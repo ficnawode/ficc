@@ -160,6 +160,29 @@ static bool lex_ident(LexerCtx *ctx)
     return true;
 }
 
+static bool lex_comment(LexerCtx *ctx)
+{
+    if (ctx->p[0] != '/' || ctx->p[1] != '*')
+        return false;
+
+    lexer_advance(ctx); /* consume '/' */
+    lexer_advance(ctx); /* consume '*' */
+
+    while (*ctx->p)
+    {
+        if (ctx->p[0] == '*' && ctx->p[1] == '/')
+        {
+            lexer_advance(ctx); /* consume '*' */
+            lexer_advance(ctx); /* consume '/' */
+            return true;
+        }
+        lexer_advance(ctx);
+    }
+
+    lexer_error(ctx, "unterminated comment");
+    return true; /* consumed opening, so don't re-error as unknown char */
+}
+
 static bool lex_punct(LexerCtx *ctx)
 {
     TokenKind kind;
@@ -180,6 +203,27 @@ static bool lex_punct(LexerCtx *ctx)
         case ';':
             kind = TOK_SEMI;
             break;
+        case '+':
+            kind = TOK_PLUS;
+            break;
+        case '-':
+            kind = TOK_MINUS;
+            break;
+        case '*':
+            kind = TOK_STAR;
+            break;
+        case '/':
+            kind = TOK_SLASH;
+            break;
+        case '%':
+            kind = TOK_PERCENT;
+            break;
+        case '=':
+            kind = TOK_ASSIGN;
+            break;
+        case ',':
+            kind = TOK_COMMA;
+            break;
         default:
             return false;
     }
@@ -198,6 +242,8 @@ Token *lex(const char *file, const char *src, Arena *arena, u64 *out_count)
     while (*ctx.p)
     {
         if (lex_whitespace(&ctx))
+            continue;
+        if (lex_comment(&ctx))
             continue;
         if (lex_number(&ctx))
             continue;

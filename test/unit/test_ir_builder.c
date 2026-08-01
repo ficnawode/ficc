@@ -37,6 +37,7 @@ TEST(ir_builder, return42)
 
     Instr *ret = (Instr *)vec_get(bb->instrs, 0);
     EXPECT_EQ(ret->opcode, OP_RET);
+    EXPECT_EQ(ret->nops, 1);
     EXPECT_TRUE(ret->ops[0].is_imm);
     EXPECT_EQ(ret->ops[0].u.imm, 42);
 
@@ -46,15 +47,15 @@ TEST(ir_builder, return42)
 TEST(ir_builder, return_void)
 {
     Arena *a = arena_new();
-    Module *m = build_from_source("int main(void) { return; }", a);
+    Module *m = build_from_source("void f(void) { return; }", a);
     EXPECT_TRUE(m != NULL);
 
-    Function *f = (Function *)vec_get(m->funcs, 0);
-    Block *bb = (Block *)vec_get(f->blocks, 0);
+    Function *fn = (Function *)vec_get(m->funcs, 0);
+    EXPECT_TRUE(strcmp(fn->name, "f") == 0);
+    Block *bb = (Block *)vec_get(fn->blocks, 0);
     Instr *ret = (Instr *)vec_get(bb->instrs, 0);
     EXPECT_EQ(ret->opcode, OP_RET);
-    EXPECT_TRUE(ret->ops[0].is_imm);
-    EXPECT_EQ(ret->ops[0].u.imm, 0);
+    EXPECT_EQ(ret->nops, 0);
 
     arena_free(a);
 }

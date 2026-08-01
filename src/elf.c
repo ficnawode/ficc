@@ -214,7 +214,6 @@ void elf_write(CodegenModule *cm, const char *path)
 
     Strtab strtab;
     strtab_init(&strtab, arena);
-    u32 symname_main = strtab_add(&strtab, "main");
 
     /* Build .text content (concatenate all functions) */
     ByteBuf text;
@@ -239,13 +238,18 @@ void elf_write(CodegenModule *cm, const char *path)
     bb_u16(&symtab, SEC_TEXT);                                 /* st_shndx */
     bb_u64(&symtab, 0);                                        /* st_value */
     bb_u64(&symtab, 0);                                        /* st_size */
-    /* Index 2: main (global function) */
-    bb_u32(&symtab, symname_main);                           /* st_name */
-    bb_append(&symtab, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC)); /* st_info */
-    bb_append(&symtab, 0);                                   /* st_other */
-    bb_u16(&symtab, SEC_TEXT);                               /* st_shndx */
-    bb_u64(&symtab, 0);                                      /* st_value */
-    bb_u64(&symtab, text.len);                               /* st_size */
+    /* Global function symbols */
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
+        u32 name_off = strtab_add(&strtab, cf->name);
+        bb_u32(&symtab, name_off);                               /* st_name */
+        bb_append(&symtab, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC)); /* st_info */
+        bb_append(&symtab, 0);                                   /* st_other */
+        bb_u16(&symtab, SEC_TEXT);                               /* st_shndx */
+        bb_u64(&symtab, cf->offset);                             /* st_value */
+        bb_u64(&symtab, cf->len);                                /* st_size */
+    }
 
     /* Compute layout */
     size_t off = 0;
@@ -344,8 +348,8 @@ void elf_write(CodegenModule *cm, const char *path)
     bb_u64(&out, 0);
     bb_u64(&out, off_symtab);
     bb_u64(&out, symtab.len);
-    bb_u32(&out, SEC_STRTAB); /* sh_link = .strtab */
-    bb_u32(&out, 2);          /* sh_info = last local + 1 */
+    bb_u32(&out, SEC_STRTAB);               /* sh_link = .strtab */
+    bb_u32(&out, 2);        /* sh_info = last local + 1 */
     bb_u64(&out, 8);
     bb_u64(&out, sizeof(Elf64_Sym));
 

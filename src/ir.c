@@ -82,6 +82,77 @@ Instr *ir_emit_unreachable(Block *b, Arena *arena)
     return i;
 }
 
+Instr *ir_emit_ret_void(Block *b, Arena *arena)
+{
+    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
+    i->opcode = OP_RET;
+    i->result = NO_VREG;
+    i->nops = 0;
+    vec_push(b->instrs, i);
+    return i;
+}
+
+static Instr *emit_binop(Block *b, Arena *arena, IrOpcode op, u32 dst, Operand lhs, Operand rhs)
+{
+    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
+    i->opcode = op;
+    i->result = dst;
+    i->nops = 2;
+    i->ops[0] = lhs;
+    i->ops[1] = rhs;
+    vec_push(b->instrs, i);
+    return i;
+}
+
+Instr *ir_emit_add(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs)
+{
+    return emit_binop(b, arena, OP_ADD, dst, lhs, rhs);
+}
+
+Instr *ir_emit_sub(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs)
+{
+    return emit_binop(b, arena, OP_SUB, dst, lhs, rhs);
+}
+
+Instr *ir_emit_mul(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs)
+{
+    return emit_binop(b, arena, OP_MUL, dst, lhs, rhs);
+}
+
+Instr *ir_emit_sdiv(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs)
+{
+    return emit_binop(b, arena, OP_SDIV, dst, lhs, rhs);
+}
+
+Instr *ir_emit_srem(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs)
+{
+    return emit_binop(b, arena, OP_SREM, dst, lhs, rhs);
+}
+
+Instr *ir_emit_neg(Block *b, Arena *arena, u32 dst, Operand src)
+{
+    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
+    i->opcode = OP_NEG;
+    i->result = dst;
+    i->nops = 1;
+    i->ops[0] = src;
+    vec_push(b->instrs, i);
+    return i;
+}
+
+Instr *ir_emit_call(Block *b, Arena *arena, u32 dst, const char *name, u32 nargs, Operand *args)
+{
+    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
+    i->opcode = OP_CALL;
+    i->result = dst;
+    i->nops = 0;
+    i->extra.call.nargs = nargs;
+    i->extra.call.args = args;
+    i->extra.call.name = name;
+    vec_push(b->instrs, i);
+    return i;
+}
+
 Operand ir_operand_imm(i64 val)
 {
     Operand o;

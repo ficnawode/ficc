@@ -53,6 +53,96 @@ ASTNode *ast_int_literal(Arena *arena, i64 value, Loc loc)
     return &n->base;
 }
 
+ASTNode *ast_program(Arena *arena, Vec *decls, Loc loc)
+{
+    ASTProgram *n = arena_alloc(arena, sizeof(ASTProgram), sizeof(void *));
+    n->base.kind = AST_PROGRAM;
+    n->base.loc = loc;
+    n->decls = decls;
+    return &n->base;
+}
+
+ASTNode *ast_var_decl(Arena *arena, Type *type, const char *name, ASTNode *init, Loc loc)
+{
+    ASTVarDecl *n = arena_alloc(arena, sizeof(ASTVarDecl), sizeof(void *));
+    n->base.kind = AST_VAR_DECL;
+    n->base.loc = loc;
+    n->type = type;
+    n->name = name;
+    n->init = init;
+    return &n->base;
+}
+
+ASTNode *ast_expr_stmt(Arena *arena, ASTNode *expr, Loc loc)
+{
+    ASTExprStmt *n = arena_alloc(arena, sizeof(ASTExprStmt), sizeof(void *));
+    n->base.kind = AST_EXPR_STMT;
+    n->base.loc = loc;
+    n->expr = expr;
+    return &n->base;
+}
+
+ASTNode *ast_binary_expr(Arena *arena, BinOpKind op, ASTNode *left, ASTNode *right, Loc loc)
+{
+    ASTBinaryExpr *n = arena_alloc(arena, sizeof(ASTBinaryExpr), sizeof(void *));
+    n->base.kind = AST_BINARY_EXPR;
+    n->base.loc = loc;
+    n->op = op;
+    n->left = left;
+    n->right = right;
+    return &n->base;
+}
+
+ASTNode *ast_unary_expr(Arena *arena, UnaryOpKind op, ASTNode *operand, Loc loc)
+{
+    ASTUnaryExpr *n = arena_alloc(arena, sizeof(ASTUnaryExpr), sizeof(void *));
+    n->base.kind = AST_UNARY_EXPR;
+    n->base.loc = loc;
+    n->op = op;
+    n->operand = operand;
+    return &n->base;
+}
+
+ASTNode *ast_call_expr(Arena *arena, const char *callee, Vec *args, Loc loc)
+{
+    ASTCallExpr *n = arena_alloc(arena, sizeof(ASTCallExpr), sizeof(void *));
+    n->base.kind = AST_CALL_EXPR;
+    n->base.loc = loc;
+    n->callee = callee;
+    n->args = args;
+    return &n->base;
+}
+
+ASTNode *ast_ident(Arena *arena, const char *name, Loc loc)
+{
+    ASTIdent *n = arena_alloc(arena, sizeof(ASTIdent), sizeof(void *));
+    n->base.kind = AST_IDENT;
+    n->base.loc = loc;
+    n->name = name;
+    return &n->base;
+}
+
+static const char *bin_op_name(BinOpKind op)
+{
+    switch (op) {
+        case BIN_ADD: return "+";
+        case BIN_SUB: return "-";
+        case BIN_MUL: return "*";
+        case BIN_DIV: return "/";
+        case BIN_REM: return "%";
+        case BIN_ASSIGN: return "=";
+    }
+    return "?";
+}
+
+static const char *unary_op_name(UnaryOpKind op)
+{
+    switch (op) {
+        case UN_NEG: return "-";
+    }
+    return "?";
+}
+
 static void dump_indent(int depth)
 {
     for (int i = 0; i < depth; i++)
@@ -101,8 +191,55 @@ static void ast_dump_rec(ASTNode *node, int depth)
         printf("INT_LITERAL %lld\n", (long long)n->value);
         break;
     }
-    default:
-        printf("UNKNOWN_AST(%d)\n", node->kind);
+    case AST_PROGRAM: {
+        ASTProgram *n = ast_as(ASTProgram, node);
+        printf("PROGRAM (%zu decls)\n", vec_size(n->decls));
+        size_t count = vec_size(n->decls);
+        for (size_t i = 0; i < count; i++)
+            ast_dump_rec((ASTNode *)vec_get(n->decls, i), depth + 1);
         break;
+    }
+    case AST_VAR_DECL: {
+        ASTVarDecl *n = ast_as(ASTVarDecl, node);
+        printf("VAR_DECL %s : %s\n", n->name, type_kind_name(n->type->kind));
+        if (n->init)
+            ast_dump_rec(n->init, depth + 1);
+        break;
+    }
+    case AST_EXPR_STMT: {
+        ASTExprStmt *n = ast_as(ASTExprStmt, node);
+        printf("EXPR_STMT\n");
+        ast_dump_rec(n->expr, depth + 1);
+        break;
+    }
+    case AST_BINARY_EXPR: {
+        ASTBinaryExpr *n = ast_as(ASTBinaryExpr, node);
+        printf("BINARY %s\n", bin_op_name(n->op));
+        ast_dump_rec(n->left, depth + 1);
+        ast_dump_rec(n->right, depth + 1);
+        break;
+    }
+    case AST_UNARY_EXPR: {
+        ASTUnaryExpr *n = ast_as(ASTUnaryExpr, node);
+        printf("UNARY %s\n", unary_op_name(n->op));
+        ast_dump_rec(n->operand, depth + 1);
+        break;
+    }
+    case AST_CALL_EXPR: {
+        ASTCallExpr *n = ast_as(ASTCallExpr, node);
+        printf("CALL %s (%zu args)\n", n->callee, vec_size(n->args));
+        size_t count = vec_size(n->args);
+        for (size_t i = 0; i < count; i++)
+            ast_dump_rec((ASTNode *)vec_get(n->args, i), depth + 1);
+        break;
+    }
+    case AST_IDENT: {
+        ASTIdent *n = ast_as(ASTIdent, node);
+        printf("IDENT %s\n", n->name);
+        break;
+    }
+    default:
+        fprintf(stderr, "[ast] error: unknown AST kind %s\n", ast_kind_name(node->kind));
+        return;
     }
 }

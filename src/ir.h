@@ -95,6 +95,7 @@ typedef struct {
 typedef struct {
     u32 nargs;
     Operand *args;
+    const char *name;
 } CallPayload;
 
 /* IR instruction.
@@ -120,11 +121,19 @@ struct Block {
     Vec *instrs; /* Vec<Instr*> */
 };
 
+/* Parameter descriptor for a Function. */
+typedef struct Param Param;
+struct Param {
+    const char *name;
+    Type *type;
+    u32 vreg;
+};
+
 typedef struct Function Function;
 struct Function {
     const char *name;
     Type *ret_type;
-    Vec *params;    /* Vec<Type*> for now; later Vec<Param> with names+vregs */
+    Vec *params;    /* Vec<Param*> */
     Vec *blocks;    /* Vec<Block*> */
 };
 
@@ -163,6 +172,14 @@ u32 ir_alloc_vreg(Module *m, u8 width);
 /* instruction creation */
 Instr *ir_emit_ret(Block *b, Arena *arena, Operand val);
 Instr *ir_emit_unreachable(Block *b, Arena *arena);
+Instr *ir_emit_ret_void(Block *b, Arena *arena);
+Instr *ir_emit_add(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs);
+Instr *ir_emit_sub(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs);
+Instr *ir_emit_mul(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs);
+Instr *ir_emit_sdiv(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs);
+Instr *ir_emit_srem(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs);
+Instr *ir_emit_neg(Block *b, Arena *arena, u32 dst, Operand src);
+Instr *ir_emit_call(Block *b, Arena *arena, u32 dst, const char *name, u32 nargs, Operand *args);
 
 /* operand helpers */
 Operand ir_operand_imm(i64 val);

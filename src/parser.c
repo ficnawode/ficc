@@ -69,6 +69,24 @@ static Type *parse_type_specifier(ParserCtx *p)
     return NULL;
 }
 
+static ASTNode *parse_param(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    Type *type = parse_type_specifier(p);
+    if (!type)
+        return NULL;
+
+    Token *name_tok = parser_peek(p);
+    if (name_tok->kind != TOK_IDENT)
+    {
+        parser_error(p, "expected parameter name");
+        return NULL;
+    }
+    parser_advance(p);
+
+    return ast_var_decl(p->arena, type, name_tok->payload.str, NULL, start->loc);
+}
+
 static Vec *parse_param_list(ParserCtx *p)
 {
     Vec *params = vec_new(p->arena);
@@ -82,8 +100,21 @@ static Vec *parse_param_list(ParserCtx *p)
     if (t->kind == TOK_RPAREN)
         return params;
 
-    parser_error(p, "expected ')' or 'void' in parameter list");
-    return NULL;
+    ASTNode *first = parse_param(p);
+    if (!first)
+        return NULL;
+    vec_push(params, first);
+
+    while (parser_peek(p)->kind == TOK_COMMA)
+    {
+        parser_advance(p); /* consume ',' */
+        ASTNode *next = parse_param(p);
+        if (!next)
+            return NULL;
+        vec_push(params, next);
+    }
+
+    return params;
 }
 
 static ASTNode *parse_compound_stmt(ParserCtx *p)
@@ -125,20 +156,75 @@ static ASTNode *parse_return_stmt(ParserCtx *p)
     return ast_return_stmt(p->arena, expr, start->loc);
 }
 
+static ASTNode *parse_var_decl(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_INT);
+    Type *type = parse_type_specifier(p);
+    if (!type)
+        return NULL;
+
+    Token *name_tok = parser_peek(p);
+    if (name_tok->kind != TOK_IDENT)
+    {
+        parser_error(p, "expected variable name");
+        return NULL;
+    }
+    parser_advance(p);
+
+    ASTNode *init = NULL;
+    if (parser_peek(p)->kind == TOK_ASSIGN)
+    {
+        parser_advance(p); /* consume '=' */
+        init = parse_expr(p);
+        if (!init)
+            return NULL;
+    }
+
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+        return NULL;
+
+    return ast_var_decl(p->arena, type, name_tok->payload.str, init, start->loc);
+}
+
+static ASTNode *parse_expr_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASTNode *expr = parse_expr(p);
+    if (!expr)
+        return NULL;
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+        return NULL;
+    return ast_expr_stmt(p->arena, expr, start->loc);
+}
+
 static ASTNode *parse_stmt(ParserCtx *p)
 {
     Token *t = parser_peek(p);
     switch (t->kind)
     {
+        case TOK_KW_INT:
+            return parse_var_decl(p);
         case TOK_KW_RETURN:
             return parse_return_stmt(p);
         default:
-            parser_error(p, "unexpected token %s", token_kind_name(t->kind));
-            return NULL;
+            return parse_expr_stmt(p);
     }
 }
 
+/* Forward declarations for expression levels */
+static ASTNode *parse_primary(ParserCtx *p);
+static ASTNode *parse_unary(ParserCtx *p);
+static ASTNode *parse_mul(ParserCtx *p);
+static ASTNode *parse_add(ParserCtx *p);
+static ASTNode *parse_assign(ParserCtx *p);
+
 static ASTNode *parse_expr(ParserCtx *p)
+{
+    return parse_assign(p);
+}
+
+static ASTNode *parse_primary(ParserCtx *p)
 {
     Token *t = parser_peek(p);
     if (t->kind == TOK_INT_LIT)
@@ -146,8 +232,141 @@ static ASTNode *parse_expr(ParserCtx *p)
         parser_advance(p);
         return ast_int_literal(p->arena, t->payload.int_val, t->loc);
     }
+    if (t->kind == TOK_IDENT)
+    {
+        parser_advance(p);
+        const char *name = t->payload.str;
+        if (parser_peek(p)->kind == TOK_LPAREN)
+        {
+            parser_advance(p); /* consume '(' */
+            Vec *args = vec_new(p->arena);
+            if (parser_peek(p)->kind != TOK_RPAREN)
+            {
+                while (true)
+                {
+                    ASTNode *arg = parse_expr(p);
+                    if (!arg)
+                        return NULL;
+                    vec_push(args, arg);
+                    if (parser_peek(p)->kind == TOK_COMMA)
+                    {
+                        parser_advance(p);
+                        continue;
+                    }
+                    break;
+                }
+            }
+            if (!parser_expect(p, TOK_RPAREN, "')'"))
+                return NULL;
+            return ast_call_expr(p->arena, name, args, t->loc);
+        }
+        return ast_ident(p->arena, name, t->loc);
+    }
+    if (t->kind == TOK_LPAREN)
+    {
+        parser_advance(p);
+        ASTNode *inner = parse_expr(p);
+        if (!inner)
+            return NULL;
+        if (!parser_expect(p, TOK_RPAREN, "')'"))
+            return NULL;
+        return inner;
+    }
     parser_error(p, "expected expression");
     return NULL;
+}
+
+static ASTNode *parse_unary(ParserCtx *p)
+{
+    Token *t = parser_peek(p);
+    if (t->kind == TOK_MINUS)
+    {
+        parser_advance(p);
+        ASTNode *operand = parse_unary(p);
+        if (!operand)
+            return NULL;
+        return ast_unary_expr(p->arena, UN_NEG, operand, t->loc);
+    }
+    return parse_primary(p);
+}
+
+static ASTNode *parse_mul(ParserCtx *p)
+{
+    ASTNode *left = parse_unary(p);
+    if (!left)
+        return NULL;
+
+    while (true)
+    {
+        Token *t = parser_peek(p);
+        BinOpKind op;
+        switch (t->kind)
+        {
+            case TOK_STAR:
+                op = BIN_MUL;
+                break;
+            case TOK_SLASH:
+                op = BIN_DIV;
+                break;
+            case TOK_PERCENT:
+                op = BIN_REM;
+                break;
+            default:
+                return left;
+        }
+        parser_advance(p);
+        ASTNode *right = parse_unary(p);
+        if (!right)
+            return NULL;
+        left = ast_binary_expr(p->arena, op, left, right, t->loc);
+    }
+}
+
+static ASTNode *parse_add(ParserCtx *p)
+{
+    ASTNode *left = parse_mul(p);
+    if (!left)
+        return NULL;
+
+    while (true)
+    {
+        Token *t = parser_peek(p);
+        BinOpKind op;
+        switch (t->kind)
+        {
+            case TOK_PLUS:
+                op = BIN_ADD;
+                break;
+            case TOK_MINUS:
+                op = BIN_SUB;
+                break;
+            default:
+                return left;
+        }
+        parser_advance(p);
+        ASTNode *right = parse_mul(p);
+        if (!right)
+            return NULL;
+        left = ast_binary_expr(p->arena, op, left, right, t->loc);
+    }
+}
+
+static ASTNode *parse_assign(ParserCtx *p)
+{
+    ASTNode *left = parse_add(p);
+    if (!left)
+        return NULL;
+
+    if (parser_peek(p)->kind == TOK_ASSIGN)
+    {
+        Token *t = parser_peek(p);
+        parser_advance(p);
+        ASTNode *right = parse_assign(p); /* right-associative */
+        if (!right)
+            return NULL;
+        left = ast_binary_expr(p->arena, BIN_ASSIGN, left, right, t->loc);
+    }
+    return left;
 }
 
 static ASTNode *parse_func_def(ParserCtx *p)
@@ -186,15 +405,15 @@ ASTNode *parse(Token *tokens, u64 count, Arena *arena)
 {
     ASSERT(count > 0);
     ParserCtx p = {tokens, count, 0, arena};
-    ASTNode *node = parse_func_def(&p);
-    if (!node)
-        return NULL;
 
-    Token *eof = parser_peek(&p);
-    if (eof->kind != TOK_EOF)
+    Vec *decls = vec_new(arena);
+    while (parser_peek(&p)->kind != TOK_EOF)
     {
-        parser_error(&p, "expected EOF, got %s", token_kind_name(eof->kind));
-        return NULL;
+        ASTNode *node = parse_func_def(&p);
+        if (!node)
+            return NULL;
+        vec_push(decls, node);
     }
-    return node;
+
+    return ast_program(arena, decls, tokens[0].loc);
 }

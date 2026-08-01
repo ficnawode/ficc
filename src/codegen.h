@@ -12,6 +12,8 @@ struct CodegenFunc {
     u8 *bytes;
     size_t len;
     size_t cap;
+    size_t offset; /* start position in .text */
+    Vec *patches;  /* Vec<CallPatch*> — internal to codegen.c */
 };
 
 /* Module-level codegen records */

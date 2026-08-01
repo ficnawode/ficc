@@ -15,7 +15,14 @@
     X(TOK_RPAREN)                                                                                  \
     X(TOK_LBRACE)                                                                                  \
     X(TOK_RBRACE)                                                                                  \
-    X(TOK_SEMI)
+    X(TOK_SEMI)                                                                                    \
+    X(TOK_PLUS)                                                                                    \
+    X(TOK_MINUS)                                                                                   \
+    X(TOK_STAR)                                                                                    \
+    X(TOK_SLASH)                                                                                   \
+    X(TOK_PERCENT)                                                                                 \
+    X(TOK_ASSIGN)                                                                                  \
+    X(TOK_COMMA)
 
 typedef enum
 {

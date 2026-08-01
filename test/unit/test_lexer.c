@@ -100,3 +100,44 @@ TEST(lexer, empty_source)
     EXPECT_EQ(t[0].kind, TOK_EOF);
     arena_free(a);
 }
+
+TEST(lexer, operators)
+{
+    Arena *a = arena_new();
+    u64 n;
+    Token *t = lex("t", "+ - * / % = ,", a, &n);
+    EXPECT_TRUE(t != NULL);
+    EXPECT_EQ(n, 8);
+    EXPECT_EQ(t[0].kind, TOK_PLUS);
+    EXPECT_EQ(t[1].kind, TOK_MINUS);
+    EXPECT_EQ(t[2].kind, TOK_STAR);
+    EXPECT_EQ(t[3].kind, TOK_SLASH);
+    EXPECT_EQ(t[4].kind, TOK_PERCENT);
+    EXPECT_EQ(t[5].kind, TOK_ASSIGN);
+    EXPECT_EQ(t[6].kind, TOK_COMMA);
+    EXPECT_EQ(t[7].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, block_comment)
+{
+    Arena *a = arena_new();
+    u64 n;
+    Token *t = lex("t", "int /* comment */ x;", a, &n);
+    EXPECT_TRUE(t != NULL);
+    EXPECT_EQ(n, 4);
+    EXPECT_EQ(t[0].kind, TOK_KW_INT);
+    EXPECT_EQ(t[1].kind, TOK_IDENT);
+    EXPECT_EQ(t[2].kind, TOK_SEMI);
+    EXPECT_EQ(t[3].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, unterminated_comment)
+{
+    Arena *a = arena_new();
+    u64 n;
+    Token *t = lex("t", "int /* never ends", a, &n);
+    EXPECT_TRUE(t == NULL);
+    arena_free(a);
+}
