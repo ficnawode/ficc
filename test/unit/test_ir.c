@@ -1,7 +1,7 @@
 #include "harness.h"
-#include <string.h>
 #include "ir.h"
 #include "util/arena.h"
+#include <string.h>
 
 TEST(ir, module_creation)
 {
@@ -41,11 +41,11 @@ TEST(ir, vreg_table_growth)
     Module *m = ir_module_new(a);
 
     for (int i = 0; i < 20; i++)
-        ir_alloc_vreg(m, (u8)(i + 1));
+        ir_alloc_vreg(m, (u8) (i + 1));
 
     EXPECT_EQ(m->width_count, 20);
     for (int i = 0; i < 20; i++)
-        EXPECT_EQ(m->widths[i], (u8)(i + 1));
+        EXPECT_EQ(m->widths[i], (u8) (i + 1));
 
     arena_free(a);
 }
@@ -160,5 +160,47 @@ TEST(ir, emit_call)
     EXPECT_EQ(i->extra.call.nargs, 2);
     EXPECT_TRUE(strcmp(i->extra.call.name, "foo") == 0);
     EXPECT_EQ(i->extra.call.args[0].u.imm, 1);
+    arena_free(a);
+}
+
+TEST(ir, emit_br)
+{
+    Arena *a = arena_new();
+    Module *m = ir_module_new(a);
+    Function *f = ir_module_add_func(m, a, "main", type_int());
+    Block *bb = ir_func_add_block(f, a, "entry");
+    Instr *i = ir_emit_br(bb, a, "target");
+    EXPECT_EQ(i->opcode, OP_BR);
+    EXPECT_TRUE(strcmp(i->extra.br.target_label, "target") == 0);
+    arena_free(a);
+}
+
+TEST(ir, emit_brcond)
+{
+    Arena *a = arena_new();
+    Module *m = ir_module_new(a);
+    Function *f = ir_module_add_func(m, a, "main", type_int());
+    Block *bb = ir_func_add_block(f, a, "entry");
+    Instr *i = ir_emit_brcond(bb, a, ir_operand_vreg(0), "then", "else");
+    EXPECT_EQ(i->opcode, OP_BRCOND);
+    EXPECT_TRUE(strcmp(i->extra.brcond.true_label, "then") == 0);
+    EXPECT_TRUE(strcmp(i->extra.brcond.false_label, "else") == 0);
+    arena_free(a);
+}
+
+TEST(ir, emit_phi)
+{
+    Arena *a = arena_new();
+    Module *m = ir_module_new(a);
+    Function *f = ir_module_add_func(m, a, "main", type_int());
+    Block *bb = ir_func_add_block(f, a, "entry");
+    Instr *phi = ir_emit_phi(bb, a, 2, 2);
+    EXPECT_EQ(phi->opcode, OP_PHI);
+    EXPECT_EQ(phi->result, 2);
+    EXPECT_EQ(phi->extra.phi.nentries, 2);
+    phi_add_entry(phi, ir_operand_imm(10), bb);
+    phi_add_entry(phi, ir_operand_imm(20), bb);
+    EXPECT_EQ(phi->extra.phi.entries[0].val.u.imm, 10);
+    EXPECT_EQ(phi->extra.phi.entries[1].val.u.imm, 20);
     arena_free(a);
 }

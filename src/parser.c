@@ -198,6 +198,38 @@ static ASTNode *parse_expr_stmt(ParserCtx *p)
     return ast_expr_stmt(p->arena, expr, start->loc);
 }
 
+static ASTNode *parse_if_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_IF);
+    parser_advance(p); /* consume 'if' */
+
+    if (!parser_expect(p, TOK_LPAREN, "'('"))
+        return NULL;
+
+    ASTNode *cond = parse_expr(p);
+    if (!cond)
+        return NULL;
+
+    if (!parser_expect(p, TOK_RPAREN, "')'"))
+        return NULL;
+
+    ASTNode *then_branch = parse_stmt(p);
+    if (!then_branch)
+        return NULL;
+
+    ASTNode *else_branch = NULL;
+    if (parser_peek(p)->kind == TOK_KW_ELSE)
+    {
+        parser_advance(p); /* consume 'else' */
+        else_branch = parse_stmt(p);
+        if (!else_branch)
+            return NULL;
+    }
+
+    return ast_if_stmt(p->arena, cond, then_branch, else_branch, start->loc);
+}
+
 static ASTNode *parse_stmt(ParserCtx *p)
 {
     Token *t = parser_peek(p);
@@ -207,6 +239,10 @@ static ASTNode *parse_stmt(ParserCtx *p)
             return parse_var_decl(p);
         case TOK_KW_RETURN:
             return parse_return_stmt(p);
+        case TOK_KW_IF:
+            return parse_if_stmt(p);
+        case TOK_LBRACE:
+            return parse_compound_stmt(p);
         default:
             return parse_expr_stmt(p);
     }

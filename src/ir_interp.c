@@ -14,16 +14,30 @@ static i64 operand_val(Operand o, i64 *regs, u32 nregs)
 static Function *find_func(Module *m, const char *name)
 {
     size_t n = vec_size(m->funcs);
-    for (size_t i = 0; i < n; i++) {
-        Function *f = (Function *)vec_get(m->funcs, i);
+    for (size_t i = 0; i < n; i++)
+    {
+        Function *f = (Function *) vec_get(m->funcs, i);
         if (strcmp(f->name, name) == 0)
             return f;
     }
     return NULL;
 }
 
+static Block *find_block(Function *func, const char *label)
+{
+    size_t n = vec_size(func->blocks);
+    for (size_t i = 0; i < n; i++)
+    {
+        Block *b = (Block *) vec_get(func->blocks, i);
+        if (strcmp(b->label, label) == 0)
+            return b;
+    }
+    return NULL;
+}
+
 typedef struct Frame Frame;
-struct Frame {
+struct Frame
+{
     Function *func;
     i64 *regs;
 };
@@ -37,101 +51,177 @@ static Frame *frame_new(Arena *arena, Function *func, u32 nregs)
     return f;
 }
 
-static i64 exec_func(Module *m, Frame *fr, Vec *stack, Arena *frame_arena, u32 nregs);
-
-static i64 run_func(Module *m, Function *func, Vec *stack, Arena *frame_arena, u32 nregs)
+static void eval_phis(Frame *fr, Block *bb, Block *pred, u32 nregs)
 {
-    Frame *fr = frame_new(frame_arena, func, nregs);
-    vec_push(stack, fr);
-    i64 result = exec_func(m, fr, stack, frame_arena, nregs);
-    vec_pop(stack);
-    return result;
+    size_t ninstr = vec_size(bb->instrs);
+    for (size_t i = 0; i < ninstr; i++)
+    {
+        Instr *in = (Instr *) vec_get(bb->instrs, i);
+        if (in->opcode != OP_PHI)
+            break;
+        bool found = false;
+        for (u32 e = 0; e < in->extra.phi.nentries; e++)
+        {
+            if (strcmp(in->extra.phi.entries[e].label, pred->label) == 0)
+            {
+                fr->regs[in->result] = operand_val(in->extra.phi.entries[e].val, fr->regs, nregs);
+                found = true;
+                break;
+            }
+        }
+        ASSERT(found);
+    }
 }
 
-static i64 exec_func(Module *m, Frame *fr, Vec *stack, Arena *frame_arena, u32 nregs)
+static i64 exec_block(Module *m, Frame *fr, Block *start_bb, Block *start_pred, Vec *stack,
+                      Arena *frame_arena, u32 nregs)
 {
-    Block *entry = (Block *)vec_get(fr->func->blocks, 0);
-    size_t ninstr = vec_size(entry->instrs);
+    Block *bb = start_bb;
+    Block *pred = start_pred;
 
-    for (size_t i = 0; i < ninstr; i++) {
-        Instr *in = (Instr *)vec_get(entry->instrs, i);
-        switch (in->opcode) {
-        case OP_ADD:
-            fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) +
-                                    operand_val(in->ops[1], fr->regs, nregs);
-            break;
-        case OP_SUB:
-            fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) -
-                                    operand_val(in->ops[1], fr->regs, nregs);
-            break;
-        case OP_MUL:
-            fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) *
-                                    operand_val(in->ops[1], fr->regs, nregs);
-            break;
-        case OP_SDIV: {
-            i64 rhs = operand_val(in->ops[1], fr->regs, nregs);
-            if (rhs == 0) {
-                fprintf(stderr, "[interp] error: division by zero\n");
-                ASSERT(false);
-                return 1;
+    while (bb)
+    {
+        if (pred)
+            eval_phis(fr, bb, pred, nregs);
+
+        size_t ninstr = vec_size(bb->instrs);
+        Block *next_bb = NULL;
+        Block *next_pred = bb;
+        bool jumped = false;
+
+        for (size_t i = 0; i < ninstr; i++)
+        {
+            Instr *in = (Instr *) vec_get(bb->instrs, i);
+            switch (in->opcode)
+            {
+                case OP_PHI:
+                    /* Already evaluated on entry */
+                    break;
+                case OP_ADD:
+                    fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) +
+                                           operand_val(in->ops[1], fr->regs, nregs);
+                    break;
+                case OP_SUB:
+                    fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) -
+                                           operand_val(in->ops[1], fr->regs, nregs);
+                    break;
+                case OP_MUL:
+                    fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) *
+                                           operand_val(in->ops[1], fr->regs, nregs);
+                    break;
+                case OP_SDIV:
+                {
+                    i64 rhs = operand_val(in->ops[1], fr->regs, nregs);
+                    if (rhs == 0)
+                    {
+                        fprintf(stderr, "[interp] error: division by zero\n");
+                        ASSERT(false);
+                        return 1;
+                    }
+                    fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) / rhs;
+                    break;
+                }
+                case OP_SREM:
+                {
+                    i64 rhs = operand_val(in->ops[1], fr->regs, nregs);
+                    if (rhs == 0)
+                    {
+                        fprintf(stderr, "[interp] error: division by zero\n");
+                        ASSERT(false);
+                        return 1;
+                    }
+                    fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) % rhs;
+                    break;
+                }
+                case OP_NEG:
+                    fr->regs[in->result] = -operand_val(in->ops[0], fr->regs, nregs);
+                    break;
+                case OP_CALL:
+                {
+                    Function *callee = find_func(m, in->extra.call.name);
+                    if (!callee)
+                    {
+                        fprintf(stderr, "[interp] error: undefined function '%s'\n",
+                                in->extra.call.name);
+                        return 1;
+                    }
+                    Frame *callee_fr = frame_new(frame_arena, callee, nregs);
+                    vec_push(stack, callee_fr);
+                    /* Copy args into callee param vregs */
+                    for (u32 a = 0; a < in->extra.call.nargs; a++)
+                    {
+                        Param *p = (Param *) vec_get(callee->params, a);
+                        callee_fr->regs[p->vreg] =
+                            operand_val(in->extra.call.args[a], fr->regs, nregs);
+                    }
+                    Block *entry = (Block *) vec_get(callee->blocks, 0);
+                    i64 ret = exec_block(m, callee_fr, entry, NULL, stack, frame_arena, nregs);
+                    vec_pop(stack);
+                    fr->regs[in->result] = ret;
+                    break;
+                }
+                case OP_BR:
+                {
+                    next_bb = find_block(fr->func, in->extra.br.target_label);
+                    ASSERT(next_bb);
+                    jumped = true;
+                    break;
+                }
+                case OP_BRCOND:
+                {
+                    i64 cond = operand_val(in->ops[0], fr->regs, nregs);
+                    const char *target_label =
+                        cond ? in->extra.brcond.true_label : in->extra.brcond.false_label;
+                    next_bb = find_block(fr->func, target_label);
+                    ASSERT(next_bb);
+                    jumped = true;
+                    break;
+                }
+                case OP_RET:
+                {
+                    i64 result = 0;
+                    if (in->nops > 0)
+                        result = operand_val(in->ops[0], fr->regs, nregs);
+                    return result;
+                }
+                case OP_UNREACHABLE:
+                    fprintf(stderr, "[interp] error: reached unreachable\n");
+                    return 1;
+                default:
+                    fprintf(stderr, "[interp] error: unsupported opcode %s\n",
+                            ir_opcode_name(in->opcode));
+                    ASSERT(false);
+                    return 1;
             }
-            fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) / rhs;
-            break;
+            if (jumped)
+                break;
         }
-        case OP_SREM: {
-            i64 rhs = operand_val(in->ops[1], fr->regs, nregs);
-            if (rhs == 0) {
-                fprintf(stderr, "[interp] error: division by zero\n");
-                ASSERT(false);
-                return 1;
-            }
-            fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) % rhs;
-            break;
-        }
-        case OP_NEG:
-            fr->regs[in->result] = -operand_val(in->ops[0], fr->regs, nregs);
-            break;
-        case OP_CALL: {
-            Function *callee = find_func(m, in->extra.call.name);
-            if (!callee) {
-                fprintf(stderr, "[interp] error: undefined function '%s'\n", in->extra.call.name);
-                return 1;
-            }
-            Frame *callee_fr = frame_new(frame_arena, callee, nregs);
-            vec_push(stack, callee_fr);
-            /* Copy args into callee param vregs */
-            for (u32 a = 0; a < in->extra.call.nargs; a++) {
-                Param *p = (Param *)vec_get(callee->params, a);
-                callee_fr->regs[p->vreg] = operand_val(in->extra.call.args[a], fr->regs, nregs);
-            }
-            i64 ret = exec_func(m, callee_fr, stack, frame_arena, nregs);
-            vec_pop(stack);
-            fr->regs[in->result] = ret;
-            break;
-        }
-        case OP_RET: {
-            i64 result = 0;
-            if (in->nops > 0)
-                result = operand_val(in->ops[0], fr->regs, nregs);
-            return result;
-        }
-        case OP_UNREACHABLE:
-            fprintf(stderr, "[interp] error: reached unreachable\n");
-            return 1;
-        default:
-            fprintf(stderr, "[interp] error: unsupported opcode %s\n", ir_opcode_name(in->opcode));
-            ASSERT(false);
-            return 1;
-        }
+
+        if (!next_bb)
+            return 0;
+
+        pred = next_pred;
+        bb = next_bb;
     }
 
     return 0;
 }
 
+static i64 run_func(Module *m, Function *func, Vec *stack, Arena *frame_arena, u32 nregs)
+{
+    Frame *fr = frame_new(frame_arena, func, nregs);
+    vec_push(stack, fr);
+    Block *entry = (Block *) vec_get(func->blocks, 0);
+    i64 result = exec_block(m, fr, entry, NULL, stack, frame_arena, nregs);
+    vec_pop(stack);
+    return result;
+}
+
 i64 ir_interp_run(Module *m)
 {
     Function *main_fn = find_func(m, "main");
-    if (!main_fn) {
+    if (!main_fn)
+    {
         fprintf(stderr, "[interp] error: no main function found\n");
         return 1;
     }

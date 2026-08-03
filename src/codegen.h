@@ -7,7 +7,8 @@
 
 /* Per-function machine code record */
 typedef struct CodegenFunc CodegenFunc;
-struct CodegenFunc {
+struct CodegenFunc
+{
     const char *name;
     u8 *bytes;
     size_t len;
@@ -18,9 +19,10 @@ struct CodegenFunc {
 
 /* Module-level codegen records */
 typedef struct CodegenModule CodegenModule;
-struct CodegenModule {
-    Module *ir;   /* kept for text emission */
-    Vec *funcs;   /* Vec<CodegenFunc*> */
+struct CodegenModule
+{
+    Module *ir; /* kept for text emission */
+    Vec *funcs; /* Vec<CodegenFunc*> */
 };
 
 /* Convert IR to machine code bytes. */

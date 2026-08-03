@@ -19,7 +19,8 @@
     X(AST_BINARY_EXPR)                                                                             \
     X(AST_UNARY_EXPR)                                                                              \
     X(AST_CALL_EXPR)                                                                               \
-    X(AST_IDENT)
+    X(AST_IDENT)                                                                                   \
+    X(AST_IF_STMT)
 
 typedef enum
 {
@@ -138,6 +139,15 @@ struct ASTIdent
     const char *name;
 };
 
+typedef struct ASTIfStmt ASTIfStmt;
+struct ASTIfStmt
+{
+    ASTNode base;
+    ASTNode *cond;
+    ASTNode *then_branch;
+    ASTNode *else_branch;
+};
+
 ASTNode *ast_func_def(Arena *arena, Type *ret_type, const char *name, Vec *params, ASTNode *body,
                       Loc loc);
 ASTNode *ast_compound_stmt(Arena *arena, Vec *stmts, Loc loc);
@@ -150,6 +160,8 @@ ASTNode *ast_binary_expr(Arena *arena, BinOpKind op, ASTNode *left, ASTNode *rig
 ASTNode *ast_unary_expr(Arena *arena, UnaryOpKind op, ASTNode *operand, Loc loc);
 ASTNode *ast_call_expr(Arena *arena, const char *callee, Vec *args, Loc loc);
 ASTNode *ast_ident(Arena *arena, const char *name, Loc loc);
+ASTNode *ast_if_stmt(Arena *arena, ASTNode *cond, ASTNode *then_branch, ASTNode *else_branch,
+                     Loc loc);
 
 void ast_dump(ASTNode *node);
 

@@ -29,7 +29,8 @@ static bool check_expr(ASTNode *node, SemanticCtx *ctx)
     {
         case AST_INT_LITERAL:
             return true;
-        case AST_IDENT: {
+        case AST_IDENT:
+        {
             ASTIdent *id = ast_as(ASTIdent, node);
             if (!strmap_get(ctx->locals, id->name))
             {
@@ -39,15 +40,18 @@ static bool check_expr(ASTNode *node, SemanticCtx *ctx)
             }
             return true;
         }
-        case AST_BINARY_EXPR: {
+        case AST_BINARY_EXPR:
+        {
             ASTBinaryExpr *be = ast_as(ASTBinaryExpr, node);
             return check_expr(be->left, ctx) && check_expr(be->right, ctx);
         }
-        case AST_UNARY_EXPR: {
+        case AST_UNARY_EXPR:
+        {
             ASTUnaryExpr *ue = ast_as(ASTUnaryExpr, node);
             return check_expr(ue->operand, ctx);
         }
-        case AST_CALL_EXPR: {
+        case AST_CALL_EXPR:
+        {
             ASTCallExpr *ce = ast_as(ASTCallExpr, node);
             ASTFuncDef *callee = strmap_get(ctx->globals, ce->callee);
             if (!callee)
@@ -68,7 +72,7 @@ static bool check_expr(ASTNode *node, SemanticCtx *ctx)
             size_t n = vec_size(ce->args);
             for (size_t i = 0; i < n; i++)
             {
-                if (!check_expr((ASTNode *)vec_get(ce->args, i), ctx))
+                if (!check_expr((ASTNode *) vec_get(ce->args, i), ctx))
                     return false;
             }
             return true;
@@ -84,7 +88,8 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
 {
     switch (node->kind)
     {
-        case AST_RETURN_STMT: {
+        case AST_RETURN_STMT:
+        {
             ASTReturnStmt *ret = ast_as(ASTReturnStmt, node);
             if (ret_type->kind == TYPE_VOID)
             {
@@ -108,7 +113,8 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
                 return false;
             return true;
         }
-        case AST_VAR_DECL: {
+        case AST_VAR_DECL:
+        {
             ASTVarDecl *vd = ast_as(ASTVarDecl, node);
             if (strmap_get(ctx->locals, vd->name))
             {
@@ -121,9 +127,32 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
                 return false;
             return true;
         }
-        case AST_EXPR_STMT: {
+        case AST_EXPR_STMT:
+        {
             ASTExprStmt *es = ast_as(ASTExprStmt, node);
             return check_expr(es->expr, ctx);
+        }
+        case AST_COMPOUND_STMT:
+        {
+            ASTCompoundStmt *cs = ast_as(ASTCompoundStmt, node);
+            size_t n = vec_size(cs->stmts);
+            for (size_t i = 0; i < n; i++)
+            {
+                if (!check_stmt((ASTNode *) vec_get(cs->stmts, i), ctx, ret_type))
+                    return false;
+            }
+            return true;
+        }
+        case AST_IF_STMT:
+        {
+            ASTIfStmt *is = ast_as(ASTIfStmt, node);
+            if (!check_expr(is->cond, ctx))
+                return false;
+            if (!check_stmt(is->then_branch, ctx, ret_type))
+                return false;
+            if (is->else_branch && !check_stmt(is->else_branch, ctx, ret_type))
+                return false;
+            return true;
         }
         default:
             sem_error(node->loc, "unsupported statement kind %s", ast_kind_name(node->kind));
@@ -145,7 +174,7 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
     size_t nparams = vec_size(fn->params);
     for (size_t i = 0; i < nparams; i++)
     {
-        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *)vec_get(fn->params, i));
+        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->params, i));
         if (strmap_get(ctx->locals, param->name))
         {
             sem_error(param->base.loc, "redeclaration of parameter '%s'", param->name);
@@ -160,7 +189,7 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
     size_t nstmts = vec_size(body->stmts);
     for (size_t i = 0; i < nstmts; i++)
     {
-        ASTNode *stmt = (ASTNode *)vec_get(body->stmts, i);
+        ASTNode *stmt = (ASTNode *) vec_get(body->stmts, i);
         if (!check_stmt(stmt, ctx, fn->ret_type))
         {
             ctx->locals = saved_locals;
@@ -189,7 +218,7 @@ ASTNode *semantic_check(ASTNode *ast, Arena *arena)
     size_t ndecls = vec_size(prog->decls);
     for (size_t i = 0; i < ndecls; i++)
     {
-        ASTNode *decl = (ASTNode *)vec_get(prog->decls, i);
+        ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
         if (decl->kind != AST_FUNC_DEF)
         {
             sem_error(decl->loc, "expected function definition at top level");
@@ -207,7 +236,7 @@ ASTNode *semantic_check(ASTNode *ast, Arena *arena)
     /* Pass 2: check each function body */
     for (size_t i = 0; i < ndecls; i++)
     {
-        ASTNode *decl = (ASTNode *)vec_get(prog->decls, i);
+        ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
         if (!check_func(decl, &ctx))
             return NULL;
     }

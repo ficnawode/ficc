@@ -1,7 +1,7 @@
 #include "harness.h"
-#include <string.h>
 #include "lexer.h"
 #include "util/arena.h"
+#include <string.h>
 
 TEST(lexer, keywords_and_punct)
 {
@@ -68,7 +68,7 @@ TEST(lexer, tab_advances_col)
     u64 n;
     Token *t = lex("t", "int\tmain", a, &n);
     EXPECT_TRUE(t != NULL);
-    EXPECT_EQ(t[1].loc.col, 8);  /* tab from col 4 -> col 9 */
+    EXPECT_EQ(t[1].loc.col, 8); /* tab from col 4 -> col 9 */
     arena_free(a);
 }
 
@@ -139,5 +139,21 @@ TEST(lexer, unterminated_comment)
     u64 n;
     Token *t = lex("t", "int /* never ends", a, &n);
     EXPECT_TRUE(t == NULL);
+    arena_free(a);
+}
+
+TEST(lexer, if_else_keywords)
+{
+    Arena *a = arena_new();
+    u64 n;
+    Token *t = lex("t", "if (x) else", a, &n);
+    EXPECT_TRUE(t != NULL);
+    EXPECT_EQ(n, 6);
+    EXPECT_EQ(t[0].kind, TOK_KW_IF);
+    EXPECT_EQ(t[1].kind, TOK_LPAREN);
+    EXPECT_EQ(t[2].kind, TOK_IDENT);
+    EXPECT_EQ(t[3].kind, TOK_RPAREN);
+    EXPECT_EQ(t[4].kind, TOK_KW_ELSE);
+    EXPECT_EQ(t[5].kind, TOK_EOF);
     arena_free(a);
 }

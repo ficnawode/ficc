@@ -3,7 +3,8 @@
 
 const char *ast_kind_name(ASTKind kind)
 {
-    switch (kind) {
+    switch (kind)
+    {
 #define CASE(K)                                                                                    \
     case K:                                                                                        \
         return #K;
@@ -122,23 +123,44 @@ ASTNode *ast_ident(Arena *arena, const char *name, Loc loc)
     return &n->base;
 }
 
+ASTNode *ast_if_stmt(Arena *arena, ASTNode *cond, ASTNode *then_branch, ASTNode *else_branch,
+                     Loc loc)
+{
+    ASTIfStmt *n = arena_alloc(arena, sizeof(ASTIfStmt), sizeof(void *));
+    n->base.kind = AST_IF_STMT;
+    n->base.loc = loc;
+    n->cond = cond;
+    n->then_branch = then_branch;
+    n->else_branch = else_branch;
+    return &n->base;
+}
+
 static const char *bin_op_name(BinOpKind op)
 {
-    switch (op) {
-        case BIN_ADD: return "+";
-        case BIN_SUB: return "-";
-        case BIN_MUL: return "*";
-        case BIN_DIV: return "/";
-        case BIN_REM: return "%";
-        case BIN_ASSIGN: return "=";
+    switch (op)
+    {
+        case BIN_ADD:
+            return "+";
+        case BIN_SUB:
+            return "-";
+        case BIN_MUL:
+            return "*";
+        case BIN_DIV:
+            return "/";
+        case BIN_REM:
+            return "%";
+        case BIN_ASSIGN:
+            return "=";
     }
     return "?";
 }
 
 static const char *unary_op_name(UnaryOpKind op)
 {
-    switch (op) {
-        case UN_NEG: return "-";
+    switch (op)
+    {
+        case UN_NEG:
+            return "-";
     }
     return "?";
 }
@@ -158,88 +180,111 @@ void ast_dump(ASTNode *node)
 
 static void ast_dump_rec(ASTNode *node, int depth)
 {
-    if (!node) {
+    if (!node)
+    {
         dump_indent(depth);
         printf("(null)\n");
         return;
     }
     dump_indent(depth);
-    switch (node->kind) {
-    case AST_FUNC_DEF: {
-        ASTFuncDef *n = ast_as(ASTFuncDef, node);
-        printf("FUNC_DEF %s -> %s\n", n->name, type_kind_name(n->ret_type->kind));
-        ast_dump_rec(n->body, depth + 1);
-        break;
-    }
-    case AST_COMPOUND_STMT: {
-        ASTCompoundStmt *n = ast_as(ASTCompoundStmt, node);
-        printf("COMPOUND_STMT (%zu stmts)\n", vec_size(n->stmts));
-        size_t count = vec_size(n->stmts);
-        for (size_t i = 0; i < count; i++)
-            ast_dump_rec((ASTNode *)vec_get(n->stmts, i), depth + 1);
-        break;
-    }
-    case AST_RETURN_STMT: {
-        ASTReturnStmt *n = ast_as(ASTReturnStmt, node);
-        printf("RETURN\n");
-        if (n->expr)
+    switch (node->kind)
+    {
+        case AST_FUNC_DEF:
+        {
+            ASTFuncDef *n = ast_as(ASTFuncDef, node);
+            printf("FUNC_DEF %s -> %s\n", n->name, type_kind_name(n->ret_type->kind));
+            ast_dump_rec(n->body, depth + 1);
+            break;
+        }
+        case AST_COMPOUND_STMT:
+        {
+            ASTCompoundStmt *n = ast_as(ASTCompoundStmt, node);
+            printf("COMPOUND_STMT (%zu stmts)\n", vec_size(n->stmts));
+            size_t count = vec_size(n->stmts);
+            for (size_t i = 0; i < count; i++)
+                ast_dump_rec((ASTNode *) vec_get(n->stmts, i), depth + 1);
+            break;
+        }
+        case AST_RETURN_STMT:
+        {
+            ASTReturnStmt *n = ast_as(ASTReturnStmt, node);
+            printf("RETURN\n");
+            if (n->expr)
+                ast_dump_rec(n->expr, depth + 1);
+            break;
+        }
+        case AST_INT_LITERAL:
+        {
+            ASTIntLiteral *n = ast_as(ASTIntLiteral, node);
+            printf("INT_LITERAL %lld\n", (long long) n->value);
+            break;
+        }
+        case AST_PROGRAM:
+        {
+            ASTProgram *n = ast_as(ASTProgram, node);
+            printf("PROGRAM (%zu decls)\n", vec_size(n->decls));
+            size_t count = vec_size(n->decls);
+            for (size_t i = 0; i < count; i++)
+                ast_dump_rec((ASTNode *) vec_get(n->decls, i), depth + 1);
+            break;
+        }
+        case AST_VAR_DECL:
+        {
+            ASTVarDecl *n = ast_as(ASTVarDecl, node);
+            printf("VAR_DECL %s : %s\n", n->name, type_kind_name(n->type->kind));
+            if (n->init)
+                ast_dump_rec(n->init, depth + 1);
+            break;
+        }
+        case AST_EXPR_STMT:
+        {
+            ASTExprStmt *n = ast_as(ASTExprStmt, node);
+            printf("EXPR_STMT\n");
             ast_dump_rec(n->expr, depth + 1);
-        break;
-    }
-    case AST_INT_LITERAL: {
-        ASTIntLiteral *n = ast_as(ASTIntLiteral, node);
-        printf("INT_LITERAL %lld\n", (long long)n->value);
-        break;
-    }
-    case AST_PROGRAM: {
-        ASTProgram *n = ast_as(ASTProgram, node);
-        printf("PROGRAM (%zu decls)\n", vec_size(n->decls));
-        size_t count = vec_size(n->decls);
-        for (size_t i = 0; i < count; i++)
-            ast_dump_rec((ASTNode *)vec_get(n->decls, i), depth + 1);
-        break;
-    }
-    case AST_VAR_DECL: {
-        ASTVarDecl *n = ast_as(ASTVarDecl, node);
-        printf("VAR_DECL %s : %s\n", n->name, type_kind_name(n->type->kind));
-        if (n->init)
-            ast_dump_rec(n->init, depth + 1);
-        break;
-    }
-    case AST_EXPR_STMT: {
-        ASTExprStmt *n = ast_as(ASTExprStmt, node);
-        printf("EXPR_STMT\n");
-        ast_dump_rec(n->expr, depth + 1);
-        break;
-    }
-    case AST_BINARY_EXPR: {
-        ASTBinaryExpr *n = ast_as(ASTBinaryExpr, node);
-        printf("BINARY %s\n", bin_op_name(n->op));
-        ast_dump_rec(n->left, depth + 1);
-        ast_dump_rec(n->right, depth + 1);
-        break;
-    }
-    case AST_UNARY_EXPR: {
-        ASTUnaryExpr *n = ast_as(ASTUnaryExpr, node);
-        printf("UNARY %s\n", unary_op_name(n->op));
-        ast_dump_rec(n->operand, depth + 1);
-        break;
-    }
-    case AST_CALL_EXPR: {
-        ASTCallExpr *n = ast_as(ASTCallExpr, node);
-        printf("CALL %s (%zu args)\n", n->callee, vec_size(n->args));
-        size_t count = vec_size(n->args);
-        for (size_t i = 0; i < count; i++)
-            ast_dump_rec((ASTNode *)vec_get(n->args, i), depth + 1);
-        break;
-    }
-    case AST_IDENT: {
-        ASTIdent *n = ast_as(ASTIdent, node);
-        printf("IDENT %s\n", n->name);
-        break;
-    }
-    default:
-        fprintf(stderr, "[ast] error: unknown AST kind %s\n", ast_kind_name(node->kind));
-        return;
+            break;
+        }
+        case AST_BINARY_EXPR:
+        {
+            ASTBinaryExpr *n = ast_as(ASTBinaryExpr, node);
+            printf("BINARY %s\n", bin_op_name(n->op));
+            ast_dump_rec(n->left, depth + 1);
+            ast_dump_rec(n->right, depth + 1);
+            break;
+        }
+        case AST_UNARY_EXPR:
+        {
+            ASTUnaryExpr *n = ast_as(ASTUnaryExpr, node);
+            printf("UNARY %s\n", unary_op_name(n->op));
+            ast_dump_rec(n->operand, depth + 1);
+            break;
+        }
+        case AST_CALL_EXPR:
+        {
+            ASTCallExpr *n = ast_as(ASTCallExpr, node);
+            printf("CALL %s (%zu args)\n", n->callee, vec_size(n->args));
+            size_t count = vec_size(n->args);
+            for (size_t i = 0; i < count; i++)
+                ast_dump_rec((ASTNode *) vec_get(n->args, i), depth + 1);
+            break;
+        }
+        case AST_IDENT:
+        {
+            ASTIdent *n = ast_as(ASTIdent, node);
+            printf("IDENT %s\n", n->name);
+            break;
+        }
+        case AST_IF_STMT:
+        {
+            ASTIfStmt *n = ast_as(ASTIfStmt, node);
+            printf("IF\n");
+            ast_dump_rec(n->cond, depth + 1);
+            ast_dump_rec(n->then_branch, depth + 1);
+            if (n->else_branch)
+                ast_dump_rec(n->else_branch, depth + 1);
+            break;
+        }
+        default:
+            fprintf(stderr, "[ast] error: unknown AST kind %s\n", ast_kind_name(node->kind));
+            return;
     }
 }

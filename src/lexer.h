@@ -11,6 +11,8 @@
     X(TOK_KW_INT)                                                                                  \
     X(TOK_KW_VOID)                                                                                 \
     X(TOK_KW_RETURN)                                                                               \
+    X(TOK_KW_IF)                                                                                   \
+    X(TOK_KW_ELSE)                                                                                 \
     X(TOK_LPAREN)                                                                                  \
     X(TOK_RPAREN)                                                                                  \
     X(TOK_LBRACE)                                                                                  \

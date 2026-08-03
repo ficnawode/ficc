@@ -47,6 +47,10 @@ static TokenKind keyword_kind(const char *s)
         return TOK_KW_VOID;
     if (strcmp(s, "return") == 0)
         return TOK_KW_RETURN;
+    if (strcmp(s, "if") == 0)
+        return TOK_KW_IF;
+    if (strcmp(s, "else") == 0)
+        return TOK_KW_ELSE;
     return TOK_IDENT;
 }
 

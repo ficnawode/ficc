@@ -23,19 +23,18 @@ static int run_shell(const char *cmd)
 
 TEST(phase2, interp_arith)
 {
-    const char *src =
-        "int add(int a, int b) {\n"
-        "    return a + b;\n"
-        "}\n"
-        "int sub(int a, int b) {\n"
-        "    return a - b;\n"
-        "}\n"
-        "int main(void) {\n"
-        "    int x;\n"
-        "    x = add(10, 3);\n"
-        "    x = sub(x, 2);\n"
-        "    return x * 5;\n"
-        "}\n";
+    const char *src = "int add(int a, int b) {\n"
+                      "    return a + b;\n"
+                      "}\n"
+                      "int sub(int a, int b) {\n"
+                      "    return a - b;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    int x;\n"
+                      "    x = add(10, 3);\n"
+                      "    x = sub(x, 2);\n"
+                      "    return x * 5;\n"
+                      "}\n";
     Arena *arena = arena_new();
     u64 tok_count;
     Token *tokens = lex("<test>", src, arena, &tok_count);
@@ -53,19 +52,18 @@ TEST(phase2, interp_arith)
 
 TEST(phase2, elf_arith)
 {
-    const char *src =
-        "int add(int a, int b) {\n"
-        "    return a + b;\n"
-        "}\n"
-        "int sub(int a, int b) {\n"
-        "    return a - b;\n"
-        "}\n"
-        "int main(void) {\n"
-        "    int x;\n"
-        "    x = add(10, 3);\n"
-        "    x = sub(x, 2);\n"
-        "    return x * 5;\n"
-        "}\n";
+    const char *src = "int add(int a, int b) {\n"
+                      "    return a + b;\n"
+                      "}\n"
+                      "int sub(int a, int b) {\n"
+                      "    return a - b;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    int x;\n"
+                      "    x = add(10, 3);\n"
+                      "    x = sub(x, 2);\n"
+                      "    return x * 5;\n"
+                      "}\n";
     Arena *arena = arena_new();
     u64 tok_count;
     Token *tokens = lex("<test>", src, arena, &tok_count);

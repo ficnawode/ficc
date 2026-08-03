@@ -5,17 +5,18 @@ static const Type the_int = {TYPE_INT, 32, 4, 4};
 
 Type *type_void(void)
 {
-    return (Type *)&the_void;
+    return (Type *) &the_void;
 }
 
 Type *type_int(void)
 {
-    return (Type *)&the_int;
+    return (Type *) &the_int;
 }
 
 const char *type_kind_name(TypeKind kind)
 {
-    switch (kind) {
+    switch (kind)
+    {
 #define CASE(K)                                                                                    \
     case K:                                                                                        \
         return #K;

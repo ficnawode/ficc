@@ -1,9 +1,9 @@
 #include "harness.h"
-#include <string.h>
 #include "lexer.h"
 #include "parser.h"
 #include "semantic.h"
 #include "util/arena.h"
+#include <string.h>
 
 static ASTNode *check_from_source(const char *src, Arena *arena)
 {
@@ -60,7 +60,8 @@ TEST(semantic, undeclared_function_call)
 TEST(semantic, wrong_arity)
 {
     Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int foo(int a) { return a; } int main(void) { return foo(); }", a);
+    ASTNode *ast =
+        check_from_source("int foo(int a) { return a; } int main(void) { return foo(); }", a);
     EXPECT_TRUE(ast == NULL);
     arena_free(a);
 }
@@ -100,7 +101,25 @@ TEST(semantic, assignment_undeclared)
 TEST(semantic, call_across_functions)
 {
     Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int add(int a, int b) { return a + b; } int main(void) { return add(1, 2); }", a);
+    ASTNode *ast = check_from_source(
+        "int add(int a, int b) { return a + b; } int main(void) { return add(1, 2); }", a);
     EXPECT_TRUE(ast != NULL);
+    arena_free(a);
+}
+
+TEST(semantic, if_else_ok)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = check_from_source(
+        "int main(void) { int x; if (1) { x = 10; } else { x = 20; } return x; }", a);
+    EXPECT_TRUE(ast != NULL);
+    arena_free(a);
+}
+
+TEST(semantic, if_undeclared_cond)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = check_from_source("int main(void) { if (x) { return 1; } return 0; }", a);
+    EXPECT_TRUE(ast == NULL);
     arena_free(a);
 }

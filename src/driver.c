@@ -1,4 +1,3 @@
-#include "driver.h"
 #include "codegen.h"
 #include "elf.h"
 #include "ir_builder.h"
@@ -11,6 +10,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+typedef struct
+{
+    bool dump_tokens;
+    bool dump_ast;
+    bool dump_ir;
+    bool emit_asm;
+    bool emit_obj;
+    bool run_interp;
+} DriverFlags;
+
+typedef struct
+{
+    const char *input_file;
+    DriverFlags flags;
+} DriverArgs;
 
 static char *read_file(const char *path, Arena *arena)
 {

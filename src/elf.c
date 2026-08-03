@@ -348,8 +348,8 @@ void elf_write(CodegenModule *cm, const char *path)
     bb_u64(&out, 0);
     bb_u64(&out, off_symtab);
     bb_u64(&out, symtab.len);
-    bb_u32(&out, SEC_STRTAB);               /* sh_link = .strtab */
-    bb_u32(&out, 2);        /* sh_info = last local + 1 */
+    bb_u32(&out, SEC_STRTAB); /* sh_link = .strtab */
+    bb_u32(&out, 2);          /* sh_info = last local + 1 */
     bb_u64(&out, 8);
     bb_u64(&out, sizeof(Elf64_Sym));
 
