@@ -51,10 +51,16 @@ typedef struct
     } payload;
 } Token;
 
+typedef struct LexResult LexResult;
+struct LexResult
+{
+    Token *tokens;
+    u64 count;
+};
+
 /* Lex source text into a flat array of tokens.
-   Returns the token array; writes count into *out_count.
-   Returns NULL if any lexical errors were encountered. */
-Token *lex(const char *file, const char *src, Arena *arena, u64 *out_count);
+   On lexical error, tokens is NULL and count is 0. */
+LexResult lex(const char *file, const char *src, Arena *arena);
 
 const char *token_kind_name(TokenKind kind);
 

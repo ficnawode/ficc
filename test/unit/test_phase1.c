@@ -28,10 +28,9 @@ TEST(phase1, interp_return42)
 {
     const char *src = "int main(void) { return 42; }";
     Arena *arena = arena_new();
-    u64 tok_count;
-    Token *tokens = lex("<test>", src, arena, &tok_count);
-    EXPECT_TRUE(tokens != NULL);
-    ASTNode *ast = parse(tokens, tok_count, arena);
+    LexResult lexed = lex("<test>", src, arena);
+    EXPECT_TRUE(lexed.tokens != NULL);
+    ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
     EXPECT_TRUE(ast != NULL);
     ast = semantic_check(ast, arena);
     EXPECT_TRUE(ast != NULL);
@@ -46,9 +45,8 @@ TEST(phase1, elf_return42)
 {
     const char *src = "int main(void) { return 42; }";
     Arena *arena = arena_new();
-    u64 tok_count;
-    Token *tokens = lex("<test>", src, arena, &tok_count);
-    ASTNode *ast = parse(tokens, tok_count, arena);
+    LexResult lexed = lex("<test>", src, arena);
+    ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
     ast = semantic_check(ast, arena);
     Module *mod = ir_build_module(ast, arena);
 

@@ -156,18 +156,17 @@ static bool parse_args(int argc, char **argv, DriverArgs *out)
 
 static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
 {
-    u64 tok_count;
-    Token *tokens = lex(args->input_file, src, arena, &tok_count);
-    if (!tokens)
+    LexResult lexed = lex(args->input_file, src, arena);
+    if (!lexed.tokens)
     {
         fprintf(stderr, "lex failed\n");
         return 1;
     }
     if (args->flags.dump_tokens)
     {
-        for (size_t i = 0; i < tok_count; i++)
+        for (size_t i = 0; i < lexed.count; i++)
         {
-            Token *t = &tokens[i];
+            Token *t = &lexed.tokens[i];
             printf("%s:%u:%u %s", t->loc.file, t->loc.line, t->loc.col, token_kind_name(t->kind));
             if (t->kind == TOK_INT_LIT)
                 printf(" %lld", (long long) t->payload.int_val);
@@ -177,7 +176,7 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
         }
     }
 
-    ASTNode *ast = parse(tokens, tok_count, arena);
+    ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
     if (!ast)
     {
         fprintf(stderr, "parse failed\n");

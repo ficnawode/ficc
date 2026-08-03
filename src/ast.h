@@ -148,20 +148,18 @@ struct ASTIfStmt
     ASTNode *else_branch;
 };
 
-ASTNode *ast_func_def(Arena *arena, Type *ret_type, const char *name, Vec *params, ASTNode *body,
-                      Loc loc);
-ASTNode *ast_compound_stmt(Arena *arena, Vec *stmts, Loc loc);
-ASTNode *ast_return_stmt(Arena *arena, ASTNode *expr, Loc loc);
-ASTNode *ast_int_literal(Arena *arena, i64 value, Loc loc);
-ASTNode *ast_program(Arena *arena, Vec *decls, Loc loc);
-ASTNode *ast_var_decl(Arena *arena, Type *type, const char *name, ASTNode *init, Loc loc);
-ASTNode *ast_expr_stmt(Arena *arena, ASTNode *expr, Loc loc);
-ASTNode *ast_binary_expr(Arena *arena, BinOpKind op, ASTNode *left, ASTNode *right, Loc loc);
-ASTNode *ast_unary_expr(Arena *arena, UnaryOpKind op, ASTNode *operand, Loc loc);
-ASTNode *ast_call_expr(Arena *arena, const char *callee, Vec *args, Loc loc);
-ASTNode *ast_ident(Arena *arena, const char *name, Loc loc);
-ASTNode *ast_if_stmt(Arena *arena, ASTNode *cond, ASTNode *then_branch, ASTNode *else_branch,
-                     Loc loc);
+ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body, Loc loc, Arena *arena);
+ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
+ASTNode *ast_return_stmt(ASTNode *expr, Loc loc, Arena *arena);
+ASTNode *ast_int_literal(i64 value, Loc loc, Arena *arena);
+ASTNode *ast_program(Vec *decls, Loc loc, Arena *arena);
+ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, Loc loc, Arena *arena);
+ASTNode *ast_expr_stmt(ASTNode *expr, Loc loc, Arena *arena);
+ASTNode *ast_binary_expr(BinOpKind op, ASTNode *left, ASTNode *right, Loc loc, Arena *arena);
+ASTNode *ast_unary_expr(UnaryOpKind op, ASTNode *operand, Loc loc, Arena *arena);
+ASTNode *ast_call_expr(const char *callee, Vec *args, Loc loc, Arena *arena);
+ASTNode *ast_ident(const char *name, Loc loc, Arena *arena);
+ASTNode *ast_if_stmt(ASTNode *cond, ASTNode *then_branch, ASTNode *else_branch, Loc loc, Arena *arena);
 
 void ast_dump(ASTNode *node);
 

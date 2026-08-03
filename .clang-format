@@ -13,3 +13,4 @@ IndentCaseLabels: true
 SortIncludes: true
 SpaceAfterCStyleCast: true
 PointerAlignment: Right
+InsertBraces: true

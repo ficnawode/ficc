@@ -6,11 +6,10 @@
 
 static ASTNode *parse_string(const char *src, Arena *arena)
 {
-    u64 count;
-    Token *tokens = lex("<test>", src, arena, &count);
-    if (!tokens)
+    LexResult lexed = lex("<test>", src, arena);
+    if (!lexed.tokens)
         return NULL;
-    return parse(tokens, count, arena);
+    return parse(lexed.tokens, lexed.count, arena);
 }
 
 TEST(parser, minimal_program)

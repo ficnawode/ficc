@@ -14,7 +14,10 @@ struct ParserCtx
 static Token *parser_peek(ParserCtx *p)
 {
     if (p->pos < p->count)
+    {
         return &p->tokens[p->pos];
+    }
+
     return &p->tokens[p->count - 1]; /* EOF */
 }
 
@@ -22,7 +25,9 @@ static Token *parser_advance(ParserCtx *p)
 {
     Token *t = parser_peek(p);
     if (p->pos < p->count - 1)
+    {
         p->pos++;
+    }
     return t;
 }
 
@@ -51,22 +56,27 @@ static bool parser_expect(ParserCtx *p, TokenKind kind, const char *what)
 
 static ASTNode *parse_expr(ParserCtx *p);
 static ASTNode *parse_stmt(ParserCtx *p);
+static ASTNode *parse_primary(ParserCtx *p);
+static ASTNode *parse_unary(ParserCtx *p);
+static ASTNode *parse_mul(ParserCtx *p);
+static ASTNode *parse_add(ParserCtx *p);
+static ASTNode *parse_assign(ParserCtx *p);
 
 static Type *parse_type_specifier(ParserCtx *p)
 {
     Token *t = parser_peek(p);
-    if (t->kind == TOK_KW_INT)
+    switch (t->kind)
     {
-        parser_advance(p);
-        return type_int();
+        case TOK_KW_INT:
+            parser_advance(p);
+            return type_int();
+        case TOK_KW_VOID:
+            parser_advance(p);
+            return type_void();
+        default:
+            parser_error(p, "expected type specifier");
+            return NULL;
     }
-    if (t->kind == TOK_KW_VOID)
-    {
-        parser_advance(p);
-        return type_void();
-    }
-    parser_error(p, "expected type specifier");
-    return NULL;
 }
 
 static ASTNode *parse_param(ParserCtx *p)
@@ -74,35 +84,42 @@ static ASTNode *parse_param(ParserCtx *p)
     Token *start = parser_peek(p);
     Type *type = parse_type_specifier(p);
     if (!type)
+    {
         return NULL;
+    }
 
-    Token *name_tok = parser_peek(p);
-    if (name_tok->kind != TOK_IDENT)
+    Token *name = parser_peek(p);
+    if (name->kind != TOK_IDENT)
     {
         parser_error(p, "expected parameter name");
         return NULL;
     }
     parser_advance(p);
 
-    return ast_var_decl(p->arena, type, name_tok->payload.str, NULL, start->loc);
+    return ast_var_decl(type, name->payload.str, NULL, start->loc, p->arena);
 }
 
 static Vec *parse_param_list(ParserCtx *p)
 {
     Vec *params = vec_new(p->arena);
     Token *t = parser_peek(p);
+
     if (t->kind == TOK_KW_VOID)
     {
         parser_advance(p);
         return params;
     }
-    /* empty param list is also valid for `()` */
+
     if (t->kind == TOK_RPAREN)
+    {
         return params;
+    }
 
     ASTNode *first = parse_param(p);
     if (!first)
+    {
         return NULL;
+    }
     vec_push(params, first);
 
     while (parser_peek(p)->kind == TOK_COMMA)
@@ -110,7 +127,9 @@ static Vec *parse_param_list(ParserCtx *p)
         parser_advance(p); /* consume ',' */
         ASTNode *next = parse_param(p);
         if (!next)
+        {
             return NULL;
+        }
         vec_push(params, next);
     }
 
@@ -121,20 +140,26 @@ static ASTNode *parse_compound_stmt(ParserCtx *p)
 {
     Token *start = parser_peek(p);
     if (!parser_expect(p, TOK_LBRACE, "'{'"))
+    {
         return NULL;
+    }
 
     Vec *stmts = vec_new(p->arena);
     while (parser_peek(p)->kind != TOK_RBRACE)
     {
         ASTNode *stmt = parse_stmt(p);
         if (!stmt)
+        {
             return NULL;
+        }
         vec_push(stmts, stmt);
     }
     if (!parser_expect(p, TOK_RBRACE, "'}'"))
+    {
         return NULL;
+    }
 
-    return ast_compound_stmt(p->arena, stmts, start->loc);
+    return ast_compound_stmt(stmts, start->loc, p->arena);
 }
 
 static ASTNode *parse_return_stmt(ParserCtx *p)
@@ -148,12 +173,16 @@ static ASTNode *parse_return_stmt(ParserCtx *p)
     {
         expr = parse_expr(p);
         if (!expr)
+        {
             return NULL;
+        }
     }
     if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
         return NULL;
+    }
 
-    return ast_return_stmt(p->arena, expr, start->loc);
+    return ast_return_stmt(expr, start->loc, p->arena);
 }
 
 static ASTNode *parse_var_decl(ParserCtx *p)
@@ -162,10 +191,12 @@ static ASTNode *parse_var_decl(ParserCtx *p)
     ASSERT(start->kind == TOK_KW_INT);
     Type *type = parse_type_specifier(p);
     if (!type)
+    {
         return NULL;
+    }
 
-    Token *name_tok = parser_peek(p);
-    if (name_tok->kind != TOK_IDENT)
+    Token *name = parser_peek(p);
+    if (name->kind != TOK_IDENT)
     {
         parser_error(p, "expected variable name");
         return NULL;
@@ -178,13 +209,17 @@ static ASTNode *parse_var_decl(ParserCtx *p)
         parser_advance(p); /* consume '=' */
         init = parse_expr(p);
         if (!init)
+        {
             return NULL;
+        }
     }
 
     if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
         return NULL;
+    }
 
-    return ast_var_decl(p->arena, type, name_tok->payload.str, init, start->loc);
+    return ast_var_decl(type, name->payload.str, init, start->loc, p->arena);
 }
 
 static ASTNode *parse_expr_stmt(ParserCtx *p)
@@ -192,10 +227,14 @@ static ASTNode *parse_expr_stmt(ParserCtx *p)
     Token *start = parser_peek(p);
     ASTNode *expr = parse_expr(p);
     if (!expr)
+    {
         return NULL;
+    }
     if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
         return NULL;
-    return ast_expr_stmt(p->arena, expr, start->loc);
+    }
+    return ast_expr_stmt(expr, start->loc, p->arena);
 }
 
 static ASTNode *parse_if_stmt(ParserCtx *p)
@@ -205,18 +244,26 @@ static ASTNode *parse_if_stmt(ParserCtx *p)
     parser_advance(p); /* consume 'if' */
 
     if (!parser_expect(p, TOK_LPAREN, "'('"))
+    {
         return NULL;
+    }
 
     ASTNode *cond = parse_expr(p);
     if (!cond)
+    {
         return NULL;
+    }
 
     if (!parser_expect(p, TOK_RPAREN, "')'"))
+    {
         return NULL;
+    }
 
     ASTNode *then_branch = parse_stmt(p);
     if (!then_branch)
+    {
         return NULL;
+    }
 
     ASTNode *else_branch = NULL;
     if (parser_peek(p)->kind == TOK_KW_ELSE)
@@ -224,10 +271,12 @@ static ASTNode *parse_if_stmt(ParserCtx *p)
         parser_advance(p); /* consume 'else' */
         else_branch = parse_stmt(p);
         if (!else_branch)
+        {
             return NULL;
+        }
     }
 
-    return ast_if_stmt(p->arena, cond, then_branch, else_branch, start->loc);
+    return ast_if_stmt(cond, then_branch, else_branch, start->loc, p->arena);
 }
 
 static ASTNode *parse_stmt(ParserCtx *p)
@@ -248,68 +297,82 @@ static ASTNode *parse_stmt(ParserCtx *p)
     }
 }
 
-/* Forward declarations for expression levels */
-static ASTNode *parse_primary(ParserCtx *p);
-static ASTNode *parse_unary(ParserCtx *p);
-static ASTNode *parse_mul(ParserCtx *p);
-static ASTNode *parse_add(ParserCtx *p);
-static ASTNode *parse_assign(ParserCtx *p);
-
 static ASTNode *parse_expr(ParserCtx *p)
 {
     return parse_assign(p);
 }
 
+static ASTNode *parse_identifier_expr(ParserCtx *p, Token *t)
+{
+    parser_advance(p);
+    const char *name = t->payload.str;
+    if (parser_peek(p)->kind == TOK_LPAREN)
+    {
+        parser_advance(p);
+        Vec *args = vec_new(p->arena);
+        if (parser_peek(p)->kind != TOK_RPAREN)
+        {
+            while (true)
+            {
+                ASTNode *arg = parse_expr(p);
+                if (!arg)
+                {
+                    return NULL;
+                }
+
+                vec_push(args, arg);
+
+                if (parser_peek(p)->kind != TOK_COMMA)
+                {
+                    break;
+                }
+
+                parser_advance(p);
+            }
+        }
+        if (!parser_expect(p, TOK_RPAREN, "')'"))
+        {
+            return NULL;
+        }
+        return ast_call_expr(name, args, t->loc, p->arena);
+    }
+    return ast_ident(name, t->loc, p->arena);
+}
+
 static ASTNode *parse_primary(ParserCtx *p)
 {
     Token *t = parser_peek(p);
-    if (t->kind == TOK_INT_LIT)
+    switch (t->kind)
     {
-        parser_advance(p);
-        return ast_int_literal(p->arena, t->payload.int_val, t->loc);
-    }
-    if (t->kind == TOK_IDENT)
-    {
-        parser_advance(p);
-        const char *name = t->payload.str;
-        if (parser_peek(p)->kind == TOK_LPAREN)
+        case TOK_INT_LIT:
         {
-            parser_advance(p); /* consume '(' */
-            Vec *args = vec_new(p->arena);
-            if (parser_peek(p)->kind != TOK_RPAREN)
+            parser_advance(p);
+            return ast_int_literal(t->payload.int_val, t->loc, p->arena);
+        }
+        case TOK_IDENT:
+        {
+            return parse_identifier_expr(p, t);
+        }
+        case TOK_LPAREN:
+        {
+            parser_advance(p);
+            ASTNode *inner = parse_expr(p);
+            if (!inner)
             {
-                while (true)
-                {
-                    ASTNode *arg = parse_expr(p);
-                    if (!arg)
-                        return NULL;
-                    vec_push(args, arg);
-                    if (parser_peek(p)->kind == TOK_COMMA)
-                    {
-                        parser_advance(p);
-                        continue;
-                    }
-                    break;
-                }
+                return NULL;
             }
             if (!parser_expect(p, TOK_RPAREN, "')'"))
+            {
                 return NULL;
-            return ast_call_expr(p->arena, name, args, t->loc);
+            }
+            return inner;
         }
-        return ast_ident(p->arena, name, t->loc);
-    }
-    if (t->kind == TOK_LPAREN)
-    {
-        parser_advance(p);
-        ASTNode *inner = parse_expr(p);
-        if (!inner)
+        default:
+        {
+            parser_error(p, "expected expression");
             return NULL;
-        if (!parser_expect(p, TOK_RPAREN, "')'"))
-            return NULL;
-        return inner;
+        }
     }
-    parser_error(p, "expected expression");
-    return NULL;
 }
 
 static ASTNode *parse_unary(ParserCtx *p)
@@ -320,8 +383,10 @@ static ASTNode *parse_unary(ParserCtx *p)
         parser_advance(p);
         ASTNode *operand = parse_unary(p);
         if (!operand)
+        {
             return NULL;
-        return ast_unary_expr(p->arena, UN_NEG, operand, t->loc);
+        }
+        return ast_unary_expr(UN_NEG, operand, t->loc, p->arena);
     }
     return parse_primary(p);
 }
@@ -330,7 +395,9 @@ static ASTNode *parse_mul(ParserCtx *p)
 {
     ASTNode *left = parse_unary(p);
     if (!left)
+    {
         return NULL;
+    }
 
     while (true)
     {
@@ -353,8 +420,10 @@ static ASTNode *parse_mul(ParserCtx *p)
         parser_advance(p);
         ASTNode *right = parse_unary(p);
         if (!right)
+        {
             return NULL;
-        left = ast_binary_expr(p->arena, op, left, right, t->loc);
+        }
+        left = ast_binary_expr(op, left, right, t->loc, p->arena);
     }
 }
 
@@ -362,7 +431,9 @@ static ASTNode *parse_add(ParserCtx *p)
 {
     ASTNode *left = parse_mul(p);
     if (!left)
+    {
         return NULL;
+    }
 
     while (true)
     {
@@ -382,8 +453,10 @@ static ASTNode *parse_add(ParserCtx *p)
         parser_advance(p);
         ASTNode *right = parse_mul(p);
         if (!right)
+        {
             return NULL;
-        left = ast_binary_expr(p->arena, op, left, right, t->loc);
+        }
+        left = ast_binary_expr(op, left, right, t->loc, p->arena);
     }
 }
 
@@ -391,16 +464,20 @@ static ASTNode *parse_assign(ParserCtx *p)
 {
     ASTNode *left = parse_add(p);
     if (!left)
+    {
         return NULL;
+    }
 
     if (parser_peek(p)->kind == TOK_ASSIGN)
     {
         Token *t = parser_peek(p);
         parser_advance(p);
-        ASTNode *right = parse_assign(p); /* right-associative */
+        ASTNode *right = parse_assign(p);
         if (!right)
+        {
             return NULL;
-        left = ast_binary_expr(p->arena, BIN_ASSIGN, left, right, t->loc);
+        }
+        left = ast_binary_expr(BIN_ASSIGN, left, right, t->loc, p->arena);
     }
     return left;
 }
@@ -410,10 +487,12 @@ static ASTNode *parse_func_def(ParserCtx *p)
     Token *start = parser_peek(p);
     Type *ret_type = parse_type_specifier(p);
     if (!ret_type)
+    {
         return NULL;
+    }
 
-    Token *name_tok = parser_peek(p);
-    if (name_tok->kind != TOK_IDENT)
+    Token *name = parser_peek(p);
+    if (name->kind != TOK_IDENT)
     {
         parser_error(p, "expected function name");
         return NULL;
@@ -421,20 +500,28 @@ static ASTNode *parse_func_def(ParserCtx *p)
     parser_advance(p);
 
     if (!parser_expect(p, TOK_LPAREN, "'('"))
+    {
         return NULL;
+    }
 
     Vec *params = parse_param_list(p);
     if (!params)
+    {
         return NULL;
+    }
 
     if (!parser_expect(p, TOK_RPAREN, "')'"))
+    {
         return NULL;
+    }
 
     ASTNode *body = parse_compound_stmt(p);
     if (!body)
+    {
         return NULL;
+    }
 
-    return ast_func_def(p->arena, ret_type, name_tok->payload.str, params, body, start->loc);
+    return ast_func_def(ret_type, name->payload.str, params, body, start->loc, p->arena);
 }
 
 ASTNode *parse(Token *tokens, u64 count, Arena *arena)
@@ -447,9 +534,11 @@ ASTNode *parse(Token *tokens, u64 count, Arena *arena)
     {
         ASTNode *node = parse_func_def(&p);
         if (!node)
+        {
             return NULL;
+        }
         vec_push(decls, node);
     }
 
-    return ast_program(arena, decls, tokens[0].loc);
+    return ast_program(decls, tokens[0].loc, arena);
 }

@@ -7,11 +7,10 @@
 
 static ASTNode *check_from_source(const char *src, Arena *arena)
 {
-    u64 count;
-    Token *tokens = lex("<test>", src, arena, &count);
-    if (!tokens)
+    LexResult lexed = lex("<test>", src, arena);
+    if (!lexed.tokens)
         return NULL;
-    ASTNode *ast = parse(tokens, count, arena);
+    ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
     if (!ast)
         return NULL;
     return semantic_check(ast, arena);

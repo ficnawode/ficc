@@ -29,14 +29,24 @@ const char *token_kind_name(TokenKind kind)
     return "TOK_UNKNOWN";
 }
 
-static bool isident_start(char c)
+static bool is_identifier_start(char c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
 
-static bool isident_char(char c)
+static bool is_identifier_char(char c)
 {
-    return isident_start(c) || (c >= '0' && c <= '9');
+    return is_identifier_start(c) || (c >= '0' && c <= '9');
+}
+
+static bool is_digit(char c)
+{
+    return c >= '0' && c <= '9';
+}
+
+static bool is_whitespace(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
 static TokenKind keyword_kind(const char *s)
@@ -95,47 +105,45 @@ static void lexer_advance(LexerCtx *ctx)
     ctx->p++;
 }
 
-static void lexer_push(LexerCtx *ctx, Token t)
+static void lexer_push(LexerCtx *ctx, Token token)
 {
-    Token *p = arena_alloc(ctx->arena, sizeof(Token), sizeof(void *));
-    *p = t;
-    vec_push(ctx->tokens, p);
+    Token *slot = arena_alloc(ctx->arena, sizeof(Token), sizeof(void *));
+    *slot = token;
+    vec_push(ctx->tokens, slot);
 }
 
 static bool lex_whitespace(LexerCtx *ctx)
 {
-    if (*ctx->p != ' ' && *ctx->p != '\t' && *ctx->p != '\r' && *ctx->p != '\n')
+    if (!is_whitespace(*ctx->p))
         return false;
 
-    while (*ctx->p == ' ' || *ctx->p == '\t' || *ctx->p == '\r' || *ctx->p == '\n')
+    while (is_whitespace(*ctx->p))
         lexer_advance(ctx);
     return true;
 }
 
 static bool lex_number(LexerCtx *ctx)
 {
-    if (*ctx->p < '0' || *ctx->p > '9')
+    if (!is_digit(*ctx->p))
         return false;
 
     Loc loc = lexer_loc(ctx);
     u64 val = 0;
+    bool overflow = false;
 
-    while (*ctx->p >= '0' && *ctx->p <= '9')
+    while (is_digit(*ctx->p))
     {
         u64 digit = (u64) (*ctx->p - '0');
-
-        /* Overflow detection */
-        if (val > ((u64) INT64_MAX - digit) / 10)
+        if (!overflow && val > ((u64) INT64_MAX - digit) / 10)
         {
             lexer_error(ctx, "integer literal overflow");
-            /* Consume the rest of the digits so we don't re-error,
-               but leave val at max so downstream has a defined value. */
             val = (u64) INT64_MAX;
-            while (*ctx->p >= '0' && *ctx->p <= '9')
-                lexer_advance(ctx);
-            break;
+            overflow = true;
         }
-        val = val * 10 + digit;
+        else if (!overflow)
+        {
+            val = val * 10 + digit;
+        }
         lexer_advance(ctx);
     }
 
@@ -145,19 +153,18 @@ static bool lex_number(LexerCtx *ctx)
 
 static bool lex_ident(LexerCtx *ctx)
 {
-    if (!isident_start(*ctx->p))
+    if (!is_identifier_start(*ctx->p))
         return false;
 
     Loc loc = lexer_loc(ctx);
     const char *start = ctx->p;
 
-    while (isident_char(*ctx->p))
+    while (is_identifier_char(*ctx->p))
         lexer_advance(ctx);
 
     size_t len = (size_t) (ctx->p - start);
     char *buf = arena_alloc(ctx->arena, len + 1, 1);
-    for (size_t i = 0; i < len; i++)
-        buf[i] = start[i];
+    memcpy(buf, start, len);
     buf[len] = '\0';
 
     lexer_push(ctx, (Token) {.kind = keyword_kind(buf), .loc = loc, .payload.str = buf});
@@ -238,7 +245,7 @@ static bool lex_punct(LexerCtx *ctx)
     return true;
 }
 
-Token *lex(const char *file, const char *src, Arena *arena, u64 *out_count)
+LexResult lex(const char *file, const char *src, Arena *arena)
 {
     LexerCtx ctx;
     lexer_init(&ctx, file, src, arena);
@@ -246,15 +253,25 @@ Token *lex(const char *file, const char *src, Arena *arena, u64 *out_count)
     while (*ctx.p)
     {
         if (lex_whitespace(&ctx))
+        {
             continue;
+        }
         if (lex_comment(&ctx))
+        {
             continue;
+        }
         if (lex_number(&ctx))
+        {
             continue;
+        }
         if (lex_ident(&ctx))
+        {
             continue;
+        }
         if (lex_punct(&ctx))
+        {
             continue;
+        }
 
         lexer_error(&ctx, "unknown character");
         lexer_advance(&ctx);
@@ -267,12 +284,11 @@ Token *lex(const char *file, const char *src, Arena *arena, u64 *out_count)
     Token *arr = arena_alloc(arena, count * sizeof(Token), sizeof(void *));
     for (size_t i = 0; i < count; i++)
     {
-        Token *t = (Token *) vec_get(ctx.tokens, i);
-        arr[i] = *t;
+        Token *slot = (Token *) vec_get(ctx.tokens, i);
+        arr[i] = *slot;
     }
 
-    *out_count = (u64) count;
     if (ctx.error_count > 0)
-        return NULL;
-    return arr;
+        return (LexResult) {0};
+    return (LexResult) {.tokens = arr, .count = (u64) count};
 }
