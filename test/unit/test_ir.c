@@ -54,8 +54,8 @@ TEST(ir, function_and_block)
 {
     Arena *a = arena_new();
     Module *m = ir_module_new(a);
-    Function *f = ir_module_add_func(m, a, "main", type_int());
-    Block *bb = ir_func_add_block(f, a, "entry");
+    Function *f = ir_module_add_func(m, "main", type_int());
+    Block *bb = ir_func_add_block(f, "entry");
 
     EXPECT_TRUE(f != NULL);
     EXPECT_TRUE(strcmp(f->name, "main") == 0);
@@ -70,10 +70,10 @@ TEST(ir, emit_ret)
 {
     Arena *a = arena_new();
     Module *m = ir_module_new(a);
-    Function *f = ir_module_add_func(m, a, "main", type_int());
-    Block *bb = ir_func_add_block(f, a, "entry");
+    Function *f = ir_module_add_func(m, "main", type_int());
+    Block *bb = ir_func_add_block(f, "entry");
 
-    Instr *i = ir_emit_ret(bb, a, ir_operand_imm(42));
+    Instr *i = ir_emit_ret(bb, ir_operand_imm(42));
     EXPECT_TRUE(i != NULL);
     EXPECT_EQ(i->opcode, OP_RET);
     EXPECT_EQ(i->nops, 1);
@@ -87,10 +87,10 @@ TEST(ir, emit_unreachable)
 {
     Arena *a = arena_new();
     Module *m = ir_module_new(a);
-    Function *f = ir_module_add_func(m, a, "main", type_int());
-    Block *bb = ir_func_add_block(f, a, "entry");
+    Function *f = ir_module_add_func(m, "main", type_int());
+    Block *bb = ir_func_add_block(f, "entry");
 
-    Instr *i = ir_emit_unreachable(bb, a);
+    Instr *i = ir_emit_unreachable(bb);
     EXPECT_TRUE(i != NULL);
     EXPECT_EQ(i->opcode, OP_UNREACHABLE);
     EXPECT_EQ(i->nops, 0);
@@ -123,9 +123,9 @@ TEST(ir, emit_ret_void)
 {
     Arena *a = arena_new();
     Module *m = ir_module_new(a);
-    Function *f = ir_module_add_func(m, a, "main", type_void());
-    Block *bb = ir_func_add_block(f, a, "entry");
-    Instr *i = ir_emit_ret_void(bb, a);
+    Function *f = ir_module_add_func(m, "main", type_void());
+    Block *bb = ir_func_add_block(f, "entry");
+    Instr *i = ir_emit_ret_void(bb);
     EXPECT_EQ(i->opcode, OP_RET);
     EXPECT_EQ(i->result, NO_VREG);
     EXPECT_EQ(i->nops, 0);
@@ -136,9 +136,9 @@ TEST(ir, emit_add)
 {
     Arena *a = arena_new();
     Module *m = ir_module_new(a);
-    Function *f = ir_module_add_func(m, a, "main", type_int());
-    Block *bb = ir_func_add_block(f, a, "entry");
-    Instr *i = ir_emit_add(bb, a, 0, ir_operand_vreg(1), ir_operand_imm(2));
+    Function *f = ir_module_add_func(m, "main", type_int());
+    Block *bb = ir_func_add_block(f, "entry");
+    Instr *i = ir_emit_add(bb, 0, ir_operand_vreg(1), ir_operand_imm(2));
     EXPECT_EQ(i->opcode, OP_ADD);
     EXPECT_EQ(i->result, 0);
     EXPECT_EQ(i->nops, 2);
@@ -151,10 +151,10 @@ TEST(ir, emit_call)
 {
     Arena *a = arena_new();
     Module *m = ir_module_new(a);
-    Function *f = ir_module_add_func(m, a, "main", type_int());
-    Block *bb = ir_func_add_block(f, a, "entry");
+    Function *f = ir_module_add_func(m, "main", type_int());
+    Block *bb = ir_func_add_block(f, "entry");
     Operand args[2] = {ir_operand_imm(1), ir_operand_imm(2)};
-    Instr *i = ir_emit_call(bb, a, 0, "foo", 2, args);
+    Instr *i = ir_emit_call(bb, 0, "foo", 2, args);
     EXPECT_EQ(i->opcode, OP_CALL);
     EXPECT_EQ(i->result, 0);
     EXPECT_EQ(i->extra.call.nargs, 2);
@@ -167,9 +167,9 @@ TEST(ir, emit_br)
 {
     Arena *a = arena_new();
     Module *m = ir_module_new(a);
-    Function *f = ir_module_add_func(m, a, "main", type_int());
-    Block *bb = ir_func_add_block(f, a, "entry");
-    Instr *i = ir_emit_br(bb, a, "target");
+    Function *f = ir_module_add_func(m, "main", type_int());
+    Block *bb = ir_func_add_block(f, "entry");
+    Instr *i = ir_emit_br(bb, "target");
     EXPECT_EQ(i->opcode, OP_BR);
     EXPECT_TRUE(strcmp(i->extra.br.target_label, "target") == 0);
     arena_free(a);
@@ -179,9 +179,9 @@ TEST(ir, emit_brcond)
 {
     Arena *a = arena_new();
     Module *m = ir_module_new(a);
-    Function *f = ir_module_add_func(m, a, "main", type_int());
-    Block *bb = ir_func_add_block(f, a, "entry");
-    Instr *i = ir_emit_brcond(bb, a, ir_operand_vreg(0), "then", "else");
+    Function *f = ir_module_add_func(m, "main", type_int());
+    Block *bb = ir_func_add_block(f, "entry");
+    Instr *i = ir_emit_brcond(bb, ir_operand_vreg(0), "then", "else");
     EXPECT_EQ(i->opcode, OP_BRCOND);
     EXPECT_TRUE(strcmp(i->extra.brcond.true_label, "then") == 0);
     EXPECT_TRUE(strcmp(i->extra.brcond.false_label, "else") == 0);
@@ -192,14 +192,14 @@ TEST(ir, emit_phi)
 {
     Arena *a = arena_new();
     Module *m = ir_module_new(a);
-    Function *f = ir_module_add_func(m, a, "main", type_int());
-    Block *bb = ir_func_add_block(f, a, "entry");
-    Instr *phi = ir_emit_phi(bb, a, 2, 2);
+    Function *f = ir_module_add_func(m, "main", type_int());
+    Block *bb = ir_func_add_block(f, "entry");
+    Instr *phi = ir_emit_phi(bb, 2, 2);
     EXPECT_EQ(phi->opcode, OP_PHI);
     EXPECT_EQ(phi->result, 2);
     EXPECT_EQ(phi->extra.phi.nentries, 2);
-    phi_add_entry(phi, ir_operand_imm(10), bb);
-    phi_add_entry(phi, ir_operand_imm(20), bb);
+    ir_phi_add_entry(phi, ir_operand_imm(10), bb);
+    ir_phi_add_entry(phi, ir_operand_imm(20), bb);
     EXPECT_EQ(phi->extra.phi.entries[0].val.u.imm, 10);
     EXPECT_EQ(phi->extra.phi.entries[1].val.u.imm, 20);
     arena_free(a);

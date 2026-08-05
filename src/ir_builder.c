@@ -13,7 +13,6 @@ struct BlockState
 typedef struct BuilderCtx BuilderCtx;
 struct BuilderCtx
 {
-    Arena *arena;
     Module *mod;
     U64Map *block_states; /* (u64)Block* -> BlockState* */
 };
@@ -29,9 +28,9 @@ static void ir_error(ASTNode *node, const char *fmt, ...)
     fprintf(stderr, "\n");
 }
 
-static Operand *make_operand_ptr(Arena *arena, Operand op)
+static Operand *make_operand_ptr(BuilderCtx *ctx, Operand op)
 {
-    Operand *p = arena_alloc(arena, sizeof(Operand), sizeof(Operand));
+    Operand *p = arena_alloc(ctx->mod->arena, sizeof(Operand), sizeof(Operand));
     *p = op;
     return p;
 }
@@ -41,8 +40,8 @@ static BlockState *get_block_state(BuilderCtx *ctx, Block *bb)
     BlockState *bs = u64map_get(ctx->block_states, (u64) (uintptr_t) bb);
     if (!bs)
     {
-        bs = arena_alloc(ctx->arena, sizeof(BlockState), sizeof(void *));
-        bs->locals = strmap_new(ctx->arena);
+        bs = arena_alloc(ctx->mod->arena, sizeof(BlockState), sizeof(void *));
+        bs->locals = strmap_new(ctx->mod->arena);
         u64map_set(ctx->block_states, (u64) (uintptr_t) bb, bs);
     }
     return bs;
@@ -52,13 +51,30 @@ static bool is_terminated(Block *bb)
 {
     size_t n = vec_size(bb->instrs);
     if (n == 0)
+    {
         return false;
+    }
     Instr *last = (Instr *) vec_get(bb->instrs, n - 1);
     return last->opcode == OP_RET || last->opcode == OP_UNREACHABLE || last->opcode == OP_BR ||
            last->opcode == OP_BRCOND;
 }
 
 static Operand read_variable(BuilderCtx *ctx, const char *name, Block *bb);
+
+/* Multiple predecessors: value must come through a PHI, one entry per pred. */
+static Operand build_phi(BuilderCtx *ctx, const char *name, Block *bb)
+{
+    u32 nentries = (u32) vec_size(bb->preds);
+    u32 dst = ir_alloc_vreg(ctx->mod, 4);
+    Instr *phi = ir_emit_phi(bb, dst, nentries);
+    for (u32 e = 0; e < nentries; e++)
+    {
+        Block *pred = (Block *) vec_get(bb->preds, e);
+        Operand pval = read_variable(ctx, name, pred);
+        ir_phi_add_entry(phi, pval, pred);
+    }
+    return ir_operand_vreg(dst);
+}
 
 static Operand read_variable_recursive(BuilderCtx *ctx, const char *name, Block *bb)
 {
@@ -76,19 +92,9 @@ static Operand read_variable_recursive(BuilderCtx *ctx, const char *name, Block 
     }
     else
     {
-        /* Multiple predecessors: need a PHI */
-        u32 nentries = (u32) vec_size(bb->preds);
-        u32 dst = ir_alloc_vreg(ctx->mod, 4);
-        Instr *phi = ir_emit_phi(bb, ctx->arena, dst, nentries);
-        for (u32 e = 0; e < nentries; e++)
-        {
-            Block *pred = (Block *) vec_get(bb->preds, e);
-            Operand pval = read_variable(ctx, name, pred);
-            phi_add_entry(phi, pval, pred);
-        }
-        val = ir_operand_vreg(dst);
+        val = build_phi(ctx, name, bb);
     }
-    strmap_set(bs->locals, name, make_operand_ptr(ctx->arena, val));
+    strmap_set(bs->locals, name, make_operand_ptr(ctx, val));
     return val;
 }
 
@@ -97,24 +103,80 @@ static Operand read_variable(BuilderCtx *ctx, const char *name, Block *bb)
     BlockState *bs = get_block_state(ctx, bb);
     Operand *p = strmap_get(bs->locals, name);
     if (p)
+    {
         return *p;
+    }
     return read_variable_recursive(ctx, name, bb);
 }
 
 static void write_variable(BuilderCtx *ctx, const char *name, Block *bb, Operand val)
 {
     BlockState *bs = get_block_state(ctx, bb);
-    strmap_set(bs->locals, name, make_operand_ptr(ctx->arena, val));
+    strmap_set(bs->locals, name, make_operand_ptr(ctx, val));
+}
+
+static void emit_arith_binop(Block *bb, u32 dst, BinOpKind op, Operand left, Operand right,
+                             ASTNode *node)
+{
+    switch (op)
+    {
+        case BIN_ADD:
+            ir_emit_add(bb, dst, left, right);
+            break;
+        case BIN_SUB:
+            ir_emit_sub(bb, dst, left, right);
+            break;
+        case BIN_MUL:
+            ir_emit_mul(bb, dst, left, right);
+            break;
+        case BIN_DIV:
+            ir_emit_sdiv(bb, dst, left, right);
+            break;
+        case BIN_REM:
+            ir_emit_srem(bb, dst, left, right);
+            break;
+        case BIN_ASSIGN:
+            ir_error(node, "assignment is handled before arithmetic emission");
+            break;
+        default:
+            ir_error(node, "unsupported binary operator");
+            break;
+    }
+}
+
+static void emit_unary_op(Block *bb, u32 dst, UnaryOpKind op, Operand src, ASTNode *node)
+{
+    switch (op)
+    {
+        case UN_NEG:
+            ir_emit_neg(bb, dst, src);
+            break;
+        default:
+            ir_error(node, "unsupported unary operator");
+            break;
+    }
+}
+
+static Operand build_assignment(Block *bb, ASTNode *node, Operand value, BuilderCtx *ctx)
+{
+    ASTBinaryExpr *assign = ast_as(ASTBinaryExpr, node);
+    if (assign->left->kind != AST_IDENT)
+    {
+        ir_error(node, "assignment target must be an identifier");
+        return ir_operand_imm(0);
+    }
+    ASTIdent *target = ast_as(ASTIdent, assign->left);
+    write_variable(ctx, target->name, bb, value);
+    return value;
 }
 
 static Operand build_expr(ASTNode *node, Function *f, Block *bb, BuilderCtx *ctx)
 {
-    (void) f;
     switch (node->kind)
     {
         case AST_INT_LITERAL:
         {
-            ASTIntLiteral *lit = (ASTIntLiteral *) node;
+            ASTIntLiteral *lit = ast_as(ASTIntLiteral, node);
             return ir_operand_imm(lit->value);
         }
         case AST_IDENT:
@@ -129,37 +191,10 @@ static Operand build_expr(ASTNode *node, Function *f, Block *bb, BuilderCtx *ctx
             Operand right = build_expr(be->right, f, bb, ctx);
             if (be->op == BIN_ASSIGN)
             {
-                if (be->left->kind != AST_IDENT)
-                {
-                    ir_error(node, "assignment target must be an identifier");
-                    return ir_operand_imm(0);
-                }
-                ASTIdent *target = ast_as(ASTIdent, be->left);
-                write_variable(ctx, target->name, bb, right);
-                return right;
+                return build_assignment(bb, node, right, ctx);
             }
             u32 dst = ir_alloc_vreg(ctx->mod, 4);
-            switch (be->op)
-            {
-                case BIN_ADD:
-                    ir_emit_add(bb, ctx->arena, dst, left, right);
-                    break;
-                case BIN_SUB:
-                    ir_emit_sub(bb, ctx->arena, dst, left, right);
-                    break;
-                case BIN_MUL:
-                    ir_emit_mul(bb, ctx->arena, dst, left, right);
-                    break;
-                case BIN_DIV:
-                    ir_emit_sdiv(bb, ctx->arena, dst, left, right);
-                    break;
-                case BIN_REM:
-                    ir_emit_srem(bb, ctx->arena, dst, left, right);
-                    break;
-                default:
-                    ir_error(node, "unsupported binary operator");
-                    break;
-            }
+            emit_arith_binop(bb, dst, be->op, left, right, node);
             return ir_operand_vreg(dst);
         }
         case AST_UNARY_EXPR:
@@ -167,29 +202,21 @@ static Operand build_expr(ASTNode *node, Function *f, Block *bb, BuilderCtx *ctx
             ASTUnaryExpr *ue = ast_as(ASTUnaryExpr, node);
             Operand src = build_expr(ue->operand, f, bb, ctx);
             u32 dst = ir_alloc_vreg(ctx->mod, 4);
-            switch (ue->op)
-            {
-                case UN_NEG:
-                    ir_emit_neg(bb, ctx->arena, dst, src);
-                    break;
-                default:
-                    ir_error(node, "unsupported unary operator");
-                    break;
-            }
+            emit_unary_op(bb, dst, ue->op, src, node);
             return ir_operand_vreg(dst);
         }
         case AST_CALL_EXPR:
         {
             ASTCallExpr *ce = ast_as(ASTCallExpr, node);
             u32 nargs = (u32) vec_size(ce->args);
-            Operand *args = arena_alloc(ctx->arena, nargs * sizeof(Operand), sizeof(Operand));
+            Operand *args = arena_alloc(ctx->mod->arena, nargs * sizeof(Operand), sizeof(Operand));
             for (u32 i = 0; i < nargs; i++)
             {
                 ASTNode *arg = (ASTNode *) vec_get(ce->args, i);
                 args[i] = build_expr(arg, f, bb, ctx);
             }
             u32 dst = ir_alloc_vreg(ctx->mod, 4);
-            ir_emit_call(bb, ctx->arena, dst, ce->callee, nargs, args);
+            ir_emit_call(bb, dst, ce->callee, nargs, args);
             return ir_operand_vreg(dst);
         }
         default:
@@ -211,21 +238,57 @@ static Block *build_compound_stmt(ASTCompoundStmt *cs, Function *f, Block *bb, B
     return bb;
 }
 
+/* Build one if/else branch: wire the entry, build the statement (if any), and
+   fall through to the merge block unless the branch already terminates. */
+static void build_branch(ASTNode *branch_stmt, Function *f, Block *cond_bb, Block *branch_bb,
+                         Block *merge_bb, BuilderCtx *ctx)
+{
+    vec_push(branch_bb->preds, cond_bb);
+    branch_bb->sealed = true;
+
+    Block *end = branch_bb;
+    if (branch_stmt)
+    {
+        end = build_stmt(branch_stmt, f, branch_bb, ctx);
+    }
+    if (!is_terminated(end))
+    {
+        ir_emit_br(end, merge_bb->label);
+        vec_push(merge_bb->preds, end);
+    }
+}
+
+static Block *build_if_stmt(ASTIfStmt *is, Function *f, Block *bb, BuilderCtx *ctx)
+{
+    Operand cond = build_expr(is->cond, f, bb, ctx);
+
+    Block *then_bb = ir_func_add_block(f, "then");
+    Block *else_bb = ir_func_add_block(f, "else");
+    Block *merge_bb = ir_func_add_block(f, "merge");
+
+    ir_emit_brcond(bb, cond, then_bb->label, else_bb->label);
+
+    build_branch(is->then_branch, f, bb, then_bb, merge_bb, ctx);
+    build_branch(is->else_branch, f, bb, else_bb, merge_bb, ctx);
+    merge_bb->sealed = true;
+    return merge_bb;
+}
+
 static Block *build_stmt(ASTNode *node, Function *f, Block *bb, BuilderCtx *ctx)
 {
     switch (node->kind)
     {
         case AST_RETURN_STMT:
         {
-            ASTReturnStmt *ret = (ASTReturnStmt *) node;
+            ASTReturnStmt *ret = ast_as(ASTReturnStmt, node);
             if (ret->expr)
             {
                 Operand val = build_expr(ret->expr, f, bb, ctx);
-                ir_emit_ret(bb, ctx->arena, val);
+                ir_emit_ret(bb, val);
             }
             else
             {
-                ir_emit_ret_void(bb, ctx->arena);
+                ir_emit_ret_void(bb);
             }
             return bb;
         }
@@ -248,46 +311,13 @@ static Block *build_stmt(ASTNode *node, Function *f, Block *bb, BuilderCtx *ctx)
         }
         case AST_COMPOUND_STMT:
         {
-            return build_compound_stmt(ast_as(ASTCompoundStmt, node), f, bb, ctx);
+            ASTCompoundStmt *cs = ast_as(ASTCompoundStmt, node);
+            return build_compound_stmt(cs, f, bb, ctx);
         }
         case AST_IF_STMT:
         {
             ASTIfStmt *is = ast_as(ASTIfStmt, node);
-            Operand cond = build_expr(is->cond, f, bb, ctx);
-
-            Block *then_bb = ir_func_add_block(f, ctx->arena, "then");
-            Block *else_bb = ir_func_add_block(f, ctx->arena, "else");
-            Block *merge_bb = ir_func_add_block(f, ctx->arena, "merge");
-
-            ir_emit_brcond(bb, ctx->arena, cond, then_bb->label, else_bb->label);
-
-            /* Then branch */
-            vec_push(then_bb->preds, bb);
-            then_bb->sealed = true;
-            Block *then_end = build_stmt(is->then_branch, f, then_bb, ctx);
-            bool then_reaches_merge = !is_terminated(then_end);
-            if (then_reaches_merge)
-                ir_emit_br(then_end, ctx->arena, merge_bb->label);
-
-            /* Else branch */
-            vec_push(else_bb->preds, bb);
-            else_bb->sealed = true;
-            Block *else_end = else_bb;
-            if (is->else_branch)
-            {
-                else_end = build_stmt(is->else_branch, f, else_bb, ctx);
-            }
-            bool else_reaches_merge = !is_terminated(else_end);
-            if (else_reaches_merge)
-                ir_emit_br(else_end, ctx->arena, merge_bb->label);
-
-            /* Merge */
-            if (then_reaches_merge)
-                vec_push(merge_bb->preds, then_end);
-            if (else_reaches_merge)
-                vec_push(merge_bb->preds, else_end);
-            merge_bb->sealed = true;
-            return merge_bb;
+            return build_if_stmt(is, f, bb, ctx);
         }
         default:
             ir_error(node, "unsupported statement kind %s", ast_kind_name(node->kind));
@@ -295,7 +325,7 @@ static Block *build_stmt(ASTNode *node, Function *f, Block *bb, BuilderCtx *ctx)
     }
 }
 
-static bool build_func(ASTNode *ast, Module *mod, Arena *arena)
+static bool build_func(ASTNode *ast, Module *mod)
 {
     if (ast->kind != AST_FUNC_DEF)
     {
@@ -304,8 +334,8 @@ static bool build_func(ASTNode *ast, Module *mod, Arena *arena)
     }
     ASTFuncDef *func_ast = (ASTFuncDef *) ast;
 
-    Function *func = ir_module_add_func(mod, arena, func_ast->name, func_ast->ret_type);
-    Block *entry = ir_func_add_block(func, arena, "entry");
+    Function *func = ir_module_add_func(mod, func_ast->name, func_ast->ret_type);
+    Block *entry = ir_func_add_block(func, "entry");
 
     if (func_ast->body->kind != AST_COMPOUND_STMT)
     {
@@ -313,7 +343,7 @@ static bool build_func(ASTNode *ast, Module *mod, Arena *arena)
         return false;
     }
 
-    BuilderCtx ctx = {arena, mod, u64map_new(arena)};
+    BuilderCtx ctx = {mod, u64map_new(mod->arena)};
 
     /* Allocate vregs for parameters and record them */
     size_t nparams = vec_size(func_ast->params);
@@ -321,7 +351,7 @@ static bool build_func(ASTNode *ast, Module *mod, Arena *arena)
     {
         ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(func_ast->params, i));
         u32 vreg = ir_alloc_vreg(mod, 4);
-        Param *p = arena_alloc(arena, sizeof(Param), sizeof(void *));
+        Param *p = arena_alloc(mod->arena, sizeof(Param), sizeof(void *));
         p->name = param->name;
         p->type = param->type;
         p->vreg = vreg;
@@ -341,9 +371,13 @@ static bool build_func(ASTNode *ast, Module *mod, Arena *arena)
     if (!is_terminated(entry))
     {
         if (func_ast->ret_type->kind == TYPE_VOID)
-            ir_emit_ret_void(entry, arena);
+        {
+            ir_emit_ret_void(entry);
+        }
         else
-            ir_emit_unreachable(entry, arena);
+        {
+            ir_emit_unreachable(entry);
+        }
     }
 
     return true;
@@ -363,8 +397,10 @@ Module *ir_build_module(ASTNode *ast, Arena *arena)
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
-        if (!build_func(decl, mod, arena))
+        if (!build_func(decl, mod))
+        {
             return NULL;
+        }
     }
     return mod;
 }

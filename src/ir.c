@@ -29,23 +29,25 @@ Module *ir_module_new(Arena *arena)
     return m;
 }
 
-Function *ir_module_add_func(Module *m, Arena *arena, const char *name, Type *ret_type)
+Function *ir_module_add_func(Module *m, const char *name, Type *ret_type)
 {
-    Function *f = arena_alloc(arena, sizeof(Function), sizeof(void *));
+    Function *f = arena_alloc(m->arena, sizeof(Function), sizeof(void *));
     f->name = name;
     f->ret_type = ret_type;
-    f->params = vec_new(arena);
-    f->blocks = vec_new(arena);
+    f->arena = m->arena;
+    f->params = vec_new(m->arena);
+    f->blocks = vec_new(m->arena);
     vec_push(m->funcs, f);
     return f;
 }
 
-Block *ir_func_add_block(Function *f, Arena *arena, const char *label)
+Block *ir_func_add_block(Function *f, const char *label)
 {
-    Block *bb = arena_alloc(arena, sizeof(Block), sizeof(void *));
+    Block *bb = arena_alloc(f->arena, sizeof(Block), sizeof(void *));
     bb->label = label;
-    bb->instrs = vec_new(arena);
-    bb->preds = vec_new(arena);
+    bb->arena = f->arena;
+    bb->instrs = vec_new(f->arena);
+    bb->preds = vec_new(f->arena);
     bb->sealed = false;
     vec_push(f->blocks, bb);
     return bb;
@@ -58,7 +60,9 @@ u32 ir_alloc_vreg(Module *m, u8 width)
         u32 new_cap = m->width_cap ? m->width_cap * 2 : 8;
         u8 *new_widths = arena_alloc(m->arena, new_cap, sizeof(u8));
         if (m->widths)
+        {
             memcpy(new_widths, m->widths, m->width_count);
+        }
         m->widths = new_widths;
         m->width_cap = new_cap;
     }
@@ -66,137 +70,108 @@ u32 ir_alloc_vreg(Module *m, u8 width)
     return m->next_vreg++;
 }
 
-Instr *ir_emit_ret(Block *b, Arena *arena, Operand val)
+static Instr *instr_new(Block *bb, IrOpcode opcode, u32 result, u8 nops)
 {
-    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
-    i->opcode = OP_RET;
-    i->result = NO_VREG;
-    i->nops = 1;
-    i->ops[0] = val;
-    vec_push(b->instrs, i);
-    return i;
+    Instr *ins = arena_alloc(bb->arena, sizeof(Instr), sizeof(void *));
+    ins->opcode = opcode;
+    ins->result = result;
+    ins->nops = nops;
+    vec_push(bb->instrs, ins);
+    return ins;
 }
 
-Instr *ir_emit_unreachable(Block *b, Arena *arena)
+Instr *ir_emit_ret(Block *bb, Operand val)
 {
-    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
-    i->opcode = OP_UNREACHABLE;
-    i->result = NO_VREG;
-    i->nops = 0;
-    vec_push(b->instrs, i);
-    return i;
+    Instr *ins = instr_new(bb, OP_RET, NO_VREG, 1);
+    ins->ops[0] = val;
+    return ins;
 }
 
-Instr *ir_emit_ret_void(Block *b, Arena *arena)
+Instr *ir_emit_unreachable(Block *bb)
 {
-    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
-    i->opcode = OP_RET;
-    i->result = NO_VREG;
-    i->nops = 0;
-    vec_push(b->instrs, i);
-    return i;
+    return instr_new(bb, OP_UNREACHABLE, NO_VREG, 0);
 }
 
-static Instr *emit_binop(Block *b, Arena *arena, IrOpcode op, u32 dst, Operand lhs, Operand rhs)
+Instr *ir_emit_ret_void(Block *bb)
 {
-    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
-    i->opcode = op;
-    i->result = dst;
-    i->nops = 2;
-    i->ops[0] = lhs;
-    i->ops[1] = rhs;
-    vec_push(b->instrs, i);
-    return i;
+    return instr_new(bb, OP_RET, NO_VREG, 0);
 }
 
-Instr *ir_emit_add(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs)
+static Instr *emit_binop(Block *bb, IrOpcode opcode, u32 dst, Operand lhs, Operand rhs)
 {
-    return emit_binop(b, arena, OP_ADD, dst, lhs, rhs);
+    Instr *ins = instr_new(bb, opcode, dst, 2);
+    ins->ops[0] = lhs;
+    ins->ops[1] = rhs;
+    return ins;
 }
 
-Instr *ir_emit_sub(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs)
+Instr *ir_emit_add(Block *bb, u32 dst, Operand lhs, Operand rhs)
 {
-    return emit_binop(b, arena, OP_SUB, dst, lhs, rhs);
+    return emit_binop(bb, OP_ADD, dst, lhs, rhs);
 }
 
-Instr *ir_emit_mul(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs)
+Instr *ir_emit_sub(Block *bb, u32 dst, Operand lhs, Operand rhs)
 {
-    return emit_binop(b, arena, OP_MUL, dst, lhs, rhs);
+    return emit_binop(bb, OP_SUB, dst, lhs, rhs);
 }
 
-Instr *ir_emit_sdiv(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs)
+Instr *ir_emit_mul(Block *bb, u32 dst, Operand lhs, Operand rhs)
 {
-    return emit_binop(b, arena, OP_SDIV, dst, lhs, rhs);
+    return emit_binop(bb, OP_MUL, dst, lhs, rhs);
 }
 
-Instr *ir_emit_srem(Block *b, Arena *arena, u32 dst, Operand lhs, Operand rhs)
+Instr *ir_emit_sdiv(Block *bb, u32 dst, Operand lhs, Operand rhs)
 {
-    return emit_binop(b, arena, OP_SREM, dst, lhs, rhs);
+    return emit_binop(bb, OP_SDIV, dst, lhs, rhs);
 }
 
-Instr *ir_emit_neg(Block *b, Arena *arena, u32 dst, Operand src)
+Instr *ir_emit_srem(Block *bb, u32 dst, Operand lhs, Operand rhs)
 {
-    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
-    i->opcode = OP_NEG;
-    i->result = dst;
-    i->nops = 1;
-    i->ops[0] = src;
-    vec_push(b->instrs, i);
-    return i;
+    return emit_binop(bb, OP_SREM, dst, lhs, rhs);
 }
 
-Instr *ir_emit_call(Block *b, Arena *arena, u32 dst, const char *name, u32 nargs, Operand *args)
+Instr *ir_emit_neg(Block *bb, u32 dst, Operand src)
 {
-    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
-    i->opcode = OP_CALL;
-    i->result = dst;
-    i->nops = 0;
-    i->extra.call.nargs = nargs;
-    i->extra.call.args = args;
-    i->extra.call.name = name;
-    vec_push(b->instrs, i);
-    return i;
+    Instr *ins = instr_new(bb, OP_NEG, dst, 1);
+    ins->ops[0] = src;
+    return ins;
 }
 
-Instr *ir_emit_br(Block *b, Arena *arena, const char *target_label)
+Instr *ir_emit_call(Block *bb, u32 dst, const char *name, u32 nargs, Operand *args)
 {
-    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
-    i->opcode = OP_BR;
-    i->result = NO_VREG;
-    i->nops = 0;
-    i->extra.br.target_label = target_label;
-    vec_push(b->instrs, i);
-    return i;
+    Instr *ins = instr_new(bb, OP_CALL, dst, 0);
+    ins->extra.call.nargs = nargs;
+    ins->extra.call.args = args;
+    ins->extra.call.name = name;
+    return ins;
 }
 
-Instr *ir_emit_brcond(Block *b, Arena *arena, Operand cond, const char *true_label,
-                      const char *false_label)
+Instr *ir_emit_br(Block *bb, const char *target_label)
 {
-    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
-    i->opcode = OP_BRCOND;
-    i->result = NO_VREG;
-    i->nops = 1;
-    i->ops[0] = cond;
-    i->extra.brcond.true_label = true_label;
-    i->extra.brcond.false_label = false_label;
-    vec_push(b->instrs, i);
-    return i;
+    Instr *ins = instr_new(bb, OP_BR, NO_VREG, 0);
+    ins->extra.br.target_label = target_label;
+    return ins;
 }
 
-Instr *ir_emit_phi(Block *b, Arena *arena, u32 dst, u32 nentries)
+Instr *ir_emit_brcond(Block *bb, Operand cond, const char *true_label, const char *false_label)
 {
-    Instr *i = arena_alloc(arena, sizeof(Instr), sizeof(void *));
-    i->opcode = OP_PHI;
-    i->result = dst;
-    i->nops = 0;
-    i->extra.phi.nentries = nentries;
-    i->extra.phi.nfilled = 0;
-    i->extra.phi.entries = arena_alloc(arena, nentries * sizeof(PhiEntry), sizeof(void *));
-    vec_push(b->instrs, i);
-    return i;
+    Instr *ins = instr_new(bb, OP_BRCOND, NO_VREG, 1);
+    ins->ops[0] = cond;
+    ins->extra.brcond.true_label = true_label;
+    ins->extra.brcond.false_label = false_label;
+    return ins;
 }
 
-void phi_add_entry(Instr *phi, Operand val, Block *pred)
+Instr *ir_emit_phi(Block *bb, u32 dst, u32 nentries)
+{
+    Instr *ins = instr_new(bb, OP_PHI, dst, 0);
+    ins->extra.phi.nentries = nentries;
+    ins->extra.phi.nfilled = 0;
+    ins->extra.phi.entries = arena_alloc(bb->arena, nentries * sizeof(PhiEntry), sizeof(void *));
+    return ins;
+}
+
+void ir_phi_add_entry(Instr *phi, Operand val, Block *pred)
 {
     ASSERT(phi->opcode == OP_PHI);
     u32 idx = phi->extra.phi.nfilled;
@@ -222,57 +197,104 @@ Operand ir_operand_vreg(u32 vreg)
     return o;
 }
 
-static void operand_dump(Operand o)
+static void dump_operand(Operand op)
 {
-    if (o.is_imm)
-        printf("imm %lld", (long long) o.u.imm);
+    if (op.is_imm)
+    {
+        printf("imm %lld", (long long) op.u.imm);
+    }
     else
-        printf("v%u", o.u.vreg);
+    {
+        printf("v%u", op.u.vreg);
+    }
+}
+
+static void dump_phi_entries(Instr *ins)
+{
+    for (u32 e = 0; e < ins->extra.phi.nentries; e++)
+    {
+        printf(" [");
+        dump_operand(ins->extra.phi.entries[e].val);
+        printf(" from %s]", ins->extra.phi.entries[e].label);
+    }
+}
+
+static void dump_call_args(Instr *ins)
+{
+    printf(" %s", ins->extra.call.name);
+    for (u32 i = 0; i < ins->extra.call.nargs; i++)
+    {
+        printf(" ");
+        dump_operand(ins->extra.call.args[i]);
+    }
+}
+
+static void dump_switch_cases(Instr *ins)
+{
+    for (u32 c = 0; c < ins->extra.sw.ncases; c++)
+    {
+        printf(" [%lld -> %s]", (long long) ins->extra.sw.cases[c].val,
+               ins->extra.sw.cases[c].label);
+    }
+    if (ins->extra.sw.default_label)
+    {
+        printf(" default:%s", ins->extra.sw.default_label);
+    }
+}
+
+static void dump_instr(Instr *ins)
+{
+    printf("    %s", ir_opcode_name(ins->opcode));
+    if (ins->result != NO_VREG)
+    {
+        printf(" v%u =", ins->result);
+    }
+    for (u8 oi = 0; oi < ins->nops; oi++)
+    {
+        printf(" ");
+        dump_operand(ins->ops[oi]);
+    }
+    switch (ins->opcode)
+    {
+        case OP_PHI:
+            dump_phi_entries(ins);
+            break;
+        case OP_CALL:
+            dump_call_args(ins);
+            break;
+        case OP_SWITCH:
+            dump_switch_cases(ins);
+            break;
+        case OP_BR:
+            printf(" %s", ins->extra.br.target_label);
+            break;
+        case OP_BRCOND:
+            printf(" true:%s false:%s", ins->extra.brcond.true_label,
+                   ins->extra.brcond.false_label);
+            break;
+        default:
+            break;
+    }
+    printf("\n");
 }
 
 void ir_dump(Module *m)
 {
     size_t nfuncs = vec_size(m->funcs);
-    for (size_t fi = 0; fi < nfuncs; fi++)
+    for (size_t func_i = 0; func_i < nfuncs; func_i++)
     {
-        Function *f = (Function *) vec_get(m->funcs, fi);
-        printf("func %s -> %s {\n", f->name, type_kind_name(f->ret_type->kind));
-        size_t nblocks = vec_size(f->blocks);
-        for (size_t bi = 0; bi < nblocks; bi++)
+        Function *func = (Function *) vec_get(m->funcs, func_i);
+        printf("func %s -> %s {\n", func->name, type_kind_name(func->ret_type->kind));
+        size_t nblocks = vec_size(func->blocks);
+        for (size_t block_i = 0; block_i < nblocks; block_i++)
         {
-            Block *bb = (Block *) vec_get(f->blocks, bi);
+            Block *bb = (Block *) vec_get(func->blocks, block_i);
             printf("  %s:\n", bb->label);
-            size_t ninstr = vec_size(bb->instrs);
-            for (size_t ii = 0; ii < ninstr; ii++)
+            size_t ninstrs = vec_size(bb->instrs);
+            for (size_t instr_i = 0; instr_i < ninstrs; instr_i++)
             {
-                Instr *in = (Instr *) vec_get(bb->instrs, ii);
-                printf("    %s", ir_opcode_name(in->opcode));
-                if (in->result != NO_VREG)
-                    printf(" v%u =", in->result);
-                for (u8 oi = 0; oi < in->nops; oi++)
-                {
-                    printf(" ");
-                    operand_dump(in->ops[oi]);
-                }
-                if (in->opcode == OP_PHI)
-                {
-                    for (u32 e = 0; e < in->extra.phi.nentries; e++)
-                    {
-                        printf(" [");
-                        operand_dump(in->extra.phi.entries[e].val);
-                        printf(" from %s]", in->extra.phi.entries[e].label);
-                    }
-                }
-                if (in->opcode == OP_BR)
-                {
-                    printf(" %s", in->extra.br.target_label);
-                }
-                if (in->opcode == OP_BRCOND)
-                {
-                    printf(" true:%s false:%s", in->extra.brcond.true_label,
-                           in->extra.brcond.false_label);
-                }
-                printf("\n");
+                Instr *ins = (Instr *) vec_get(bb->instrs, instr_i);
+                dump_instr(ins);
             }
         }
         printf("}\n");
