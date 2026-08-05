@@ -6,7 +6,6 @@
 #include "parser.h"
 #include "semantic.h"
 #include "util/arena.h"
-#include "util/sbuf.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +15,6 @@ typedef struct
     bool dump_tokens;
     bool dump_ast;
     bool dump_ir;
-    bool emit_asm;
     bool emit_obj;
     bool run_interp;
 } DriverFlags;
@@ -93,7 +91,7 @@ static void replace_ext(const char *in, char *out, size_t out_len, const char *n
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "Usage: %s [-tokens] [-ast] [-ir] [-S] [-c] [-run] <file.c>\n", prog);
+    fprintf(stderr, "Usage: %s [-tokens] [-ast] [-ir] [-c] [-run] <file.c>\n", prog);
 }
 
 static bool parse_args(int argc, char **argv, DriverArgs *out)
@@ -115,10 +113,6 @@ static bool parse_args(int argc, char **argv, DriverArgs *out)
         else if (strcmp(arg, "-ir") == 0)
         {
             out->flags.dump_ir = true;
-        }
-        else if (strcmp(arg, "-S") == 0)
-        {
-            out->flags.emit_asm = true;
         }
         else if (strcmp(arg, "-c") == 0)
         {
@@ -169,9 +163,13 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
             Token *t = &lexed.tokens[i];
             printf("%s:%u:%u %s", t->loc.file, t->loc.line, t->loc.col, token_kind_name(t->kind));
             if (t->kind == TOK_INT_LIT)
+            {
                 printf(" %lld", (long long) t->payload.int_val);
+            }
             else if (t->kind == TOK_IDENT)
+            {
                 printf(" %s", t->payload.str);
+            }
             printf("\n");
         }
     }
@@ -219,14 +217,6 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
         elf_write(cm, outpath);
     }
 
-    if (args->flags.emit_asm)
-    {
-        CodegenModule *cm = codegen_ir_to_machine(mod, arena);
-        Sbuf *sb = sbuf_new(arena);
-        codegen_text_dump(cm, sb);
-        printf("%s", sbuf_cstr(sb));
-    }
-
     return 0;
 }
 
@@ -234,12 +224,16 @@ int main(int argc, char **argv)
 {
     DriverArgs args;
     if (!parse_args(argc, argv, &args))
+    {
         return 1;
+    }
 
     Arena *arena = arena_new();
     char *src = read_file(args.input_file, arena);
     if (!src)
+    {
         return 1;
+    }
 
     int rc = run_pipeline(&args, arena, src);
     arena_free(arena);
