@@ -28,9 +28,13 @@ struct CodegenModule
 /* Convert IR to machine code bytes. */
 CodegenModule *codegen_ir_to_machine(Module *ir, Arena *arena);
 
-/* Debug: emit human-readable text assembly to Sbuf.
-   Walks the original IR and calls the text emitter,
-   so it cannot drift from the machine-code path. */
+/* Debug: dump human-readable x86 assembly to Sbuf.
+   NOTE: this is a separate hand-written text emitter (emit_*_text in
+   codegen.c), NOT a disassembly of the emitted machine bytes, so it is free
+   to drift from the machine-code path. Keep the two in sync when adding an
+   opcode; the -S dump is a debugging aid, not the single source of truth.
+   TODO: fold this into a disassembler over CodegenFunc.bytes so the machine
+   bytes become the one source of truth. */
 void codegen_text_dump(CodegenModule *cm, Sbuf *out);
 
 #endif

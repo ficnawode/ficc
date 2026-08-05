@@ -110,7 +110,9 @@ static void bb_grow(ByteBuf *bb, size_t need)
     if (bb->len + need > bb->cap)
     {
         while (bb->len + need > bb->cap)
+        {
             bb->cap *= 2;
+        }
         u8 *old = bb->data;
         bb->data = arena_alloc(bb->arena, bb->cap, 1);
         memcpy(bb->data, old, bb->len);
@@ -151,11 +153,15 @@ static void bb_u64(ByteBuf *bb, u64 v)
 static void bb_align(ByteBuf *bb, size_t align)
 {
     if (align == 0)
+    {
         return;
+    }
     size_t mask = align - 1;
     size_t padded = (bb->len + mask) & ~mask;
     while (bb->len < padded)
+    {
         bb_append(bb, 0);
+    }
 }
 
 /* ---- string table builder ---- */
@@ -230,7 +236,9 @@ void elf_write(CodegenModule *cm, const char *path)
     bb_init(&symtab, arena);
     /* Index 0: null symbol */
     for (size_t i = 0; i < sizeof(Elf64_Sym); i++)
+    {
         bb_append(&symtab, 0);
+    }
     /* Index 1: .text section symbol (local) */
     bb_u32(&symtab, 0);                                        /* st_name */
     bb_append(&symtab, ELF64_ST_INFO(STB_LOCAL, STT_SECTION)); /* st_info */
@@ -285,7 +293,9 @@ void elf_write(CodegenModule *cm, const char *path)
     bb_append(&out, EV_CURRENT);
     bb_append(&out, 0); /* ELFOSABI */
     for (int i = 0; i < 8; i++)
+    {
         bb_append(&out, 0);
+    }
     bb_u16(&out, ET_REL);
     bb_u16(&out, EM_X86_64);
     bb_u32(&out, EV_CURRENT);

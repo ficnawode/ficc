@@ -1,8 +1,20 @@
 #include "codegen.h"
 #include "util/assert.h"
 #include "util/hashmap.h"
+#include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
+
+/* Diagnostics carry no file:line:col — the IR carries no source locations. */
+static void codegen_error(const char *fmt, ...)
+{
+    fprintf(stderr, "[codegen] error: ");
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fprintf(stderr, "\n");
+}
 
 /* ------------------------------------------------------------------ */
 /* Byte buffer helpers                                                 */
@@ -30,7 +42,9 @@ static void bb_grow(ByteBuf *bb, size_t need)
     if (bb->len + need > bb->cap)
     {
         while (bb->len + need > bb->cap)
+        {
             bb->cap *= 2;
+        }
         u8 *old = bb->data;
         bb->data = arena_alloc(bb->arena, bb->cap, 1);
         memcpy(bb->data, old, bb->len);
@@ -111,11 +125,18 @@ static bool fits_i8(i32 v)
     return v >= -128 && v <= 127;
 }
 
+static bool fits_i32(i64 v)
+{
+    return v >= (i64) INT32_MIN && v <= (i64) INT32_MAX;
+}
+
 /* movl %reg, disp(%rbp) */
 static void emit_mov_reg_to_rbp(ByteBuf *bb, u8 reg, i32 disp)
 {
     if (reg >= 8)
+    {
         bb_append(bb, rex(false, false, false, true));
+    }
     bb_append(bb, 0x89);
     if (fits_i8(disp))
     {
@@ -133,7 +154,9 @@ static void emit_mov_reg_to_rbp(ByteBuf *bb, u8 reg, i32 disp)
 static void emit_mov_rbp_to_reg(ByteBuf *bb, u8 reg, i32 disp)
 {
     if (reg >= 8)
+    {
         bb_append(bb, rex(false, false, false, true));
+    }
     bb_append(bb, 0x8B);
     if (fits_i8(disp))
     {
@@ -154,11 +177,20 @@ static void emit_mov_imm_to_eax(ByteBuf *bb, i32 imm)
     bb_append_i32(bb, imm);
 }
 
+/* movl $imm32, %ecx */
+static void emit_mov_imm_to_ecx(ByteBuf *bb, i32 imm)
+{
+    bb_append(bb, 0xB9);
+    bb_append_i32(bb, imm);
+}
+
 /* movl %eax, %reg */
 static void emit_mov_eax_to_reg(ByteBuf *bb, u8 reg)
 {
     if (reg >= 8)
+    {
         bb_append(bb, rex(false, false, false, true));
+    }
     bb_append(bb, 0x89);
     bb_append(bb, modrm(3, 0, reg));
 }
@@ -390,12 +422,10 @@ struct CodegenCtx
     Vec **phi_copies; /* per-block Vec<PhiCopy*>, indexed by block index */
 };
 
-static void emit_load_operand(ByteBuf *bb, Operand op, u32 nregs)
+static void emit_load_operand(ByteBuf *bb, Operand op)
 {
-    (void) nregs;
     if (op.is_imm)
     {
-        ASSERT(op.u.imm >= (i64) INT32_MIN && op.u.imm <= (i64) INT32_MAX);
         emit_mov_imm_to_eax(bb, (i32) op.u.imm);
     }
     else
@@ -409,14 +439,47 @@ static void emit_store_eax(ByteBuf *bb, u32 vreg)
     emit_mov_reg_to_rbp(bb, 0, vreg_offset(vreg));
 }
 
+/* Every immediate below is encoded in a signed 32-bit field. Values that do
+   not fit (e.g. a C11 `long` constant, LP64) are user input the current
+   32-bit-only lowering cannot represent: diagnose, never assert. */
+static bool instr_has_bad_imm(Instr *in)
+{
+    for (u8 oi = 0; oi < in->nops; oi++)
+    {
+        if (in->ops[oi].is_imm && !fits_i32(in->ops[oi].u.imm))
+        {
+            return true;
+        }
+    }
+    if (in->opcode == OP_CALL)
+    {
+        for (u32 a = 0; a < in->extra.call.nargs; a++)
+        {
+            if (in->extra.call.args[a].is_imm && !fits_i32(in->extra.call.args[a].u.imm))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
 {
     ByteBuf *bb = ctx->bb;
+    if (instr_has_bad_imm(in))
+    {
+        codegen_error("%s: immediate outside i32 range; 64-bit codegen not implemented yet",
+                      ir_opcode_name(in->opcode));
+        bb_append(bb, 0x0F); /* ud2 */
+        bb_append(bb, 0x0B);
+        return;
+    }
     switch (in->opcode)
     {
         case OP_ADD:
         {
-            emit_load_operand(bb, in->ops[0], 0);
+            emit_load_operand(bb, in->ops[0]);
             if (in->ops[1].is_imm)
             {
                 emit_addl_imm_to_eax(bb, (i32) in->ops[1].u.imm);
@@ -430,7 +493,7 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
         }
         case OP_SUB:
         {
-            emit_load_operand(bb, in->ops[0], 0);
+            emit_load_operand(bb, in->ops[0]);
             if (in->ops[1].is_imm)
             {
                 emit_subl_imm_to_eax(bb, (i32) in->ops[1].u.imm);
@@ -444,7 +507,7 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
         }
         case OP_MUL:
         {
-            emit_load_operand(bb, in->ops[0], 0);
+            emit_load_operand(bb, in->ops[0]);
             if (in->ops[1].is_imm)
             {
                 emit_imull_imm_to_eax(bb, (i32) in->ops[1].u.imm);
@@ -458,12 +521,13 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
         }
         case OP_SDIV:
         {
-            emit_load_operand(bb, in->ops[0], 0);
+            emit_load_operand(bb, in->ops[0]);
             emit_cdq(bb);
             if (in->ops[1].is_imm)
             {
-                emit_mov_imm_to_eax(bb, (i32) in->ops[1].u.imm);
-                emit_mov_eax_to_reg(bb, 1); /* mov %eax, %ecx */
+                /* Load the divisor into %ecx directly: %eax still holds the
+                   dividend (edx:eax after cdq) and must not be clobbered. */
+                emit_mov_imm_to_ecx(bb, (i32) in->ops[1].u.imm);
             }
             else
             {
@@ -476,12 +540,11 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
         }
         case OP_SREM:
         {
-            emit_load_operand(bb, in->ops[0], 0);
+            emit_load_operand(bb, in->ops[0]);
             emit_cdq(bb);
             if (in->ops[1].is_imm)
             {
-                emit_mov_imm_to_eax(bb, (i32) in->ops[1].u.imm);
-                emit_mov_eax_to_reg(bb, 1);
+                emit_mov_imm_to_ecx(bb, (i32) in->ops[1].u.imm);
             }
             else
             {
@@ -496,7 +559,7 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
         }
         case OP_NEG:
         {
-            emit_load_operand(bb, in->ops[0], 0);
+            emit_load_operand(bb, in->ops[0]);
             emit_negl_eax(bb);
             emit_store_eax(bb, in->result);
             break;
@@ -512,9 +575,13 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
             if (total_stack > 0)
             {
                 if (total_stack <= 127)
+                {
                     emit_sub_rsp_imm8(bb, (i8) total_stack);
+                }
                 else
+                {
                     emit_sub_rsp_imm32(bb, total_stack);
+                }
             }
 
             /* Store stack args at 0(%rsp), 8(%rsp), ... */
@@ -522,13 +589,21 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
             {
                 Operand arg = in->extra.call.args[i];
                 if (arg.is_imm)
+                {
                     emit_mov_imm_to_eax(bb, (i32) arg.u.imm);
+                }
                 else
+                {
                     emit_mov_rbp_to_reg(bb, 0, vreg_offset(arg.u.vreg));
+                }
                 if (i == 6)
+                {
                     emit_mov_eax_to_rsp(bb);
+                }
                 else
+                {
                     emit_mov_eax_to_rsp_disp8(bb, (i8) ((i - 6) * 8));
+                }
             }
 
             /* Load register args (reverse order to avoid clobbering) */
@@ -537,9 +612,13 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
             {
                 Operand arg = in->extra.call.args[i];
                 if (arg.is_imm)
+                {
                     emit_mov_imm_to_eax(bb, (i32) arg.u.imm);
+                }
                 else
+                {
                     emit_mov_rbp_to_reg(bb, 0, vreg_offset(arg.u.vreg));
+                }
                 emit_mov_eax_to_reg(bb, arg_regs[i]);
             }
 
@@ -551,9 +630,13 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
             if (total_stack > 0)
             {
                 if (total_stack <= 127)
+                {
                     emit_add_rsp_imm8(bb, (i8) total_stack);
+                }
                 else
+                {
                     emit_add_rsp_imm32(bb, total_stack);
+                }
             }
             break;
         }
@@ -561,7 +644,7 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
         {
             if (in->nops > 0)
             {
-                emit_load_operand(bb, in->ops[0], 0);
+                emit_load_operand(bb, in->ops[0]);
             }
             else
             {
@@ -578,7 +661,7 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
         }
         case OP_BRCOND:
         {
-            emit_load_operand(bb, in->ops[0], 0);
+            emit_load_operand(bb, in->ops[0]);
             emit_testl_eax_eax(bb);
             emit_jz_placeholder(bb, ctx->block_patches, in->extra.brcond.false_label, ctx->arena);
             break;
@@ -593,7 +676,7 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
         default:
             bb_append(bb, 0x0F); /* ud2 */
             bb_append(bb, 0x0B);
-            fprintf(stderr, "[codegen] error: unsupported opcode %s\n", ir_opcode_name(in->opcode));
+            codegen_error("unsupported opcode %s", ir_opcode_name(in->opcode));
             break;
     }
 }
@@ -610,11 +693,15 @@ static u32 compute_max_vreg(Function *f)
         {
             Instr *in = (Instr *) vec_get(blk->instrs, ii);
             if (in->result != NO_VREG && in->result > max)
+            {
                 max = in->result;
+            }
             for (u8 oi = 0; oi < in->nops; oi++)
             {
                 if (!in->ops[oi].is_imm && in->ops[oi].u.vreg > max)
+                {
                     max = in->ops[oi].u.vreg;
+                }
             }
             if (in->opcode == OP_CALL)
             {
@@ -622,7 +709,9 @@ static u32 compute_max_vreg(Function *f)
                 {
                     Operand arg = in->extra.call.args[a];
                     if (!arg.is_imm && arg.u.vreg > max)
+                    {
                         max = arg.u.vreg;
+                    }
                 }
             }
         }
@@ -632,7 +721,9 @@ static u32 compute_max_vreg(Function *f)
     {
         Param *p = (Param *) vec_get(f->params, i);
         if (p->vreg > max)
+        {
             max = p->vreg;
+        }
     }
     return max;
 }
@@ -655,9 +746,13 @@ static void emit_func_mc(Function *f, CodegenFunc *cf, Arena *arena)
     if (frame_size > 0)
     {
         if (frame_size <= 127)
+        {
             emit_sub_rsp_imm8(&bb, (i8) frame_size);
+        }
         else
+        {
             emit_sub_rsp_imm32(&bb, frame_size);
+        }
     }
 
     /* Move incoming args into param vreg slots */
@@ -684,7 +779,9 @@ static void emit_func_mc(Function *f, CodegenFunc *cf, Arena *arena)
     size_t nblocks = vec_size(f->blocks);
     Vec **phi_copies = arena_alloc(arena, nblocks * sizeof(Vec *), sizeof(void *));
     for (size_t bi = 0; bi < nblocks; bi++)
+    {
         phi_copies[bi] = vec_new(arena);
+    }
 
     /* Label -> Block map for O(1) predecessor lookup */
     StrMap *label_to_block = strmap_new(arena);
@@ -705,24 +802,23 @@ static void emit_func_mc(Function *f, CodegenFunc *cf, Arena *arena)
         {
             Instr *in = (Instr *) vec_get(blk->instrs, ii);
             if (in->opcode != OP_PHI)
+            {
                 continue;
+            }
             for (u32 e = 0; e < in->extra.phi.nentries; e++)
             {
                 PhiEntry *entry = &in->extra.phi.entries[e];
                 Block *pred = strmap_get(label_to_block, entry->label);
-                if (pred)
-                {
-                    size_t pj = (size_t) u64map_get(block_to_index, (u64) (uintptr_t) pred);
-                    PhiCopy *pc = arena_alloc(arena, sizeof(PhiCopy), sizeof(void *));
-                    pc->src = entry->val;
-                    pc->dst_vreg = in->result;
-                    vec_push(phi_copies[pj], pc);
-                }
+                ASSERT(pred != NULL && "phi entry names a real predecessor in this function");
+                size_t pj = (size_t) u64map_get(block_to_index, (u64) (uintptr_t) pred);
+                PhiCopy *pc = arena_alloc(arena, sizeof(PhiCopy), sizeof(void *));
+                pc->src = entry->val;
+                pc->dst_vreg = in->result;
+                vec_push(phi_copies[pj], pc);
             }
         }
     }
 
-    /* Track block start offsets */
     size_t *block_offsets = arena_alloc(arena, nblocks * sizeof(size_t), sizeof(size_t));
 
     /* Body */
@@ -753,7 +849,7 @@ static void emit_func_mc(Function *f, CodegenFunc *cf, Arena *arena)
             for (size_t pi = 0; pi < npc; pi++)
             {
                 PhiCopy *pc = (PhiCopy *) vec_get(phi_copies[bi], pi);
-                emit_load_operand(&bb, pc->src, 0);
+                emit_load_operand(&bb, pc->src);
                 emit_store_eax(&bb, pc->dst_vreg);
             }
             emit_instr_mc((Instr *) vec_get(blk->instrs, ii), &ctx);
@@ -778,11 +874,7 @@ static void emit_func_mc(Function *f, CodegenFunc *cf, Arena *arena)
                 break;
             }
         }
-        if (!found)
-        {
-            fprintf(stderr, "[codegen] error: undefined block label '%s'\n", bp->target);
-            continue;
-        }
+        ASSERT(found && "branch target names a block the IR builder created");
         /* Compute relative offset from displacement end to target */
         size_t patch_end = bp->offset + 4; /* displacement is 4 bytes */
         i32 rel = (i32) ((i64) target_off - (i64) patch_end);
@@ -807,7 +899,9 @@ static CodegenFunc *find_codegen_func(CodegenModule *cm, const char *name)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
         if (strcmp(cf->name, name) == 0)
+        {
             return cf;
+        }
     }
     return NULL;
 }
@@ -847,7 +941,7 @@ CodegenModule *codegen_ir_to_machine(Module *ir, Arena *arena)
             CodegenFunc *target = find_codegen_func(cm, p->target);
             if (!target)
             {
-                fprintf(stderr, "[codegen] error: undefined function '%s'\n", p->target);
+                codegen_error("undefined function '%s'", p->target);
                 continue;
             }
             i32 rel = (i32) (target->offset - (cf->offset + p->offset + 5));
@@ -875,51 +969,81 @@ static void emit_instr_text(Instr *in, Sbuf *text)
             sbuf_appendf(text, "    movl %d(%%rbp), %%eax\n",
                          in->ops[0].is_imm ? 0 : vreg_offset(in->ops[0].u.vreg));
             if (in->ops[0].is_imm)
+            {
                 sbuf_appendf(text, "    movl $%lld, %%eax\n", (long long) in->ops[0].u.imm);
+            }
             if (in->ops[1].is_imm)
+            {
                 sbuf_appendf(text, "    addl $%lld, %%eax\n", (long long) in->ops[1].u.imm);
+            }
             else
+            {
                 sbuf_appendf(text, "    addl %d(%%rbp), %%eax\n", vreg_offset(in->ops[1].u.vreg));
+            }
             sbuf_appendf(text, "    movl %%eax, %d(%%rbp)\n", vreg_offset(in->result));
             break;
         }
         case OP_SUB:
         {
             if (in->ops[0].is_imm)
+            {
                 sbuf_appendf(text, "    movl $%lld, %%eax\n", (long long) in->ops[0].u.imm);
+            }
             else
+            {
                 sbuf_appendf(text, "    movl %d(%%rbp), %%eax\n", vreg_offset(in->ops[0].u.vreg));
+            }
             if (in->ops[1].is_imm)
+            {
                 sbuf_appendf(text, "    subl $%lld, %%eax\n", (long long) in->ops[1].u.imm);
+            }
             else
+            {
                 sbuf_appendf(text, "    subl %d(%%rbp), %%eax\n", vreg_offset(in->ops[1].u.vreg));
+            }
             sbuf_appendf(text, "    movl %%eax, %d(%%rbp)\n", vreg_offset(in->result));
             break;
         }
         case OP_MUL:
         {
             if (in->ops[0].is_imm)
+            {
                 sbuf_appendf(text, "    movl $%lld, %%eax\n", (long long) in->ops[0].u.imm);
+            }
             else
+            {
                 sbuf_appendf(text, "    movl %d(%%rbp), %%eax\n", vreg_offset(in->ops[0].u.vreg));
+            }
             if (in->ops[1].is_imm)
+            {
                 sbuf_appendf(text, "    imull $%lld, %%eax\n", (long long) in->ops[1].u.imm);
+            }
             else
+            {
                 sbuf_appendf(text, "    imull %d(%%rbp), %%eax\n", vreg_offset(in->ops[1].u.vreg));
+            }
             sbuf_appendf(text, "    movl %%eax, %d(%%rbp)\n", vreg_offset(in->result));
             break;
         }
         case OP_SDIV:
         {
             if (in->ops[0].is_imm)
+            {
                 sbuf_appendf(text, "    movl $%lld, %%eax\n", (long long) in->ops[0].u.imm);
+            }
             else
+            {
                 sbuf_appendf(text, "    movl %d(%%rbp), %%eax\n", vreg_offset(in->ops[0].u.vreg));
+            }
             sbuf_appendf(text, "    cdq\n");
             if (in->ops[1].is_imm)
+            {
                 sbuf_appendf(text, "    movl $%lld, %%ecx\n", (long long) in->ops[1].u.imm);
+            }
             else
+            {
                 sbuf_appendf(text, "    movl %d(%%rbp), %%ecx\n", vreg_offset(in->ops[1].u.vreg));
+            }
             sbuf_appendf(text, "    idivl %%ecx\n");
             sbuf_appendf(text, "    movl %%eax, %d(%%rbp)\n", vreg_offset(in->result));
             break;
@@ -927,14 +1051,22 @@ static void emit_instr_text(Instr *in, Sbuf *text)
         case OP_SREM:
         {
             if (in->ops[0].is_imm)
+            {
                 sbuf_appendf(text, "    movl $%lld, %%eax\n", (long long) in->ops[0].u.imm);
+            }
             else
+            {
                 sbuf_appendf(text, "    movl %d(%%rbp), %%eax\n", vreg_offset(in->ops[0].u.vreg));
+            }
             sbuf_appendf(text, "    cdq\n");
             if (in->ops[1].is_imm)
+            {
                 sbuf_appendf(text, "    movl $%lld, %%ecx\n", (long long) in->ops[1].u.imm);
+            }
             else
+            {
                 sbuf_appendf(text, "    movl %d(%%rbp), %%ecx\n", vreg_offset(in->ops[1].u.vreg));
+            }
             sbuf_appendf(text, "    idivl %%ecx\n");
             sbuf_appendf(text, "    movl %%edx, %%eax\n");
             sbuf_appendf(text, "    movl %%eax, %d(%%rbp)\n", vreg_offset(in->result));
@@ -943,9 +1075,13 @@ static void emit_instr_text(Instr *in, Sbuf *text)
         case OP_NEG:
         {
             if (in->ops[0].is_imm)
+            {
                 sbuf_appendf(text, "    movl $%lld, %%eax\n", (long long) in->ops[0].u.imm);
+            }
             else
+            {
                 sbuf_appendf(text, "    movl %d(%%rbp), %%eax\n", vreg_offset(in->ops[0].u.vreg));
+            }
             sbuf_appendf(text, "    negl %%eax\n");
             sbuf_appendf(text, "    movl %%eax, %d(%%rbp)\n", vreg_offset(in->result));
             break;
@@ -957,23 +1093,31 @@ static void emit_instr_text(Instr *in, Sbuf *text)
             for (u32 i = 0; i < nargs && i < 6; i++)
             {
                 if (in->extra.call.args[i].is_imm)
+                {
                     sbuf_appendf(text, "    movl $%lld, %s\n",
                                  (long long) in->extra.call.args[i].u.imm, reg_names[i]);
+                }
                 else
+                {
                     sbuf_appendf(text, "    movl %d(%%rbp), %s\n",
                                  vreg_offset(in->extra.call.args[i].u.vreg), reg_names[i]);
+                }
             }
             if (nargs > 6)
             {
                 u32 n_stack = nargs - 6;
                 u32 pad = (n_stack % 2) * 8;
                 if (pad)
+                {
                     sbuf_appendf(text, "    subq $%u, %%rsp\n", pad);
+                }
                 for (i32 i = (i32) nargs - 1; i >= 6; i--)
                 {
                     if (in->extra.call.args[i].is_imm)
+                    {
                         sbuf_appendf(text, "    pushq $%lld\n",
                                      (long long) in->extra.call.args[i].u.imm);
+                    }
                     else
                     {
                         sbuf_appendf(text, "    movl %d(%%rbp), %%eax\n",
@@ -996,9 +1140,13 @@ static void emit_instr_text(Instr *in, Sbuf *text)
         case OP_RET:
         {
             if (in->nops > 0 && in->ops[0].is_imm)
+            {
                 sbuf_appendf(text, "    movl $%lld, %%eax\n", (long long) in->ops[0].u.imm);
+            }
             else if (in->nops > 0)
+            {
                 sbuf_appendf(text, "    movl %d(%%rbp), %%eax\n", vreg_offset(in->ops[0].u.vreg));
+            }
             sbuf_appendf(text, "    leave\n");
             sbuf_appendf(text, "    ret\n");
             break;
@@ -1011,9 +1159,13 @@ static void emit_instr_text(Instr *in, Sbuf *text)
         case OP_BRCOND:
         {
             if (in->ops[0].is_imm)
+            {
                 sbuf_appendf(text, "    movl $%lld, %%eax\n", (long long) in->ops[0].u.imm);
+            }
             else
+            {
                 sbuf_appendf(text, "    movl %d(%%rbp), %%eax\n", vreg_offset(in->ops[0].u.vreg));
+            }
             sbuf_appendf(text, "    testl %%eax, %%eax\n");
             sbuf_appendf(text, "    jz %s\n", in->extra.brcond.false_label);
             break;
@@ -1024,11 +1176,17 @@ static void emit_instr_text(Instr *in, Sbuf *text)
             for (u32 e = 0; e < in->extra.phi.nentries; e++)
             {
                 if (e > 0)
+                {
                     sbuf_append(text, ", ");
+                }
                 if (in->extra.phi.entries[e].val.is_imm)
+                {
                     sbuf_appendf(text, "imm %lld", (long long) in->extra.phi.entries[e].val.u.imm);
+                }
                 else
+                {
                     sbuf_appendf(text, "v%u", in->extra.phi.entries[e].val.u.vreg);
+                }
                 sbuf_appendf(text, " from %s", in->extra.phi.entries[e].label);
             }
             sbuf_append(text, "\n");
@@ -1040,7 +1198,7 @@ static void emit_instr_text(Instr *in, Sbuf *text)
         default:
             sbuf_appendf(text, "    # unsupported opcode %s\n", ir_opcode_name(in->opcode));
             sbuf_appendf(text, "    ud2\n");
-            fprintf(stderr, "[codegen] error: unsupported opcode %s\n", ir_opcode_name(in->opcode));
+            codegen_error("unsupported opcode %s", ir_opcode_name(in->opcode));
             break;
     }
 }
@@ -1057,7 +1215,9 @@ static void emit_func_text(Function *f, Sbuf *text, Arena *arena)
     u32 max_vreg = compute_max_vreg(f);
     u32 frame_size = (u32) (((max_vreg + 1) * 8 + 15) & ~15ULL);
     if (frame_size > 0)
+    {
         sbuf_appendf(text, "    subq $%u, %%rsp\n", frame_size);
+    }
 
     /* Param moves */
     static const char *param_regs[6] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
@@ -1081,7 +1241,9 @@ static void emit_func_text(Function *f, Sbuf *text, Arena *arena)
     size_t nblocks = vec_size(f->blocks);
     Vec **phi_copies_text = arena_alloc(arena, nblocks * sizeof(Vec *), sizeof(void *));
     for (size_t bi = 0; bi < nblocks; bi++)
+    {
         phi_copies_text[bi] = vec_new(arena);
+    }
 
     /* Reuse label -> block and block -> index maps */
     StrMap *label_to_block_text = strmap_new(arena);
@@ -1101,19 +1263,19 @@ static void emit_func_text(Function *f, Sbuf *text, Arena *arena)
         {
             Instr *in = (Instr *) vec_get(blk->instrs, ii);
             if (in->opcode != OP_PHI)
+            {
                 continue;
+            }
             for (u32 e = 0; e < in->extra.phi.nentries; e++)
             {
                 PhiEntry *entry = &in->extra.phi.entries[e];
                 Block *pred = strmap_get(label_to_block_text, entry->label);
-                if (pred)
-                {
-                    size_t pj = (size_t) u64map_get(block_to_index_text, (u64) (uintptr_t) pred);
-                    PhiCopy *pc = arena_alloc(arena, sizeof(PhiCopy), sizeof(void *));
-                    pc->src = entry->val;
-                    pc->dst_vreg = in->result;
-                    vec_push(phi_copies_text[pj], pc);
-                }
+                ASSERT(pred != NULL && "phi entry names a real predecessor in this function");
+                size_t pj = (size_t) u64map_get(block_to_index_text, (u64) (uintptr_t) pred);
+                PhiCopy *pc = arena_alloc(arena, sizeof(PhiCopy), sizeof(void *));
+                pc->src = entry->val;
+                pc->dst_vreg = in->result;
+                vec_push(phi_copies_text[pj], pc);
             }
         }
     }
@@ -1123,7 +1285,9 @@ static void emit_func_text(Function *f, Sbuf *text, Arena *arena)
     {
         Block *blk = (Block *) vec_get(f->blocks, bi);
         if (bi > 0)
+        {
             sbuf_appendf(text, "%s:\n", blk->label);
+        }
         size_t ninstr = vec_size(blk->instrs);
         for (size_t ii = 0; ii < ninstr; ii++)
         {
@@ -1137,10 +1301,14 @@ static void emit_func_text(Function *f, Sbuf *text, Arena *arena)
                 {
                     PhiCopy *pc = (PhiCopy *) vec_get(phi_copies_text[bi], pi);
                     if (pc->src.is_imm)
+                    {
                         sbuf_appendf(text, "    movl $%lld, %%eax\n", (long long) pc->src.u.imm);
+                    }
                     else
+                    {
                         sbuf_appendf(text, "    movl %d(%%rbp), %%eax\n",
                                      vreg_offset(pc->src.u.vreg));
+                    }
                     sbuf_appendf(text, "    movl %%eax, %d(%%rbp)\n", vreg_offset(pc->dst_vreg));
                 }
             }
