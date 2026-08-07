@@ -166,7 +166,7 @@ void elf_write(CodegenModule *cm, const char *path)
     bytebuf_append_u16(&symtab, SEC_TEXT);                                 /* st_shndx */
     bytebuf_append_u64(&symtab, 0);                                        /* st_value */
     bytebuf_append_u64(&symtab, 0);                                        /* st_size */
-    /* Global function symbols */
+    /* IrGlobal function symbols */
     for (size_t i = 0; i < nfuncs; i++)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);

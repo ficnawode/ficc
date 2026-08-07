@@ -6,7 +6,7 @@
 #include "util/vec.h"
 
 /* X-macro for IR opcodes. Append only.
-   ICMP predicates are separate opcodes so Instr needs no predicate field. */
+   ICMP predicates are separate opcodes so IrInstr needs no predicate field. */
 #define IR_OPCODES(X)                                                                              \
     X(OP_RET)                                                                                      \
     X(OP_ADD)                                                                                      \
@@ -58,7 +58,7 @@ typedef enum
 
 #define NO_VREG 0xFFFFFFFFU
 
-/* Operand: either an immediate or a virtual register index.
+/* IrOperand: either an immediate or a virtual register index.
    The union is named `u` so both arms are explicit at every use site. */
 typedef struct
 {
@@ -68,21 +68,21 @@ typedef struct
         u32 vreg;
         i64 imm;
     } u;
-} Operand;
+} IrOperand;
 
 /* One entry per predecessor block. */
 typedef struct
 {
-    Operand val;
+    IrOperand val;
     const char *label;
-} PhiEntry;
+} IrPhiEntry;
 
 /* SWITCH case: value → target block label. */
 typedef struct
 {
     i64 val;
     const char *label;
-} SwitchCase;
+} IrSwitchCase;
 
 /* Extended payloads for variable-arity instructions.
    Only the field matching the opcode is valid. */
@@ -90,88 +90,88 @@ typedef struct
 {
     u32 nentries;
     u32 nfilled;
-    PhiEntry *entries;
-} PhiPayload;
+    IrPhiEntry *entries;
+} IrPhiPayload;
 
 typedef struct
 {
     u32 ncases;
-    SwitchCase *cases;
+    IrSwitchCase *cases;
     const char *default_label;
-} SwitchPayload;
+} IrSwitchPayload;
 
 typedef struct
 {
     u32 nargs;
-    Operand *args;
+    IrOperand *args;
     const char *name;
-} CallPayload;
+} IrCallPayload;
 
 typedef struct
 {
     const char *true_label;
     const char *false_label;
-} BrcondPayload;
+} IrBrcondPayload;
 
 typedef struct
 {
     const char *target_label;
-} BrPayload;
+} IrBrPayload;
 
 /* IR instruction.
    Fixed operands in ops[3] cover unary/binary/ternary needs.
    Variable-arity ops (phi, switch, call) use the typed `extra` union.
    Steering-locked shape: do not change without design discussion. */
-typedef struct Instr Instr;
-struct Instr
+typedef struct IrInstr IrInstr;
+struct IrInstr
 {
     IrOpcode opcode;
     u32 result; /* vreg index, or NO_VREG */
     u8 nops;
-    Operand ops[3];
+    IrOperand ops[3];
     union
     {
-        PhiPayload phi;
-        SwitchPayload sw;
-        CallPayload call;
-        BrPayload br;
-        BrcondPayload brcond;
+        IrPhiPayload phi;
+        IrSwitchPayload sw;
+        IrCallPayload call;
+        IrBrPayload br;
+        IrBrcondPayload brcond;
     } extra;
 };
 
-typedef struct Block Block;
-struct Block
+typedef struct IrBlock IrBlock;
+struct IrBlock
 {
     const char *label;
     Arena *arena;
-    Vec *instrs;         /* Vec<Instr*> */
-    Vec *preds;          /* Vec<Block*> — predecessor blocks */
+    Vec *instrs;         /* Vec<IrInstr*> */
+    Vec *preds;          /* Vec<IrBlock*> — predecessor blocks */
     bool sealed;         /* all predecessors known? */
     bool is_loop_header; /* block is a loop header (back edge added later) */
 };
 
-typedef struct Param Param;
-struct Param
+typedef struct IrParam IrParam;
+struct IrParam
 {
     const char *name;
     Type *type;
     u32 vreg;
 };
 
-typedef struct Function Function;
-struct Function
+typedef struct IrFunction IrFunction;
+struct IrFunction
 {
     const char *name;
     Type *ret_type;
     Arena *arena;
-    Vec *params; /* Vec<Param*> */
-    Vec *blocks; /* Vec<Block*> */
+    Vec *params; /* Vec<IrParam*> */
+    Vec *blocks; /* Vec<IrBlock*> */
 };
 
-/* Global variable / data record.
+/* IrGlobal variable / data record.
    init_data == NULL and init_len == 0 → .bss */
-typedef struct Global Global;
-struct Global
+typedef struct IrGlobal IrGlobal;
+struct IrGlobal
 {
     const char *name;
     Type *type;
@@ -180,14 +180,14 @@ struct Global
     u32 align;
 };
 
-/* Module owns all IR data for a compilation unit.
+/* An IrModule owns all IR data for a compilation unit.
    Vreg ids are dense and module-wide; the width table is indexed by vreg. */
-typedef struct Module Module;
-struct Module
+typedef struct IrModule IrModule;
+struct IrModule
 {
     Arena *arena;
-    Vec *funcs;   /* Vec<Function*> */
-    Vec *globals; /* Vec<Global*> */
+    Vec *funcs;   /* Vec<IrFunction*> */
+    Vec *globals; /* Vec<IrGlobal*> */
     u8 *widths;   /* value-width table, indexed by vreg id */
     u32 width_count;
     u32 width_cap;
@@ -197,42 +197,34 @@ struct Module
 /* ---- builder ----
    Every builder allocates from the module's arena, reached through the
    module/function/block context. ir_module_new is the sole entry point. */
-Module *ir_module_new(Arena *arena);
-Function *ir_module_add_func(Module *m, const char *name, Type *ret_type);
-Block *ir_func_add_block(Function *f, const char *label);
+IrModule *ir_module_new(Arena *arena);
+IrFunction *ir_module_add_func(IrModule *m, const char *name, Type *ret_type);
+IrBlock *ir_func_add_block(IrFunction *f, const char *label);
 
 /* vreg allocation */
-u32 ir_alloc_vreg(Module *m, u8 width);
+u32 ir_alloc_vreg(IrModule *m, u8 width);
 
 /* instruction creation */
-Instr *ir_emit_ret(Block *bb, Operand val);
-Instr *ir_emit_unreachable(Block *bb);
-Instr *ir_emit_ret_void(Block *bb);
-Instr *ir_emit_add(Block *bb, u32 dst, Operand lhs, Operand rhs);
-Instr *ir_emit_sub(Block *bb, u32 dst, Operand lhs, Operand rhs);
-Instr *ir_emit_mul(Block *bb, u32 dst, Operand lhs, Operand rhs);
-Instr *ir_emit_sdiv(Block *bb, u32 dst, Operand lhs, Operand rhs);
-Instr *ir_emit_srem(Block *bb, u32 dst, Operand lhs, Operand rhs);
-Instr *ir_emit_and(Block *bb, u32 dst, Operand lhs, Operand rhs);
-Instr *ir_emit_or(Block *bb, u32 dst, Operand lhs, Operand rhs);
-Instr *ir_emit_xor(Block *bb, u32 dst, Operand lhs, Operand rhs);
-Instr *ir_emit_shl(Block *bb, u32 dst, Operand lhs, Operand rhs);
-Instr *ir_emit_ashr(Block *bb, u32 dst, Operand lhs, Operand rhs);
-Instr *ir_emit_neg(Block *bb, u32 dst, Operand src);
-Instr *ir_emit_not(Block *bb, u32 dst, Operand src);
-Instr *ir_emit_icmp(Block *bb, IrOpcode op, u32 dst, Operand lhs, Operand rhs);
-Instr *ir_emit_call(Block *bb, u32 dst, const char *name, u32 nargs, Operand *args);
-Instr *ir_emit_br(Block *bb, const char *target_label);
-Instr *ir_emit_brcond(Block *bb, Operand cond, const char *true_label, const char *false_label);
-Instr *ir_emit_phi(Block *bb, u32 dst, u32 nentries);
-void ir_phi_add_entry(Instr *phi, Operand val, Block *pred);
+IrInstr *ir_emit_ret(IrBlock *bb, IrOperand val);
+IrInstr *ir_emit_unreachable(IrBlock *bb);
+IrInstr *ir_emit_ret_void(IrBlock *bb);
+
+/* Binary (arith, shifts, icmp predicates) and unary ops: the opcode carries
+   the operation, so adding an opcode needs no new emitter. */
+IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOperand rhs);
+IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src);
+IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOperand *args);
+IrInstr *ir_emit_br(IrBlock *bb, const char *target_label);
+IrInstr *ir_emit_brcond(IrBlock *bb, IrOperand cond, const char *true_label, const char *false_label);
+IrInstr *ir_emit_phi(IrBlock *bb, u32 dst, u32 nentries);
+void ir_phi_add_entry(IrInstr *phi, IrOperand val, IrBlock *pred);
 
 /* operand helpers */
-Operand ir_operand_imm(i64 val);
-Operand ir_operand_vreg(u32 vreg);
+IrOperand ir_operand_imm(i64 val);
+IrOperand ir_operand_vreg(u32 vreg);
 
 /* dump */
-void ir_dump(Module *m);
+void ir_dump(IrModule *m);
 const char *ir_opcode_name(IrOpcode op);
 
 #endif

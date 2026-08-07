@@ -12,7 +12,7 @@
 
 /* Patch records: a 4-byte PC-relative displacement at `offset` (within the
    function's bytes) that must be resolved to the label `target` later.
-   Block labels are resolved during emit_func_mc, function names after
+   IrBlock labels are resolved during emit_func_mc, function names after
    layout. */
 typedef struct
 {
@@ -23,7 +23,7 @@ typedef struct
 /* One copy emitted in a predecessor block for each PHI entry. */
 typedef struct
 {
-    Operand src;
+    IrOperand src;
     u32 dst_vreg;
 } PhiCopy;
 
@@ -38,12 +38,12 @@ typedef struct CodegenCtx CodegenCtx;
 struct CodegenCtx
 {
     ByteBuf *buf;
-    Function *func;
-    Module *mod;     /* for the per-vreg width table */
+    IrFunction *func;
+    IrModule *mod;     /* for the per-vreg width table */
     Arena *arena;
     Vec **phi_copies;        /* per-block Vec<PhiCopy*>, indexed by block index */
-    StrMap *label_to_block;  /* block label -> Block* */
-    U64Map *block_to_index;  /* Block* -> block index */
+    StrMap *label_to_block;  /* block label -> IrBlock* */
+    U64Map *block_to_index;  /* IrBlock* -> block index */
     size_t *block_offsets;   /* per-block offset within the function bytes */
     Vec *patches;            /* Vec<Patch*>, function calls */
     Vec *block_patches;      /* Vec<Patch*>, intra-function jumps */
@@ -175,7 +175,7 @@ static X86Operand xop_vreg(u32 vreg)
     return xop_mem(x86_mem_rbp(-(i32) ((vreg + 1) * 8)));
 }
 
-static X86Operand xop_from_operand(Operand op)
+static X86Operand xop_from_operand(IrOperand op)
 {
     if (op.is_imm)
     {
@@ -455,19 +455,19 @@ static void emit_call_placeholder(ByteBuf *buf, const char *target, Vec *patches
 /* IR lowering                                                         */
 /* ------------------------------------------------------------------ */
 
-typedef void (*LowerFn)(Instr *in, CodegenCtx *ctx);
+typedef void (*LowerFn)(IrInstr *in, CodegenCtx *ctx);
 
-static void lower_binary(Instr *in, CodegenCtx *ctx);
-static void lower_unary(Instr *in, CodegenCtx *ctx);
-static void lower_shift(Instr *in, CodegenCtx *ctx);
-static void lower_div(Instr *in, CodegenCtx *ctx);
-static void lower_icmp(Instr *in, CodegenCtx *ctx);
-static void lower_call(Instr *in, CodegenCtx *ctx);
-static void lower_ret(Instr *in, CodegenCtx *ctx);
-static void lower_br(Instr *in, CodegenCtx *ctx);
-static void lower_brcond(Instr *in, CodegenCtx *ctx);
-static void lower_phi(Instr *in, CodegenCtx *ctx);
-static void lower_unreachable(Instr *in, CodegenCtx *ctx);
+static void lower_binary(IrInstr *in, CodegenCtx *ctx);
+static void lower_unary(IrInstr *in, CodegenCtx *ctx);
+static void lower_shift(IrInstr *in, CodegenCtx *ctx);
+static void lower_div(IrInstr *in, CodegenCtx *ctx);
+static void lower_icmp(IrInstr *in, CodegenCtx *ctx);
+static void lower_call(IrInstr *in, CodegenCtx *ctx);
+static void lower_ret(IrInstr *in, CodegenCtx *ctx);
+static void lower_br(IrInstr *in, CodegenCtx *ctx);
+static void lower_brcond(IrInstr *in, CodegenCtx *ctx);
+static void lower_phi(IrInstr *in, CodegenCtx *ctx);
+static void lower_unreachable(IrInstr *in, CodegenCtx *ctx);
 
 #define LOWER_ENTRIES(X)      \
     X(OP_RET, lower_ret)      \
@@ -512,7 +512,7 @@ static u8 vreg_width(CodegenCtx *ctx, u32 vreg)
     return ctx->mod->widths[vreg];
 }
 
-static void lower_binary(Instr *in, CodegenCtx *ctx)
+static void lower_binary(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
     const ArithSpec *s = &arith_specs[in->opcode];
@@ -533,7 +533,7 @@ static void lower_binary(Instr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
-static void lower_unary(Instr *in, CodegenCtx *ctx)
+static void lower_unary(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
     emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
@@ -541,7 +541,7 @@ static void lower_unary(Instr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
-static void lower_shift(Instr *in, CodegenCtx *ctx)
+static void lower_shift(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
     emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
@@ -550,7 +550,7 @@ static void lower_shift(Instr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
-static void lower_div(Instr *in, CodegenCtx *ctx)
+static void lower_div(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
     emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
@@ -564,7 +564,7 @@ static void lower_div(Instr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
-static void lower_icmp(Instr *in, CodegenCtx *ctx)
+static void lower_icmp(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
     emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
@@ -577,7 +577,7 @@ static void lower_icmp(Instr *in, CodegenCtx *ctx)
 /* System V AMD64 argument registers. */
 static const u8 abi_arg_regs[6] = {R_EDI, R_ESI, R_EDX, R_ECX, R_R8, R_R9};
 
-static void lower_call(Instr *in, CodegenCtx *ctx)
+static void lower_call(IrInstr *in, CodegenCtx *ctx)
 {
     u32 nargs = in->extra.call.nargs;
     u32 n_stack = (nargs > 6) ? (nargs - 6) : 0;
@@ -617,7 +617,7 @@ static void lower_call(Instr *in, CodegenCtx *ctx)
     }
 }
 
-static void lower_ret(Instr *in, CodegenCtx *ctx)
+static void lower_ret(IrInstr *in, CodegenCtx *ctx)
 {
     if (in->nops > 0)
     {
@@ -631,12 +631,12 @@ static void lower_ret(Instr *in, CodegenCtx *ctx)
     bytebuf_append(ctx->buf, 0xC3); /* ret */
 }
 
-static void lower_br(Instr *in, CodegenCtx *ctx)
+static void lower_br(IrInstr *in, CodegenCtx *ctx)
 {
     emit_jmp_placeholder(ctx->buf, in->extra.br.target_label, ctx->block_patches, ctx->arena);
 }
 
-static void lower_brcond(Instr *in, CodegenCtx *ctx)
+static void lower_brcond(IrInstr *in, CodegenCtx *ctx)
 {
     emit_mov(ctx->buf, 4, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
     emit_test_eax_eax(ctx->buf);
@@ -644,13 +644,13 @@ static void lower_brcond(Instr *in, CodegenCtx *ctx)
     emit_jmp_placeholder(ctx->buf, in->extra.brcond.true_label, ctx->block_patches, ctx->arena);
 }
 
-static void lower_phi(Instr *in, CodegenCtx *ctx)
+static void lower_phi(IrInstr *in, CodegenCtx *ctx)
 {
     (void) in;
     (void) ctx; /* lowered into copies in predecessor blocks */
 }
 
-static void lower_unreachable(Instr *in, CodegenCtx *ctx)
+static void lower_unreachable(IrInstr *in, CodegenCtx *ctx)
 {
     (void) in;
     emit_ud2(ctx->buf);
@@ -659,7 +659,7 @@ static void lower_unreachable(Instr *in, CodegenCtx *ctx)
 /* Every immediate is encoded in a signed 32-bit field. Values that do not
    fit (e.g. a C11 `long` constant, LP64) are user input the current
    32-bit-only lowering cannot represent: diagnose, never assert. */
-static bool instr_has_bad_imm(Instr *in)
+static bool instr_has_bad_imm(IrInstr *in)
 {
     for (u8 oi = 0; oi < in->nops; oi++)
     {
@@ -681,7 +681,7 @@ static bool instr_has_bad_imm(Instr *in)
     return false;
 }
 
-static void lower_instr(Instr *in, CodegenCtx *ctx)
+static void lower_instr(IrInstr *in, CodegenCtx *ctx)
 {
     if (instr_has_bad_imm(in))
     {
@@ -701,7 +701,7 @@ static void lower_instr(Instr *in, CodegenCtx *ctx)
 }
 
 /* ------------------------------------------------------------------ */
-/* Function emission                                                   */
+/* IrFunction emission                                                   */
 /* ------------------------------------------------------------------ */
 
 static void scan_vreg(u32 *max, u32 vreg)
@@ -712,7 +712,7 @@ static void scan_vreg(u32 *max, u32 vreg)
     }
 }
 
-static void scan_operand(u32 *max, Operand op)
+static void scan_operand(u32 *max, IrOperand op)
 {
     if (!op.is_imm)
     {
@@ -720,7 +720,7 @@ static void scan_operand(u32 *max, Operand op)
     }
 }
 
-static void scan_instr_vregs(u32 *max, Instr *in)
+static void scan_instr_vregs(u32 *max, IrInstr *in)
 {
     scan_vreg(max, in->result);
     for (u8 oi = 0; oi < in->nops; oi++)
@@ -736,23 +736,23 @@ static void scan_instr_vregs(u32 *max, Instr *in)
     }
 }
 
-static FrameInfo frame_plan(Function *f)
+static FrameInfo frame_plan(IrFunction *f)
 {
     u32 max_vreg = 0;
     size_t nblocks = vec_size(f->blocks);
     for (size_t bi = 0; bi < nblocks; bi++)
     {
-        Block *blk = (Block *) vec_get(f->blocks, bi);
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, bi);
         size_t ninstr = vec_size(blk->instrs);
         for (size_t ii = 0; ii < ninstr; ii++)
         {
-            scan_instr_vregs(&max_vreg, (Instr *) vec_get(blk->instrs, ii));
+            scan_instr_vregs(&max_vreg, (IrInstr *) vec_get(blk->instrs, ii));
         }
     }
     size_t nparams = vec_size(f->params);
     for (size_t i = 0; i < nparams; i++)
     {
-        scan_vreg(&max_vreg, ((Param *) vec_get(f->params, i))->vreg);
+        scan_vreg(&max_vreg, ((IrParam *) vec_get(f->params, i))->vreg);
     }
 
     FrameInfo fr;
@@ -763,24 +763,24 @@ static FrameInfo frame_plan(Function *f)
 
 /* Move incoming args into their param vreg slots. Args 7+ sit at
    16 + (i-6)*8(%rbp) and must be routed through %eax. */
-static void emit_param_shuffle(ByteBuf *buf, Function *f)
+static void emit_param_shuffle(ByteBuf *buf, IrFunction *f)
 {
     size_t nparams = vec_size(f->params);
     size_t n_reg = nparams < 6 ? nparams : 6;
     for (size_t i = 0; i < n_reg; i++)
     {
-        Param *p = (Param *) vec_get(f->params, i);
+        IrParam *p = (IrParam *) vec_get(f->params, i);
         emit_mov(buf, 4, xop_vreg(p->vreg), xop_reg(abi_arg_regs[i]));
     }
     for (size_t i = n_reg; i < nparams; i++)
     {
-        Param *p = (Param *) vec_get(f->params, i);
+        IrParam *p = (IrParam *) vec_get(f->params, i);
         emit_mov(buf, 4, xop_reg(R_EAX), xop_mem(x86_mem_rbp(16 + (i32) ((i - 6) * 8))));
         emit_mov(buf, 4, xop_vreg(p->vreg), xop_reg(R_EAX));
     }
 }
 
-static void emit_prologue(ByteBuf *buf, Function *f)
+static void emit_prologue(ByteBuf *buf, IrFunction *f)
 {
     bytebuf_append(buf, 0x55); /* push %rbp */
     emit_mov(buf, 8, xop_reg(R_EBP), xop_reg(R_ESP)); /* mov %rsp, %rbp */
@@ -797,12 +797,12 @@ static bool is_terminator(IrOpcode op)
 }
 
 /* Each PHI entry becomes a copy in the named predecessor block. */
-static void add_phi_copies(CodegenCtx *ctx, Instr *phi)
+static void add_phi_copies(CodegenCtx *ctx, IrInstr *phi)
 {
     for (u32 e = 0; e < phi->extra.phi.nentries; e++)
     {
-        PhiEntry *entry = &phi->extra.phi.entries[e];
-        Block *pred = strmap_get(ctx->label_to_block, entry->label);
+        IrPhiEntry *entry = &phi->extra.phi.entries[e];
+        IrBlock *pred = strmap_get(ctx->label_to_block, entry->label);
         ASSERT(pred != NULL && "phi entry names a real predecessor in this function");
         size_t pj = (size_t) u64map_get(ctx->block_to_index, (u64) (uintptr_t) pred);
         PhiCopy *pc = arena_alloc(ctx->arena, sizeof(PhiCopy), sizeof(void *));
@@ -812,16 +812,16 @@ static void add_phi_copies(CodegenCtx *ctx, Instr *phi)
     }
 }
 
-static void collect_phi_copies(Function *f, CodegenCtx *ctx)
+static void collect_phi_copies(IrFunction *f, CodegenCtx *ctx)
 {
     size_t nblocks = vec_size(f->blocks);
     for (size_t bi = 0; bi < nblocks; bi++)
     {
-        Block *blk = (Block *) vec_get(f->blocks, bi);
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, bi);
         size_t ninstr = vec_size(blk->instrs);
         for (size_t ii = 0; ii < ninstr; ii++)
         {
-            Instr *in = (Instr *) vec_get(blk->instrs, ii);
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
             if (in->opcode != OP_PHI)
             {
                 continue;
@@ -831,7 +831,7 @@ static void collect_phi_copies(Function *f, CodegenCtx *ctx)
     }
 }
 
-static void emit_block(Block *blk, size_t bi, CodegenCtx *ctx)
+static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
 {
     ctx->block_offsets[bi] = bytebuf_len(ctx->buf);
     size_t ninstr = vec_size(blk->instrs);
@@ -840,7 +840,7 @@ static void emit_block(Block *blk, size_t bi, CodegenCtx *ctx)
     size_t ii = 0;
     for (; ii < ninstr; ii++)
     {
-        Instr *in = (Instr *) vec_get(blk->instrs, ii);
+        IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
         if (is_terminator(in->opcode))
         {
             break;
@@ -859,7 +859,7 @@ static void emit_block(Block *blk, size_t bi, CodegenCtx *ctx)
             emit_mov(ctx->buf, 4, xop_vreg(pc->dst_vreg),
                      xop_reg(R_EAX));
         }
-        lower_instr((Instr *) vec_get(blk->instrs, ii), ctx);
+        lower_instr((IrInstr *) vec_get(blk->instrs, ii), ctx);
     }
 }
 
@@ -869,7 +869,7 @@ static void resolve_block_patches(CodegenCtx *ctx)
     for (size_t pi = 0; pi < npatches; pi++)
     {
         Patch *bp = (Patch *) vec_get(ctx->block_patches, pi);
-        Block *target = strmap_get(ctx->label_to_block, bp->target);
+        IrBlock *target = strmap_get(ctx->label_to_block, bp->target);
         ASSERT(target != NULL && "branch target names a block the IR builder created");
         size_t ti = (size_t) u64map_get(ctx->block_to_index, (u64) (uintptr_t) target);
         i32 rel = (i32) ((i64) ctx->block_offsets[ti] - (i64) (bp->offset + 4));
@@ -877,7 +877,7 @@ static void resolve_block_patches(CodegenCtx *ctx)
     }
 }
 
-static void emit_func_mc(Function *f, CodegenFunc *cf, Module *mod, Arena *arena)
+static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *arena)
 {
     ByteBuf *buf = arena_alloc(arena, sizeof(ByteBuf), sizeof(void *));
     bytebuf_init(buf, arena);
@@ -908,7 +908,7 @@ static void emit_func_mc(Function *f, CodegenFunc *cf, Module *mod, Arena *arena
 
     for (size_t bi = 0; bi < nblocks; bi++)
     {
-        Block *blk = (Block *) vec_get(f->blocks, bi);
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, bi);
         strmap_set(ctx.label_to_block, blk->label, blk);
         u64map_set(ctx.block_to_index, (u64) (uintptr_t) blk, (void *) bi);
     }
@@ -917,7 +917,7 @@ static void emit_func_mc(Function *f, CodegenFunc *cf, Module *mod, Arena *arena
 
     for (size_t bi = 0; bi < nblocks; bi++)
     {
-        emit_block((Block *) vec_get(f->blocks, bi), bi, &ctx);
+        emit_block((IrBlock *) vec_get(f->blocks, bi), bi, &ctx);
     }
 
     resolve_block_patches(&ctx);
@@ -929,7 +929,7 @@ static void emit_func_mc(Function *f, CodegenFunc *cf, Module *mod, Arena *arena
 }
 
 /* ------------------------------------------------------------------ */
-/* Module emission                                                     */
+/* IrModule emission                                                     */
 /* ------------------------------------------------------------------ */
 
 static CodegenFunc *find_codegen_func(CodegenModule *cm, const char *name)
@@ -946,7 +946,7 @@ static CodegenFunc *find_codegen_func(CodegenModule *cm, const char *name)
     return NULL;
 }
 
-CodegenModule *codegen_ir_to_machine(Module *ir, Arena *arena)
+CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena)
 {
     CodegenModule *cm = arena_alloc(arena, sizeof(CodegenModule), sizeof(void *));
     cm->funcs = vec_new(arena);
@@ -954,7 +954,7 @@ CodegenModule *codegen_ir_to_machine(Module *ir, Arena *arena)
     size_t nfuncs = vec_size(ir->funcs);
     for (size_t i = 0; i < nfuncs; i++)
     {
-        Function *f = (Function *) vec_get(ir->funcs, i);
+        IrFunction *f = (IrFunction *) vec_get(ir->funcs, i);
         CodegenFunc *cf = arena_alloc(arena, sizeof(CodegenFunc), sizeof(void *));
         emit_func_mc(f, cf, ir, arena);
         vec_push(cm->funcs, cf);

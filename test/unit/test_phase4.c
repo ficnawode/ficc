@@ -23,7 +23,7 @@ static int run_shell(const char *cmd)
     return WEXITSTATUS(rc);
 }
 
-static Module *build_from_source(const char *src, Arena *arena)
+static IrModule *build_from_source(const char *src, Arena *arena)
 {
     LexResult lexed = lex("<test>", src, arena);
     if (!lexed.tokens)
@@ -45,14 +45,14 @@ static Module *build_from_source(const char *src, Arena *arena)
 
 static i64 run_interp(const char *src, Arena *arena)
 {
-    Module *mod = build_from_source(src, arena);
+    IrModule *mod = build_from_source(src, arena);
     EXPECT_TRUE(mod != NULL);
     return ir_interp_run(mod);
 }
 
 static int run_elf(const char *src, Arena *arena, const char *obj_path, const char *bin_path)
 {
-    Module *mod = build_from_source(src, arena);
+    IrModule *mod = build_from_source(src, arena);
     EXPECT_TRUE(mod != NULL);
 
     CodegenModule *cm = codegen_ir_to_machine(mod, arena);
@@ -560,7 +560,7 @@ TEST(phase4, interp_var_assigned_in_one_branch)
 TEST(phase4, semantic_break_outside_loop)
 {
     Arena *arena = arena_new();
-    Module *mod = build_from_source("int main(void) { break; return 0; }", arena);
+    IrModule *mod = build_from_source("int main(void) { break; return 0; }", arena);
     EXPECT_TRUE(mod == NULL);
     arena_free(arena);
 }
@@ -568,7 +568,7 @@ TEST(phase4, semantic_break_outside_loop)
 TEST(phase4, semantic_continue_outside_loop)
 {
     Arena *arena = arena_new();
-    Module *mod = build_from_source("int main(void) { continue; return 0; }", arena);
+    IrModule *mod = build_from_source("int main(void) { continue; return 0; }", arena);
     EXPECT_TRUE(mod == NULL);
     arena_free(arena);
 }
@@ -576,7 +576,7 @@ TEST(phase4, semantic_continue_outside_loop)
 TEST(phase4, semantic_goto_undefined_label)
 {
     Arena *arena = arena_new();
-    Module *mod = build_from_source("int main(void) { goto nope; return 0; }", arena);
+    IrModule *mod = build_from_source("int main(void) { goto nope; return 0; }", arena);
     EXPECT_TRUE(mod == NULL);
     arena_free(arena);
 }
@@ -584,7 +584,7 @@ TEST(phase4, semantic_goto_undefined_label)
 TEST(phase4, semantic_duplicate_label)
 {
     Arena *arena = arena_new();
-    Module *mod = build_from_source("int main(void) { goto a; a: goto a; a: return 0; }", arena);
+    IrModule *mod = build_from_source("int main(void) { goto a; a: goto a; a: return 0; }", arena);
     EXPECT_TRUE(mod == NULL);
     arena_free(arena);
 }

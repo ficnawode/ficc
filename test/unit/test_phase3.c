@@ -21,7 +21,7 @@ static int run_shell(const char *cmd)
     return WEXITSTATUS(rc);
 }
 
-static Module *build_from_source(const char *src, Arena *arena)
+static IrModule *build_from_source(const char *src, Arena *arena)
 {
     LexResult lexed = lex("<test>", src, arena);
     if (!lexed.tokens)
@@ -47,7 +47,7 @@ TEST(phase3, interp_if_then)
                       "    return x;\n"
                       "}\n";
     Arena *arena = arena_new();
-    Module *mod = build_from_source(src, arena);
+    IrModule *mod = build_from_source(src, arena);
     EXPECT_TRUE(mod != NULL);
     i64 result = ir_interp_run(mod);
     EXPECT_EQ(result, 10);
@@ -66,7 +66,7 @@ TEST(phase3, interp_if_else)
                       "    return x;\n"
                       "}\n";
     Arena *arena = arena_new();
-    Module *mod = build_from_source(src, arena);
+    IrModule *mod = build_from_source(src, arena);
     EXPECT_TRUE(mod != NULL);
     i64 result = ir_interp_run(mod);
     EXPECT_EQ(result, 20);
@@ -85,7 +85,7 @@ TEST(phase3, elf_if_then)
                       "    return x;\n"
                       "}\n";
     Arena *arena = arena_new();
-    Module *mod = build_from_source(src, arena);
+    IrModule *mod = build_from_source(src, arena);
     EXPECT_TRUE(mod != NULL);
 
     CodegenModule *cm = codegen_ir_to_machine(mod, arena);
@@ -119,7 +119,7 @@ TEST(phase3, elf_if_else)
                       "    return x;\n"
                       "}\n";
     Arena *arena = arena_new();
-    Module *mod = build_from_source(src, arena);
+    IrModule *mod = build_from_source(src, arena);
     EXPECT_TRUE(mod != NULL);
 
     CodegenModule *cm = codegen_ir_to_machine(mod, arena);

@@ -16,9 +16,9 @@ const char *ir_opcode_name(IrOpcode op)
     return "OP_UNKNOWN";
 }
 
-Module *ir_module_new(Arena *arena)
+IrModule *ir_module_new(Arena *arena)
 {
-    Module *m = arena_alloc(arena, sizeof(Module), sizeof(void *));
+    IrModule *m = arena_alloc(arena, sizeof(IrModule), sizeof(void *));
     m->arena = arena;
     m->funcs = vec_new(arena);
     m->globals = vec_new(arena);
@@ -29,9 +29,9 @@ Module *ir_module_new(Arena *arena)
     return m;
 }
 
-Function *ir_module_add_func(Module *m, const char *name, Type *ret_type)
+IrFunction *ir_module_add_func(IrModule *m, const char *name, Type *ret_type)
 {
-    Function *f = arena_alloc(m->arena, sizeof(Function), sizeof(void *));
+    IrFunction *f = arena_alloc(m->arena, sizeof(IrFunction), sizeof(void *));
     f->name = name;
     f->ret_type = ret_type;
     f->arena = m->arena;
@@ -41,9 +41,9 @@ Function *ir_module_add_func(Module *m, const char *name, Type *ret_type)
     return f;
 }
 
-Block *ir_func_add_block(Function *f, const char *label)
+IrBlock *ir_func_add_block(IrFunction *f, const char *label)
 {
-    Block *bb = arena_alloc(f->arena, sizeof(Block), sizeof(void *));
+    IrBlock *bb = arena_alloc(f->arena, sizeof(IrBlock), sizeof(void *));
     bb->label = label;
     bb->arena = f->arena;
     bb->instrs = vec_new(f->arena);
@@ -54,7 +54,7 @@ Block *ir_func_add_block(Function *f, const char *label)
     return bb;
 }
 
-u32 ir_alloc_vreg(Module *m, u8 width)
+u32 ir_alloc_vreg(IrModule *m, u8 width)
 {
     if (m->width_count >= m->width_cap)
     {
@@ -71,9 +71,9 @@ u32 ir_alloc_vreg(Module *m, u8 width)
     return m->next_vreg++;
 }
 
-static Instr *instr_new(Block *bb, IrOpcode opcode, u32 result, u8 nops)
+static IrInstr *instr_new(IrBlock *bb, IrOpcode opcode, u32 result, u8 nops)
 {
-    Instr *ins = arena_alloc(bb->arena, sizeof(Instr), sizeof(void *));
+    IrInstr *ins = arena_alloc(bb->arena, sizeof(IrInstr), sizeof(void *));
     ins->opcode = opcode;
     ins->result = result;
     ins->nops = nops;
@@ -81,138 +81,76 @@ static Instr *instr_new(Block *bb, IrOpcode opcode, u32 result, u8 nops)
     return ins;
 }
 
-Instr *ir_emit_ret(Block *bb, Operand val)
+IrInstr *ir_emit_ret(IrBlock *bb, IrOperand val)
 {
-    Instr *ins = instr_new(bb, OP_RET, NO_VREG, 1);
+    IrInstr *ins = instr_new(bb, OP_RET, NO_VREG, 1);
     ins->ops[0] = val;
     return ins;
 }
 
-Instr *ir_emit_unreachable(Block *bb)
+IrInstr *ir_emit_unreachable(IrBlock *bb)
 {
     return instr_new(bb, OP_UNREACHABLE, NO_VREG, 0);
 }
 
-Instr *ir_emit_ret_void(Block *bb)
+IrInstr *ir_emit_ret_void(IrBlock *bb)
 {
     return instr_new(bb, OP_RET, NO_VREG, 0);
 }
 
-static Instr *emit_binop(Block *bb, IrOpcode opcode, u32 dst, Operand lhs, Operand rhs)
+/* The opcode carries the operation; only binops and icmp predicates belong. */
+IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOperand rhs)
 {
-    Instr *ins = instr_new(bb, opcode, dst, 2);
+    ASSERT((op >= OP_ADD && op <= OP_ASHR) || (op >= OP_ICMP_EQ && op <= OP_ICMP_SGE));
+    IrInstr *ins = instr_new(bb, op, dst, 2);
     ins->ops[0] = lhs;
     ins->ops[1] = rhs;
     return ins;
 }
 
-Instr *ir_emit_add(Block *bb, u32 dst, Operand lhs, Operand rhs)
+IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src)
 {
-    return emit_binop(bb, OP_ADD, dst, lhs, rhs);
-}
-
-Instr *ir_emit_sub(Block *bb, u32 dst, Operand lhs, Operand rhs)
-{
-    return emit_binop(bb, OP_SUB, dst, lhs, rhs);
-}
-
-Instr *ir_emit_mul(Block *bb, u32 dst, Operand lhs, Operand rhs)
-{
-    return emit_binop(bb, OP_MUL, dst, lhs, rhs);
-}
-
-Instr *ir_emit_sdiv(Block *bb, u32 dst, Operand lhs, Operand rhs)
-{
-    return emit_binop(bb, OP_SDIV, dst, lhs, rhs);
-}
-
-Instr *ir_emit_srem(Block *bb, u32 dst, Operand lhs, Operand rhs)
-{
-    return emit_binop(bb, OP_SREM, dst, lhs, rhs);
-}
-
-Instr *ir_emit_and(Block *bb, u32 dst, Operand lhs, Operand rhs)
-{
-    return emit_binop(bb, OP_AND, dst, lhs, rhs);
-}
-
-Instr *ir_emit_or(Block *bb, u32 dst, Operand lhs, Operand rhs)
-{
-    return emit_binop(bb, OP_OR, dst, lhs, rhs);
-}
-
-Instr *ir_emit_xor(Block *bb, u32 dst, Operand lhs, Operand rhs)
-{
-    return emit_binop(bb, OP_XOR, dst, lhs, rhs);
-}
-
-Instr *ir_emit_shl(Block *bb, u32 dst, Operand lhs, Operand rhs)
-{
-    return emit_binop(bb, OP_SHL, dst, lhs, rhs);
-}
-
-Instr *ir_emit_ashr(Block *bb, u32 dst, Operand lhs, Operand rhs)
-{
-    return emit_binop(bb, OP_ASHR, dst, lhs, rhs);
-}
-
-Instr *ir_emit_neg(Block *bb, u32 dst, Operand src)
-{
-    Instr *ins = instr_new(bb, OP_NEG, dst, 1);
+    ASSERT(op == OP_NEG || op == OP_NOT);
+    IrInstr *ins = instr_new(bb, op, dst, 1);
     ins->ops[0] = src;
     return ins;
 }
 
-Instr *ir_emit_not(Block *bb, u32 dst, Operand src)
+IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOperand *args)
 {
-    Instr *ins = instr_new(bb, OP_NOT, dst, 1);
-    ins->ops[0] = src;
-    return ins;
-}
-
-Instr *ir_emit_icmp(Block *bb, IrOpcode op, u32 dst, Operand lhs, Operand rhs)
-{
-    Instr *ins = instr_new(bb, op, dst, 2);
-    ins->ops[0] = lhs;
-    ins->ops[1] = rhs;
-    return ins;
-}
-
-Instr *ir_emit_call(Block *bb, u32 dst, const char *name, u32 nargs, Operand *args)
-{
-    Instr *ins = instr_new(bb, OP_CALL, dst, 0);
+    IrInstr *ins = instr_new(bb, OP_CALL, dst, 0);
     ins->extra.call.nargs = nargs;
     ins->extra.call.args = args;
     ins->extra.call.name = name;
     return ins;
 }
 
-Instr *ir_emit_br(Block *bb, const char *target_label)
+IrInstr *ir_emit_br(IrBlock *bb, const char *target_label)
 {
-    Instr *ins = instr_new(bb, OP_BR, NO_VREG, 0);
+    IrInstr *ins = instr_new(bb, OP_BR, NO_VREG, 0);
     ins->extra.br.target_label = target_label;
     return ins;
 }
 
-Instr *ir_emit_brcond(Block *bb, Operand cond, const char *true_label, const char *false_label)
+IrInstr *ir_emit_brcond(IrBlock *bb, IrOperand cond, const char *true_label, const char *false_label)
 {
-    Instr *ins = instr_new(bb, OP_BRCOND, NO_VREG, 1);
+    IrInstr *ins = instr_new(bb, OP_BRCOND, NO_VREG, 1);
     ins->ops[0] = cond;
     ins->extra.brcond.true_label = true_label;
     ins->extra.brcond.false_label = false_label;
     return ins;
 }
 
-Instr *ir_emit_phi(Block *bb, u32 dst, u32 nentries)
+IrInstr *ir_emit_phi(IrBlock *bb, u32 dst, u32 nentries)
 {
-    Instr *ins = instr_new(bb, OP_PHI, dst, 0);
+    IrInstr *ins = instr_new(bb, OP_PHI, dst, 0);
     ins->extra.phi.nentries = nentries;
     ins->extra.phi.nfilled = 0;
-    ins->extra.phi.entries = arena_alloc(bb->arena, nentries * sizeof(PhiEntry), sizeof(void *));
+    ins->extra.phi.entries = arena_alloc(bb->arena, nentries * sizeof(IrPhiEntry), sizeof(void *));
     return ins;
 }
 
-void ir_phi_add_entry(Instr *phi, Operand val, Block *pred)
+void ir_phi_add_entry(IrInstr *phi, IrOperand val, IrBlock *pred)
 {
     ASSERT(phi->opcode == OP_PHI);
     u32 idx = phi->extra.phi.nfilled;
@@ -222,23 +160,23 @@ void ir_phi_add_entry(Instr *phi, Operand val, Block *pred)
     phi->extra.phi.nfilled++;
 }
 
-Operand ir_operand_imm(i64 val)
+IrOperand ir_operand_imm(i64 val)
 {
-    Operand o;
+    IrOperand o;
     o.is_imm = true;
     o.u.imm = val;
     return o;
 }
 
-Operand ir_operand_vreg(u32 vreg)
+IrOperand ir_operand_vreg(u32 vreg)
 {
-    Operand o;
+    IrOperand o;
     o.is_imm = false;
     o.u.vreg = vreg;
     return o;
 }
 
-static void dump_operand(Operand op)
+static void dump_operand(IrOperand op)
 {
     if (op.is_imm)
     {
@@ -250,7 +188,7 @@ static void dump_operand(Operand op)
     }
 }
 
-static void dump_phi_entries(Instr *ins)
+static void dump_phi_entries(IrInstr *ins)
 {
     for (u32 e = 0; e < ins->extra.phi.nentries; e++)
     {
@@ -260,7 +198,7 @@ static void dump_phi_entries(Instr *ins)
     }
 }
 
-static void dump_call_args(Instr *ins)
+static void dump_call_args(IrInstr *ins)
 {
     printf(" %s", ins->extra.call.name);
     for (u32 i = 0; i < ins->extra.call.nargs; i++)
@@ -270,7 +208,7 @@ static void dump_call_args(Instr *ins)
     }
 }
 
-static void dump_switch_cases(Instr *ins)
+static void dump_switch_cases(IrInstr *ins)
 {
     for (u32 c = 0; c < ins->extra.sw.ncases; c++)
     {
@@ -283,7 +221,7 @@ static void dump_switch_cases(Instr *ins)
     }
 }
 
-static void dump_instr(Instr *ins)
+static void dump_instr(IrInstr *ins)
 {
     printf("    %s", ir_opcode_name(ins->opcode));
     if (ins->result != NO_VREG)
@@ -319,22 +257,22 @@ static void dump_instr(Instr *ins)
     printf("\n");
 }
 
-void ir_dump(Module *m)
+void ir_dump(IrModule *m)
 {
     size_t nfuncs = vec_size(m->funcs);
     for (size_t func_i = 0; func_i < nfuncs; func_i++)
     {
-        Function *func = (Function *) vec_get(m->funcs, func_i);
+        IrFunction *func = (IrFunction *) vec_get(m->funcs, func_i);
         printf("func %s -> %s {\n", func->name, type_kind_name(func->ret_type->kind));
         size_t nblocks = vec_size(func->blocks);
         for (size_t block_i = 0; block_i < nblocks; block_i++)
         {
-            Block *bb = (Block *) vec_get(func->blocks, block_i);
+            IrBlock *bb = (IrBlock *) vec_get(func->blocks, block_i);
             printf("  %s:\n", bb->label);
             size_t ninstrs = vec_size(bb->instrs);
             for (size_t instr_i = 0; instr_i < ninstrs; instr_i++)
             {
-                Instr *ins = (Instr *) vec_get(bb->instrs, instr_i);
+                IrInstr *ins = (IrInstr *) vec_get(bb->instrs, instr_i);
                 dump_instr(ins);
             }
         }

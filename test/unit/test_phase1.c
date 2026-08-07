@@ -34,7 +34,7 @@ TEST(phase1, interp_return42)
     EXPECT_TRUE(ast != NULL);
     ast = semantic_check(ast, arena);
     EXPECT_TRUE(ast != NULL);
-    Module *mod = ir_build_module(ast, arena);
+    IrModule *mod = ir_build_module(ast, arena);
     EXPECT_TRUE(mod != NULL);
     i64 result = ir_interp_run(mod);
     EXPECT_EQ(result, 42);
@@ -48,7 +48,7 @@ TEST(phase1, elf_return42)
     LexResult lexed = lex("<test>", src, arena);
     ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
     ast = semantic_check(ast, arena);
-    Module *mod = ir_build_module(ast, arena);
+    IrModule *mod = ir_build_module(ast, arena);
 
     /* Generate ELF object */
     CodegenModule *cm = codegen_ir_to_machine(mod, arena);

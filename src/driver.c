@@ -192,7 +192,7 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
         return 1;
     }
 
-    Module *mod = ir_build_module(ast, arena);
+    IrModule *mod = ir_build_module(ast, arena);
     if (!mod)
     {
         fprintf(stderr, "IR build failed\n");

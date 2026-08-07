@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static i64 operand_val(Operand o, i64 *regs, u32 nregs)
+static i64 operand_val(IrOperand o, i64 *regs, u32 nregs)
 {
     if (o.is_imm)
     {
@@ -13,12 +13,12 @@ static i64 operand_val(Operand o, i64 *regs, u32 nregs)
     return regs[o.u.vreg];
 }
 
-static Function *find_func(Module *m, const char *name)
+static IrFunction *find_func(IrModule *m, const char *name)
 {
     size_t n = vec_size(m->funcs);
     for (size_t i = 0; i < n; i++)
     {
-        Function *f = (Function *) vec_get(m->funcs, i);
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, i);
         if (strcmp(f->name, name) == 0)
         {
             return f;
@@ -27,12 +27,12 @@ static Function *find_func(Module *m, const char *name)
     return NULL;
 }
 
-static Block *find_block(Function *func, const char *label)
+static IrBlock *find_block(IrFunction *func, const char *label)
 {
     size_t n = vec_size(func->blocks);
     for (size_t i = 0; i < n; i++)
     {
-        Block *b = (Block *) vec_get(func->blocks, i);
+        IrBlock *b = (IrBlock *) vec_get(func->blocks, i);
         if (strcmp(b->label, label) == 0)
         {
             return b;
@@ -44,11 +44,11 @@ static Block *find_block(Function *func, const char *label)
 typedef struct Frame Frame;
 struct Frame
 {
-    Function *func;
+    IrFunction *func;
     i64 *regs;
 };
 
-static Frame *frame_new(Arena *arena, Function *func, u32 nregs)
+static Frame *frame_new(Arena *arena, IrFunction *func, u32 nregs)
 {
     Frame *f = arena_alloc(arena, sizeof(Frame), sizeof(void *));
     f->func = func;
@@ -57,12 +57,12 @@ static Frame *frame_new(Arena *arena, Function *func, u32 nregs)
     return f;
 }
 
-static void eval_phis(Frame *fr, Block *bb, Block *pred, u32 nregs)
+static void eval_phis(Frame *fr, IrBlock *bb, IrBlock *pred, u32 nregs)
 {
     size_t ninstr = vec_size(bb->instrs);
     for (size_t i = 0; i < ninstr; i++)
     {
-        Instr *in = (Instr *) vec_get(bb->instrs, i);
+        IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
         if (in->opcode != OP_PHI)
         {
             break;
@@ -81,11 +81,11 @@ static void eval_phis(Frame *fr, Block *bb, Block *pred, u32 nregs)
     }
 }
 
-static i64 exec_block(Module *m, Frame *fr, Block *start_bb, Block *start_pred, Vec *stack,
+static i64 exec_block(IrModule *m, Frame *fr, IrBlock *start_bb, IrBlock *start_pred, Vec *stack,
                       Arena *frame_arena, u32 nregs)
 {
-    Block *bb = start_bb;
-    Block *pred = start_pred;
+    IrBlock *bb = start_bb;
+    IrBlock *pred = start_pred;
 
     while (bb)
     {
@@ -95,13 +95,13 @@ static i64 exec_block(Module *m, Frame *fr, Block *start_bb, Block *start_pred, 
         }
 
         size_t ninstr = vec_size(bb->instrs);
-        Block *next_bb = NULL;
-        Block *next_pred = bb;
+        IrBlock *next_bb = NULL;
+        IrBlock *next_pred = bb;
         bool jumped = false;
 
         for (size_t i = 0; i < ninstr; i++)
         {
-            Instr *in = (Instr *) vec_get(bb->instrs, i);
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
             switch (in->opcode)
             {
                 case OP_PHI:
@@ -221,7 +221,7 @@ static i64 exec_block(Module *m, Frame *fr, Block *start_bb, Block *start_pred, 
                 }
                 case OP_CALL:
                 {
-                    Function *callee = find_func(m, in->extra.call.name);
+                    IrFunction *callee = find_func(m, in->extra.call.name);
                     if (!callee)
                     {
                         fprintf(stderr, "[interp] error: undefined function '%s'\n",
@@ -233,11 +233,11 @@ static i64 exec_block(Module *m, Frame *fr, Block *start_bb, Block *start_pred, 
                     /* Copy args into callee param vregs */
                     for (u32 a = 0; a < in->extra.call.nargs; a++)
                     {
-                        Param *p = (Param *) vec_get(callee->params, a);
+                        IrParam *p = (IrParam *) vec_get(callee->params, a);
                         callee_fr->regs[p->vreg] =
                             operand_val(in->extra.call.args[a], fr->regs, nregs);
                     }
-                    Block *entry = (Block *) vec_get(callee->blocks, 0);
+                    IrBlock *entry = (IrBlock *) vec_get(callee->blocks, 0);
                     i64 ret = exec_block(m, callee_fr, entry, NULL, stack, frame_arena, nregs);
                     vec_pop(stack);
                     fr->regs[in->result] = ret;
@@ -296,19 +296,19 @@ static i64 exec_block(Module *m, Frame *fr, Block *start_bb, Block *start_pred, 
     return 0;
 }
 
-static i64 run_func(Module *m, Function *func, Vec *stack, Arena *frame_arena, u32 nregs)
+static i64 run_func(IrModule *m, IrFunction *func, Vec *stack, Arena *frame_arena, u32 nregs)
 {
     Frame *fr = frame_new(frame_arena, func, nregs);
     vec_push(stack, fr);
-    Block *entry = (Block *) vec_get(func->blocks, 0);
+    IrBlock *entry = (IrBlock *) vec_get(func->blocks, 0);
     i64 result = exec_block(m, fr, entry, NULL, stack, frame_arena, nregs);
     vec_pop(stack);
     return result;
 }
 
-i64 ir_interp_run(Module *m)
+i64 ir_interp_run(IrModule *m)
 {
-    Function *main_fn = find_func(m, "main");
+    IrFunction *main_fn = find_func(m, "main");
     if (!main_fn)
     {
         fprintf(stderr, "[interp] error: no main function found\n");

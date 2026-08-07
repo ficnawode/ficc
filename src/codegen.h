@@ -15,7 +15,7 @@ struct CodegenFunc
     Vec *patches;   /* Vec<Patch*> — internal to codegen.c */
 };
 
-/* Module-level codegen records */
+/* IrModule-level codegen records */
 typedef struct CodegenModule CodegenModule;
 struct CodegenModule
 {
@@ -23,6 +23,6 @@ struct CodegenModule
 };
 
 /* Convert IR to machine code bytes. */
-CodegenModule *codegen_ir_to_machine(Module *ir, Arena *arena);
+CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena);
 
 #endif

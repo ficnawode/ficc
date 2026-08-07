@@ -6,6 +6,6 @@
 
 /* Execute the IR module, returning the exit code of `main`.
    For Phase 1, `main` has no arguments. */
-i64 ir_interp_run(Module *m);
+i64 ir_interp_run(IrModule *m);
 
 #endif

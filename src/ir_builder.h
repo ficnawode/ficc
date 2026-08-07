@@ -4,8 +4,8 @@
 #include "ast.h"
 #include "ir.h"
 
-/* Build an IR Module from an annotated AST.
+/* Build an IrModule from an annotated AST.
    For Phase 1, the AST must be a single function definition. */
-Module *ir_build_module(ASTNode *ast, Arena *arena);
+IrModule *ir_build_module(ASTNode *ast, Arena *arena);
 
 #endif
