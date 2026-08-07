@@ -4,42 +4,61 @@
 #include <stdio.h>
 #include <string.h>
 
-typedef struct BlockState BlockState;
-struct BlockState
-{
-    StrMap *locals;       /* name -> IrOperand* */
-    Vec *incomplete_phis; /* Vec<IncompletePhi*> */
-};
+/* Vreg width is stored per-value in the codegen width table; the unit is
+   BYTES (4 = 32-bit, 8 = 64-bit). */
+#define VREG_INT_WIDTH 4
 
-typedef struct IncompletePhi IncompletePhi;
-struct IncompletePhi
+typedef struct PendingPhi PendingPhi;
+struct PendingPhi
 {
     const char *name;
-    u32 dst_vreg;
+    u32 vreg;
+};
+
+typedef struct BlockLocals BlockLocals;
+struct BlockLocals
+{
+    StrMap *locals;    /* name -> IrOperand* */
+    Vec *pending_phis; /* Vec<PendingPhi*> */
 };
 
 typedef struct ExprResult ExprResult;
 struct ExprResult
 {
-    IrOperand val;
-    IrBlock *bb;
+    IrOperand value;
+    IrBlock *block;
+};
+
+typedef struct LoopBlocks LoopBlocks;
+struct LoopBlocks
+{
+    IrBlock *header;
+    IrBlock *body;
+    IrBlock *latch; /* continue target */
+    IrBlock *exit;
 };
 
 typedef struct LoopContext LoopContext;
 struct LoopContext
 {
-    IrBlock *header;
+    IrBlock *continue_target;
     IrBlock *exit;
 };
 
-typedef struct BuilderCtx BuilderCtx;
-struct BuilderCtx
+typedef struct FuncBuilder FuncBuilder;
+struct FuncBuilder
 {
     IrModule *mod;
-    U64Map *block_states; /* (u64)IrBlock* -> BlockState* */
+    U64Map *block_locals; /* (u64)IrBlock* -> BlockLocals* */
     Vec *loop_stack;      /* Vec<LoopContext*> */
     StrMap *goto_labels;  /* label name -> IrBlock* */
 };
+
+static IrOperand resolve_variable(FuncBuilder *ctx, const char *name, IrBlock *bb);
+static IrOperand build_phi(FuncBuilder *ctx, const char *name, IrBlock *bb);
+static IrBlock *label_block(FuncBuilder *ctx, IrFunction *f, const char *name);
+static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
+static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
 
 static void ir_error(ASTNode *node, const char *fmt, ...)
 {
@@ -52,29 +71,32 @@ static void ir_error(ASTNode *node, const char *fmt, ...)
     fprintf(stderr, "\n");
 }
 
-static IrOperand *make_operand_ptr(BuilderCtx *ctx, IrOperand op)
+static IrOperand *box_operand(FuncBuilder *ctx, IrOperand op)
 {
     IrOperand *p = arena_alloc(ctx->mod->arena, sizeof(IrOperand), sizeof(IrOperand));
     *p = op;
     return p;
 }
 
-static BlockState *get_block_state(BuilderCtx *ctx, IrBlock *bb)
+static u32 alloc_vreg(FuncBuilder *ctx)
 {
-    BlockState *bs = u64map_get(ctx->block_states, (u64) (uintptr_t) bb);
-    if (!bs)
-    {
-        bs = arena_alloc(ctx->mod->arena, sizeof(BlockState), sizeof(void *));
-        bs->locals = strmap_new(ctx->mod->arena);
-        bs->incomplete_phis = vec_new(ctx->mod->arena);
-        u64map_set(ctx->block_states, (u64) (uintptr_t) bb, bs);
-    }
-    return bs;
+    return ir_alloc_vreg(ctx->mod, VREG_INT_WIDTH);
 }
 
-/* Create a new block with a unique label, avoiding collisions when multiple
-   control-flow constructs appear in the same function. */
-static IrBlock *add_unique_block(IrFunction *f, const char *prefix)
+static BlockLocals *get_block_locals(FuncBuilder *ctx, IrBlock *bb)
+{
+    BlockLocals *bl = u64map_get(ctx->block_locals, (u64) (uintptr_t) bb);
+    if (!bl)
+    {
+        bl = arena_alloc(ctx->mod->arena, sizeof(BlockLocals), sizeof(void *));
+        bl->locals = strmap_new(ctx->mod->arena);
+        bl->pending_phis = vec_new(ctx->mod->arena);
+        u64map_set(ctx->block_locals, (u64) (uintptr_t) bb, bl);
+    }
+    return bl;
+}
+
+static IrBlock *new_block(IrFunction *f, const char *prefix)
 {
     size_t idx = vec_size(f->blocks);
     size_t len = strlen(prefix);
@@ -95,70 +117,38 @@ static bool is_terminated(IrBlock *bb)
            last->opcode == OP_BRCOND;
 }
 
-static IrOperand read_variable(BuilderCtx *ctx, const char *name, IrBlock *bb);
-static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, BuilderCtx *ctx);
-static void seal_block(BuilderCtx *ctx, IrBlock *bb);
-
-/* Emit a phi and move it to the front of the block so it dominates every other
-   instruction. */
-static IrInstr *emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries)
+static void jump(IrBlock *from, IrBlock *to)
 {
-    IrInstr *phi = ir_emit_phi(bb, dst, nentries);
-    IrInstr *last = (IrInstr *) vec_pop(bb->instrs);
-    ASSERT(last == phi);
-    vec_insert(bb->instrs, 0, phi);
-    return phi;
+    ir_emit_br(from, to->label);
+    vec_push(to->preds, from);
 }
 
-/* Multiple predecessors: value must come through a PHI, one entry per pred. */
-static IrOperand build_phi(BuilderCtx *ctx, const char *name, IrBlock *bb)
+static void cond_jump(IrBlock *from, IrOperand cond, IrBlock *then_bb, IrBlock *else_bb)
 {
-    u32 nentries = (u32) vec_size(bb->preds);
-    u32 dst = ir_alloc_vreg(ctx->mod, 4);
-    IrInstr *phi = emit_phi_at_start(bb, dst, nentries);
-    for (u32 e = 0; e < nentries; e++)
-    {
-        IrBlock *pred = (IrBlock *) vec_get(bb->preds, e);
-        IrOperand pval = read_variable(ctx, name, pred);
-        ir_phi_add_entry(phi, pval, pred);
-    }
-    return ir_operand_vreg(dst);
+    ir_emit_brcond(from, cond, then_bb->label, else_bb->label);
+    vec_push(then_bb->preds, from);
+    vec_push(else_bb->preds, from);
 }
 
-/* Fill a placeholder phi created while the block was unsealed. */
-static void insert_phi(BuilderCtx *ctx, IrBlock *bb, const char *name, u32 dst)
+static void declare_pred(IrBlock *bb, IrBlock *pred)
 {
-    u32 nentries = (u32) vec_size(bb->preds);
-    IrInstr *phi = emit_phi_at_start(bb, dst, nentries);
-    for (u32 e = 0; e < nentries; e++)
-    {
-        IrBlock *pred = (IrBlock *) vec_get(bb->preds, e);
-        IrOperand pval = read_variable(ctx, name, pred);
-        ir_phi_add_entry(phi, pval, pred);
-    }
+    vec_push(bb->preds, pred);
 }
 
-static void seal_block(BuilderCtx *ctx, IrBlock *bb)
+static IrOperand read_variable(FuncBuilder *ctx, const char *name, IrBlock *bb)
 {
-    if (bb->sealed)
+    BlockLocals *bl = get_block_locals(ctx, bb);
+    IrOperand *p = strmap_get(bl->locals, name);
+    if (p)
     {
-        return;
+        return *p;
     }
-    bb->sealed = true;
-
-    BlockState *bs = get_block_state(ctx, bb);
-    Vec *phis = bs->incomplete_phis;
-    size_t n = vec_size(phis);
-    for (size_t i = 0; i < n; i++)
-    {
-        IncompletePhi *ip = (IncompletePhi *) vec_get(phis, i);
-        insert_phi(ctx, bb, ip->name, ip->dst_vreg);
-    }
+    return resolve_variable(ctx, name, bb);
 }
 
-static IrOperand read_variable_recursive(BuilderCtx *ctx, const char *name, IrBlock *bb)
+static IrOperand resolve_variable(FuncBuilder *ctx, const char *name, IrBlock *bb)
 {
-    BlockState *bs = get_block_state(ctx, bb);
+    BlockLocals *bl = get_block_locals(ctx, bb);
     size_t npreds = vec_size(bb->preds);
     IrOperand val;
     if (npreds == 0)
@@ -185,73 +175,83 @@ static IrOperand read_variable_recursive(BuilderCtx *ctx, const char *name, IrBl
            placeholder PHI that will be filled when the block is sealed. Loop
            headers are pre-emptively treated as merge points because their back
            edge is added after the body is built. */
-        u32 dst = ir_alloc_vreg(ctx->mod, 4);
-        IncompletePhi *ip = arena_alloc(ctx->mod->arena, sizeof(IncompletePhi), sizeof(void *));
+        u32 dst = alloc_vreg(ctx);
+        PendingPhi *ip = arena_alloc(ctx->mod->arena, sizeof(PendingPhi), sizeof(void *));
         ip->name = name;
-        ip->dst_vreg = dst;
-        vec_push(bs->incomplete_phis, ip);
+        ip->vreg = dst;
+        vec_push(bl->pending_phis, ip);
         val = ir_operand_vreg(dst);
     }
-    strmap_set(bs->locals, name, make_operand_ptr(ctx, val));
+    strmap_set(bl->locals, name, box_operand(ctx, val));
     return val;
 }
 
-static IrOperand read_variable(BuilderCtx *ctx, const char *name, IrBlock *bb)
+static void write_variable(FuncBuilder *ctx, const char *name, IrBlock *bb, IrOperand val)
 {
-    BlockState *bs = get_block_state(ctx, bb);
-    IrOperand *p = strmap_get(bs->locals, name);
-    if (p)
+    BlockLocals *bl = get_block_locals(ctx, bb);
+    strmap_set(bl->locals, name, box_operand(ctx, val));
+}
+
+static IrInstr *emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries)
+{
+    IrInstr *phi = ir_emit_phi(bb, dst, nentries);
+    IrInstr *last = (IrInstr *) vec_pop(bb->instrs);
+    ASSERT(last == phi);
+    vec_insert(bb->instrs, 0, phi);
+    return phi;
+}
+
+static void fill_phi_entries(FuncBuilder *ctx, IrBlock *bb, const char *name, IrInstr *phi)
+{
+    size_t n = vec_size(bb->preds);
+    for (size_t e = 0; e < n; e++)
     {
-        return *p;
+        IrBlock *pred = (IrBlock *) vec_get(bb->preds, e);
+        IrOperand pval = read_variable(ctx, name, pred);
+        ir_phi_add_entry(phi, pval, pred);
     }
-    return read_variable_recursive(ctx, name, bb);
 }
 
-static void write_variable(BuilderCtx *ctx, const char *name, IrBlock *bb, IrOperand val)
+static IrOperand build_phi(FuncBuilder *ctx, const char *name, IrBlock *bb)
 {
-    BlockState *bs = get_block_state(ctx, bb);
-    strmap_set(bs->locals, name, make_operand_ptr(ctx, val));
+    u32 nentries = (u32) vec_size(bb->preds);
+    u32 dst = alloc_vreg(ctx);
+    IrInstr *phi = emit_phi_at_start(bb, dst, nentries);
+    fill_phi_entries(ctx, bb, name, phi);
+    return ir_operand_vreg(dst);
 }
 
-static ExprResult expr_result(IrOperand val, IrBlock *bb)
+static void insert_phi(FuncBuilder *ctx, IrBlock *bb, const char *name, u32 dst)
 {
-    ExprResult r = {val, bb};
-    return r;
+    u32 nentries = (u32) vec_size(bb->preds);
+    IrInstr *phi = emit_phi_at_start(bb, dst, nentries);
+    fill_phi_entries(ctx, bb, name, phi);
 }
 
-static const IrOpcode icmp_opcodes[] = {
-    [BIN_EQ] = OP_ICMP_EQ,
-    [BIN_NE] = OP_ICMP_NE,
-    [BIN_LT] = OP_ICMP_SLT,
-    [BIN_GT] = OP_ICMP_SGT,
-    [BIN_LE] = OP_ICMP_SLE,
-    [BIN_GE] = OP_ICMP_SGE,
-};
-
-static const IrOpcode arith_opcodes[] = {
-    [BIN_ADD] = OP_ADD,
-    [BIN_SUB] = OP_SUB,
-    [BIN_MUL] = OP_MUL,
-    [BIN_DIV] = OP_SDIV,
-    [BIN_REM] = OP_SREM,
-    [BIN_AND] = OP_AND,
-    [BIN_OR] = OP_OR,
-    [BIN_XOR] = OP_XOR,
-    [BIN_SHL] = OP_SHL,
-    [BIN_SHR] = OP_ASHR,
-};
-
-static void emit_arith_binop(IrBlock *bb, u32 dst, BinOpKind op, IrOperand left, IrOperand right,
-                             ASTNode *node)
+static void seal_block(FuncBuilder *ctx, IrBlock *bb)
 {
-    IrOpcode code = arith_opcodes[op];
-    if (code == 0)
+    if (bb->sealed)
     {
-        ir_error(node, "unsupported binary operator");
         return;
     }
-    ir_emit_binop(bb, code, dst, left, right);
+    bb->sealed = true;
+
+    BlockLocals *bl = get_block_locals(ctx, bb);
+    Vec *phis = bl->pending_phis;
+    size_t n = vec_size(phis);
+    for (size_t i = 0; i < n; i++)
+    {
+        PendingPhi *ip = (PendingPhi *) vec_get(phis, i);
+        insert_phi(ctx, bb, ip->name, ip->vreg);
+    }
 }
+
+static const IrOpcode binop_ir[] = {
+    [BIN_ADD] = OP_ADD,     [BIN_SUB] = OP_SUB,     [BIN_MUL] = OP_MUL,     [BIN_DIV] = OP_SDIV,
+    [BIN_REM] = OP_SREM,    [BIN_AND] = OP_AND,     [BIN_OR] = OP_OR,       [BIN_XOR] = OP_XOR,
+    [BIN_SHL] = OP_SHL,     [BIN_SHR] = OP_ASHR,    [BIN_EQ] = OP_ICMP_EQ,  [BIN_NE] = OP_ICMP_NE,
+    [BIN_LT] = OP_ICMP_SLT, [BIN_GT] = OP_ICMP_SGT, [BIN_LE] = OP_ICMP_SLE, [BIN_GE] = OP_ICMP_SGE,
+};
 
 static const IrOpcode unary_opcodes[] = {
     [UN_NEG] = OP_NEG,
@@ -269,75 +269,66 @@ static void emit_unary_op(IrBlock *bb, u32 dst, UnaryOpKind op, IrOperand src, A
     ir_emit_unary(bb, code, dst, src);
 }
 
-static IrOperand build_assignment(IrBlock *bb, ASTNode *node, IrOperand value, BuilderCtx *ctx)
+static ExprResult expr_result(IrOperand value, IrBlock *bb)
 {
-    ASTBinaryExpr *assign = ast_as(ASTBinaryExpr, node);
-    if (assign->left->kind != AST_IDENT)
-    {
-        ir_error(node, "assignment target must be an identifier");
-        return ir_operand_imm(0);
-    }
-    ASTIdent *target = ast_as(ASTIdent, assign->left);
-    write_variable(ctx, target->name, bb, value);
-    return value;
+    ExprResult r = {value, bb};
+    return r;
 }
 
-static ExprResult build_short_circuit(ASTNode *left_node, ASTNode *right_node, bool is_or,
-                                      IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static ExprResult build_int_literal_expr(ASTIntLiteral *lit, IrFunction *f, IrBlock *bb,
+                                         FuncBuilder *ctx)
 {
-    ExprResult left = build_expr(left_node, f, bb, ctx);
-    if (!left.bb)
-    {
-        return left;
-    }
+    (void) f;
+    (void) ctx;
+    return expr_result(ir_operand_imm(lit->value), bb);
+}
+
+static ExprResult build_ident_expr(ASTIdent *id, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    (void) f;
+    return expr_result(read_variable(ctx, id->name, bb), bb);
+}
+
+static ExprResult build_short_circuit(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
+                                      FuncBuilder *ctx)
+{
+    bool is_or = be->op == BIN_LOG_OR;
+    ExprResult left = build_expr(be->left, f, bb, ctx);
 
     char name[16];
-    IrBlock *true_bb = add_unique_block(f, is_or ? "lor_true" : "land_true");
-    IrBlock *false_bb = add_unique_block(f, is_or ? "lor_false" : "land_false");
+    IrBlock *true_bb = new_block(f, is_or ? "lor_true" : "land_true");
+    IrBlock *false_bb = new_block(f, is_or ? "lor_false" : "land_false");
     snprintf(name, sizeof(name), "%s_rhs", is_or ? "lor" : "land");
-    IrBlock *right_bb = add_unique_block(f, name);
+    IrBlock *right_bb = new_block(f, name);
     snprintf(name, sizeof(name), "%s_merge", is_or ? "lor" : "land");
-    IrBlock *merge_bb = add_unique_block(f, name);
+    IrBlock *merge_bb = new_block(f, name);
 
     if (is_or)
     {
-        ir_emit_brcond(left.bb, left.val, true_bb->label, right_bb->label);
-        vec_push(true_bb->preds, left.bb);
-        vec_push(right_bb->preds, left.bb);
+        cond_jump(left.block, left.value, true_bb, right_bb);
     }
     else
     {
-        ir_emit_brcond(left.bb, left.val, right_bb->label, false_bb->label);
-        vec_push(right_bb->preds, left.bb);
-        vec_push(false_bb->preds, left.bb);
+        cond_jump(left.block, left.value, right_bb, false_bb);
     }
 
-    ExprResult right = build_expr(right_node, f, right_bb, ctx);
-    if (!right.bb)
-    {
-        return right;
-    }
-    ir_emit_brcond(right.bb, right.val, true_bb->label, false_bb->label);
-    vec_push(true_bb->preds, right.bb);
-    vec_push(false_bb->preds, right.bb);
+    ExprResult right = build_expr(be->right, f, right_bb, ctx);
+    cond_jump(right.block, right.value, true_bb, false_bb);
 
-    ir_emit_br(true_bb, merge_bb->label);
-    ir_emit_br(false_bb, merge_bb->label);
-    vec_push(merge_bb->preds, true_bb);
-    vec_push(merge_bb->preds, false_bb);
+    jump(true_bb, merge_bb);
+    jump(false_bb, merge_bb);
 
     /* Seal the short-circuit blocks before the merge so that values flowing
        into the merge come from sealed predecessors. */
-    seal_block(ctx, left.bb);
+    seal_block(ctx, left.block);
     seal_block(ctx, right_bb);
     seal_block(ctx, false_bb);
     seal_block(ctx, true_bb);
 
-    /* The merge block is a real merge point: seal it so future variable reads
-       produce proper PHIs, and insert the logical-result PHI at the top. */
+    /* The merge block is sealed so future reads produce PHIs. */
     merge_bb->sealed = true;
 
-    u32 dst = ir_alloc_vreg(ctx->mod, 4);
+    u32 dst = alloc_vreg(ctx);
     IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, ir_operand_imm(1), true_bb);
     ir_phi_add_entry(phi, ir_operand_imm(0), false_bb);
@@ -345,153 +336,140 @@ static ExprResult build_short_circuit(ASTNode *left_node, ASTNode *right_node, b
     return expr_result(ir_operand_vreg(dst), merge_bb);
 }
 
-static ExprResult build_ternary(ASTNode *cond_node, ASTNode *then_node, ASTNode *else_node,
-                                IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static ExprResult build_ternary_expr(ASTTernaryExpr *te, IrFunction *f, IrBlock *bb,
+                                     FuncBuilder *ctx)
 {
-    ExprResult cond = build_expr(cond_node, f, bb, ctx);
-    if (!cond.bb)
+    ExprResult cond = build_expr(te->cond, f, bb, ctx);
+
+    IrBlock *then_bb = new_block(f, "tern_then");
+    IrBlock *else_bb = new_block(f, "tern_else");
+    IrBlock *merge_bb = new_block(f, "tern_merge");
+
+    cond_jump(cond.block, cond.value, then_bb, else_bb);
+
+    ExprResult then_val = build_expr(te->then_expr, f, then_bb, ctx);
+    if (!is_terminated(then_val.block))
     {
-        return cond;
+        jump(then_val.block, merge_bb);
     }
 
-    IrBlock *then_bb = add_unique_block(f, "tern_then");
-    IrBlock *else_bb = add_unique_block(f, "tern_else");
-    IrBlock *merge_bb = add_unique_block(f, "tern_merge");
-
-    ir_emit_brcond(cond.bb, cond.val, then_bb->label, else_bb->label);
-    vec_push(then_bb->preds, cond.bb);
-    vec_push(else_bb->preds, cond.bb);
-
-    ExprResult then_val = build_expr(then_node, f, then_bb, ctx);
-    if (!then_val.bb)
+    ExprResult else_val = build_expr(te->else_expr, f, else_bb, ctx);
+    if (!is_terminated(else_val.block))
     {
-        return then_val;
-    }
-    if (!is_terminated(then_val.bb))
-    {
-        ir_emit_br(then_val.bb, merge_bb->label);
-        vec_push(merge_bb->preds, then_val.bb);
+        jump(else_val.block, merge_bb);
     }
 
-    ExprResult else_val = build_expr(else_node, f, else_bb, ctx);
-    if (!else_val.bb)
-    {
-        return else_val;
-    }
-    if (!is_terminated(else_val.bb))
-    {
-        ir_emit_br(else_val.bb, merge_bb->label);
-        vec_push(merge_bb->preds, else_val.bb);
-    }
-
-    u32 dst = ir_alloc_vreg(ctx->mod, 4);
+    u32 dst = alloc_vreg(ctx);
     IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
-    ir_phi_add_entry(phi, then_val.val, then_val.bb);
-    ir_phi_add_entry(phi, else_val.val, else_val.bb);
+    ir_phi_add_entry(phi, then_val.value, then_val.block);
+    ir_phi_add_entry(phi, else_val.value, else_val.block);
     merge_bb->sealed = true;
 
     return expr_result(ir_operand_vreg(dst), merge_bb);
 }
 
-static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    /* The target read is deliberate: in a single-predecessor block it recurses
+       into multi-predecessor ancestors and seeds their PHIs (and the loop
+       header's placeholder PHI) before the right-hand side is built. */
+    ExprResult left = build_expr(be->left, f, bb, ctx);
+    bb = left.block;
+    ExprResult right = build_expr(be->right, f, bb, ctx);
+    bb = right.block;
+    if (be->left->kind != AST_IDENT)
+    {
+        ir_error(&be->base, "assignment target must be an identifier");
+        return expr_result(ir_operand_imm(0), bb);
+    }
+    ASTIdent *target = ast_as(ASTIdent, be->left);
+    write_variable(ctx, target->name, bb, right.value);
+    return expr_result(right.value, bb);
+}
+
+static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
+                                         FuncBuilder *ctx)
+{
+    ExprResult left = build_expr(be->left, f, bb, ctx);
+    ExprResult right = build_expr(be->right, f, left.block, ctx);
+    u32 dst = alloc_vreg(ctx);
+    IrOpcode op = binop_ir[be->op];
+    if (op == 0)
+    {
+        ir_error(&be->base, "unsupported binary operator");
+        return expr_result(ir_operand_imm(0), right.block);
+    }
+    ir_emit_binop(right.block, op, dst, left.value, right.value);
+    return expr_result(ir_operand_vreg(dst), right.block);
+}
+
+static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    ExprResult src = build_expr(ue->operand, f, bb, ctx);
+    u32 dst = alloc_vreg(ctx);
+    if (ue->op == UN_LOG_NOT)
+    {
+        ir_emit_binop(src.block, OP_ICMP_EQ, dst, src.value, ir_operand_imm(0));
+    }
+    else
+    {
+        emit_unary_op(src.block, dst, ue->op, src.value, &ue->base);
+    }
+    return expr_result(ir_operand_vreg(dst), src.block);
+}
+
+static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    u32 nargs = (u32) vec_size(ce->args);
+    IrOperand *args = arena_alloc(ctx->mod->arena, nargs * sizeof(IrOperand), sizeof(IrOperand));
+    for (u32 i = 0; i < nargs; i++)
+    {
+        ASTNode *arg = (ASTNode *) vec_get(ce->args, i);
+        ExprResult arg_res = build_expr(arg, f, bb, ctx);
+        args[i] = arg_res.value;
+        bb = arg_res.block;
+    }
+    u32 dst = alloc_vreg(ctx);
+    ir_emit_call(bb, dst, ce->callee, nargs, args);
+    return expr_result(ir_operand_vreg(dst), bb);
+}
+
+static ExprResult build_binary_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    if (be->op == BIN_LOG_AND || be->op == BIN_LOG_OR)
+    {
+        return build_short_circuit(be, f, bb, ctx);
+    }
+    if (be->op == BIN_ASSIGN)
+    {
+        return build_assign_expr(be, f, bb, ctx);
+    }
+    return build_arith_binop_expr(be, f, bb, ctx);
+}
+
+static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     switch (node->kind)
     {
         case AST_INT_LITERAL:
-        {
-            ASTIntLiteral *lit = ast_as(ASTIntLiteral, node);
-            return expr_result(ir_operand_imm(lit->value), bb);
-        }
+            return build_int_literal_expr(ast_as(ASTIntLiteral, node), f, bb, ctx);
         case AST_IDENT:
-        {
-            ASTIdent *id = ast_as(ASTIdent, node);
-            return expr_result(read_variable(ctx, id->name, bb), bb);
-        }
+            return build_ident_expr(ast_as(ASTIdent, node), f, bb, ctx);
         case AST_BINARY_EXPR:
-        {
-            ASTBinaryExpr *be = ast_as(ASTBinaryExpr, node);
-            if (be->op == BIN_LOG_AND)
-            {
-                return build_short_circuit(be->left, be->right, false, f, bb, ctx);
-            }
-            if (be->op == BIN_LOG_OR)
-            {
-                return build_short_circuit(be->left, be->right, true, f, bb, ctx);
-            }
-            ExprResult left = build_expr(be->left, f, bb, ctx);
-            bb = left.bb;
-            if (be->op == BIN_ASSIGN)
-            {
-                ExprResult right = build_expr(be->right, f, bb, ctx);
-                bb = right.bb;
-                IrOperand val = build_assignment(bb, node, right.val, ctx);
-                return expr_result(val, bb);
-            }
-            ExprResult right = build_expr(be->right, f, bb, ctx);
-            bb = right.bb;
-            u32 dst = ir_alloc_vreg(ctx->mod, 4);
-            switch (be->op)
-            {
-                case BIN_EQ:
-                case BIN_NE:
-                case BIN_LT:
-                case BIN_GT:
-                case BIN_LE:
-                case BIN_GE:
-                    ir_emit_binop(bb, icmp_opcodes[be->op], dst, left.val, right.val);
-                    break;
-                default:
-                    emit_arith_binop(bb, dst, be->op, left.val, right.val, node);
-                    break;
-            }
-            return expr_result(ir_operand_vreg(dst), bb);
-        }
+            return build_binary_expr(ast_as(ASTBinaryExpr, node), f, bb, ctx);
         case AST_UNARY_EXPR:
-        {
-            ASTUnaryExpr *ue = ast_as(ASTUnaryExpr, node);
-            ExprResult src = build_expr(ue->operand, f, bb, ctx);
-            bb = src.bb;
-            u32 dst = ir_alloc_vreg(ctx->mod, 4);
-            if (ue->op == UN_LOG_NOT)
-            {
-                ir_emit_binop(bb, OP_ICMP_EQ, dst, src.val, ir_operand_imm(0));
-            }
-            else
-            {
-                emit_unary_op(bb, dst, ue->op, src.val, node);
-            }
-            return expr_result(ir_operand_vreg(dst), bb);
-        }
+            return build_unary_expr(ast_as(ASTUnaryExpr, node), f, bb, ctx);
         case AST_CALL_EXPR:
-        {
-            ASTCallExpr *ce = ast_as(ASTCallExpr, node);
-            u32 nargs = (u32) vec_size(ce->args);
-            IrOperand *args = arena_alloc(ctx->mod->arena, nargs * sizeof(IrOperand), sizeof(IrOperand));
-            for (u32 i = 0; i < nargs; i++)
-            {
-                ASTNode *arg = (ASTNode *) vec_get(ce->args, i);
-                ExprResult arg_res = build_expr(arg, f, bb, ctx);
-                args[i] = arg_res.val;
-                bb = arg_res.bb;
-            }
-            u32 dst = ir_alloc_vreg(ctx->mod, 4);
-            ir_emit_call(bb, dst, ce->callee, nargs, args);
-            return expr_result(ir_operand_vreg(dst), bb);
-        }
+            return build_call_expr(ast_as(ASTCallExpr, node), f, bb, ctx);
         case AST_TERNARY_EXPR:
-        {
-            ASTTernaryExpr *te = ast_as(ASTTernaryExpr, node);
-            return build_ternary(te->cond, te->then_expr, te->else_expr, f, bb, ctx);
-        }
+            return build_ternary_expr(ast_as(ASTTernaryExpr, node), f, bb, ctx);
         default:
             ir_error(node, "unsupported expression kind %s", ast_kind_name(node->kind));
             return expr_result(ir_operand_imm(0), bb);
     }
 }
 
-static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, BuilderCtx *ctx);
-
-static void collect_labels(ASTNode *node, IrFunction *f, BuilderCtx *ctx)
+static void collect_labels(ASTNode *node, IrFunction *f, FuncBuilder *ctx)
 {
     if (!node)
     {
@@ -503,12 +481,7 @@ static void collect_labels(ASTNode *node, IrFunction *f, BuilderCtx *ctx)
         case AST_LABEL_STMT:
         {
             ASTLabelStmt *ls = ast_as(ASTLabelStmt, node);
-            if (!strmap_get(ctx->goto_labels, ls->label))
-            {
-                IrBlock *label_bb = ir_func_add_block(f, ls->label);
-                label_bb->is_loop_header = true;
-                strmap_set(ctx->goto_labels, ls->label, label_bb);
-            }
+            label_block(ctx, f, ls->label);
             collect_labels(ls->stmt, f, ctx);
             break;
         }
@@ -553,7 +526,21 @@ static void collect_labels(ASTNode *node, IrFunction *f, BuilderCtx *ctx)
     }
 }
 
-static IrBlock *build_stmt_sequence(Vec *stmts, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static IrBlock *label_block(FuncBuilder *ctx, IrFunction *f, const char *name)
+{
+    IrBlock *label_bb = (IrBlock *) strmap_get(ctx->goto_labels, name);
+    if (!label_bb)
+    {
+        label_bb = ir_func_add_block(f, name);
+        label_bb->is_loop_header = true;
+        strmap_set(ctx->goto_labels, name, label_bb);
+    }
+    /* Label blocks are treated as merge points because backward gotos can add
+       predecessor edges after this point, so PHIs must wait. */
+    return label_bb;
+}
+
+static IrBlock *build_stmt_sequence(Vec *stmts, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     size_t n = vec_size(stmts);
     for (size_t i = 0; i < n; i++)
@@ -561,10 +548,7 @@ static IrBlock *build_stmt_sequence(Vec *stmts, IrFunction *f, IrBlock *bb, Buil
         ASTNode *stmt = (ASTNode *) vec_get(stmts, i);
         if (is_terminated(bb))
         {
-            /* Statements after a terminator are unreachable. Place them in a
-               fresh block so they cannot pollute the value map of reachable
-               blocks. */
-            IrBlock *unreach = add_unique_block(f, "unreach");
+            IrBlock *unreach = new_block(f, "unreach");
             bb = build_stmt(stmt, f, unreach, ctx);
         }
         else
@@ -575,17 +559,15 @@ static IrBlock *build_stmt_sequence(Vec *stmts, IrFunction *f, IrBlock *bb, Buil
     return bb;
 }
 
-static IrBlock *build_compound_stmt(ASTCompoundStmt *cs, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static IrBlock *build_compound_stmt(ASTCompoundStmt *cs, IrFunction *f, IrBlock *bb,
+                                    FuncBuilder *ctx)
 {
     return build_stmt_sequence(cs->stmts, f, bb, ctx);
 }
 
-/* Build one if/else branch: wire the entry, build the statement (if any), and
-   fall through to the merge block unless the branch already terminates. */
-static void build_branch(ASTNode *branch_stmt, IrFunction *f, IrBlock *cond_bb, IrBlock *branch_bb,
-                         IrBlock *merge_bb, BuilderCtx *ctx)
+static void build_cond_branch(ASTNode *branch_stmt, IrFunction *f, IrBlock *branch_bb,
+                              IrBlock *merge_bb, FuncBuilder *ctx)
 {
-    vec_push(branch_bb->preds, cond_bb);
     seal_block(ctx, branch_bb);
 
     IrBlock *end = branch_bb;
@@ -595,202 +577,177 @@ static void build_branch(ASTNode *branch_stmt, IrFunction *f, IrBlock *cond_bb, 
     }
     if (!is_terminated(end))
     {
-        ir_emit_br(end, merge_bb->label);
-        vec_push(merge_bb->preds, end);
+        jump(end, merge_bb);
     }
 }
 
-static IrBlock *build_if_stmt(ASTIfStmt *is, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static IrBlock *build_if_stmt(ASTIfStmt *is, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     ExprResult cond = build_expr(is->cond, f, bb, ctx);
-    bb = cond.bb;
+    bb = cond.block;
 
-    IrBlock *then_bb = add_unique_block(f, "then");
-    IrBlock *else_bb = add_unique_block(f, "else");
-    IrBlock *merge_bb = add_unique_block(f, "merge");
+    IrBlock *then_bb = new_block(f, "then");
+    IrBlock *else_bb = new_block(f, "else");
+    IrBlock *merge_bb = new_block(f, "merge");
 
-    ir_emit_brcond(bb, cond.val, then_bb->label, else_bb->label);
+    cond_jump(bb, cond.value, then_bb, else_bb);
 
-    build_branch(is->then_branch, f, bb, then_bb, merge_bb, ctx);
-    build_branch(is->else_branch, f, bb, else_bb, merge_bb, ctx);
+    build_cond_branch(is->then_branch, f, then_bb, merge_bb, ctx);
+    build_cond_branch(is->else_branch, f, else_bb, merge_bb, ctx);
     seal_block(ctx, merge_bb);
     return merge_bb;
 }
 
-static IrBlock *build_while_stmt(ASTWhileStmt *ws, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static IrBlock *build_loop_body(ASTNode *body_node, IrFunction *f, LoopBlocks *lb, FuncBuilder *ctx)
 {
-    IrBlock *header_bb = add_unique_block(f, "while_header");
-    IrBlock *body_bb = add_unique_block(f, "while_body");
-    IrBlock *exit_bb = add_unique_block(f, "while_exit");
-    header_bb->is_loop_header = true;
-
-    ir_emit_br(bb, header_bb->label);
-    vec_push(header_bb->preds, bb);
-    vec_push(body_bb->preds, header_bb);
-
-    LoopContext loop = {header_bb, exit_bb};
-    vec_push(ctx->loop_stack, &loop);
-    IrBlock *body_end = build_stmt(ws->body, f, body_bb, ctx);
+    LoopContext lc = {.continue_target = lb->latch, .exit = lb->exit};
+    vec_push(ctx->loop_stack, &lc);
+    IrBlock *end = build_stmt(body_node, f, lb->body, ctx);
     vec_pop(ctx->loop_stack);
-
-    if (!is_terminated(body_end))
-    {
-        ir_emit_br(body_end, header_bb->label);
-        vec_push(header_bb->preds, body_end);
-    }
-
-    ExprResult cond = build_expr(ws->cond, f, header_bb, ctx);
-    header_bb = cond.bb;
-    ir_emit_brcond(header_bb, cond.val, body_bb->label, exit_bb->label);
-    vec_push(exit_bb->preds, header_bb);
-
-    seal_block(ctx, header_bb);
-    seal_block(ctx, exit_bb);
-    return exit_bb;
+    return end;
 }
 
-static IrBlock *build_do_while_stmt(ASTDoWhileStmt *ds, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static IrBlock *finish_loop(ASTNode *cond_node, IrFunction *f, LoopBlocks *lb, FuncBuilder *ctx)
 {
-    IrBlock *body_bb = add_unique_block(f, "do_body");
-    IrBlock *header_bb = add_unique_block(f, "do_header");
-    IrBlock *exit_bb = add_unique_block(f, "do_exit");
-    header_bb->is_loop_header = true;
-
-    ir_emit_br(bb, body_bb->label);
-    vec_push(body_bb->preds, bb);
-    vec_push(body_bb->preds, header_bb);
-
-    LoopContext loop = {header_bb, exit_bb};
-    vec_push(ctx->loop_stack, &loop);
-    IrBlock *body_end = build_stmt(ds->body, f, body_bb, ctx);
-    vec_pop(ctx->loop_stack);
-
-    if (!is_terminated(body_end))
+    IrBlock *h = lb->header;
+    if (cond_node)
     {
-        ir_emit_br(body_end, header_bb->label);
-        vec_push(header_bb->preds, body_end);
+        ExprResult c = build_expr(cond_node, f, h, ctx);
+        h = c.block;
+        ir_emit_brcond(h, c.value, lb->body->label, lb->exit->label);
     }
-
-    seal_block(ctx, body_bb);
-
-    ExprResult cond = build_expr(ds->cond, f, header_bb, ctx);
-    header_bb = cond.bb;
-    ir_emit_brcond(header_bb, cond.val, body_bb->label, exit_bb->label);
-    vec_push(exit_bb->preds, header_bb);
-
-    seal_block(ctx, header_bb);
-    seal_block(ctx, exit_bb);
-    return exit_bb;
+    else
+    {
+        ir_emit_br(h, lb->body->label);
+    }
+    declare_pred(lb->exit, h);
+    seal_block(ctx, h);
+    seal_block(ctx, lb->exit);
+    return lb->exit;
 }
 
-static IrBlock *build_for_stmt(ASTForStmt *fs, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static IrBlock *build_while_stmt(ASTWhileStmt *ws, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    IrBlock *header_bb = new_block(f, "while_header");
+    IrBlock *body_bb = new_block(f, "while_body");
+    IrBlock *exit_bb = new_block(f, "while_exit");
+    header_bb->is_loop_header = true;
+
+    LoopBlocks lb = {header_bb, body_bb, header_bb, exit_bb};
+
+    jump(bb, lb.header);
+    declare_pred(lb.body, lb.header);
+
+    IrBlock *body_end = build_loop_body(ws->body, f, &lb, ctx);
+    if (!is_terminated(body_end))
+    {
+        jump(body_end, lb.latch);
+    }
+
+    return finish_loop(ws->cond, f, &lb, ctx);
+}
+
+static IrBlock *build_do_while_stmt(ASTDoWhileStmt *ds, IrFunction *f, IrBlock *bb,
+                                    FuncBuilder *ctx)
+{
+    IrBlock *body_bb = new_block(f, "do_body");
+    IrBlock *header_bb = new_block(f, "do_header");
+    IrBlock *exit_bb = new_block(f, "do_exit");
+    header_bb->is_loop_header = true;
+
+    LoopBlocks lb = {header_bb, body_bb, header_bb, exit_bb};
+
+    jump(bb, lb.body);
+    declare_pred(lb.body, lb.header);
+
+    IrBlock *body_end = build_loop_body(ds->body, f, &lb, ctx);
+    if (!is_terminated(body_end))
+    {
+        jump(body_end, lb.latch);
+    }
+    seal_block(ctx, lb.body);
+
+    return finish_loop(ds->cond, f, &lb, ctx);
+}
+
+static IrBlock *build_for_stmt(ASTForStmt *fs, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     if (fs->init)
     {
         bb = build_stmt(fs->init, f, bb, ctx);
     }
 
-    IrBlock *header_bb = add_unique_block(f, "for_header");
-    IrBlock *body_bb = add_unique_block(f, "for_body");
-    IrBlock *latch_bb = add_unique_block(f, "for_latch");
-    IrBlock *exit_bb = add_unique_block(f, "for_exit");
+    IrBlock *header_bb = new_block(f, "for_header");
+    IrBlock *body_bb = new_block(f, "for_body");
+    IrBlock *latch_bb = new_block(f, "for_latch");
+    IrBlock *exit_bb = new_block(f, "for_exit");
     header_bb->is_loop_header = true;
 
-    ir_emit_br(bb, header_bb->label);
-    vec_push(header_bb->preds, bb);
-    vec_push(body_bb->preds, header_bb);
+    LoopBlocks lb = {header_bb, body_bb, latch_bb, exit_bb};
 
-    LoopContext loop = {latch_bb, exit_bb};
-    vec_push(ctx->loop_stack, &loop);
-    IrBlock *body_end = build_stmt(fs->body, f, body_bb, ctx);
-    vec_pop(ctx->loop_stack);
+    jump(bb, lb.header);
+    declare_pred(lb.body, lb.header);
 
+    IrBlock *body_end = build_loop_body(fs->body, f, &lb, ctx);
     if (!is_terminated(body_end))
     {
-        ir_emit_br(body_end, latch_bb->label);
-        vec_push(latch_bb->preds, body_end);
+        jump(body_end, lb.latch);
     }
 
-    /* The latch is a merge point: it is entered by the body's fall-through and
-       by `continue`. All its predecessors are known now, so seal it before the
-       post-expression reads loop variables. */
-    seal_block(ctx, latch_bb);
+    /* The latch is a merge point: seal it before the post-expression so
+       post reads see sealed predecessors. */
+    seal_block(ctx, lb.latch);
 
     if (fs->post)
     {
-        ExprResult post = build_expr(fs->post, f, latch_bb, ctx);
-        latch_bb = post.bb;
+        ExprResult post = build_expr(fs->post, f, lb.latch, ctx);
+        lb.latch = post.block;
     }
-    if (!is_terminated(latch_bb))
+    if (!is_terminated(lb.latch))
     {
-        ir_emit_br(latch_bb, header_bb->label);
-        vec_push(header_bb->preds, latch_bb);
+        jump(lb.latch, lb.header);
     }
 
-    ExprResult cond;
-    if (fs->cond)
-    {
-        cond = build_expr(fs->cond, f, header_bb, ctx);
-        header_bb = cond.bb;
-        ir_emit_brcond(header_bb, cond.val, body_bb->label, exit_bb->label);
-    }
-    else
-    {
-        ir_emit_br(header_bb, body_bb->label);
-    }
-    vec_push(exit_bb->preds, header_bb);
-
-    seal_block(ctx, header_bb);
-    seal_block(ctx, exit_bb);
-    return exit_bb;
+    return finish_loop(fs->cond, f, &lb, ctx);
 }
 
-static IrBlock *build_break_stmt(ASTBreakStmt *bs, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static IrBlock *build_break_stmt(ASTBreakStmt *bs, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     (void) bs;
     (void) f;
     ASSERT(vec_size(ctx->loop_stack) > 0);
     LoopContext *loop = (LoopContext *) vec_last(ctx->loop_stack);
-    ir_emit_br(bb, loop->exit->label);
-    vec_push(loop->exit->preds, bb);
+    jump(bb, loop->exit);
     return bb;
 }
 
-static IrBlock *build_continue_stmt(ASTContinueStmt *cs, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static IrBlock *build_continue_stmt(ASTContinueStmt *cs, IrFunction *f, IrBlock *bb,
+                                    FuncBuilder *ctx)
 {
     (void) cs;
     (void) f;
     ASSERT(vec_size(ctx->loop_stack) > 0);
     LoopContext *loop = (LoopContext *) vec_last(ctx->loop_stack);
-    ir_emit_br(bb, loop->header->label);
-    vec_push(loop->header->preds, bb);
+    jump(bb, loop->continue_target);
     return bb;
 }
 
-static IrBlock *build_goto_stmt(ASTGotoStmt *gs, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static IrBlock *build_goto_stmt(ASTGotoStmt *gs, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     (void) f;
     IrBlock *target = (IrBlock *) strmap_get(ctx->goto_labels, gs->label);
     ASSERT(target != NULL);
-    ir_emit_br(bb, target->label);
-    vec_push(target->preds, bb);
+    jump(bb, target);
     return bb;
 }
 
-static IrBlock *build_label_stmt(ASTLabelStmt *ls, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static IrBlock *build_label_stmt(ASTLabelStmt *ls, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
-    IrBlock *label_bb = (IrBlock *) strmap_get(ctx->goto_labels, ls->label);
-    if (!label_bb)
-    {
-        label_bb = ir_func_add_block(f, ls->label);
-        label_bb->is_loop_header = true;
-        strmap_set(ctx->goto_labels, ls->label, label_bb);
-    }
+    IrBlock *label_bb = label_block(ctx, f, ls->label);
     /* If the current block is not terminated, fall through to the label block. */
     if (!is_terminated(bb))
     {
-        ir_emit_br(bb, label_bb->label);
-        vec_push(label_bb->preds, bb);
+        jump(bb, label_bb);
     }
     /* Label blocks are deferred until the end of the function: a backward goto
        can add a predecessor edge after this point, so PHIs must wait for all
@@ -798,92 +755,114 @@ static IrBlock *build_label_stmt(ASTLabelStmt *ls, IrFunction *f, IrBlock *bb, B
     return build_stmt(ls->stmt, f, label_bb, ctx);
 }
 
-static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, BuilderCtx *ctx)
+static IrBlock *build_return_stmt(ASTReturnStmt *ret, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    if (ret->expr)
+    {
+        ExprResult val = build_expr(ret->expr, f, bb, ctx);
+        ir_emit_ret(val.block, val.value);
+        return val.block;
+    }
+    ir_emit_ret_void(bb);
+    return bb;
+}
+
+static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    IrOperand val = ir_operand_imm(0);
+    if (vd->init)
+    {
+        ExprResult init = build_expr(vd->init, f, bb, ctx);
+        bb = init.block;
+        val = init.value;
+    }
+    write_variable(ctx, vd->name, bb, val);
+    return bb;
+}
+
+static IrBlock *build_expr_stmt(ASTExprStmt *es, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    ExprResult res = build_expr(es->expr, f, bb, ctx);
+    return res.block;
+}
+
+static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     switch (node->kind)
     {
         case AST_RETURN_STMT:
-        {
-            ASTReturnStmt *ret = ast_as(ASTReturnStmt, node);
-            if (ret->expr)
-            {
-                ExprResult val = build_expr(ret->expr, f, bb, ctx);
-                ir_emit_ret(val.bb, val.val);
-            }
-            else
-            {
-                ir_emit_ret_void(bb);
-            }
-            return bb;
-        }
+            return build_return_stmt(ast_as(ASTReturnStmt, node), f, bb, ctx);
         case AST_VAR_DECL:
-        {
-            ASTVarDecl *vd = ast_as(ASTVarDecl, node);
-            IrOperand val = ir_operand_imm(0);
-            if (vd->init)
-            {
-                ExprResult init = build_expr(vd->init, f, bb, ctx);
-                bb = init.bb;
-                val = init.val;
-            }
-            write_variable(ctx, vd->name, bb, val);
-            return bb;
-        }
+            return build_var_decl_stmt(ast_as(ASTVarDecl, node), f, bb, ctx);
         case AST_EXPR_STMT:
-        {
-            ASTExprStmt *es = ast_as(ASTExprStmt, node);
-            ExprResult res = build_expr(es->expr, f, bb, ctx);
-            return res.bb;
-        }
+            return build_expr_stmt(ast_as(ASTExprStmt, node), f, bb, ctx);
         case AST_COMPOUND_STMT:
-        {
-            ASTCompoundStmt *cs = ast_as(ASTCompoundStmt, node);
-            return build_compound_stmt(cs, f, bb, ctx);
-        }
+            return build_compound_stmt(ast_as(ASTCompoundStmt, node), f, bb, ctx);
         case AST_IF_STMT:
-        {
-            ASTIfStmt *is = ast_as(ASTIfStmt, node);
-            return build_if_stmt(is, f, bb, ctx);
-        }
+            return build_if_stmt(ast_as(ASTIfStmt, node), f, bb, ctx);
         case AST_WHILE_STMT:
-        {
-            ASTWhileStmt *ws = ast_as(ASTWhileStmt, node);
-            return build_while_stmt(ws, f, bb, ctx);
-        }
+            return build_while_stmt(ast_as(ASTWhileStmt, node), f, bb, ctx);
         case AST_DO_WHILE_STMT:
-        {
-            ASTDoWhileStmt *ds = ast_as(ASTDoWhileStmt, node);
-            return build_do_while_stmt(ds, f, bb, ctx);
-        }
+            return build_do_while_stmt(ast_as(ASTDoWhileStmt, node), f, bb, ctx);
         case AST_FOR_STMT:
-        {
-            ASTForStmt *fs = ast_as(ASTForStmt, node);
-            return build_for_stmt(fs, f, bb, ctx);
-        }
+            return build_for_stmt(ast_as(ASTForStmt, node), f, bb, ctx);
         case AST_BREAK_STMT:
-        {
-            ASTBreakStmt *bs = ast_as(ASTBreakStmt, node);
-            return build_break_stmt(bs, f, bb, ctx);
-        }
+            return build_break_stmt(ast_as(ASTBreakStmt, node), f, bb, ctx);
         case AST_CONTINUE_STMT:
-        {
-            ASTContinueStmt *cs = ast_as(ASTContinueStmt, node);
-            return build_continue_stmt(cs, f, bb, ctx);
-        }
+            return build_continue_stmt(ast_as(ASTContinueStmt, node), f, bb, ctx);
         case AST_GOTO_STMT:
-        {
-            ASTGotoStmt *gs = ast_as(ASTGotoStmt, node);
-            return build_goto_stmt(gs, f, bb, ctx);
-        }
+            return build_goto_stmt(ast_as(ASTGotoStmt, node), f, bb, ctx);
         case AST_LABEL_STMT:
-        {
-            ASTLabelStmt *ls = ast_as(ASTLabelStmt, node);
-            return build_label_stmt(ls, f, bb, ctx);
-        }
+            return build_label_stmt(ast_as(ASTLabelStmt, node), f, bb, ctx);
         default:
             ir_error(node, "unsupported statement kind %s", ast_kind_name(node->kind));
             return bb;
     }
+}
+
+static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlock *entry)
+{
+    size_t nparams = vec_size(ast->params);
+    for (size_t i = 0; i < nparams; i++)
+    {
+        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(ast->params, i));
+        u32 vreg = alloc_vreg(ctx);
+        IrParam *p = arena_alloc(ctx->mod->arena, sizeof(IrParam), sizeof(void *));
+        p->name = param->name;
+        p->type = param->type;
+        p->vreg = vreg;
+        vec_push(f->params, p);
+        write_variable(ctx, param->name, entry, ir_operand_vreg(vreg));
+    }
+}
+
+static void seal_all_blocks(FuncBuilder *ctx, IrFunction *f)
+{
+    /* Seal every block that is still unsealed. Label blocks are deliberately
+       left unsealed during construction so that backward-goto predecessor edges
+       are known before their PHIs are built. */
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t i = 0; i < nblocks; i++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, i);
+        seal_block(ctx, bb);
+    }
+}
+
+static void finish_func(IrFunction *f, IrBlock *exit, FuncBuilder *ctx)
+{
+    if (!is_terminated(exit))
+    {
+        if (f->ret_type->kind == TYPE_VOID)
+        {
+            ir_emit_ret_void(exit);
+        }
+        else
+        {
+            ir_emit_unreachable(exit);
+        }
+    }
+    seal_all_blocks(ctx, f);
 }
 
 static bool build_func(ASTNode *ast, IrModule *mod)
@@ -904,50 +883,17 @@ static bool build_func(ASTNode *ast, IrModule *mod)
         return false;
     }
 
-    BuilderCtx ctx = {mod, u64map_new(mod->arena), vec_new(mod->arena), strmap_new(mod->arena)};
+    FuncBuilder ctx = {mod, u64map_new(mod->arena), vec_new(mod->arena), strmap_new(mod->arena)};
 
     /* Pre-create blocks for all labels so gotos can target them. */
     collect_labels(func_ast->body, func, &ctx);
 
-    /* Allocate vregs for parameters and record them */
-    size_t nparams = vec_size(func_ast->params);
-    for (size_t i = 0; i < nparams; i++)
-    {
-        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(func_ast->params, i));
-        u32 vreg = ir_alloc_vreg(mod, 4);
-        IrParam *p = arena_alloc(mod->arena, sizeof(IrParam), sizeof(void *));
-        p->name = param->name;
-        p->type = param->type;
-        p->vreg = vreg;
-        vec_push(func->params, p);
-        write_variable(&ctx, param->name, entry, ir_operand_vreg(vreg));
-    }
+    setup_params(&ctx, func, func_ast, entry);
 
     ASTCompoundStmt *body = (ASTCompoundStmt *) func_ast->body;
     entry = build_stmt_sequence(body->stmts, func, entry, &ctx);
 
-    /* Ensure block ends with a terminator */
-    if (!is_terminated(entry))
-    {
-        if (func_ast->ret_type->kind == TYPE_VOID)
-        {
-            ir_emit_ret_void(entry);
-        }
-        else
-        {
-            ir_emit_unreachable(entry);
-        }
-    }
-
-    /* Seal every block that is still unsealed. Label blocks are deliberately
-       left unsealed during construction so that backward-goto predecessor edges
-       are known before their PHIs are built. */
-    size_t nblocks = vec_size(func->blocks);
-    for (size_t i = 0; i < nblocks; i++)
-    {
-        IrBlock *bb = (IrBlock *) vec_get(func->blocks, i);
-        seal_block(&ctx, bb);
-    }
+    finish_func(func, entry, &ctx);
 
     return true;
 }

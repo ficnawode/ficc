@@ -118,3 +118,163 @@ TEST(ir_builder, if_no_else)
     EXPECT_EQ(result, 10);
     arena_free(a);
 }
+
+static IrBlock *find_block(IrFunction *f, const char *label)
+{
+    size_t n = vec_size(f->blocks);
+    for (size_t i = 0; i < n; i++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, i);
+        if (strcmp(bb->label, label) == 0)
+        {
+            return bb;
+        }
+    }
+    return NULL;
+}
+
+static IrBlock *find_block_by_prefix(IrFunction *f, const char *prefix)
+{
+    size_t n = vec_size(f->blocks);
+    size_t plen = strlen(prefix);
+    for (size_t i = 0; i < n; i++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, i);
+        if (strncmp(bb->label, prefix, plen) == 0)
+        {
+            return bb;
+        }
+    }
+    return NULL;
+}
+
+TEST(ir_builder, while_loop_structure)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_from_source(
+        "int main(void) { int i = 0; while (i < 3) { i = i + 1; } return i; }", a);
+    EXPECT_TRUE(m != NULL);
+
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    /* entry + while_header + while_body + while_exit */
+    EXPECT_EQ(vec_size(f->blocks), 4);
+
+    IrBlock *header = (IrBlock *) vec_get(f->blocks, 1);
+    EXPECT_TRUE(strcmp(header->label, "while_header_1") == 0);
+    EXPECT_TRUE(header->is_loop_header);
+
+    /* The loop header is the merge point (entry + back edge): its PHI carries
+       the loop-carried value of i. */
+    IrInstr *first = (IrInstr *) vec_get(header->instrs, 0);
+    EXPECT_EQ(first->opcode, OP_PHI);
+
+    IrInstr *last = (IrInstr *) vec_last(header->instrs);
+    EXPECT_EQ(last->opcode, OP_BRCOND);
+
+    EXPECT_EQ(ir_interp_run(m), 3);
+    arena_free(a);
+}
+
+TEST(ir_builder, for_loop_structure)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_from_source(
+        "int main(void) { int s = 0; for (int i = 0; i < 4; i = i + 1) { s = s + i; } return s; }",
+        a);
+    EXPECT_TRUE(m != NULL);
+
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    /* entry + for_header + for_body + for_latch + for_exit */
+    EXPECT_EQ(vec_size(f->blocks), 5);
+
+    IrBlock *header = (IrBlock *) vec_get(f->blocks, 1);
+    EXPECT_TRUE(strcmp(header->label, "for_header_1") == 0);
+    EXPECT_TRUE(header->is_loop_header);
+    IrInstr *last = (IrInstr *) vec_last(header->instrs);
+    EXPECT_EQ(last->opcode, OP_BRCOND);
+
+    EXPECT_EQ(ir_interp_run(m), 6);
+
+    /* No-cond form: the header falls through to the body with a plain BR. */
+    IrModule *m2 = build_from_source(
+        "int main(void) { int i = 0; for (;;) { i = i + 1; if (i > 2) break; } return i; }", a);
+    EXPECT_TRUE(m2 != NULL);
+
+    IrFunction *f2 = (IrFunction *) vec_get(m2->funcs, 0);
+    IrBlock *hdr2 = (IrBlock *) vec_get(f2->blocks, 1);
+    EXPECT_TRUE(strcmp(hdr2->label, "for_header_1") == 0);
+    IrInstr *last2 = (IrInstr *) vec_last(hdr2->instrs);
+    EXPECT_EQ(last2->opcode, OP_BR);
+
+    EXPECT_EQ(ir_interp_run(m2), 3);
+    arena_free(a);
+}
+
+TEST(ir_builder, short_circuit_structure)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_from_source("int main(void) { return (1 && 0) ? 1 : 0; }", a);
+    EXPECT_TRUE(m != NULL);
+
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    EXPECT_TRUE(find_block_by_prefix(f, "land_true") != NULL);
+    EXPECT_TRUE(find_block_by_prefix(f, "land_false") != NULL);
+    EXPECT_TRUE(find_block_by_prefix(f, "land_rhs") != NULL);
+
+    IrBlock *merge = find_block_by_prefix(f, "land_merge");
+    EXPECT_TRUE(merge != NULL);
+    IrInstr *first = (IrInstr *) vec_get(merge->instrs, 0);
+    EXPECT_EQ(first->opcode, OP_PHI);
+    EXPECT_EQ(first->extra.phi.nentries, 2);
+    EXPECT_TRUE(first->extra.phi.entries[0].val.is_imm);
+    EXPECT_EQ(first->extra.phi.entries[0].val.u.imm, 1);
+    EXPECT_TRUE(first->extra.phi.entries[1].val.is_imm);
+    EXPECT_EQ(first->extra.phi.entries[1].val.u.imm, 0);
+
+    EXPECT_EQ(ir_interp_run(m), 0);
+    arena_free(a);
+}
+
+TEST(ir_builder, goto_label_block)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_from_source("int main(void) { goto a; return 0; a: return 42; }", a);
+    EXPECT_TRUE(m != NULL);
+
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    IrBlock *label_bb = find_block(f, "a");
+    EXPECT_TRUE(label_bb != NULL);
+    EXPECT_TRUE(label_bb->is_loop_header);
+
+    EXPECT_EQ(ir_interp_run(m), 42);
+    arena_free(a);
+}
+
+TEST(ir_builder, nested_break_continue_preds)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_from_source(
+        "int main(void) { int s = 0; for (int i = 0; i < 10; i = i + 1) { if (i == 3) continue; "
+        "if (i == 7) break; s = s + 1; } return s; }",
+        a);
+    EXPECT_TRUE(m != NULL);
+
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t bi = 0; bi < nblocks; bi++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
+        size_t ninstrs = vec_size(bb->instrs);
+        for (size_t ii = 0; ii < ninstrs; ii++)
+        {
+            IrInstr *ins = (IrInstr *) vec_get(bb->instrs, ii);
+            if (ins->opcode == OP_PHI)
+            {
+                EXPECT_EQ(ins->extra.phi.nfilled, ins->extra.phi.nentries);
+            }
+        }
+    }
+
+    EXPECT_EQ(ir_interp_run(m), 6);
+    arena_free(a);
+}
