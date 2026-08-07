@@ -95,6 +95,22 @@ static TokenKind keyword_kind(const char *s)
     {
         return TOK_KW_GOTO;
     }
+    if (strcmp(s, "char") == 0)
+    {
+        return TOK_KW_CHAR;
+    }
+    if (strcmp(s, "short") == 0)
+    {
+        return TOK_KW_SHORT;
+    }
+    if (strcmp(s, "long") == 0)
+    {
+        return TOK_KW_LONG;
+    }
+    if (strcmp(s, "unsigned") == 0)
+    {
+        return TOK_KW_UNSIGNED;
+    }
     return TOK_IDENT;
 }
 

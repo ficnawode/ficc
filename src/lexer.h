@@ -10,6 +10,10 @@
     X(TOK_INT_LIT)                                                                                 \
     X(TOK_KW_INT)                                                                                  \
     X(TOK_KW_VOID)                                                                                 \
+    X(TOK_KW_CHAR)                                                                                 \
+    X(TOK_KW_SHORT)                                                                                \
+    X(TOK_KW_LONG)                                                                                 \
+    X(TOK_KW_UNSIGNED)                                                                             \
     X(TOK_KW_RETURN)                                                                               \
     X(TOK_KW_IF)                                                                                   \
     X(TOK_KW_ELSE)                                                                                 \

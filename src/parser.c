@@ -82,6 +82,41 @@ static Type *parse_type_specifier(ParserCtx *p)
         case TOK_KW_VOID:
             parser_advance(p);
             return type_void();
+        case TOK_KW_CHAR:
+            parser_advance(p);
+            return type_char();
+        case TOK_KW_SHORT:
+            parser_advance(p);
+            return type_short();
+        case TOK_KW_LONG:
+            parser_advance(p);
+            return type_long();
+        case TOK_KW_UNSIGNED:
+        {
+            parser_advance(p);
+            Token *next = parser_peek(p);
+            if (next->kind == TOK_KW_INT)
+            {
+                parser_advance(p);
+                return type_uint();
+            }
+            if (next->kind == TOK_KW_CHAR)
+            {
+                parser_advance(p);
+                return type_uchar();
+            }
+            if (next->kind == TOK_KW_SHORT)
+            {
+                parser_advance(p);
+                return type_ushort();
+            }
+            if (next->kind == TOK_KW_LONG)
+            {
+                parser_advance(p);
+                return type_ulong();
+            }
+            return type_uint();
+        }
         default:
             parser_error(p, "expected type specifier");
             return NULL;
@@ -197,7 +232,7 @@ static ASTNode *parse_return_stmt(ParserCtx *p)
 static ASTNode *parse_var_decl(ParserCtx *p)
 {
     Token *start = parser_peek(p);
-    ASSERT(start->kind == TOK_KW_INT);
+    (void) start; /* type-checking done by parse_type_specifier */
     Type *type = parse_type_specifier(p);
     if (!type)
     {
@@ -372,7 +407,9 @@ static ASTNode *parse_for_stmt(ParserCtx *p)
     ASTNode *init = NULL;
     if (parser_peek(p)->kind != TOK_SEMI)
     {
-        if (parser_peek(p)->kind == TOK_KW_INT)
+        if (parser_peek(p)->kind == TOK_KW_INT || parser_peek(p)->kind == TOK_KW_CHAR ||
+            parser_peek(p)->kind == TOK_KW_SHORT || parser_peek(p)->kind == TOK_KW_LONG ||
+            parser_peek(p)->kind == TOK_KW_UNSIGNED)
         {
             init = parse_var_decl(p);
         }
@@ -497,6 +534,10 @@ static ASTNode *parse_stmt(ParserCtx *p)
     switch (t->kind)
     {
         case TOK_KW_INT:
+        case TOK_KW_CHAR:
+        case TOK_KW_SHORT:
+        case TOK_KW_LONG:
+        case TOK_KW_UNSIGNED:
             return parse_var_decl(p);
         case TOK_KW_RETURN:
             return parse_return_stmt(p);

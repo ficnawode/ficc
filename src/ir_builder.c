@@ -4,10 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Vreg width is stored per-value in the codegen width table; the unit is
-   BYTES (4 = 32-bit, 8 = 64-bit). */
-#define VREG_INT_WIDTH 4
-
 typedef struct PendingPhi PendingPhi;
 struct PendingPhi
 {
@@ -52,6 +48,8 @@ struct FuncBuilder
     U64Map *block_locals; /* (u64)IrBlock* -> BlockLocals* */
     Vec *loop_stack;      /* Vec<LoopContext*> */
     StrMap *goto_labels;  /* label name -> IrBlock* */
+    StrMap *var_types;    /* variable name -> Type* */
+    StrMap *func_types;   /* function name -> Type* (return type) */
 };
 
 static IrOperand resolve_variable(FuncBuilder *ctx, const char *name, IrBlock *bb);
@@ -78,9 +76,125 @@ static IrOperand *box_operand(FuncBuilder *ctx, IrOperand op)
     return p;
 }
 
-static u32 alloc_vreg(FuncBuilder *ctx)
+static u32 alloc_vreg_from_type(FuncBuilder *ctx, Type *type)
 {
-    return ir_alloc_vreg(ctx->mod, VREG_INT_WIDTH);
+    u8 width = type->width / 8;
+    ASSERT(width == 1 || width == 2 || width == 4 || width == 8);
+    return ir_alloc_vreg(ctx->mod, width);
+}
+
+static Type *promote_type(Type *t)
+{
+    return type_promote(t);
+}
+
+static Type *common_type(Type *a, Type *b)
+{
+    return type_common(a, b);
+}
+
+static Type *expr_type(ASTNode *node, FuncBuilder *ctx)
+{
+    switch (node->kind)
+    {
+        case AST_INT_LITERAL:
+            return type_int();
+        case AST_IDENT:
+        {
+            ASTIdent *id = ast_as(ASTIdent, node);
+            Type *t = strmap_get(ctx->var_types, id->name);
+            ASSERT(t != NULL);
+            return t;
+        }
+        case AST_BINARY_EXPR:
+        {
+            ASTBinaryExpr *be = ast_as(ASTBinaryExpr, node);
+            if (be->op == BIN_ASSIGN)
+            {
+                return expr_type(be->left, ctx);
+            }
+            if (be->op == BIN_LOG_AND || be->op == BIN_LOG_OR)
+            {
+                return type_int();
+            }
+            if (be->op >= BIN_EQ && be->op <= BIN_GE)
+            {
+                return type_int();
+            }
+            return common_type(promote_type(expr_type(be->left, ctx)),
+                               promote_type(expr_type(be->right, ctx)));
+        }
+        case AST_UNARY_EXPR:
+        {
+            ASTUnaryExpr *ue = ast_as(ASTUnaryExpr, node);
+            if (ue->op == UN_LOG_NOT)
+            {
+                return type_int();
+            }
+            return promote_type(expr_type(ue->operand, ctx));
+        }
+        case AST_CALL_EXPR:
+        {
+            ASTCallExpr *ce = ast_as(ASTCallExpr, node);
+            Type *ret = strmap_get(ctx->func_types, ce->callee);
+            ASSERT(ret != NULL);
+            return ret;
+        }
+        case AST_TERNARY_EXPR:
+        {
+            ASTTernaryExpr *te = ast_as(ASTTernaryExpr, node);
+            return common_type(expr_type(te->then_expr, ctx), expr_type(te->else_expr, ctx));
+        }
+        default:
+            return type_int();
+    }
+}
+
+static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *src_type,
+                            Type *target_type)
+{
+    if (src_type->kind == target_type->kind)
+    {
+        return val;
+    }
+    u8 src_w = src_type->width / 8;
+    u8 tgt_w = target_type->width / 8;
+    if (tgt_w > src_w)
+    {
+        u32 dst = alloc_vreg_from_type(ctx, target_type);
+        IrOpcode op = type_is_signed(src_type) ? OP_SEXT : OP_ZEXT;
+        ir_emit_unary(bb, op, dst, val);
+        return ir_operand_vreg(dst);
+    }
+    else if (tgt_w < src_w)
+    {
+        u32 dst = alloc_vreg_from_type(ctx, target_type);
+        ir_emit_unary(bb, OP_TRUNC, dst, val);
+        return ir_operand_vreg(dst);
+    }
+    return val;
+}
+
+static bool is_comparison_op(BinOpKind op)
+{
+    return op >= BIN_EQ && op <= BIN_GE;
+}
+
+static bool is_shift_op(BinOpKind op)
+{
+    return op == BIN_SHL || op == BIN_SHR;
+}
+
+static bool is_divrem_op(BinOpKind op)
+{
+    return op == BIN_DIV || op == BIN_REM;
+}
+
+static u32 alloc_phi_vreg(FuncBuilder *ctx, const char *name)
+{
+    Type *t = strmap_get(ctx->var_types, name);
+    ASSERT(t != NULL);
+    return alloc_vreg_from_type(ctx, t);
 }
 
 static BlockLocals *get_block_locals(FuncBuilder *ctx, IrBlock *bb)
@@ -175,7 +289,7 @@ static IrOperand resolve_variable(FuncBuilder *ctx, const char *name, IrBlock *b
            placeholder PHI that will be filled when the block is sealed. Loop
            headers are pre-emptively treated as merge points because their back
            edge is added after the body is built. */
-        u32 dst = alloc_vreg(ctx);
+        u32 dst = alloc_phi_vreg(ctx, name);
         PendingPhi *ip = arena_alloc(ctx->mod->arena, sizeof(PendingPhi), sizeof(void *));
         ip->name = name;
         ip->vreg = dst;
@@ -215,7 +329,7 @@ static void fill_phi_entries(FuncBuilder *ctx, IrBlock *bb, const char *name, Ir
 static IrOperand build_phi(FuncBuilder *ctx, const char *name, IrBlock *bb)
 {
     u32 nentries = (u32) vec_size(bb->preds);
-    u32 dst = alloc_vreg(ctx);
+    u32 dst = alloc_phi_vreg(ctx, name);
     IrInstr *phi = emit_phi_at_start(bb, dst, nentries);
     fill_phi_entries(ctx, bb, name, phi);
     return ir_operand_vreg(dst);
@@ -328,7 +442,7 @@ static ExprResult build_short_circuit(ASTBinaryExpr *be, IrFunction *f, IrBlock 
     /* The merge block is sealed so future reads produce PHIs. */
     merge_bb->sealed = true;
 
-    u32 dst = alloc_vreg(ctx);
+    u32 dst = alloc_vreg_from_type(ctx, type_int());
     IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, ir_operand_imm(1), true_bb);
     ir_phi_add_entry(phi, ir_operand_imm(0), false_bb);
@@ -359,7 +473,8 @@ static ExprResult build_ternary_expr(ASTTernaryExpr *te, IrFunction *f, IrBlock 
         jump(else_val.block, merge_bb);
     }
 
-    u32 dst = alloc_vreg(ctx);
+    Type *tern_type = expr_type((ASTNode *) te, ctx);
+    u32 dst = alloc_vreg_from_type(ctx, tern_type);
     IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, then_val.value, then_val.block);
     ir_phi_add_entry(phi, else_val.value, else_val.block);
@@ -370,9 +485,6 @@ static ExprResult build_ternary_expr(ASTTernaryExpr *te, IrFunction *f, IrBlock 
 
 static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
-    /* The target read is deliberate: in a single-predecessor block it recurses
-       into multi-predecessor ancestors and seeds their PHIs (and the loop
-       header's placeholder PHI) before the right-hand side is built. */
     ExprResult left = build_expr(be->left, f, bb, ctx);
     bb = left.block;
     ExprResult right = build_expr(be->right, f, bb, ctx);
@@ -383,8 +495,12 @@ static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
         return expr_result(ir_operand_imm(0), bb);
     }
     ASTIdent *target = ast_as(ASTIdent, be->left);
-    write_variable(ctx, target->name, bb, right.value);
-    return expr_result(right.value, bb);
+    Type *lhs_type = strmap_get(ctx->var_types, target->name);
+    ASSERT(lhs_type != NULL);
+    Type *rhs_type = expr_type(be->right, ctx);
+    IrOperand val = promote_to(ctx, bb, right.value, rhs_type, lhs_type);
+    write_variable(ctx, target->name, bb, val);
+    return expr_result(val, bb);
 }
 
 static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
@@ -392,28 +508,104 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
 {
     ExprResult left = build_expr(be->left, f, bb, ctx);
     ExprResult right = build_expr(be->right, f, left.block, ctx);
-    u32 dst = alloc_vreg(ctx);
+
+    Type *lt = expr_type(be->left, ctx);
+    Type *rt = expr_type(be->right, ctx);
+
+    IrOperand lhs = left.value;
+    IrOperand rhs = right.value;
+
+    if (!is_comparison_op(be->op) && !is_shift_op(be->op) && !is_divrem_op(be->op))
+    {
+        Type *promoted = common_type(promote_type(lt), promote_type(rt));
+        lhs = promote_to(ctx, right.block, lhs, lt, promoted);
+        lt = promoted;
+        rhs = promote_to(ctx, right.block, rhs, rt, promoted);
+        rt = promoted;
+    }
+    else if (is_comparison_op(be->op) || is_divrem_op(be->op))
+    {
+        Type *promoted = common_type(promote_type(lt), promote_type(rt));
+        lhs = promote_to(ctx, right.block, lhs, lt, promoted);
+        lt = promoted;
+        rhs = promote_to(ctx, right.block, rhs, rt, promoted);
+        rt = promoted;
+    }
+    /* For shifts, the left operand type determines the result; right is always int-promoted. */
+    else
+    {
+        Type *promoted = common_type(promote_type(lt), promote_type(rt));
+        rhs = promote_to(ctx, right.block, rhs, rt, promoted);
+        rt = promoted;
+    }
+
     IrOpcode op = binop_ir[be->op];
     if (op == 0)
     {
         ir_error(&be->base, "unsupported binary operator");
         return expr_result(ir_operand_imm(0), right.block);
     }
-    ir_emit_binop(right.block, op, dst, left.value, right.value);
+
+    if (is_comparison_op(be->op))
+    {
+        bool unsig = type_is_unsigned(lt);
+        switch (be->op)
+        {
+            case BIN_EQ:
+                op = unsig ? OP_ICMP_EQ : OP_ICMP_EQ;
+                break;
+            case BIN_NE:
+                op = unsig ? OP_ICMP_NE : OP_ICMP_NE;
+                break;
+            case BIN_LT:
+                op = unsig ? OP_ICMP_ULT : OP_ICMP_SLT;
+                break;
+            case BIN_GT:
+                op = unsig ? OP_ICMP_UGT : OP_ICMP_SGT;
+                break;
+            case BIN_LE:
+                op = unsig ? OP_ICMP_ULE : OP_ICMP_SLE;
+                break;
+            case BIN_GE:
+                op = unsig ? OP_ICMP_UGE : OP_ICMP_SGE;
+                break;
+            default:
+                break;
+        }
+    }
+    else if (is_divrem_op(be->op))
+    {
+        if (type_is_unsigned(lt))
+        {
+            op = (be->op == BIN_DIV) ? OP_UDIV : OP_UREM;
+        }
+    }
+    else if (be->op == BIN_SHR)
+    {
+        op = type_is_unsigned(lt) ? OP_LSHR : OP_ASHR;
+    }
+
+    Type *result_type = expr_type((ASTNode *) be, ctx);
+    u32 dst = alloc_vreg_from_type(ctx, result_type);
+    ir_emit_binop(right.block, op, dst, lhs, rhs);
     return expr_result(ir_operand_vreg(dst), right.block);
 }
 
 static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     ExprResult src = build_expr(ue->operand, f, bb, ctx);
-    u32 dst = alloc_vreg(ctx);
+    Type *result_type = expr_type((ASTNode *) ue, ctx);
+    u32 dst = alloc_vreg_from_type(ctx, result_type);
     if (ue->op == UN_LOG_NOT)
     {
         ir_emit_binop(src.block, OP_ICMP_EQ, dst, src.value, ir_operand_imm(0));
     }
     else
     {
-        emit_unary_op(src.block, dst, ue->op, src.value, &ue->base);
+        Type *op_type = expr_type(ue->operand, ctx);
+        Type *promoted = promote_type(op_type);
+        IrOperand promoted_op = promote_to(ctx, src.block, src.value, op_type, promoted);
+        emit_unary_op(src.block, dst, ue->op, promoted_op, &ue->base);
     }
     return expr_result(ir_operand_vreg(dst), src.block);
 }
@@ -429,9 +621,11 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
         args[i] = arg_res.value;
         bb = arg_res.block;
     }
-    u32 dst = alloc_vreg(ctx);
+    Type *ret_type = strmap_get(ctx->func_types, ce->callee);
+    ASSERT(ret_type != NULL);
+    u32 dst = ret_type->kind == TYPE_VOID ? NO_VREG : alloc_vreg_from_type(ctx, ret_type);
     ir_emit_call(bb, dst, ce->callee, nargs, args);
-    return expr_result(ir_operand_vreg(dst), bb);
+    return expr_result(dst == NO_VREG ? ir_operand_imm(0) : ir_operand_vreg(dst), bb);
 }
 
 static ExprResult build_binary_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
@@ -769,12 +963,14 @@ static IrBlock *build_return_stmt(ASTReturnStmt *ret, IrFunction *f, IrBlock *bb
 
 static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
+    strmap_set(ctx->var_types, vd->name, vd->type);
     IrOperand val = ir_operand_imm(0);
     if (vd->init)
     {
         ExprResult init = build_expr(vd->init, f, bb, ctx);
         bb = init.block;
-        val = init.value;
+        Type *rhs_type = expr_type(vd->init, ctx);
+        val = promote_to(ctx, bb, init.value, rhs_type, vd->type);
     }
     write_variable(ctx, vd->name, bb, val);
     return bb;
@@ -826,12 +1022,13 @@ static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlo
     for (size_t i = 0; i < nparams; i++)
     {
         ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(ast->params, i));
-        u32 vreg = alloc_vreg(ctx);
+        u32 vreg = alloc_vreg_from_type(ctx, param->type);
         IrParam *p = arena_alloc(ctx->mod->arena, sizeof(IrParam), sizeof(void *));
         p->name = param->name;
         p->type = param->type;
         p->vreg = vreg;
         vec_push(f->params, p);
+        strmap_set(ctx->var_types, param->name, param->type);
         write_variable(ctx, param->name, entry, ir_operand_vreg(vreg));
     }
 }
@@ -865,7 +1062,7 @@ static void finish_func(IrFunction *f, IrBlock *exit, FuncBuilder *ctx)
     seal_all_blocks(ctx, f);
 }
 
-static bool build_func(ASTNode *ast, IrModule *mod)
+static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types)
 {
     if (ast->kind != AST_FUNC_DEF)
     {
@@ -883,7 +1080,12 @@ static bool build_func(ASTNode *ast, IrModule *mod)
         return false;
     }
 
-    FuncBuilder ctx = {mod, u64map_new(mod->arena), vec_new(mod->arena), strmap_new(mod->arena)};
+    FuncBuilder ctx = {mod, //
+                       u64map_new(mod->arena),
+                       vec_new(mod->arena),
+                       strmap_new(mod->arena),
+                       strmap_new(mod->arena),
+                       func_types};
 
     /* Pre-create blocks for all labels so gotos can target them. */
     collect_labels(func_ast->body, func, &ctx);
@@ -907,12 +1109,23 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
     }
     ASTProgram *prog = (ASTProgram *) ast;
 
-    IrModule *mod = ir_module_new(arena);
+    StrMap *func_types = strmap_new(arena);
     size_t ndecls = vec_size(prog->decls);
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
-        if (!build_func(decl, mod))
+        if (decl->kind == AST_FUNC_DEF)
+        {
+            ASTFuncDef *fn = ast_as(ASTFuncDef, decl);
+            strmap_set(func_types, fn->name, fn->ret_type);
+        }
+    }
+
+    IrModule *mod = ir_module_new(arena);
+    for (size_t i = 0; i < ndecls; i++)
+    {
+        ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
+        if (!build_func(decl, mod, func_types))
         {
             return NULL;
         }

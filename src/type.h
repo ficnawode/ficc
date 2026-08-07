@@ -45,6 +45,30 @@ struct Type
 
 Type *type_void(void);
 Type *type_int(void);
+Type *type_cbool(void);  /* C11 _Bool: 1 byte, unsigned semantics */
+Type *type_char(void);
+Type *type_short(void);
+Type *type_long(void);
+Type *type_llong(void);
+Type *type_uchar(void);
+Type *type_ushort(void);
+Type *type_uint(void);
+Type *type_ulong(void);
+Type *type_ullong(void);
+
+bool type_is_signed(Type *t);
+bool type_is_unsigned(Type *t);
+bool type_is_integer(Type *t);
+
+/* C11 §6.3.1.1 integer promotion: promote types narrower than int to int. */
+Type *type_promote(Type *t);
+
+/* C11 §6.3.1.8 usual arithmetic conversions: common type for binary operations. */
+Type *type_common(Type *a, Type *b);
+
+/* Integer rank for type comparison: higher rank = wider type.
+   Returns 0 for non-integer types. */
+int type_rank(Type *t);
 
 const char *type_kind_name(TypeKind kind);
 

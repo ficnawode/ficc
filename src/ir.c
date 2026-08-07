@@ -111,7 +111,7 @@ IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOpera
 
 IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src)
 {
-    ASSERT(op == OP_NEG || op == OP_NOT);
+    ASSERT(op == OP_NEG || op == OP_NOT || op == OP_TRUNC || op == OP_ZEXT || op == OP_SEXT);
     IrInstr *ins = instr_new(bb, op, dst, 1);
     ins->ops[0] = src;
     return ins;
@@ -223,12 +223,12 @@ static void dump_switch_cases(IrInstr *ins)
     }
 }
 
-static void dump_instr(IrInstr *ins)
+static void dump_instr(IrInstr *ins, IrModule *m)
 {
     printf("    ");
     if (ins->result != NO_VREG)
     {
-        printf("v%u = ", ins->result);
+        printf("v%u:w%u = ", ins->result, m->widths[ins->result]);
     }
 
     const char *name = ir_opcode_name(ins->opcode) + 3;
@@ -282,7 +282,7 @@ void ir_dump(IrModule *m)
             for (size_t instr_i = 0; instr_i < ninstrs; instr_i++)
             {
                 IrInstr *ins = (IrInstr *) vec_get(bb->instrs, instr_i);
-                dump_instr(ins);
+                dump_instr(ins, m);
             }
         }
         printf("}\n");

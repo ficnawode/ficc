@@ -251,26 +251,35 @@ static void emit_mem_operand(ByteBuf *buf, u8 reg, X86Mem m)
     }
 }
 
-/* Generic mov between any two operands. `width` selects REX.W (8 = 64-bit);
-   4 = 32-bit. */
+static u8 mov_width(u8 w)
+{
+    return w == 1 ? 4 : w;
+}
+
+static void emit_os16(ByteBuf *buf, u8 width)
+{
+    if (width == 2) bytebuf_append(buf, 0x66);
+}
+
 static void emit_mov(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
 {
     if (src.kind == XOP_IMM)
     {
-        /* mov $imm32, %reg */
-        bytebuf_append(buf, rex(width == 8, false, false, dst.u.reg >= 8));
-        bytebuf_append(buf, (u8) (0xB8 + (dst.u.reg & 7)));
-        bytebuf_append_i32(buf, (i32) src.u.imm);
+    emit_os16(buf, mov_width(width));
+    bytebuf_append(buf, rex(width == 8, false, false, dst.u.reg >= 8));
+    bytebuf_append(buf, (u8) (0xB8 + (dst.u.reg & 7)));
+    bytebuf_append_i32(buf, (i32) src.u.imm);
         return;
     }
     if (dst.kind == XOP_REG && src.kind == XOP_REG)
     {
+        emit_os16(buf, mov_width(width));
         bytebuf_append(buf, rex(width == 8, src.u.reg >= 8, false, dst.u.reg >= 8));
         bytebuf_append(buf, 0x89);
         bytebuf_append(buf, modrm(3, src.u.reg, dst.u.reg));
         return;
     }
-    /* Memory forms: 8B reg <- mem, 89 mem <- reg. */
+    emit_os16(buf, mov_width(width));
     bool to_reg = dst.kind == XOP_REG;
     u8 reg = to_reg ? dst.u.reg : src.u.reg;
     X86Mem mem = to_reg ? src.u.mem : dst.u.mem;
@@ -305,7 +314,7 @@ static const ArithSpec arith_specs[] = {
 static const ArithSpec cmp_spec = {0x3B, 0x83, 0x81, 7, false};
 
 static const u8 unary_digit[OP_NOT + 1] = {[OP_NEG] = 3, [OP_NOT] = 2};
-static const u8 shift_digit[OP_ASHR + 1] = {[OP_SHL] = 4, [OP_ASHR] = 7};
+static const u8 shift_digit[64] = {[OP_SHL] = 4, [OP_LSHR] = 5, [OP_ASHR] = 7};
 
 /* setcc/jcc condition code per icmp predicate, indexed by opcode. */
 static const u8 icmp_cc[OP_ICMP_SGE + 1] = {
@@ -327,6 +336,7 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
     if (rhs.kind == XOP_IMM)
     {
         i64 v = rhs.u.imm;
+        emit_os16(buf, width);
         bytebuf_append(buf, rex(width == 8, false, false, dst_reg >= 8));
         if (fits_i8(v))
         {
@@ -342,6 +352,7 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
         }
         return;
     }
+    emit_os16(buf, width);
     bytebuf_append(buf, rex(width == 8, dst_reg >= 8, rhs.u.mem.index != NO_REG && rhs.u.mem.index >= 8,
                       rhs.u.mem.base != NO_REG && rhs.u.mem.base >= 8));
     if (s->mem_0f)
@@ -352,9 +363,10 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
     emit_mem_operand(buf, dst_reg, rhs.u.mem);
 }
 
-/* F7 /digit */
+/* F7 /digit; for 16-bit 0x66 prefix added. */
 static void emit_unary(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 {
+    emit_os16(buf, width);
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
     bytebuf_append(buf, 0xF7);
     bytebuf_append(buf, modrm(3, digit, reg));
@@ -363,6 +375,7 @@ static void emit_unary(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 /* D3 /digit, count in %cl */
 static void emit_shift_cl(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 {
+    emit_os16(buf, width);
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
     bytebuf_append(buf, 0xD3);
     bytebuf_append(buf, modrm(3, digit, reg));
@@ -468,6 +481,9 @@ static void lower_br(IrInstr *in, CodegenCtx *ctx);
 static void lower_brcond(IrInstr *in, CodegenCtx *ctx);
 static void lower_phi(IrInstr *in, CodegenCtx *ctx);
 static void lower_unreachable(IrInstr *in, CodegenCtx *ctx);
+static void lower_trunc(IrInstr *in, CodegenCtx *ctx);
+static void lower_zext(IrInstr *in, CodegenCtx *ctx);
+static void lower_sext(IrInstr *in, CodegenCtx *ctx);
 
 #define LOWER_ENTRIES(X)      \
     X(OP_RET, lower_ret)      \
@@ -476,13 +492,19 @@ static void lower_unreachable(IrInstr *in, CodegenCtx *ctx);
     X(OP_MUL, lower_binary)   \
     X(OP_SDIV, lower_div)     \
     X(OP_SREM, lower_div)     \
+    X(OP_UDIV, lower_div)     \
+    X(OP_UREM, lower_div)     \
     X(OP_AND, lower_binary)   \
     X(OP_OR, lower_binary)    \
     X(OP_XOR, lower_binary)   \
     X(OP_SHL, lower_shift)    \
     X(OP_ASHR, lower_shift)   \
+    X(OP_LSHR, lower_shift)   \
     X(OP_NEG, lower_unary)    \
     X(OP_NOT, lower_unary)    \
+    X(OP_TRUNC, lower_trunc)  \
+    X(OP_ZEXT, lower_zext)    \
+    X(OP_SEXT, lower_sext)    \
     X(OP_ICMP_EQ, lower_icmp) \
     X(OP_ICMP_NE, lower_icmp) \
     X(OP_ICMP_ULT, lower_icmp) \
@@ -654,6 +676,108 @@ static void lower_unreachable(IrInstr *in, CodegenCtx *ctx)
 {
     (void) in;
     emit_ud2(ctx->buf);
+}
+
+static void lower_trunc(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 w = mov_width(vreg_width(ctx, in->result));
+    X86Operand src = xop_from_operand(in->ops[0]);
+    emit_mov(ctx->buf, w, xop_reg(R_EAX), src);
+    emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
+}
+
+static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src)
+{
+    ASSERT(dst_w == 4 || dst_w == 8);
+    if (src_w == 1)
+    {
+        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
+                           src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
+        bytebuf_append(buf, 0x0F);
+        bytebuf_append(buf, 0xB6);
+    }
+    else
+    {
+        bytebuf_append(buf, 0x66);
+        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
+                           src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
+        bytebuf_append(buf, 0x0F);
+        bytebuf_append(buf, 0xB7);
+    }
+    if (src.kind == XOP_REG)
+    {
+        bytebuf_append(buf, modrm(3, dst_reg, src.u.reg));
+    }
+    else
+    {
+        emit_mem_operand(buf, dst_reg, src.u.mem);
+    }
+}
+
+static void emit_movsx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src)
+{
+    ASSERT(dst_w == 4 || dst_w == 8);
+    if (src_w == 4)
+    {
+        ASSERT(dst_w == 8);
+        bytebuf_append(buf, rex(true, dst_reg >= 8, false,
+                           src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
+        bytebuf_append(buf, 0x63);
+    }
+    else
+    {
+        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
+                           src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
+        bytebuf_append(buf, 0x0F);
+        bytebuf_append(buf, src_w == 1 ? 0xBE : 0xBF);
+    }
+    if (src.kind == XOP_REG)
+    {
+        bytebuf_append(buf, modrm(3, dst_reg, src.u.reg));
+    }
+    else
+    {
+        emit_mem_operand(buf, dst_reg, src.u.mem);
+    }
+}
+
+static void lower_zext(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
+    u8 dw = vreg_width(ctx, in->result);
+    X86Operand src = xop_from_operand(in->ops[0]);
+    if (src.kind == XOP_MEM)
+    {
+        emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
+        emit_movzx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
+    }
+    else if (src.kind == XOP_REG && sw == 1)
+    {
+        emit_movzx(ctx->buf, sw, dw, R_EAX, src);
+    }
+    else
+    {
+        emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
+        emit_movzx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
+    }
+    emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
+}
+
+static void lower_sext(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
+    u8 dw = vreg_width(ctx, in->result);
+    X86Operand src = xop_from_operand(in->ops[0]);
+    if (src.kind == XOP_MEM)
+    {
+        emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
+        emit_movsx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
+    }
+    else
+    {
+        emit_movsx(ctx->buf, sw, dw, R_EAX, src);
+    }
+    emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
 /* Every immediate is encoded in a signed 32-bit field. Values that do not
