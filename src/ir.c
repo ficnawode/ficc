@@ -1,5 +1,6 @@
 #include "ir.h"
 #include "util/assert.h"
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -132,7 +133,8 @@ IrInstr *ir_emit_br(IrBlock *bb, const char *target_label)
     return ins;
 }
 
-IrInstr *ir_emit_brcond(IrBlock *bb, IrOperand cond, const char *true_label, const char *false_label)
+IrInstr *ir_emit_brcond(IrBlock *bb, IrOperand cond, const char *true_label,
+                        const char *false_label)
 {
     IrInstr *ins = instr_new(bb, OP_BRCOND, NO_VREG, 1);
     ins->ops[0] = cond;
@@ -180,7 +182,7 @@ static void dump_operand(IrOperand op)
 {
     if (op.is_imm)
     {
-        printf("imm %lld", (long long) op.u.imm);
+        printf("%lld", (long long) op.u.imm);
     }
     else
     {
@@ -194,7 +196,7 @@ static void dump_phi_entries(IrInstr *ins)
     {
         printf(" [");
         dump_operand(ins->extra.phi.entries[e].val);
-        printf(" from %s]", ins->extra.phi.entries[e].label);
+        printf(" <- %s]", ins->extra.phi.entries[e].label);
     }
 }
 
@@ -203,7 +205,7 @@ static void dump_call_args(IrInstr *ins)
     printf(" %s", ins->extra.call.name);
     for (u32 i = 0; i < ins->extra.call.nargs; i++)
     {
-        printf(" ");
+        printf(", ");
         dump_operand(ins->extra.call.args[i]);
     }
 }
@@ -223,16 +225,24 @@ static void dump_switch_cases(IrInstr *ins)
 
 static void dump_instr(IrInstr *ins)
 {
-    printf("    %s", ir_opcode_name(ins->opcode));
+    printf("    ");
     if (ins->result != NO_VREG)
     {
-        printf(" v%u =", ins->result);
+        printf("v%u = ", ins->result);
     }
+
+    const char *name = ir_opcode_name(ins->opcode) + 3;
+    for (const char *p = name; *p; p++)
+    {
+        putchar((char) tolower((unsigned char) *p));
+    }
+
     for (u8 oi = 0; oi < ins->nops; oi++)
     {
-        printf(" ");
+        printf("%s", oi == 0 ? " " : ", ");
         dump_operand(ins->ops[oi]);
     }
+
     switch (ins->opcode)
     {
         case OP_PHI:
@@ -248,8 +258,7 @@ static void dump_instr(IrInstr *ins)
             printf(" %s", ins->extra.br.target_label);
             break;
         case OP_BRCOND:
-            printf(" true:%s false:%s", ins->extra.brcond.true_label,
-                   ins->extra.brcond.false_label);
+            printf(", %s, %s", ins->extra.brcond.true_label, ins->extra.brcond.false_label);
             break;
         default:
             break;
