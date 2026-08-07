@@ -89,7 +89,7 @@ typedef struct
 typedef struct
 {
     u32 nentries;
-    u32 nfilled;
+    u32 nfilled; /* tracks ir_phi_add_entry calls; verified by test_ir_builder */
     IrPhiEntry *entries;
 } IrPhiPayload;
 
@@ -215,7 +215,8 @@ IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOpera
 IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src);
 IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOperand *args);
 IrInstr *ir_emit_br(IrBlock *bb, const char *target_label);
-IrInstr *ir_emit_brcond(IrBlock *bb, IrOperand cond, const char *true_label, const char *false_label);
+IrInstr *ir_emit_brcond(IrBlock *bb, IrOperand cond, const char *true_label,
+                        const char *false_label);
 IrInstr *ir_emit_phi(IrBlock *bb, u32 dst, u32 nentries);
 void ir_phi_add_entry(IrInstr *phi, IrOperand val, IrBlock *pred);
 

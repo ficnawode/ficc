@@ -81,10 +81,14 @@ static i64 trunc_result(i64 val, u8 width_bytes)
 {
     switch (width_bytes)
     {
-        case 1: return val & 0xFF;
-        case 2: return val & 0xFFFF;
-        case 4: return val & 0xFFFFFFFF;
-        default: return val;
+        case 1:
+            return val & 0xFF;
+        case 2:
+            return val & 0xFFFF;
+        case 4:
+            return val & 0xFFFFFFFF;
+        default:
+            return val;
     }
 }
 
@@ -92,10 +96,14 @@ static i64 sext_result(i64 val, u8 width_bytes)
 {
     switch (width_bytes)
     {
-        case 1: return (i64)(i8)val;
-        case 2: return (i64)(i16)val;
-        case 4: return (i64)(i32)val;
-        default: return val;
+        case 1:
+            return (i64) (i8) val;
+        case 2:
+            return (i64) (i16) val;
+        case 4:
+            return (i64) (i32) val;
+        default:
+            return val;
     }
 }
 
@@ -230,11 +238,11 @@ static i64 eval_divrem(IrInstr *in, InterpCtx *ctx, i64 *regs)
     }
     else if (in->opcode == OP_UDIV)
     {
-        regs[in->result] = (i64)((u64)lhs / (u64)rhs);
+        regs[in->result] = (i64) ((u64) lhs / (u64) rhs);
     }
     else
     {
-        regs[in->result] = (i64)((u64)lhs % (u64)rhs);
+        regs[in->result] = (i64) ((u64) lhs % (u64) rhs);
     }
     mask_vreg(ctx, regs, in->result);
     return 0;
@@ -260,10 +268,10 @@ static i64 eval_shift(IrInstr *in, InterpCtx *ctx, i64 *regs)
     i64 lhs = operand_val(in->ops[0], regs, ctx->nregs);
     i64 rhs = operand_val(in->ops[1], regs, ctx->nregs);
     u8 w = ctx->mod->widths[in->result];
-    u32 limit = (w == 8) ? 64 : (u32)w * 8;
-    if (rhs < 0 || rhs >= (i64)limit)
+    u32 limit = (w == 8) ? 64 : (u32) w * 8;
+    if (rhs < 0 || rhs >= (i64) limit)
     {
-        interp_error("shift by %lld is undefined", (long long)rhs);
+        interp_error("shift by %lld is undefined", (long long) rhs);
         ASSERT(false);
         return 1;
     }
@@ -277,7 +285,7 @@ static i64 eval_shift(IrInstr *in, InterpCtx *ctx, i64 *regs)
     }
     else
     {
-        regs[in->result] = (i64)((u64)lhs >> rhs);
+        regs[in->result] = (i64) ((u64) lhs >> rhs);
     }
     mask_vreg(ctx, regs, in->result);
     return 0;
@@ -347,8 +355,9 @@ static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
         IrParam *p = (IrParam *) vec_get(callee->params, a);
         callee_fr->regs[p->vreg] = operand_val(in->extra.call.args[a], regs, ctx->nregs);
         u8 pw = ctx->mod->widths[p->vreg];
-        callee_fr->regs[p->vreg] = type_is_signed(p->type) ? sext_result(callee_fr->regs[p->vreg], pw)
-                                                           : trunc_result(callee_fr->regs[p->vreg], pw);
+        callee_fr->regs[p->vreg] = type_is_signed(p->type)
+                                       ? sext_result(callee_fr->regs[p->vreg], pw)
+                                       : trunc_result(callee_fr->regs[p->vreg], pw);
     }
 
     /* Build callee's block map */
@@ -425,13 +434,24 @@ static i64 eval_trunc(IrInstr *in, InterpCtx *ctx, i64 *regs)
 static i64 eval_zext(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     i64 src = operand_val(in->ops[0], regs, ctx->nregs);
-    regs[in->result] = src;
+    if (in->ops[0].is_imm)
+    {
+        regs[in->result] = src;
+        return 0;
+    }
+    u8 src_w = ctx->mod->widths[in->ops[0].u.vreg];
+    regs[in->result] = trunc_result(src, src_w);
     return 0;
 }
 
 static i64 eval_sext(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     i64 src = operand_val(in->ops[0], regs, ctx->nregs);
+    if (in->ops[0].is_imm)
+    {
+        regs[in->result] = src;
+        return 0;
+    }
     u8 src_w = ctx->mod->widths[in->ops[0].u.vreg];
     regs[in->result] = sext_result(src, src_w);
     return 0;

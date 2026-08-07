@@ -17,7 +17,9 @@ static int run_shell(const char *cmd)
 {
     int rc = system(cmd);
     if (rc == -1)
+    {
         return -1;
+    }
     return WEXITSTATUS(rc);
 }
 
@@ -25,13 +27,19 @@ static IrModule *build_from_source(const char *src, Arena *arena)
 {
     LexResult lexed = lex("<test>", src, arena);
     if (!lexed.tokens)
+    {
         return NULL;
+    }
     ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
     if (!ast)
+    {
         return NULL;
+    }
     ast = semantic_check(ast, arena);
     if (!ast)
+    {
         return NULL;
+    }
     return ir_build_module(ast, arena);
 }
 

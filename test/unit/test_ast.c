@@ -39,7 +39,7 @@ TEST(ast, compound_stmt_constructor)
 TEST(ast, return_stmt_constructor)
 {
     Arena *a = arena_new();
-    ASTNode *expr = ast_int_literal(7, (Loc) {"t", 1, 1}, a);
+    ASTNode *expr = ast_int_literal(7, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     ASTNode *node = ast_return_stmt(expr, (Loc) {"t", 1, 1}, a);
 
     EXPECT_TRUE(node != NULL);
@@ -68,7 +68,7 @@ TEST(ast, return_stmt_null_expr)
 TEST(ast, int_literal_constructor)
 {
     Arena *a = arena_new();
-    ASTNode *node = ast_int_literal(-123, (Loc) {"t", 1, 1}, a);
+    ASTNode *node = ast_int_literal(-123, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
 
     EXPECT_TRUE(node != NULL);
     EXPECT_EQ(node->kind, AST_INT_LITERAL);
@@ -110,7 +110,7 @@ TEST(ast, program_constructor)
 TEST(ast, var_decl_constructor)
 {
     Arena *a = arena_new();
-    ASTNode *init = ast_int_literal(7, (Loc) {"t", 1, 1}, a);
+    ASTNode *init = ast_int_literal(7, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     ASTNode *d = ast_var_decl(type_int(), "x", init, (Loc) {"t", 1, 1}, a);
     EXPECT_TRUE(d != NULL);
     EXPECT_EQ(d->kind, AST_VAR_DECL);
@@ -123,8 +123,8 @@ TEST(ast, var_decl_constructor)
 TEST(ast, binary_expr_constructor)
 {
     Arena *a = arena_new();
-    ASTNode *l = ast_int_literal(1, (Loc) {"t", 1, 1}, a);
-    ASTNode *r = ast_int_literal(2, (Loc) {"t", 1, 1}, a);
+    ASTNode *l = ast_int_literal(1, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
+    ASTNode *r = ast_int_literal(2, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     ASTNode *b = ast_binary_expr(BIN_ADD, l, r, (Loc) {"t", 1, 1}, a);
     EXPECT_TRUE(b != NULL);
     EXPECT_EQ(b->kind, AST_BINARY_EXPR);
@@ -138,7 +138,7 @@ TEST(ast, binary_expr_constructor)
 TEST(ast, unary_expr_constructor)
 {
     Arena *a = arena_new();
-    ASTNode *o = ast_int_literal(5, (Loc) {"t", 1, 1}, a);
+    ASTNode *o = ast_int_literal(5, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     ASTNode *u = ast_unary_expr(UN_NEG, o, (Loc) {"t", 1, 1}, a);
     EXPECT_TRUE(u != NULL);
     EXPECT_EQ(u->kind, AST_UNARY_EXPR);

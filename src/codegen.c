@@ -39,14 +39,14 @@ struct CodegenCtx
 {
     ByteBuf *buf;
     IrFunction *func;
-    IrModule *mod;     /* for the per-vreg width table */
+    IrModule *mod; /* for the per-vreg width table */
     Arena *arena;
-    Vec **phi_copies;        /* per-block Vec<PhiCopy*>, indexed by block index */
-    StrMap *label_to_block;  /* block label -> IrBlock* */
-    U64Map *block_to_index;  /* IrBlock* -> block index */
-    size_t *block_offsets;   /* per-block offset within the function bytes */
-    Vec *patches;            /* Vec<Patch*>, function calls */
-    Vec *block_patches;      /* Vec<Patch*>, intra-function jumps */
+    Vec **phi_copies;       /* per-block Vec<PhiCopy*>, indexed by block index */
+    StrMap *label_to_block; /* block label -> IrBlock* */
+    U64Map *block_to_index; /* IrBlock* -> block index */
+    size_t *block_offsets;  /* per-block offset within the function bytes */
+    Vec *patches;           /* Vec<Patch*>, function calls */
+    Vec *block_patches;     /* Vec<Patch*>, intra-function jumps */
 };
 
 static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
@@ -69,10 +69,22 @@ static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
 
 typedef enum
 {
-    R_EAX, R_ECX, R_EDX, R_EBX,
-    R_ESP, R_EBP, R_ESI, R_EDI,
-    R_R8, R_R9, R_R10, R_R11,
-    R_R12, R_R13, R_R14, R_R15
+    R_EAX,
+    R_ECX,
+    R_EDX,
+    R_EBX,
+    R_ESP,
+    R_EBP,
+    R_ESI,
+    R_EDI,
+    R_R8,
+    R_R9,
+    R_R10,
+    R_R11,
+    R_R12,
+    R_R13,
+    R_R14,
+    R_R15
 } X86Reg;
 
 /* x86 condition-code encodings, shared by setcc and jcc. */
@@ -100,9 +112,9 @@ typedef enum
 
 typedef struct
 {
-    u8 base;   /* X86Reg or NO_REG (RIP-relative) */
-    u8 index;  /* X86Reg or NO_REG */
-    u8 scale;  /* 1, 2, 4 or 8 */
+    u8 base;  /* X86Reg or NO_REG (RIP-relative) */
+    u8 index; /* X86Reg or NO_REG */
+    u8 scale; /* 1, 2, 4 or 8 */
     i32 disp;
 } X86Mem;
 
@@ -251,40 +263,70 @@ static void emit_mem_operand(ByteBuf *buf, u8 reg, X86Mem m)
     }
 }
 
-static u8 mov_width(u8 w)
-{
-    return w == 1 ? 4 : w;
-}
-
 static void emit_os16(ByteBuf *buf, u8 width)
 {
-    if (width == 2) bytebuf_append(buf, 0x66);
+    if (width == 2)
+    {
+        bytebuf_append(buf, 0x66);
+    }
 }
 
 static void emit_mov(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
 {
+    if (width == 1)
+    {
+        if (src.kind == XOP_IMM)
+        {
+            bytebuf_append(buf, rex(false, false, false, dst.u.reg >= 8));
+            bytebuf_append(buf, (u8) (0xB0 + (dst.u.reg & 7)));
+            bytebuf_append_i8(buf, (i8) src.u.imm);
+            return;
+        }
+        if (dst.kind == XOP_REG && src.kind == XOP_REG)
+        {
+            bytebuf_append(buf, rex(false, src.u.reg >= 8, false, dst.u.reg >= 8));
+            bytebuf_append(buf, 0x88);
+            bytebuf_append(buf, modrm(3, src.u.reg, dst.u.reg));
+            return;
+        }
+        bool to_reg = dst.kind == XOP_REG;
+        u8 reg = to_reg ? dst.u.reg : src.u.reg;
+        X86Mem mem = to_reg ? src.u.mem : dst.u.mem;
+        bytebuf_append(buf, rex(false, reg >= 8, mem.index != NO_REG && mem.index >= 8,
+                                mem.base != NO_REG && mem.base >= 8));
+        bytebuf_append(buf, to_reg ? 0x8A : 0x88);
+        emit_mem_operand(buf, reg, mem);
+        return;
+    }
+    emit_os16(buf, width);
     if (src.kind == XOP_IMM)
     {
-    emit_os16(buf, mov_width(width));
-    bytebuf_append(buf, rex(width == 8, false, false, dst.u.reg >= 8));
-    bytebuf_append(buf, (u8) (0xB8 + (dst.u.reg & 7)));
-    bytebuf_append_i32(buf, (i32) src.u.imm);
+        bytebuf_append(buf, rex(width == 8, false, false, dst.u.reg >= 8));
+        bytebuf_append(buf, (u8) (0xB8 + (dst.u.reg & 7)));
+        if (width == 2)
+        {
+            u16 imm = (u16) (i64) src.u.imm;
+            bytebuf_append(buf, (u8) (imm & 0xFF));
+            bytebuf_append(buf, (u8) (imm >> 8));
+        }
+        else
+        {
+            bytebuf_append_i32(buf, (i32) src.u.imm);
+        }
         return;
     }
     if (dst.kind == XOP_REG && src.kind == XOP_REG)
     {
-        emit_os16(buf, mov_width(width));
         bytebuf_append(buf, rex(width == 8, src.u.reg >= 8, false, dst.u.reg >= 8));
         bytebuf_append(buf, 0x89);
         bytebuf_append(buf, modrm(3, src.u.reg, dst.u.reg));
         return;
     }
-    emit_os16(buf, mov_width(width));
     bool to_reg = dst.kind == XOP_REG;
     u8 reg = to_reg ? dst.u.reg : src.u.reg;
     X86Mem mem = to_reg ? src.u.mem : dst.u.mem;
     bytebuf_append(buf, rex(width == 8, reg >= 8, mem.index != NO_REG && mem.index >= 8,
-                      mem.base != NO_REG && mem.base >= 8));
+                            mem.base != NO_REG && mem.base >= 8));
     bytebuf_append(buf, to_reg ? 0x8B : 0x89);
     emit_mem_operand(buf, reg, mem);
 }
@@ -302,12 +344,9 @@ typedef struct
 } ArithSpec;
 
 static const ArithSpec arith_specs[] = {
-    [OP_ADD] = {0x03, 0x83, 0x81, 0, false},
-    [OP_SUB] = {0x2B, 0x83, 0x81, 5, false},
-    [OP_MUL] = {0xAF, 0x6B, 0x69, 0, true},
-    [OP_AND] = {0x23, 0x83, 0x81, 4, false},
-    [OP_OR]  = {0x0B, 0x83, 0x81, 1, false},
-    [OP_XOR] = {0x33, 0x83, 0x81, 6, false},
+    [OP_ADD] = {0x03, 0x83, 0x81, 0, false}, [OP_SUB] = {0x2B, 0x83, 0x81, 5, false},
+    [OP_MUL] = {0xAF, 0x6B, 0x69, 0, true},  [OP_AND] = {0x23, 0x83, 0x81, 4, false},
+    [OP_OR] = {0x0B, 0x83, 0x81, 1, false},  [OP_XOR] = {0x33, 0x83, 0x81, 6, false},
 };
 
 /* cmp: same shape as the arithmetic ops, /7. Not an IR opcode itself. */
@@ -318,21 +357,32 @@ static const u8 shift_digit[64] = {[OP_SHL] = 4, [OP_LSHR] = 5, [OP_ASHR] = 7};
 
 /* setcc/jcc condition code per icmp predicate, indexed by opcode. */
 static const u8 icmp_cc[OP_ICMP_SGE + 1] = {
-    [OP_ICMP_EQ]  = CC_E,
-    [OP_ICMP_NE]  = CC_NE,
-    [OP_ICMP_ULT] = CC_B,
-    [OP_ICMP_ULE] = CC_BE,
-    [OP_ICMP_UGT] = CC_A,
-    [OP_ICMP_UGE] = CC_AE,
-    [OP_ICMP_SLT] = CC_L,
-    [OP_ICMP_SLE] = CC_LE,
-    [OP_ICMP_SGT] = CC_G,
-    [OP_ICMP_SGE] = CC_GE,
+    [OP_ICMP_EQ] = CC_E,  [OP_ICMP_NE] = CC_NE,  [OP_ICMP_ULT] = CC_B, [OP_ICMP_ULE] = CC_BE,
+    [OP_ICMP_UGT] = CC_A, [OP_ICMP_UGE] = CC_AE, [OP_ICMP_SLT] = CC_L, [OP_ICMP_SLE] = CC_LE,
+    [OP_ICMP_SGT] = CC_G, [OP_ICMP_SGE] = CC_GE,
 };
 
 /* %reg op= rhs */
 static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_reg, X86Operand rhs)
 {
+    if (width == 1)
+    {
+        /* 8-bit encoding: imm8 uses 0x80 /digit, r/m8 op= reg uses 0x00-based opcodes */
+        u8 digit = s->digit;
+        if (rhs.kind == XOP_IMM)
+        {
+            bytebuf_append(buf, 0x80);
+            bytebuf_append(buf, modrm(3, digit, dst_reg));
+            bytebuf_append_i8(buf, (i8) rhs.u.imm);
+            return;
+        }
+        /* 8-bit r/m8 op= reg: emit_mov to %al, then op %al, r/m8 */
+        /* For 8-bit we always use the reg, reg form: 0x02 + digit parity */
+        ASSERT(rhs.kind == XOP_REG || rhs.kind == XOP_MEM);
+        bytebuf_append(buf, 0x02 /* ADD r/m8, reg8 */);
+        bytebuf_append(buf, modrm(3, dst_reg, rhs.u.reg));
+        return;
+    }
     if (rhs.kind == XOP_IMM)
     {
         i64 v = rhs.u.imm;
@@ -353,8 +403,9 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
         return;
     }
     emit_os16(buf, width);
-    bytebuf_append(buf, rex(width == 8, dst_reg >= 8, rhs.u.mem.index != NO_REG && rhs.u.mem.index >= 8,
-                      rhs.u.mem.base != NO_REG && rhs.u.mem.base >= 8));
+    bytebuf_append(buf,
+                   rex(width == 8, dst_reg >= 8, rhs.u.mem.index != NO_REG && rhs.u.mem.index >= 8,
+                       rhs.u.mem.base != NO_REG && rhs.u.mem.base >= 8));
     if (s->mem_0f)
     {
         bytebuf_append(buf, 0x0F);
@@ -363,26 +414,40 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
     emit_mem_operand(buf, dst_reg, rhs.u.mem);
 }
 
-/* F7 /digit; for 16-bit 0x66 prefix added. */
+/* F7 /digit; for 16-bit 0x66 prefix added. 8-bit uses F6. */
 static void emit_unary(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 {
     emit_os16(buf, width);
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
-    bytebuf_append(buf, 0xF7);
+    bytebuf_append(buf, width == 1 ? 0xF6 : 0xF7);
     bytebuf_append(buf, modrm(3, digit, reg));
 }
 
-/* D3 /digit, count in %cl */
+/* D3 /digit, count in %cl. 8-bit uses D2. */
 static void emit_shift_cl(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 {
     emit_os16(buf, width);
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
-    bytebuf_append(buf, 0xD3);
+    bytebuf_append(buf, width == 1 ? 0xD2 : 0xD3);
     bytebuf_append(buf, modrm(3, digit, reg));
 }
 
-static void emit_cdq(ByteBuf *buf, u8 width)
+static void emit_cdq(ByteBuf *buf, u8 width, bool is_unsigned)
 {
+    if (width == 1)
+    {
+        if (is_unsigned)
+        {
+            bytebuf_append(buf, 0x30); /* xor %ah, %ah */
+            bytebuf_append(buf, modrm(3, 4, 4));
+        }
+        else
+        {
+            bytebuf_append(buf, 0x66); /* cbw */
+            bytebuf_append(buf, 0x98);
+        }
+        return;
+    }
     if (width == 8)
     {
         bytebuf_append(buf, 0x48); /* cqo */
@@ -390,11 +455,11 @@ static void emit_cdq(ByteBuf *buf, u8 width)
     bytebuf_append(buf, 0x99);
 }
 
-/* F7 /7: idiv %reg */
+/* F7 /7: idiv %reg. 8-bit uses F6 /7. */
 static void emit_idiv(ByteBuf *buf, u8 width, u8 reg)
 {
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
-    bytebuf_append(buf, 0xF7);
+    bytebuf_append(buf, width == 1 ? 0xF6 : 0xF7);
     bytebuf_append(buf, modrm(3, 7, reg));
 }
 
@@ -489,40 +554,40 @@ static void lower_trunc(IrInstr *in, CodegenCtx *ctx);
 static void lower_zext(IrInstr *in, CodegenCtx *ctx);
 static void lower_sext(IrInstr *in, CodegenCtx *ctx);
 
-#define LOWER_ENTRIES(X)      \
-    X(OP_RET, lower_ret)      \
-    X(OP_ADD, lower_binary)   \
-    X(OP_SUB, lower_binary)   \
-    X(OP_MUL, lower_binary)   \
-    X(OP_SDIV, lower_div)     \
-    X(OP_SREM, lower_div)     \
-    X(OP_UDIV, lower_div)     \
-    X(OP_UREM, lower_div)     \
-    X(OP_AND, lower_binary)   \
-    X(OP_OR, lower_binary)    \
-    X(OP_XOR, lower_binary)   \
-    X(OP_SHL, lower_shift)    \
-    X(OP_ASHR, lower_shift)   \
-    X(OP_LSHR, lower_shift)   \
-    X(OP_NEG, lower_unary)    \
-    X(OP_NOT, lower_unary)    \
-    X(OP_TRUNC, lower_trunc)  \
-    X(OP_ZEXT, lower_zext)    \
-    X(OP_SEXT, lower_sext)    \
-    X(OP_ICMP_EQ, lower_icmp) \
-    X(OP_ICMP_NE, lower_icmp) \
-    X(OP_ICMP_ULT, lower_icmp) \
-    X(OP_ICMP_ULE, lower_icmp) \
-    X(OP_ICMP_UGT, lower_icmp) \
-    X(OP_ICMP_UGE, lower_icmp) \
-    X(OP_ICMP_SLT, lower_icmp) \
-    X(OP_ICMP_SLE, lower_icmp) \
-    X(OP_ICMP_SGT, lower_icmp) \
-    X(OP_ICMP_SGE, lower_icmp) \
-    X(OP_BR, lower_br)        \
-    X(OP_BRCOND, lower_brcond) \
-    X(OP_CALL, lower_call)    \
-    X(OP_PHI, lower_phi)      \
+#define LOWER_ENTRIES(X)                                                                           \
+    X(OP_RET, lower_ret)                                                                           \
+    X(OP_ADD, lower_binary)                                                                        \
+    X(OP_SUB, lower_binary)                                                                        \
+    X(OP_MUL, lower_binary)                                                                        \
+    X(OP_SDIV, lower_div)                                                                          \
+    X(OP_SREM, lower_div)                                                                          \
+    X(OP_UDIV, lower_div)                                                                          \
+    X(OP_UREM, lower_div)                                                                          \
+    X(OP_AND, lower_binary)                                                                        \
+    X(OP_OR, lower_binary)                                                                         \
+    X(OP_XOR, lower_binary)                                                                        \
+    X(OP_SHL, lower_shift)                                                                         \
+    X(OP_ASHR, lower_shift)                                                                        \
+    X(OP_LSHR, lower_shift)                                                                        \
+    X(OP_NEG, lower_unary)                                                                         \
+    X(OP_NOT, lower_unary)                                                                         \
+    X(OP_TRUNC, lower_trunc)                                                                       \
+    X(OP_ZEXT, lower_zext)                                                                         \
+    X(OP_SEXT, lower_sext)                                                                         \
+    X(OP_ICMP_EQ, lower_icmp)                                                                      \
+    X(OP_ICMP_NE, lower_icmp)                                                                      \
+    X(OP_ICMP_ULT, lower_icmp)                                                                     \
+    X(OP_ICMP_ULE, lower_icmp)                                                                     \
+    X(OP_ICMP_UGT, lower_icmp)                                                                     \
+    X(OP_ICMP_UGE, lower_icmp)                                                                     \
+    X(OP_ICMP_SLT, lower_icmp)                                                                     \
+    X(OP_ICMP_SLE, lower_icmp)                                                                     \
+    X(OP_ICMP_SGT, lower_icmp)                                                                     \
+    X(OP_ICMP_SGE, lower_icmp)                                                                     \
+    X(OP_BR, lower_br)                                                                             \
+    X(OP_BRCOND, lower_brcond)                                                                     \
+    X(OP_CALL, lower_call)                                                                         \
+    X(OP_PHI, lower_phi)                                                                           \
     X(OP_UNREACHABLE, lower_unreachable)
 
 /* Dispatch table indexed by opcode; unlisted opcodes are NULL and diagnosed
@@ -544,9 +609,9 @@ static void lower_binary(IrInstr *in, CodegenCtx *ctx)
     const ArithSpec *s = &arith_specs[in->opcode];
     X86Operand rhs = xop_from_operand(in->ops[1]);
     emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
-    if (in->opcode == OP_AND && rhs.kind == XOP_IMM && rhs.u.imm == 0xFF)
+    if (in->opcode == OP_AND && w == 4 && rhs.kind == XOP_IMM && rhs.u.imm == 0xFF)
     {
-        emit_movzbl_al_eax(ctx->buf); /* andl $0xFF, %eax */
+        emit_movzbl_al_eax(ctx->buf); /* andl $0xFF, %eax → movzbl %al, %eax */
     }
     else if (in->opcode == OP_XOR && rhs.kind == XOP_IMM && rhs.u.imm == 0)
     {
@@ -579,11 +644,12 @@ static void lower_shift(IrInstr *in, CodegenCtx *ctx)
 static void lower_div(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
+    bool is_unsigned = in->opcode == OP_UDIV || in->opcode == OP_UREM;
     emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
-    emit_cdq(ctx->buf, w);
+    emit_cdq(ctx->buf, w, is_unsigned);
     emit_mov(ctx->buf, w, xop_reg(R_ECX), xop_from_operand(in->ops[1]));
     emit_idiv(ctx->buf, w, R_ECX);
-    if (in->opcode == OP_SREM)
+    if (in->opcode == OP_SREM || in->opcode == OP_UREM)
     {
         emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_reg(R_EDX));
     }
@@ -615,26 +681,29 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
         emit_binop_rhs(ctx->buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(total_stack));
     }
 
-    /* Stack args at 0(%rsp), 8(%rsp), ... */
     for (u32 i = 6; i < nargs; i++)
     {
-        emit_mov(ctx->buf, 4, xop_reg(R_EAX), xop_from_operand(in->extra.call.args[i]));
-        emit_mov(ctx->buf, 4, xop_mem(x86_mem_rsp((i32) (i - 6) * 8)), xop_reg(R_EAX));
+        IrOperand arg = in->extra.call.args[i];
+        u8 w = arg.is_imm ? 4 : vreg_width(ctx, arg.u.vreg);
+        emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(arg));
+        emit_mov(ctx->buf, 8, xop_mem(x86_mem_rsp((i32) (i - 6) * 8)), xop_reg(R_EAX));
     }
 
-    /* Register args in reverse order so no argument is clobbered early. */
     u32 n_reg_args = nargs < 6 ? nargs : 6;
     for (i32 i = (i32) n_reg_args - 1; i >= 0; i--)
     {
-        emit_mov(ctx->buf, 4, xop_reg(R_EAX), xop_from_operand(in->extra.call.args[i]));
-        emit_mov(ctx->buf, 4, xop_reg(abi_arg_regs[i]), xop_reg(R_EAX));
+        IrOperand arg = in->extra.call.args[i];
+        u8 w = arg.is_imm ? 4 : vreg_width(ctx, arg.u.vreg);
+        emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(arg));
+        emit_mov(ctx->buf, w, xop_reg(abi_arg_regs[i]), xop_reg(R_EAX));
     }
 
     emit_call_placeholder(ctx->buf, in->extra.call.name, ctx->patches, ctx->arena);
 
     if (in->result != NO_VREG)
     {
-        emit_mov(ctx->buf, 4, xop_vreg(in->result), xop_reg(R_EAX));
+        u8 rw = vreg_width(ctx, in->result);
+        emit_mov(ctx->buf, rw, xop_vreg(in->result), xop_reg(R_EAX));
     }
 
     if (total_stack > 0)
@@ -647,7 +716,9 @@ static void lower_ret(IrInstr *in, CodegenCtx *ctx)
 {
     if (in->nops > 0)
     {
-        emit_mov(ctx->buf, 4, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
+        IrOperand val = in->ops[0];
+        u8 w = val.is_imm ? 4 : vreg_width(ctx, val.u.vreg);
+        emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(val));
     }
     else
     {
@@ -684,7 +755,7 @@ static void lower_unreachable(IrInstr *in, CodegenCtx *ctx)
 
 static void lower_trunc(IrInstr *in, CodegenCtx *ctx)
 {
-    u8 w = mov_width(vreg_width(ctx, in->result));
+    u8 w = vreg_width(ctx, in->result);
     X86Operand src = xop_from_operand(in->ops[0]);
     emit_mov(ctx->buf, w, xop_reg(R_EAX), src);
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
@@ -695,7 +766,8 @@ static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand 
     ASSERT(dst_w == 4 || dst_w == 8);
     if (src_w == 1)
     {
-        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
+        bytebuf_append(buf,
+                       rex(dst_w == 8, dst_reg >= 8, false,
                            src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
         bytebuf_append(buf, 0x0F);
         bytebuf_append(buf, 0xB6);
@@ -703,7 +775,8 @@ static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand 
     else
     {
         bytebuf_append(buf, 0x66);
-        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
+        bytebuf_append(buf,
+                       rex(dst_w == 8, dst_reg >= 8, false,
                            src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
         bytebuf_append(buf, 0x0F);
         bytebuf_append(buf, 0xB7);
@@ -724,13 +797,15 @@ static void emit_movsx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand 
     if (src_w == 4)
     {
         ASSERT(dst_w == 8);
-        bytebuf_append(buf, rex(true, dst_reg >= 8, false,
+        bytebuf_append(buf,
+                       rex(true, dst_reg >= 8, false,
                            src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
         bytebuf_append(buf, 0x63);
     }
     else
     {
-        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
+        bytebuf_append(buf,
+                       rex(dst_w == 8, dst_reg >= 8, false,
                            src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
         bytebuf_append(buf, 0x0F);
         bytebuf_append(buf, src_w == 1 ? 0xBE : 0xBF);
@@ -747,9 +822,15 @@ static void emit_movsx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand 
 
 static void lower_zext(IrInstr *in, CodegenCtx *ctx)
 {
-    u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
     u8 dw = vreg_width(ctx, in->result);
     X86Operand src = xop_from_operand(in->ops[0]);
+    if (in->ops[0].is_imm)
+    {
+        emit_mov(ctx->buf, dw, xop_reg(R_EAX), src);
+        emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
+        return;
+    }
+    u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
     if (src.kind == XOP_MEM)
     {
         emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
@@ -769,9 +850,15 @@ static void lower_zext(IrInstr *in, CodegenCtx *ctx)
 
 static void lower_sext(IrInstr *in, CodegenCtx *ctx)
 {
-    u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
     u8 dw = vreg_width(ctx, in->result);
     X86Operand src = xop_from_operand(in->ops[0]);
+    if (in->ops[0].is_imm)
+    {
+        emit_mov(ctx->buf, dw, xop_reg(R_EAX), src);
+        emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
+        return;
+    }
+    u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
     if (src.kind == XOP_MEM)
     {
         emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
@@ -891,32 +978,34 @@ static FrameInfo frame_plan(IrFunction *f)
 
 /* Move incoming args into their param vreg slots. Args 7+ sit at
    16 + (i-6)*8(%rbp) and must be routed through %eax. */
-static void emit_param_shuffle(ByteBuf *buf, IrFunction *f)
+static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod)
 {
     size_t nparams = vec_size(f->params);
     size_t n_reg = nparams < 6 ? nparams : 6;
     for (size_t i = 0; i < n_reg; i++)
     {
         IrParam *p = (IrParam *) vec_get(f->params, i);
-        emit_mov(buf, 4, xop_vreg(p->vreg), xop_reg(abi_arg_regs[i]));
+        u8 w = mod->widths[p->vreg];
+        emit_mov(buf, w, xop_vreg(p->vreg), xop_reg(abi_arg_regs[i]));
     }
     for (size_t i = n_reg; i < nparams; i++)
     {
         IrParam *p = (IrParam *) vec_get(f->params, i);
-        emit_mov(buf, 4, xop_reg(R_EAX), xop_mem(x86_mem_rbp(16 + (i32) ((i - 6) * 8))));
-        emit_mov(buf, 4, xop_vreg(p->vreg), xop_reg(R_EAX));
+        u8 w = mod->widths[p->vreg];
+        emit_mov(buf, w, xop_reg(R_EAX), xop_mem(x86_mem_rbp(16 + (i32) ((i - 6) * 8))));
+        emit_mov(buf, w, xop_vreg(p->vreg), xop_reg(R_EAX));
     }
 }
 
-static void emit_prologue(ByteBuf *buf, IrFunction *f)
+static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod)
 {
-    bytebuf_append(buf, 0x55); /* push %rbp */
+    bytebuf_append(buf, 0x55);                        /* push %rbp */
     emit_mov(buf, 8, xop_reg(R_EBP), xop_reg(R_ESP)); /* mov %rsp, %rbp */
 
     /* n_vregs >= 1, so the frame is always at least 16 bytes. */
     emit_binop_rhs(buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(frame_plan(f).frame_size));
 
-    emit_param_shuffle(buf, f);
+    emit_param_shuffle(buf, f, mod);
 }
 
 static bool is_terminator(IrOpcode op)
@@ -983,9 +1072,10 @@ static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
         for (size_t pi = 0; pi < npc; pi++)
         {
             PhiCopy *pc = (PhiCopy *) vec_get(ctx->phi_copies[bi], pi);
-            emit_mov(ctx->buf, 4, xop_reg(R_EAX), xop_from_operand(pc->src));
-            emit_mov(ctx->buf, 4, xop_vreg(pc->dst_vreg),
-                     xop_reg(R_EAX));
+            u8 pw =
+                pc->src.is_imm ? vreg_width(ctx, pc->dst_vreg) : vreg_width(ctx, pc->src.u.vreg);
+            emit_mov(ctx->buf, pw, xop_reg(R_EAX), xop_from_operand(pc->src));
+            emit_mov(ctx->buf, pw, xop_vreg(pc->dst_vreg), xop_reg(R_EAX));
         }
         lower_instr((IrInstr *) vec_get(blk->instrs, ii), ctx);
     }
@@ -1012,7 +1102,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     Vec *patches = vec_new(arena);
     Vec *block_patches = vec_new(arena);
 
-    emit_prologue(buf, f);
+    emit_prologue(buf, f, mod);
 
     size_t nblocks = vec_size(f->blocks);
     Vec **phi_copies = arena_alloc(arena, nblocks * sizeof(Vec *), sizeof(void *));

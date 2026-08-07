@@ -160,23 +160,23 @@ void elf_write(CodegenModule *cm, const char *path)
         bytebuf_append(&symtab, 0);
     }
     /* Index 1: .text section symbol (local) */
-    bytebuf_append_u32(&symtab, 0);                                        /* st_name */
+    bytebuf_append_u32(&symtab, 0);                                 /* st_name */
     bytebuf_append(&symtab, ELF64_ST_INFO(STB_LOCAL, STT_SECTION)); /* st_info */
     bytebuf_append(&symtab, 0);                                     /* st_other */
-    bytebuf_append_u16(&symtab, SEC_TEXT);                                 /* st_shndx */
-    bytebuf_append_u64(&symtab, 0);                                        /* st_value */
-    bytebuf_append_u64(&symtab, 0);                                        /* st_size */
+    bytebuf_append_u16(&symtab, SEC_TEXT);                          /* st_shndx */
+    bytebuf_append_u64(&symtab, 0);                                 /* st_value */
+    bytebuf_append_u64(&symtab, 0);                                 /* st_size */
     /* IrGlobal function symbols */
     for (size_t i = 0; i < nfuncs; i++)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
         u32 name_off = strtab_add(&strtab, cf->name);
-        bytebuf_append_u32(&symtab, name_off);                               /* st_name */
+        bytebuf_append_u32(&symtab, name_off);                        /* st_name */
         bytebuf_append(&symtab, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC)); /* st_info */
         bytebuf_append(&symtab, 0);                                   /* st_other */
-        bytebuf_append_u16(&symtab, SEC_TEXT);                               /* st_shndx */
-        bytebuf_append_u64(&symtab, cf->offset);                             /* st_value */
-        bytebuf_append_u64(&symtab, bytebuf_len(cf->bytes));                /* st_size */
+        bytebuf_append_u16(&symtab, SEC_TEXT);                        /* st_shndx */
+        bytebuf_append_u64(&symtab, cf->offset);                      /* st_value */
+        bytebuf_append_u64(&symtab, bytebuf_len(cf->bytes));          /* st_size */
     }
 
     /* Compute layout */

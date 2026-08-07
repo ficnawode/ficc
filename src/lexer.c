@@ -186,24 +186,110 @@ static bool lex_number(LexerCtx *ctx)
     Loc loc = lexer_loc(ctx);
     u64 val = 0;
     bool overflow = false;
+    bool is_hex = false;
 
-    while (is_digit(*ctx->p))
+    if (ctx->p[0] == '0' && (ctx->p[1] == 'x' || ctx->p[1] == 'X'))
     {
-        u64 digit = (u64) (*ctx->p - '0');
-        if (!overflow && val > ((u64) INT64_MAX - digit) / 10)
+        is_hex = true;
+        lexer_advance(ctx); /* 0 */
+        lexer_advance(ctx); /* x/X */
+        while (is_digit(*ctx->p) || (*ctx->p >= 'a' && *ctx->p <= 'f') ||
+               (*ctx->p >= 'A' && *ctx->p <= 'F'))
         {
-            lexer_error(ctx, "integer literal overflow");
-            val = (u64) INT64_MAX;
-            overflow = true;
+            u64 digit;
+            if (is_digit(*ctx->p))
+            {
+                digit = (u64) (*ctx->p - '0');
+            }
+            else if (*ctx->p >= 'a')
+            {
+                digit = (u64) (*ctx->p - 'a' + 10);
+            }
+            else
+            {
+                digit = (u64) (*ctx->p - 'A' + 10);
+            }
+            if (!overflow && val > ((u64) INT64_MAX - digit) / 16)
+            {
+                lexer_error(ctx, "integer literal overflow");
+                val = (u64) INT64_MAX;
+                overflow = true;
+            }
+            else if (!overflow)
+            {
+                val = val * 16 + digit;
+            }
+            lexer_advance(ctx);
         }
-        else if (!overflow)
+    }
+    else
+    {
+        while (is_digit(*ctx->p))
         {
-            val = val * 10 + digit;
+            u64 digit = (u64) (*ctx->p - '0');
+            if (!overflow && val > ((u64) INT64_MAX - digit) / 10)
+            {
+                lexer_error(ctx, "integer literal overflow");
+                val = (u64) INT64_MAX;
+                overflow = true;
+            }
+            else if (!overflow)
+            {
+                val = val * 10 + digit;
+            }
+            lexer_advance(ctx);
         }
-        lexer_advance(ctx);
     }
 
-    lexer_push(ctx, (Token) {.kind = TOK_INT_LIT, .loc = loc, .payload.int_val = (i64) val});
+    /* Parse integer suffixes: u/U, l/L, ll/LL */
+    bool is_unsigned = false;
+    IntSuffix length = SUFFIX_NONE;
+
+    if (*ctx->p == 'u' || *ctx->p == 'U')
+    {
+        is_unsigned = true;
+        lexer_advance(ctx);
+        if (*ctx->p == 'l' || *ctx->p == 'L')
+        {
+            length = SUFFIX_L;
+            lexer_advance(ctx);
+            if (*ctx->p == 'l' || *ctx->p == 'L')
+            {
+                length = SUFFIX_LL;
+                lexer_advance(ctx);
+            }
+        }
+    }
+    else if (*ctx->p == 'l' || *ctx->p == 'L')
+    {
+        length = SUFFIX_L;
+        lexer_advance(ctx);
+        if (*ctx->p == 'l' || *ctx->p == 'L')
+        {
+            length = SUFFIX_LL;
+            lexer_advance(ctx);
+        }
+        if (*ctx->p == 'u' || *ctx->p == 'U')
+        {
+            is_unsigned = true;
+            lexer_advance(ctx);
+        }
+    }
+
+    if (is_identifier_start(*ctx->p))
+    {
+        lexer_error(ctx, "invalid suffix on integer literal");
+        while (is_identifier_char(*ctx->p))
+        {
+            lexer_advance(ctx);
+        }
+    }
+
+    Token tok = {.kind = TOK_INT_LIT, .loc = loc, .payload.int_val = (i64) val};
+    tok.int_suffix.is_unsigned = is_unsigned;
+    tok.int_suffix.length = length;
+    tok.int_suffix.is_hex = is_hex;
+    lexer_push(ctx, tok);
     return true;
 }
 

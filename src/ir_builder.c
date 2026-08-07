@@ -93,72 +93,26 @@ static Type *common_type(Type *a, Type *b)
     return type_common(a, b);
 }
 
-static Type *expr_type(ASTNode *node, FuncBuilder *ctx)
+static inline Type *node_type(ASTNode *n)
 {
-    switch (node->kind)
-    {
-        case AST_INT_LITERAL:
-            return type_int();
-        case AST_IDENT:
-        {
-            ASTIdent *id = ast_as(ASTIdent, node);
-            Type *t = strmap_get(ctx->var_types, id->name);
-            ASSERT(t != NULL);
-            return t;
-        }
-        case AST_BINARY_EXPR:
-        {
-            ASTBinaryExpr *be = ast_as(ASTBinaryExpr, node);
-            if (be->op == BIN_ASSIGN)
-            {
-                return expr_type(be->left, ctx);
-            }
-            if (be->op == BIN_LOG_AND || be->op == BIN_LOG_OR)
-            {
-                return type_int();
-            }
-            if (be->op >= BIN_EQ && be->op <= BIN_GE)
-            {
-                return type_int();
-            }
-            return common_type(promote_type(expr_type(be->left, ctx)),
-                               promote_type(expr_type(be->right, ctx)));
-        }
-        case AST_UNARY_EXPR:
-        {
-            ASTUnaryExpr *ue = ast_as(ASTUnaryExpr, node);
-            if (ue->op == UN_LOG_NOT)
-            {
-                return type_int();
-            }
-            return promote_type(expr_type(ue->operand, ctx));
-        }
-        case AST_CALL_EXPR:
-        {
-            ASTCallExpr *ce = ast_as(ASTCallExpr, node);
-            Type *ret = strmap_get(ctx->func_types, ce->callee);
-            ASSERT(ret != NULL);
-            return ret;
-        }
-        case AST_TERNARY_EXPR:
-        {
-            ASTTernaryExpr *te = ast_as(ASTTernaryExpr, node);
-            return common_type(expr_type(te->then_expr, ctx), expr_type(te->else_expr, ctx));
-        }
-        default:
-            return type_int();
-    }
+    return n->expr_type ? n->expr_type : type_int();
 }
 
 static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *src_type,
                             Type *target_type)
 {
-    if (src_type->kind == target_type->kind)
+    u8 src_w = src_type->width / 8;
+    u8 tgt_w = target_type->width / 8;
+    if (val.is_imm)
+    {
+        u32 src_vreg = alloc_vreg_from_type(ctx, src_type);
+        ir_emit_unary(bb, type_is_signed(src_type) ? OP_SEXT : OP_ZEXT, src_vreg, val);
+        val = ir_operand_vreg(src_vreg);
+    }
+    if (src_type->kind == target_type->kind || src_w == tgt_w)
     {
         return val;
     }
-    u8 src_w = src_type->width / 8;
-    u8 tgt_w = target_type->width / 8;
     if (tgt_w > src_w)
     {
         u32 dst = alloc_vreg_from_type(ctx, target_type);
@@ -473,7 +427,7 @@ static ExprResult build_ternary_expr(ASTTernaryExpr *te, IrFunction *f, IrBlock 
         jump(else_val.block, merge_bb);
     }
 
-    Type *tern_type = expr_type((ASTNode *) te, ctx);
+    Type *tern_type = node_type((ASTNode *)te);
     u32 dst = alloc_vreg_from_type(ctx, tern_type);
     IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, then_val.value, then_val.block);
@@ -497,7 +451,7 @@ static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
     ASTIdent *target = ast_as(ASTIdent, be->left);
     Type *lhs_type = strmap_get(ctx->var_types, target->name);
     ASSERT(lhs_type != NULL);
-    Type *rhs_type = expr_type(be->right, ctx);
+    Type *rhs_type = node_type(be->right);
     IrOperand val = promote_to(ctx, bb, right.value, rhs_type, lhs_type);
     write_variable(ctx, target->name, bb, val);
     return expr_result(val, bb);
@@ -509,8 +463,8 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
     ExprResult left = build_expr(be->left, f, bb, ctx);
     ExprResult right = build_expr(be->right, f, left.block, ctx);
 
-    Type *lt = expr_type(be->left, ctx);
-    Type *rt = expr_type(be->right, ctx);
+    Type *lt = node_type(be->left);
+    Type *rt = node_type(be->right);
 
     IrOperand lhs = left.value;
     IrOperand rhs = right.value;
@@ -585,7 +539,7 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
         op = type_is_unsigned(lt) ? OP_LSHR : OP_ASHR;
     }
 
-    Type *result_type = expr_type((ASTNode *) be, ctx);
+    Type *result_type = node_type((ASTNode *) be);
     u32 dst = alloc_vreg_from_type(ctx, result_type);
     ir_emit_binop(right.block, op, dst, lhs, rhs);
     return expr_result(ir_operand_vreg(dst), right.block);
@@ -594,7 +548,7 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
 static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     ExprResult src = build_expr(ue->operand, f, bb, ctx);
-    Type *result_type = expr_type((ASTNode *) ue, ctx);
+    Type *result_type = node_type((ASTNode *) ue);
     u32 dst = alloc_vreg_from_type(ctx, result_type);
     if (ue->op == UN_LOG_NOT)
     {
@@ -602,7 +556,7 @@ static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
     }
     else
     {
-        Type *op_type = expr_type(ue->operand, ctx);
+        Type *op_type = node_type(ue->operand);
         Type *promoted = promote_type(op_type);
         IrOperand promoted_op = promote_to(ctx, src.block, src.value, op_type, promoted);
         emit_unary_op(src.block, dst, ue->op, promoted_op, &ue->base);
@@ -614,16 +568,38 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
 {
     u32 nargs = (u32) vec_size(ce->args);
     IrOperand *args = arena_alloc(ctx->mod->arena, nargs * sizeof(IrOperand), sizeof(IrOperand));
+    Type *callee_ret = strmap_get(ctx->func_types, ce->callee);
+    ASSERT(callee_ret != NULL);
+    IrFunction *callee_ir = NULL;
+    size_t nfuncs = vec_size(ctx->mod->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *cf = (IrFunction *) vec_get(ctx->mod->funcs, fi);
+        if (strcmp(cf->name, ce->callee) == 0)
+        {
+            callee_ir = cf;
+            break;
+        }
+    }
     for (u32 i = 0; i < nargs; i++)
     {
         ASTNode *arg = (ASTNode *) vec_get(ce->args, i);
         ExprResult arg_res = build_expr(arg, f, bb, ctx);
-        args[i] = arg_res.value;
         bb = arg_res.block;
+        Type *arg_type = arg->expr_type;
+        Type *param_type = NULL;
+        if (callee_ir && i < vec_size(callee_ir->params))
+        {
+            IrParam *p = (IrParam *) vec_get(callee_ir->params, i);
+            param_type = p->type;
+        }
+        else
+        {
+            param_type = arg_type;
+        }
+        args[i] = promote_to(ctx, bb, arg_res.value, arg_type, param_type);
     }
-    Type *ret_type = strmap_get(ctx->func_types, ce->callee);
-    ASSERT(ret_type != NULL);
-    u32 dst = ret_type->kind == TYPE_VOID ? NO_VREG : alloc_vreg_from_type(ctx, ret_type);
+    u32 dst = callee_ret->kind == TYPE_VOID ? NO_VREG : alloc_vreg_from_type(ctx, callee_ret);
     ir_emit_call(bb, dst, ce->callee, nargs, args);
     return expr_result(dst == NO_VREG ? ir_operand_imm(0) : ir_operand_vreg(dst), bb);
 }
@@ -969,7 +945,7 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
     {
         ExprResult init = build_expr(vd->init, f, bb, ctx);
         bb = init.block;
-        Type *rhs_type = expr_type(vd->init, ctx);
+        Type *rhs_type = node_type(vd->init);
         val = promote_to(ctx, bb, init.value, rhs_type, vd->type);
     }
     write_variable(ctx, vd->name, bb, val);

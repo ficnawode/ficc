@@ -618,7 +618,8 @@ static ASTNode *parse_primary(ParserCtx *p)
         case TOK_INT_LIT:
         {
             parser_advance(p);
-            return ast_int_literal(t->payload.int_val, t->loc, p->arena);
+            return ast_int_literal(t->payload.int_val, t->int_suffix.is_unsigned,
+                                   t->int_suffix.length, t->int_suffix.is_hex, t->loc, p->arena);
         }
         case TOK_IDENT:
         {

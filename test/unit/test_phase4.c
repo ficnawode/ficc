@@ -592,13 +592,12 @@ TEST(phase4, semantic_duplicate_label)
 TEST(phase4, elf_call_7_args)
 {
     Arena *arena = arena_new();
-    int exit_code =
-        run_elf("int sum7(int a, int b, int c, int d, int e, int f, int g)\n"
-                "{\n"
-                "    return a + b + c + d + e + f + g;\n"
-                "}\n"
-                "int main(void) { return sum7(1, 2, 3, 4, 5, 6, 7) == 28 ? 0 : 1; }",
-                arena, "/tmp/ficc_phase4_args7.o", "/tmp/ficc_phase4_args7");
+    int exit_code = run_elf("int sum7(int a, int b, int c, int d, int e, int f, int g)\n"
+                            "{\n"
+                            "    return a + b + c + d + e + f + g;\n"
+                            "}\n"
+                            "int main(void) { return sum7(1, 2, 3, 4, 5, 6, 7) == 28 ? 0 : 1; }",
+                            arena, "/tmp/ficc_phase4_args7.o", "/tmp/ficc_phase4_args7");
     EXPECT_EQ(exit_code, 0);
     arena_free(arena);
 }

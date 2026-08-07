@@ -15,7 +15,7 @@ struct SemanticCtx
     bool error;
 };
 
-static bool check_expr(ASTNode *node, SemanticCtx *ctx);
+static Type *check_expr(ASTNode *node, SemanticCtx *ctx);
 static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type);
 static bool check_func(ASTNode *node, SemanticCtx *ctx);
 static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx);
@@ -32,23 +32,67 @@ static void sem_error(Loc loc, const char *fmt, ...)
 
 static bool check_identifier_expr(ASTIdent *ident, SemanticCtx *ctx)
 {
-    if (!strmap_get(ctx->locals, ident->name))
+    ASTVarDecl *decl = strmap_get(ctx->locals, ident->name);
+    if (!decl)
     {
         sem_error(ident->base.loc, "undeclared identifier '%s'", ident->name);
         ctx->error = true;
         return false;
     }
+    ident->base.expr_type = decl->type;
     return true;
+}
+
+static bool is_comparison_op(BinOpKind op)
+{
+    return op >= BIN_EQ && op <= BIN_GE;
 }
 
 static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
 {
-    return check_expr(binary_expr->left, ctx) && check_expr(binary_expr->right, ctx);
+    if (!check_expr(binary_expr->left, ctx) || !check_expr(binary_expr->right, ctx))
+    {
+        return false;
+    }
+    Type *lt = binary_expr->left->expr_type;
+    Type *rt = binary_expr->right->expr_type;
+    Type *result = NULL;
+    if (binary_expr->op == BIN_ASSIGN)
+    {
+        result = lt;
+    }
+    else if (binary_expr->op == BIN_LOG_AND || binary_expr->op == BIN_LOG_OR)
+    {
+        result = type_int();
+    }
+    else if (is_comparison_op(binary_expr->op))
+    {
+        result = type_int();
+    }
+    else
+    {
+        result = type_common(type_promote(lt), type_promote(rt));
+    }
+    binary_expr->base.expr_type = result;
+    return true;
 }
 
 static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
 {
-    return check_expr(unary_expr->operand, ctx);
+    if (!check_expr(unary_expr->operand, ctx))
+    {
+        return false;
+    }
+    Type *op_type = unary_expr->operand->expr_type;
+    if (unary_expr->op == UN_LOG_NOT)
+    {
+        unary_expr->base.expr_type = type_int();
+    }
+    else
+    {
+        unary_expr->base.expr_type = type_promote(op_type);
+    }
+    return true;
 }
 
 static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
@@ -79,29 +123,55 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
             return false;
         }
     }
+    call_expr->base.expr_type = callee->ret_type;
     return true;
 }
 
-static bool check_expr(ASTNode *node, SemanticCtx *ctx)
+static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
 {
     switch (node->kind)
     {
         case AST_INT_LITERAL:
-            return true;
+        {
+            ASTIntLiteral *lit = ast_as(ASTIntLiteral, node);
+            node->expr_type =
+                type_int_literal(lit->value, lit->is_hex, lit->is_unsigned, lit->length);
+            return node->expr_type;
+        }
         case AST_IDENT:
-            return check_identifier_expr(ast_as(ASTIdent, node), ctx);
+            if (!check_identifier_expr(ast_as(ASTIdent, node), ctx))
+            {
+                return NULL;
+            }
+            return node->expr_type;
         case AST_BINARY_EXPR:
-            return check_binary_expr(ast_as(ASTBinaryExpr, node), ctx);
+            if (!check_binary_expr(ast_as(ASTBinaryExpr, node), ctx))
+            {
+                return NULL;
+            }
+            return node->expr_type;
         case AST_UNARY_EXPR:
-            return check_unary_expr(ast_as(ASTUnaryExpr, node), ctx);
+            if (!check_unary_expr(ast_as(ASTUnaryExpr, node), ctx))
+            {
+                return NULL;
+            }
+            return node->expr_type;
         case AST_CALL_EXPR:
-            return check_call_expr(ast_as(ASTCallExpr, node), ctx);
+            if (!check_call_expr(ast_as(ASTCallExpr, node), ctx))
+            {
+                return NULL;
+            }
+            return node->expr_type;
         case AST_TERNARY_EXPR:
-            return check_ternary_expression(ast_as(ASTTernaryExpr, node), ctx);
+            if (!check_ternary_expression(ast_as(ASTTernaryExpr, node), ctx))
+            {
+                return NULL;
+            }
+            return node->expr_type;
         default:
             sem_error(node->loc, "unsupported expression kind %s", ast_kind_name(node->kind));
             ctx->error = true;
-            return false;
+            return NULL;
     }
 }
 
@@ -277,8 +347,14 @@ static bool check_label_statement(ASTLabelStmt *label_stmt, SemanticCtx *ctx, Ty
 
 static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
 {
-    return check_expr(ternary->cond, ctx) && check_expr(ternary->then_expr, ctx) &&
-           check_expr(ternary->else_expr, ctx);
+    if (!check_expr(ternary->cond, ctx) || !check_expr(ternary->then_expr, ctx) ||
+        !check_expr(ternary->else_expr, ctx))
+    {
+        return false;
+    }
+    ternary->base.expr_type =
+        type_common(ternary->then_expr->expr_type, ternary->else_expr->expr_type);
+    return true;
 }
 
 static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)

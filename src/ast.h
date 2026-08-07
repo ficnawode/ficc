@@ -72,6 +72,7 @@ struct ASTNode
 {
     ASTKind kind;
     Loc loc;
+    Type *expr_type; /* computed by semantic pass; non-NULL for expression nodes */
 };
 
 #define ast_as(T, node) ((T *) (node))
@@ -105,6 +106,9 @@ struct ASTIntLiteral
 {
     ASTNode base;
     i64 value;
+    bool is_unsigned : 1;
+    IntSuffix length : 2;
+    bool is_hex : 1;
 };
 
 typedef struct ASTProgram ASTProgram;
@@ -237,7 +241,8 @@ ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *bo
                       Arena *arena);
 ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
 ASTNode *ast_return_stmt(ASTNode *expr, Loc loc, Arena *arena);
-ASTNode *ast_int_literal(i64 value, Loc loc, Arena *arena);
+ASTNode *ast_int_literal(i64 value, bool is_unsigned, IntSuffix length, bool is_hex, Loc loc,
+                         Arena *arena);
 ASTNode *ast_program(Vec *decls, Loc loc, Arena *arena);
 ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, Loc loc, Arena *arena);
 ASTNode *ast_expr_stmt(ASTNode *expr, Loc loc, Arena *arena);

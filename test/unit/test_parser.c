@@ -8,7 +8,9 @@ static ASTNode *parse_string(const char *src, Arena *arena)
 {
     LexResult lexed = lex("<test>", src, arena);
     if (!lexed.tokens)
+    {
         return NULL;
+    }
     return parse(lexed.tokens, lexed.count, arena);
 }
 

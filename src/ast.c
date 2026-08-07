@@ -19,6 +19,7 @@ static void *ast_new_node(size_t size, ASTKind kind, Loc loc, Arena *arena)
     ASTNode *base = arena_alloc(arena, size, sizeof(void *));
     base->kind = kind;
     base->loc = loc;
+    base->expr_type = NULL;
     return base;
 }
 
@@ -47,10 +48,14 @@ ASTNode *ast_return_stmt(ASTNode *expr, Loc loc, Arena *arena)
     return &n->base;
 }
 
-ASTNode *ast_int_literal(i64 value, Loc loc, Arena *arena)
+ASTNode *ast_int_literal(i64 value, bool is_unsigned, IntSuffix length, bool is_hex, Loc loc,
+                         Arena *arena)
 {
     ASTIntLiteral *n = ast_new_node(sizeof(ASTIntLiteral), AST_INT_LITERAL, loc, arena);
     n->value = value;
+    n->is_unsigned = is_unsigned;
+    n->length = length;
+    n->is_hex = is_hex;
     return &n->base;
 }
 

@@ -4,6 +4,13 @@
 #include "util/arena.h"
 #include "util/types.h"
 
+typedef enum
+{
+    SUFFIX_NONE,
+    SUFFIX_L,
+    SUFFIX_LL,
+} IntSuffix;
+
 /* X-macro for type kinds. Append only. */
 #define TYPE_KINDS(X)                                                                              \
     X(TYPE_VOID)                                                                                   \
@@ -45,7 +52,7 @@ struct Type
 
 Type *type_void(void);
 Type *type_int(void);
-Type *type_cbool(void);  /* C11 _Bool: 1 byte, unsigned semantics */
+Type *type_cbool(void); /* C11 _Bool: 1 byte, unsigned semantics */
 Type *type_char(void);
 Type *type_short(void);
 Type *type_long(void);
@@ -66,8 +73,12 @@ Type *type_promote(Type *t);
 /* C11 §6.3.1.8 usual arithmetic conversions: common type for binary operations. */
 Type *type_common(Type *a, Type *b);
 
+/* C11 §6.4.4.1 integer constant typing. Returns the smallest type that can
+   represent `value` given the suffix constraints, per LP64 data model. */
+Type *type_int_literal(i64 value, bool is_hex, bool is_unsigned, IntSuffix length);
+
 /* Integer rank for type comparison: higher rank = wider type.
-   Returns 0 for non-integer types. */
+   Returns -1 for non-integer types. */
 int type_rank(Type *t);
 
 const char *type_kind_name(TypeKind kind);

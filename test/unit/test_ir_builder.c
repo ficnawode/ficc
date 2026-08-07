@@ -11,13 +11,19 @@ static IrModule *build_from_source(const char *src, Arena *arena)
 {
     LexResult lexed = lex("<test>", src, arena);
     if (!lexed.tokens)
+    {
         return NULL;
+    }
     ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
     if (!ast)
+    {
         return NULL;
+    }
     ast = semantic_check(ast, arena);
     if (!ast)
+    {
         return NULL;
+    }
     return ir_build_module(ast, arena);
 }
 
@@ -80,7 +86,7 @@ TEST(ir_builder, wrong_toplevel_returns_null)
 {
     Arena *a = arena_new();
     /* Build an int literal AST directly, bypass parser */
-    ASTNode *lit = ast_int_literal(42, (Loc) {"t", 1, 1}, a);
+    ASTNode *lit = ast_int_literal(42, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     IrModule *m = ir_build_module(lit, a);
     EXPECT_TRUE(m == NULL);
     arena_free(a);

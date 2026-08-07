@@ -1,6 +1,7 @@
 #ifndef FICC_LEXER_H
 #define FICC_LEXER_H
 
+#include "type.h"
 #include "util/arena.h"
 #include "util/types.h"
 
@@ -76,6 +77,12 @@ typedef struct
         i64 int_val;
         const char *str;
     } payload;
+    struct
+    {
+        bool is_unsigned : 1;
+        IntSuffix length : 2;
+        bool is_hex : 1;
+    } int_suffix;
 } Token;
 
 typedef struct LexResult LexResult;

@@ -47,7 +47,8 @@ static IrModule *build_from_source(const char *src, Arena *arena)
 static i64 run_interp(const char *src, Arena *arena)
 {
     IrModule *mod = build_from_source(src, arena);
-    if (!mod) {
+    if (!mod)
+    {
         fprintf(stderr, "[phase5] build_from_source failed for: %s\n", src);
         return 0;
     }
@@ -57,7 +58,8 @@ static i64 run_interp(const char *src, Arena *arena)
 static int run_elf(const char *src, Arena *arena, const char *obj_path, const char *bin_path)
 {
     IrModule *mod = build_from_source(src, arena);
-    if (!mod) {
+    if (!mod)
+    {
         fprintf(stderr, "[phase5] build_from_source failed for: %s\n", src);
         return -1;
     }
@@ -400,5 +402,29 @@ TEST(phase5, elf_unsigned_div)
     EXPECT_EQ(exit_code, 3);
     unlink("/tmp/ficc_phase5_udiv.o");
     unlink("/tmp/ficc_phase5_udiv");
+    arena_free(arena);
+}
+
+TEST(phase5, elf_long_param)
+{
+    const char *src = "int use_long(long x) { return x == 42L; }\n"
+                      "int main(void) { return use_long(42L); }\n";
+    Arena *arena = arena_new();
+    int exit_code = run_elf(src, arena, "/tmp/ficc_phase5_lparam.o", "/tmp/ficc_phase5_lparam");
+    EXPECT_EQ(exit_code, 1);
+    unlink("/tmp/ficc_phase5_lparam.o");
+    unlink("/tmp/ficc_phase5_lparam");
+    arena_free(arena);
+}
+
+TEST(phase5, elf_long_return)
+{
+    const char *src = "long ret_long(void) { return 99L; }\n"
+                      "int main(void) { long r = ret_long(); return r; }\n";
+    Arena *arena = arena_new();
+    int exit_code = run_elf(src, arena, "/tmp/ficc_phase5_lret.o", "/tmp/ficc_phase5_lret");
+    EXPECT_EQ(exit_code, 99);
+    unlink("/tmp/ficc_phase5_lret.o");
+    unlink("/tmp/ficc_phase5_lret");
     arena_free(arena);
 }
