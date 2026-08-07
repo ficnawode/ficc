@@ -99,41 +99,43 @@ static Operand read_variable(BuilderCtx *ctx, const char *name, Block *bb);
 static ExprResult build_expr(ASTNode *node, Function *f, Block *bb, BuilderCtx *ctx);
 static void seal_block(BuilderCtx *ctx, Block *bb);
 
-/* Multiple predecessors: value must come through a PHI, one entry per pred.
-   The PHI is inserted at the beginning of the block so it dominates all other
-   instructions. */
+/* Emit a phi and move it to the front of the block so it dominates every other
+   instruction. */
+static Instr *emit_phi_at_start(Block *bb, u32 dst, u32 nentries)
+{
+    Instr *phi = ir_emit_phi(bb, dst, nentries);
+    Instr *last = (Instr *) vec_pop(bb->instrs);
+    ASSERT(last == phi);
+    vec_insert(bb->instrs, 0, phi);
+    return phi;
+}
+
+/* Multiple predecessors: value must come through a PHI, one entry per pred. */
 static Operand build_phi(BuilderCtx *ctx, const char *name, Block *bb)
 {
     u32 nentries = (u32) vec_size(bb->preds);
     u32 dst = ir_alloc_vreg(ctx->mod, 4);
-    Instr *phi = ir_emit_phi(bb, dst, nentries);
+    Instr *phi = emit_phi_at_start(bb, dst, nentries);
     for (u32 e = 0; e < nentries; e++)
     {
         Block *pred = (Block *) vec_get(bb->preds, e);
         Operand pval = read_variable(ctx, name, pred);
         ir_phi_add_entry(phi, pval, pred);
     }
-    Instr *last = (Instr *) vec_pop(bb->instrs);
-    ASSERT(last == phi);
-    vec_insert(bb->instrs, 0, phi);
     return ir_operand_vreg(dst);
 }
 
-/* Create and insert a filled phi at the beginning of a block. */
+/* Fill a placeholder phi created while the block was unsealed. */
 static void insert_phi(BuilderCtx *ctx, Block *bb, const char *name, u32 dst)
 {
     u32 nentries = (u32) vec_size(bb->preds);
-    Instr *phi = ir_emit_phi(bb, dst, nentries);
+    Instr *phi = emit_phi_at_start(bb, dst, nentries);
     for (u32 e = 0; e < nentries; e++)
     {
         Block *pred = (Block *) vec_get(bb->preds, e);
         Operand pval = read_variable(ctx, name, pred);
         ir_phi_add_entry(phi, pval, pred);
     }
-    /* ir_emit_phi appended; move the phi to the beginning of the block. */
-    Instr *last = (Instr *) vec_pop(bb->instrs);
-    ASSERT(last == phi);
-    vec_insert(bb->instrs, 0, phi);
 }
 
 static void seal_block(BuilderCtx *ctx, Block *bb)
@@ -157,13 +159,14 @@ static void seal_block(BuilderCtx *ctx, Block *bb)
 static Operand read_variable_recursive(BuilderCtx *ctx, const char *name, Block *bb)
 {
     BlockState *bs = get_block_state(ctx, bb);
+    size_t npreds = vec_size(bb->preds);
     Operand val;
-    if (vec_size(bb->preds) == 0)
+    if (npreds == 0)
     {
         /* No predecessors: undefined (semantic already checked) */
         val = ir_operand_imm(0);
     }
-    else if (vec_size(bb->preds) == 1 && !bb->is_loop_header)
+    else if (npreds == 1 && !bb->is_loop_header)
     {
         /* Single predecessor and not a loop header: no PHI needed. Read the value
            from the predecessor. For an unsealed predecessor this creates a
@@ -325,8 +328,8 @@ static Operand build_assignment(Block *bb, ASTNode *node, Operand value, Builder
     return value;
 }
 
-static ExprResult build_logical_and(ASTNode *left_node, ASTNode *right_node, Function *f, Block *bb,
-                                    BuilderCtx *ctx, Loc loc)
+static ExprResult build_short_circuit(ASTNode *left_node, ASTNode *right_node, bool is_or,
+                                      Function *f, Block *bb, BuilderCtx *ctx)
 {
     ExprResult left = build_expr(left_node, f, bb, ctx);
     if (!left.bb)
@@ -334,14 +337,26 @@ static ExprResult build_logical_and(ASTNode *left_node, ASTNode *right_node, Fun
         return left;
     }
 
-    Block *right_bb = add_unique_block(f, "land_rhs");
-    Block *true_bb = add_unique_block(f, "land_true");
-    Block *false_bb = add_unique_block(f, "land_false");
-    Block *merge_bb = add_unique_block(f, "land_merge");
+    char name[16];
+    Block *true_bb = add_unique_block(f, is_or ? "lor_true" : "land_true");
+    Block *false_bb = add_unique_block(f, is_or ? "lor_false" : "land_false");
+    snprintf(name, sizeof(name), "%s_rhs", is_or ? "lor" : "land");
+    Block *right_bb = add_unique_block(f, name);
+    snprintf(name, sizeof(name), "%s_merge", is_or ? "lor" : "land");
+    Block *merge_bb = add_unique_block(f, name);
 
-    ir_emit_brcond(left.bb, left.val, right_bb->label, false_bb->label);
-    vec_push(right_bb->preds, left.bb);
-    vec_push(false_bb->preds, left.bb);
+    if (is_or)
+    {
+        ir_emit_brcond(left.bb, left.val, true_bb->label, right_bb->label);
+        vec_push(true_bb->preds, left.bb);
+        vec_push(right_bb->preds, left.bb);
+    }
+    else
+    {
+        ir_emit_brcond(left.bb, left.val, right_bb->label, false_bb->label);
+        vec_push(right_bb->preds, left.bb);
+        vec_push(false_bb->preds, left.bb);
+    }
 
     ExprResult right = build_expr(right_node, f, right_bb, ctx);
     if (!right.bb)
@@ -369,70 +384,15 @@ static ExprResult build_logical_and(ASTNode *left_node, ASTNode *right_node, Fun
     merge_bb->sealed = true;
 
     u32 dst = ir_alloc_vreg(ctx->mod, 4);
-    Instr *phi = ir_emit_phi(merge_bb, dst, 2);
+    Instr *phi = emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, ir_operand_imm(1), true_bb);
     ir_phi_add_entry(phi, ir_operand_imm(0), false_bb);
-    Instr *last = (Instr *) vec_pop(merge_bb->instrs);
-    ASSERT(last == phi);
-    vec_insert(merge_bb->instrs, 0, phi);
 
-    (void) loc;
-    return expr_result(ir_operand_vreg(dst), merge_bb);
-}
-
-static ExprResult build_logical_or(ASTNode *left_node, ASTNode *right_node, Function *f, Block *bb,
-                                   BuilderCtx *ctx, Loc loc)
-{
-    ExprResult left = build_expr(left_node, f, bb, ctx);
-    if (!left.bb)
-    {
-        return left;
-    }
-
-    Block *right_bb = add_unique_block(f, "lor_rhs");
-    Block *true_bb = add_unique_block(f, "lor_true");
-    Block *false_bb = add_unique_block(f, "lor_false");
-    Block *merge_bb = add_unique_block(f, "lor_merge");
-
-    ir_emit_brcond(left.bb, left.val, true_bb->label, right_bb->label);
-    vec_push(true_bb->preds, left.bb);
-    vec_push(right_bb->preds, left.bb);
-
-    ExprResult right = build_expr(right_node, f, right_bb, ctx);
-    if (!right.bb)
-    {
-        return right;
-    }
-    ir_emit_brcond(right.bb, right.val, true_bb->label, false_bb->label);
-    vec_push(true_bb->preds, right.bb);
-    vec_push(false_bb->preds, right.bb);
-
-    ir_emit_br(true_bb, merge_bb->label);
-    ir_emit_br(false_bb, merge_bb->label);
-    vec_push(merge_bb->preds, true_bb);
-    vec_push(merge_bb->preds, false_bb);
-
-    seal_block(ctx, left.bb);
-    seal_block(ctx, right_bb);
-    seal_block(ctx, false_bb);
-    seal_block(ctx, true_bb);
-
-    merge_bb->sealed = true;
-
-    u32 dst = ir_alloc_vreg(ctx->mod, 4);
-    Instr *phi = ir_emit_phi(merge_bb, dst, 2);
-    ir_phi_add_entry(phi, ir_operand_imm(1), true_bb);
-    ir_phi_add_entry(phi, ir_operand_imm(0), false_bb);
-    Instr *last = (Instr *) vec_pop(merge_bb->instrs);
-    ASSERT(last == phi);
-    vec_insert(merge_bb->instrs, 0, phi);
-
-    (void) loc;
     return expr_result(ir_operand_vreg(dst), merge_bb);
 }
 
 static ExprResult build_ternary(ASTNode *cond_node, ASTNode *then_node, ASTNode *else_node,
-                                Function *f, Block *bb, BuilderCtx *ctx, Loc loc)
+                                Function *f, Block *bb, BuilderCtx *ctx)
 {
     ExprResult cond = build_expr(cond_node, f, bb, ctx);
     if (!cond.bb)
@@ -471,12 +431,11 @@ static ExprResult build_ternary(ASTNode *cond_node, ASTNode *then_node, ASTNode 
     }
 
     u32 dst = ir_alloc_vreg(ctx->mod, 4);
-    Instr *phi = ir_emit_phi(merge_bb, dst, 2);
+    Instr *phi = emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, then_val.val, then_val.bb);
     ir_phi_add_entry(phi, else_val.val, else_val.bb);
     merge_bb->sealed = true;
 
-    (void) loc;
     return expr_result(ir_operand_vreg(dst), merge_bb);
 }
 
@@ -499,11 +458,11 @@ static ExprResult build_expr(ASTNode *node, Function *f, Block *bb, BuilderCtx *
             ASTBinaryExpr *be = ast_as(ASTBinaryExpr, node);
             if (be->op == BIN_LOG_AND)
             {
-                return build_logical_and(be->left, be->right, f, bb, ctx, be->base.loc);
+                return build_short_circuit(be->left, be->right, false, f, bb, ctx);
             }
             if (be->op == BIN_LOG_OR)
             {
-                return build_logical_or(be->left, be->right, f, bb, ctx, be->base.loc);
+                return build_short_circuit(be->left, be->right, true, f, bb, ctx);
             }
             ExprResult left = build_expr(be->left, f, bb, ctx);
             bb = left.bb;
@@ -570,7 +529,7 @@ static ExprResult build_expr(ASTNode *node, Function *f, Block *bb, BuilderCtx *
         case AST_TERNARY_EXPR:
         {
             ASTTernaryExpr *te = ast_as(ASTTernaryExpr, node);
-            return build_ternary(te->cond, te->then_expr, te->else_expr, f, bb, ctx, te->base.loc);
+            return build_ternary(te->cond, te->then_expr, te->else_expr, f, bb, ctx);
         }
         default:
             ir_error(node, "unsupported expression kind %s", ast_kind_name(node->kind));

@@ -2,6 +2,7 @@
 #define FICC_CODEGEN_H
 
 #include "ir.h"
+#include "util/bytebuf.h"
 #include "util/types.h"
 
 /* Per-function machine code record */
@@ -9,10 +10,9 @@ typedef struct CodegenFunc CodegenFunc;
 struct CodegenFunc
 {
     const char *name;
-    u8 *bytes; /* machine-code bytes; the single source of truth for output */
-    size_t len;
-    size_t offset; /* start position in .text */
-    Vec *patches;  /* Vec<CallPatch*> — internal to codegen.c */
+    ByteBuf *bytes; /* machine-code bytes; the single source of truth for output */
+    size_t offset;  /* start position in .text */
+    Vec *patches;   /* Vec<Patch*> — internal to codegen.c */
 };
 
 /* Module-level codegen records */

@@ -370,26 +370,25 @@ static ASTNode *parse_for_stmt(ParserCtx *p)
     }
 
     ASTNode *init = NULL;
-    bool init_attempted = false;
-    if (parser_peek(p)->kind == TOK_KW_INT)
+    if (parser_peek(p)->kind != TOK_SEMI)
     {
-        init = parse_var_decl(p);
-        init_attempted = true;
-    }
-    else if (parser_peek(p)->kind != TOK_SEMI)
-    {
-        init = parse_expr_stmt(p);
-        init_attempted = true;
+        if (parser_peek(p)->kind == TOK_KW_INT)
+        {
+            init = parse_var_decl(p);
+        }
+        else
+        {
+            init = parse_expr_stmt(p);
+        }
+        if (!init)
+        {
+            return NULL;
+        }
     }
     else
     {
         /* empty init clause */
         parser_advance(p); /* consume ';' */
-    }
-    if (init_attempted && !init)
-    {
-        /* parse_var_decl or parse_expr_stmt failed */
-        return NULL;
     }
 
     ASTNode *cond = NULL;
