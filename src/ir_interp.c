@@ -409,8 +409,9 @@ static i64 eval_phi(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     (void) in;
     (void) ctx;
-    (void) regs; /* PHI evaluated in eval_phis before block execution */
-    return 0;
+    (void) regs;
+    ASSERT(false && "PHI must be evaluated before block execution via eval_phis");
+    return 1;
 }
 
 static i64 eval_trunc(IrInstr *in, InterpCtx *ctx, i64 *regs)

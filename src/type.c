@@ -71,13 +71,13 @@ Type *type_promote(Type *t)
        the value is converted to int; otherwise unsigned int. */
     if (!type_is_integer(t))
     {
-        return (Type *)t;
+        return t;
     }
     if (type_rank(t) < type_rank(type_int()))
     {
         return type_int();
     }
-    return (Type *)t;
+    return t;
 }
 
 Type *type_common(Type *a, Type *b)

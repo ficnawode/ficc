@@ -466,6 +466,10 @@ static void emit_call_placeholder(ByteBuf *buf, const char *target, Vec *patches
 
 /* ------------------------------------------------------------------ */
 /* IR lowering                                                         */
+/*                                                                      */
+/* Scratch-register contract: all lower_* functions may use R_EAX and   */
+/* R_ECX as temporaries.  The register allocator must not schedule      */
+/* live ranges that overlap the lowering of a single IR instruction.    */
 /* ------------------------------------------------------------------ */
 
 typedef void (*LowerFn)(IrInstr *in, CodegenCtx *ctx);

@@ -531,12 +531,12 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
         rhs = promote_to(ctx, right.block, rhs, rt, promoted);
         rt = promoted;
     }
-    /* For shifts, the left operand type determines the result; right is always int-promoted. */
+    /* For shifts, the left operand type determines the result width;
+       the shift count only undergoes integer promotion (C11 §6.5.7). */
     else
     {
-        Type *promoted = common_type(promote_type(lt), promote_type(rt));
-        rhs = promote_to(ctx, right.block, rhs, rt, promoted);
-        rt = promoted;
+        rhs = promote_to(ctx, right.block, rhs, rt, promote_type(rt));
+        rt = promote_type(rt);
     }
 
     IrOpcode op = binop_ir[be->op];
@@ -552,10 +552,10 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
         switch (be->op)
         {
             case BIN_EQ:
-                op = unsig ? OP_ICMP_EQ : OP_ICMP_EQ;
+                op = OP_ICMP_EQ;
                 break;
             case BIN_NE:
-                op = unsig ? OP_ICMP_NE : OP_ICMP_NE;
+                op = OP_ICMP_NE;
                 break;
             case BIN_LT:
                 op = unsig ? OP_ICMP_ULT : OP_ICMP_SLT;
