@@ -49,6 +49,7 @@ Block *ir_func_add_block(Function *f, const char *label)
     bb->instrs = vec_new(f->arena);
     bb->preds = vec_new(f->arena);
     bb->sealed = false;
+    bb->is_loop_header = false;
     vec_push(f->blocks, bb);
     return bb;
 }
@@ -130,10 +131,50 @@ Instr *ir_emit_srem(Block *bb, u32 dst, Operand lhs, Operand rhs)
     return emit_binop(bb, OP_SREM, dst, lhs, rhs);
 }
 
+Instr *ir_emit_and(Block *bb, u32 dst, Operand lhs, Operand rhs)
+{
+    return emit_binop(bb, OP_AND, dst, lhs, rhs);
+}
+
+Instr *ir_emit_or(Block *bb, u32 dst, Operand lhs, Operand rhs)
+{
+    return emit_binop(bb, OP_OR, dst, lhs, rhs);
+}
+
+Instr *ir_emit_xor(Block *bb, u32 dst, Operand lhs, Operand rhs)
+{
+    return emit_binop(bb, OP_XOR, dst, lhs, rhs);
+}
+
+Instr *ir_emit_shl(Block *bb, u32 dst, Operand lhs, Operand rhs)
+{
+    return emit_binop(bb, OP_SHL, dst, lhs, rhs);
+}
+
+Instr *ir_emit_ashr(Block *bb, u32 dst, Operand lhs, Operand rhs)
+{
+    return emit_binop(bb, OP_ASHR, dst, lhs, rhs);
+}
+
 Instr *ir_emit_neg(Block *bb, u32 dst, Operand src)
 {
     Instr *ins = instr_new(bb, OP_NEG, dst, 1);
     ins->ops[0] = src;
+    return ins;
+}
+
+Instr *ir_emit_not(Block *bb, u32 dst, Operand src)
+{
+    Instr *ins = instr_new(bb, OP_NOT, dst, 1);
+    ins->ops[0] = src;
+    return ins;
+}
+
+Instr *ir_emit_icmp(Block *bb, IrOpcode op, u32 dst, Operand lhs, Operand rhs)
+{
+    Instr *ins = instr_new(bb, op, dst, 2);
+    ins->ops[0] = lhs;
+    ins->ops[1] = rhs;
     return ins;
 }
 

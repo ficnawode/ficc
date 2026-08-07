@@ -66,3 +66,29 @@ void *vec_pop(Vec *v)
     v->len--;
     return item;
 }
+
+void vec_insert(Vec *v, size_t i, void *item)
+{
+    ASSERT(i <= v->len);
+    if (v->len >= v->cap)
+    {
+        size_t old_cap = v->cap;
+        if (old_cap > SIZE_MAX / (2 * sizeof(void *)))
+        {
+            arena_oom_abort();
+        }
+        v->cap *= 2;
+        void **old = v->data;
+        v->data = arena_alloc(v->arena, v->cap * sizeof(void *), sizeof(void *));
+        for (size_t j = 0; j < old_cap; j++)
+        {
+            v->data[j] = old[j];
+        }
+    }
+    for (size_t j = v->len; j > i; j--)
+    {
+        v->data[j] = v->data[j - 1];
+    }
+    v->data[i] = item;
+    v->len++;
+}

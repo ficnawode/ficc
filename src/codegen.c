@@ -5,7 +5,6 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Diagnostics carry no file:line:col — the IR carries no source locations. */
 static void codegen_error(const char *fmt, ...)
 {
     fprintf(stderr, "[codegen] error: ");
@@ -318,6 +317,185 @@ static void emit_testl_eax_eax(ByteBuf *bb)
 {
     bb_append(bb, 0x85);
     bb_append(bb, modrm(3, 0, 0));
+}
+
+/* cmpl $imm, %eax */
+static void emit_cmpl_imm_to_eax(ByteBuf *bb, i32 imm)
+{
+    if (fits_i8(imm))
+    {
+        bb_append(bb, 0x83);
+        bb_append(bb, modrm(3, 7, 0));
+        bb_append_i8(bb, (i8) imm);
+    }
+    else
+    {
+        bb_append(bb, 0x3D);
+        bb_append_i32(bb, imm);
+    }
+}
+
+/* cmpl disp(%rbp), %eax */
+static void emit_cmpl_rbp_to_eax(ByteBuf *bb, i32 disp)
+{
+    bb_append(bb, 0x3B);
+    if (fits_i8(disp))
+    {
+        bb_append(bb, modrm(1, 0, 5));
+        bb_append_i8(bb, (i8) disp);
+    }
+    else
+    {
+        bb_append(bb, modrm(2, 0, 5));
+        bb_append_i32(bb, disp);
+    }
+}
+
+/* setcc %al: cc encoded by cond (0=O,1=NO,2=B,3=AE,4=E,5=NE,6=BE,7=A,8=S,9=NS,
+   A=P, B=NP, C=L, D=GE, E=LE, F=G) */
+static void emit_setcc_al(ByteBuf *bb, u8 cond)
+{
+    bb_append(bb, 0x0F);
+    bb_append(bb, (u8) (0x90 + cond));
+    bb_append(bb, modrm(3, 0, 0)); /* %al */
+}
+
+/* movzbl %al, %eax */
+static void emit_movzbl_al_eax(ByteBuf *bb)
+{
+    bb_append(bb, 0x0F);
+    bb_append(bb, 0xB6);
+    bb_append(bb, modrm(3, 0, 0));
+}
+
+/* andl $imm, %eax */
+static void emit_andl_imm_to_eax(ByteBuf *bb, i32 imm)
+{
+    if (imm == 0xFF)
+    {
+        /* movzbl %al, %eax is equivalent to andl $0xFF, %eax */
+        emit_movzbl_al_eax(bb);
+        return;
+    }
+    if (fits_i8(imm))
+    {
+        bb_append(bb, 0x83);
+        bb_append(bb, modrm(3, 4, 0));
+        bb_append_i8(bb, (i8) imm);
+    }
+    else
+    {
+        bb_append(bb, 0x25);
+        bb_append_i32(bb, imm);
+    }
+}
+
+/* andl disp(%rbp), %eax */
+static void emit_andl_rbp_to_eax(ByteBuf *bb, i32 disp)
+{
+    bb_append(bb, 0x23);
+    if (fits_i8(disp))
+    {
+        bb_append(bb, modrm(1, 0, 5));
+        bb_append_i8(bb, (i8) disp);
+    }
+    else
+    {
+        bb_append(bb, modrm(2, 0, 5));
+        bb_append_i32(bb, disp);
+    }
+}
+
+/* orl $imm, %eax */
+static void emit_orl_imm_to_eax(ByteBuf *bb, i32 imm)
+{
+    if (fits_i8(imm))
+    {
+        bb_append(bb, 0x83);
+        bb_append(bb, modrm(3, 1, 0));
+        bb_append_i8(bb, (i8) imm);
+    }
+    else
+    {
+        bb_append(bb, 0x0D);
+        bb_append_i32(bb, imm);
+    }
+}
+
+/* orl disp(%rbp), %eax */
+static void emit_orl_rbp_to_eax(ByteBuf *bb, i32 disp)
+{
+    bb_append(bb, 0x0B);
+    if (fits_i8(disp))
+    {
+        bb_append(bb, modrm(1, 0, 5));
+        bb_append_i8(bb, (i8) disp);
+    }
+    else
+    {
+        bb_append(bb, modrm(2, 0, 5));
+        bb_append_i32(bb, disp);
+    }
+}
+
+/* xorl $imm, %eax */
+static void emit_xorl_imm_to_eax(ByteBuf *bb, i32 imm)
+{
+    if (imm == 0)
+    {
+        /* xorl %eax, %eax */
+        bb_append(bb, 0x31);
+        bb_append(bb, modrm(3, 0, 0));
+        return;
+    }
+    if (fits_i8(imm))
+    {
+        bb_append(bb, 0x83);
+        bb_append(bb, modrm(3, 6, 0));
+        bb_append_i8(bb, (i8) imm);
+    }
+    else
+    {
+        bb_append(bb, 0x35);
+        bb_append_i32(bb, imm);
+    }
+}
+
+/* xorl disp(%rbp), %eax */
+static void emit_xorl_rbp_to_eax(ByteBuf *bb, i32 disp)
+{
+    bb_append(bb, 0x33);
+    if (fits_i8(disp))
+    {
+        bb_append(bb, modrm(1, 0, 5));
+        bb_append_i8(bb, (i8) disp);
+    }
+    else
+    {
+        bb_append(bb, modrm(2, 0, 5));
+        bb_append_i32(bb, disp);
+    }
+}
+
+/* notl %eax */
+static void emit_notl_eax(ByteBuf *bb)
+{
+    bb_append(bb, 0xF7);
+    bb_append(bb, modrm(3, 2, 0));
+}
+
+/* shll %cl, %eax */
+static void emit_shll_cl_eax(ByteBuf *bb)
+{
+    bb_append(bb, 0xD3);
+    bb_append(bb, modrm(3, 4, 0));
+}
+
+/* sarl %cl, %eax */
+static void emit_sarl_cl_eax(ByteBuf *bb)
+{
+    bb_append(bb, 0xD3);
+    bb_append(bb, modrm(3, 7, 0));
 }
 
 /* jz rel32 (placeholder) */
@@ -664,6 +842,7 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
             emit_load_operand(bb, in->ops[0]);
             emit_testl_eax_eax(bb);
             emit_jz_placeholder(bb, ctx->block_patches, in->extra.brcond.false_label, ctx->arena);
+            emit_jmp_placeholder(bb, ctx->block_patches, in->extra.brcond.true_label, ctx->arena);
             break;
         }
         case OP_PHI:
@@ -673,6 +852,125 @@ static void emit_instr_mc(Instr *in, CodegenCtx *ctx)
             bb_append(bb, 0x0F); /* ud2 */
             bb_append(bb, 0x0B);
             break;
+        case OP_ICMP_EQ:
+        case OP_ICMP_NE:
+        case OP_ICMP_SLT:
+        case OP_ICMP_SLE:
+        case OP_ICMP_SGT:
+        case OP_ICMP_SGE:
+        {
+            emit_load_operand(bb, in->ops[0]);
+            if (in->ops[1].is_imm)
+            {
+                emit_cmpl_imm_to_eax(bb, (i32) in->ops[1].u.imm);
+            }
+            else
+            {
+                emit_cmpl_rbp_to_eax(bb, vreg_offset(in->ops[1].u.vreg));
+            }
+            u8 cond;
+            switch (in->opcode)
+            {
+                case OP_ICMP_EQ:
+                    cond = 4;
+                    break;
+                case OP_ICMP_NE:
+                    cond = 5;
+                    break;
+                case OP_ICMP_SLT:
+                    cond = 0xC;
+                    break;
+                case OP_ICMP_SLE:
+                    cond = 0xE;
+                    break;
+                case OP_ICMP_SGT:
+                    cond = 0xF;
+                    break;
+                case OP_ICMP_SGE:
+                    cond = 0xD;
+                    break;
+                default:
+                    cond = 4;
+                    break;
+            }
+            emit_setcc_al(bb, cond);
+            emit_movzbl_al_eax(bb);
+            emit_store_eax(bb, in->result);
+            break;
+        }
+        case OP_AND:
+        {
+            emit_load_operand(bb, in->ops[0]);
+            if (in->ops[1].is_imm)
+            {
+                emit_andl_imm_to_eax(bb, (i32) in->ops[1].u.imm);
+            }
+            else
+            {
+                emit_andl_rbp_to_eax(bb, vreg_offset(in->ops[1].u.vreg));
+            }
+            emit_store_eax(bb, in->result);
+            break;
+        }
+        case OP_OR:
+        {
+            emit_load_operand(bb, in->ops[0]);
+            if (in->ops[1].is_imm)
+            {
+                emit_orl_imm_to_eax(bb, (i32) in->ops[1].u.imm);
+            }
+            else
+            {
+                emit_orl_rbp_to_eax(bb, vreg_offset(in->ops[1].u.vreg));
+            }
+            emit_store_eax(bb, in->result);
+            break;
+        }
+        case OP_XOR:
+        {
+            emit_load_operand(bb, in->ops[0]);
+            if (in->ops[1].is_imm)
+            {
+                emit_xorl_imm_to_eax(bb, (i32) in->ops[1].u.imm);
+            }
+            else
+            {
+                emit_xorl_rbp_to_eax(bb, vreg_offset(in->ops[1].u.vreg));
+            }
+            emit_store_eax(bb, in->result);
+            break;
+        }
+        case OP_NOT:
+        {
+            emit_load_operand(bb, in->ops[0]);
+            emit_notl_eax(bb);
+            emit_store_eax(bb, in->result);
+            break;
+        }
+        case OP_SHL:
+        case OP_ASHR:
+        {
+            emit_load_operand(bb, in->ops[0]);
+            /* x86 shift count must be in %cl. */
+            if (in->ops[1].is_imm)
+            {
+                emit_mov_imm_to_ecx(bb, (i32) in->ops[1].u.imm);
+            }
+            else
+            {
+                emit_mov_rbp_to_reg(bb, 1, vreg_offset(in->ops[1].u.vreg));
+            }
+            if (in->opcode == OP_SHL)
+            {
+                emit_shll_cl_eax(bb);
+            }
+            else
+            {
+                emit_sarl_cl_eax(bb);
+            }
+            emit_store_eax(bb, in->result);
+            break;
+        }
         default:
             bb_append(bb, 0x0F); /* ud2 */
             bb_append(bb, 0x0B);
@@ -920,12 +1218,12 @@ CodegenModule *codegen_ir_to_machine(Module *ir, Arena *arena)
     }
 
     /* Compute function offsets in .text */
-    size_t off = 0;
+    size_t function_offset = 0;
     for (size_t i = 0; i < nfuncs; i++)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
-        cf->offset = off;
-        off += cf->len;
+        cf->offset = function_offset;
+        function_offset += cf->len;
     }
 
     /* Apply call patches */

@@ -60,6 +60,15 @@ static ASTNode *parse_primary(ParserCtx *p);
 static ASTNode *parse_unary(ParserCtx *p);
 static ASTNode *parse_mul(ParserCtx *p);
 static ASTNode *parse_add(ParserCtx *p);
+static ASTNode *parse_shift(ParserCtx *p);
+static ASTNode *parse_relational(ParserCtx *p);
+static ASTNode *parse_equality(ParserCtx *p);
+static ASTNode *parse_bit_and(ParserCtx *p);
+static ASTNode *parse_bit_xor(ParserCtx *p);
+static ASTNode *parse_bit_or(ParserCtx *p);
+static ASTNode *parse_log_and(ParserCtx *p);
+static ASTNode *parse_log_or(ParserCtx *p);
+static ASTNode *parse_ternary(ParserCtx *p);
 static ASTNode *parse_assign(ParserCtx *p);
 
 static Type *parse_type_specifier(ParserCtx *p)
@@ -279,6 +288,210 @@ static ASTNode *parse_if_stmt(ParserCtx *p)
     return ast_if_stmt(cond, then_branch, else_branch, start->loc, p->arena);
 }
 
+static ASTNode *parse_while_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_WHILE);
+    parser_advance(p); /* consume 'while' */
+
+    if (!parser_expect(p, TOK_LPAREN, "'('"))
+    {
+        return NULL;
+    }
+
+    ASTNode *cond = parse_expr(p);
+    if (!cond)
+    {
+        return NULL;
+    }
+
+    if (!parser_expect(p, TOK_RPAREN, "')'"))
+    {
+        return NULL;
+    }
+
+    ASTNode *body = parse_stmt(p);
+    if (!body)
+    {
+        return NULL;
+    }
+
+    return ast_while_stmt(cond, body, start->loc, p->arena);
+}
+
+static ASTNode *parse_do_while_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_DO);
+    parser_advance(p); /* consume 'do' */
+
+    ASTNode *body = parse_stmt(p);
+    if (!body)
+    {
+        return NULL;
+    }
+
+    if (!parser_expect(p, TOK_KW_WHILE, "'while'"))
+    {
+        return NULL;
+    }
+    if (!parser_expect(p, TOK_LPAREN, "'('"))
+    {
+        return NULL;
+    }
+
+    ASTNode *cond = parse_expr(p);
+    if (!cond)
+    {
+        return NULL;
+    }
+
+    if (!parser_expect(p, TOK_RPAREN, "')'"))
+    {
+        return NULL;
+    }
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
+        return NULL;
+    }
+
+    return ast_do_while_stmt(cond, body, start->loc, p->arena);
+}
+
+static ASTNode *parse_for_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_FOR);
+    parser_advance(p); /* consume 'for' */
+
+    if (!parser_expect(p, TOK_LPAREN, "'('"))
+    {
+        return NULL;
+    }
+
+    ASTNode *init = NULL;
+    bool init_attempted = false;
+    if (parser_peek(p)->kind == TOK_KW_INT)
+    {
+        init = parse_var_decl(p);
+        init_attempted = true;
+    }
+    else if (parser_peek(p)->kind != TOK_SEMI)
+    {
+        init = parse_expr_stmt(p);
+        init_attempted = true;
+    }
+    else
+    {
+        /* empty init clause */
+        parser_advance(p); /* consume ';' */
+    }
+    if (init_attempted && !init)
+    {
+        /* parse_var_decl or parse_expr_stmt failed */
+        return NULL;
+    }
+
+    ASTNode *cond = NULL;
+    if (parser_peek(p)->kind != TOK_SEMI)
+    {
+        cond = parse_expr(p);
+        if (!cond)
+        {
+            return NULL;
+        }
+    }
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
+        return NULL;
+    }
+
+    ASTNode *post = NULL;
+    if (parser_peek(p)->kind != TOK_RPAREN)
+    {
+        post = parse_expr(p);
+        if (!post)
+        {
+            return NULL;
+        }
+    }
+    if (!parser_expect(p, TOK_RPAREN, "')'"))
+    {
+        return NULL;
+    }
+
+    ASTNode *body = parse_stmt(p);
+    if (!body)
+    {
+        return NULL;
+    }
+
+    return ast_for_stmt(init, cond, post, body, start->loc, p->arena);
+}
+
+static ASTNode *parse_break_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_BREAK);
+    parser_advance(p); /* consume 'break' */
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
+        return NULL;
+    }
+    return ast_break_stmt(start->loc, p->arena);
+}
+
+static ASTNode *parse_continue_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_CONTINUE);
+    parser_advance(p); /* consume 'continue' */
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
+        return NULL;
+    }
+    return ast_continue_stmt(start->loc, p->arena);
+}
+
+static ASTNode *parse_goto_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_GOTO);
+    parser_advance(p); /* consume 'goto' */
+
+    Token *label = parser_peek(p);
+    if (label->kind != TOK_IDENT)
+    {
+        parser_error(p, "expected label name");
+        return NULL;
+    }
+    parser_advance(p);
+
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
+        return NULL;
+    }
+
+    return ast_goto_stmt(label->payload.str, start->loc, p->arena);
+}
+
+static ASTNode *parse_label_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_IDENT);
+    const char *label = start->payload.str;
+    parser_advance(p); /* consume label */
+    parser_advance(p); /* consume ':' */
+
+    ASTNode *stmt = parse_stmt(p);
+    if (!stmt)
+    {
+        return NULL;
+    }
+
+    return ast_label_stmt(label, stmt, start->loc, p->arena);
+}
+
 static ASTNode *parse_stmt(ParserCtx *p)
 {
     Token *t = parser_peek(p);
@@ -290,8 +503,26 @@ static ASTNode *parse_stmt(ParserCtx *p)
             return parse_return_stmt(p);
         case TOK_KW_IF:
             return parse_if_stmt(p);
+        case TOK_KW_WHILE:
+            return parse_while_stmt(p);
+        case TOK_KW_FOR:
+            return parse_for_stmt(p);
+        case TOK_KW_DO:
+            return parse_do_while_stmt(p);
+        case TOK_KW_BREAK:
+            return parse_break_stmt(p);
+        case TOK_KW_CONTINUE:
+            return parse_continue_stmt(p);
+        case TOK_KW_GOTO:
+            return parse_goto_stmt(p);
         case TOK_LBRACE:
             return parse_compound_stmt(p);
+        case TOK_IDENT:
+            if (p->pos + 1 < p->count && p->tokens[p->pos + 1].kind == TOK_COLON)
+            {
+                return parse_label_stmt(p);
+            }
+            return parse_expr_stmt(p);
         default:
             return parse_expr_stmt(p);
     }
@@ -388,6 +619,26 @@ static ASTNode *parse_unary(ParserCtx *p)
         }
         return ast_unary_expr(UN_NEG, operand, t->loc, p->arena);
     }
+    if (t->kind == TOK_NOT)
+    {
+        parser_advance(p);
+        ASTNode *operand = parse_unary(p);
+        if (!operand)
+        {
+            return NULL;
+        }
+        return ast_unary_expr(UN_LOG_NOT, operand, t->loc, p->arena);
+    }
+    if (t->kind == TOK_TILDE)
+    {
+        parser_advance(p);
+        ASTNode *operand = parse_unary(p);
+        if (!operand)
+        {
+            return NULL;
+        }
+        return ast_unary_expr(UN_BIT_NOT, operand, t->loc, p->arena);
+    }
     return parse_primary(p);
 }
 
@@ -460,9 +711,256 @@ static ASTNode *parse_add(ParserCtx *p)
     }
 }
 
-static ASTNode *parse_assign(ParserCtx *p)
+static ASTNode *parse_shift(ParserCtx *p)
 {
     ASTNode *left = parse_add(p);
+    if (!left)
+    {
+        return NULL;
+    }
+
+    while (true)
+    {
+        Token *t = parser_peek(p);
+        BinOpKind op;
+        switch (t->kind)
+        {
+            case TOK_SHL:
+                op = BIN_SHL;
+                break;
+            case TOK_SHR:
+                op = BIN_SHR;
+                break;
+            default:
+                return left;
+        }
+        parser_advance(p);
+        ASTNode *right = parse_add(p);
+        if (!right)
+        {
+            return NULL;
+        }
+        left = ast_binary_expr(op, left, right, t->loc, p->arena);
+    }
+}
+
+static ASTNode *parse_relational(ParserCtx *p)
+{
+    ASTNode *left = parse_shift(p);
+    if (!left)
+    {
+        return NULL;
+    }
+
+    while (true)
+    {
+        Token *t = parser_peek(p);
+        BinOpKind op;
+        switch (t->kind)
+        {
+            case TOK_LT:
+                op = BIN_LT;
+                break;
+            case TOK_GT:
+                op = BIN_GT;
+                break;
+            case TOK_LE:
+                op = BIN_LE;
+                break;
+            case TOK_GE:
+                op = BIN_GE;
+                break;
+            default:
+                return left;
+        }
+        parser_advance(p);
+        ASTNode *right = parse_shift(p);
+        if (!right)
+        {
+            return NULL;
+        }
+        left = ast_binary_expr(op, left, right, t->loc, p->arena);
+    }
+}
+
+static ASTNode *parse_equality(ParserCtx *p)
+{
+    ASTNode *left = parse_relational(p);
+    if (!left)
+    {
+        return NULL;
+    }
+
+    while (true)
+    {
+        Token *t = parser_peek(p);
+        BinOpKind op;
+        switch (t->kind)
+        {
+            case TOK_EQ:
+                op = BIN_EQ;
+                break;
+            case TOK_NE:
+                op = BIN_NE;
+                break;
+            default:
+                return left;
+        }
+        parser_advance(p);
+        ASTNode *right = parse_relational(p);
+        if (!right)
+        {
+            return NULL;
+        }
+        left = ast_binary_expr(op, left, right, t->loc, p->arena);
+    }
+}
+
+static ASTNode *parse_bit_and(ParserCtx *p)
+{
+    ASTNode *left = parse_equality(p);
+    if (!left)
+    {
+        return NULL;
+    }
+
+    while (parser_peek(p)->kind == TOK_BW_AND)
+    {
+        Token *t = parser_peek(p);
+        parser_advance(p);
+        ASTNode *right = parse_equality(p);
+        if (!right)
+        {
+            return NULL;
+        }
+        left = ast_binary_expr(BIN_AND, left, right, t->loc, p->arena);
+    }
+    return left;
+}
+
+static ASTNode *parse_bit_xor(ParserCtx *p)
+{
+    ASTNode *left = parse_bit_and(p);
+    if (!left)
+    {
+        return NULL;
+    }
+
+    while (parser_peek(p)->kind == TOK_BW_XOR)
+    {
+        Token *t = parser_peek(p);
+        parser_advance(p);
+        ASTNode *right = parse_bit_and(p);
+        if (!right)
+        {
+            return NULL;
+        }
+        left = ast_binary_expr(BIN_XOR, left, right, t->loc, p->arena);
+    }
+    return left;
+}
+
+static ASTNode *parse_bit_or(ParserCtx *p)
+{
+    ASTNode *left = parse_bit_xor(p);
+    if (!left)
+    {
+        return NULL;
+    }
+
+    while (parser_peek(p)->kind == TOK_BW_OR)
+    {
+        Token *t = parser_peek(p);
+        parser_advance(p);
+        ASTNode *right = parse_bit_xor(p);
+        if (!right)
+        {
+            return NULL;
+        }
+        left = ast_binary_expr(BIN_OR, left, right, t->loc, p->arena);
+    }
+    return left;
+}
+
+static ASTNode *parse_log_and(ParserCtx *p)
+{
+    ASTNode *left = parse_bit_or(p);
+    if (!left)
+    {
+        return NULL;
+    }
+
+    while (parser_peek(p)->kind == TOK_LOG_AND)
+    {
+        Token *t = parser_peek(p);
+        parser_advance(p);
+        ASTNode *right = parse_bit_or(p);
+        if (!right)
+        {
+            return NULL;
+        }
+        left = ast_binary_expr(BIN_LOG_AND, left, right, t->loc, p->arena);
+    }
+    return left;
+}
+
+static ASTNode *parse_log_or(ParserCtx *p)
+{
+    ASTNode *left = parse_log_and(p);
+    if (!left)
+    {
+        return NULL;
+    }
+
+    while (parser_peek(p)->kind == TOK_LOG_OR)
+    {
+        Token *t = parser_peek(p);
+        parser_advance(p);
+        ASTNode *right = parse_log_and(p);
+        if (!right)
+        {
+            return NULL;
+        }
+        left = ast_binary_expr(BIN_LOG_OR, left, right, t->loc, p->arena);
+    }
+    return left;
+}
+
+static ASTNode *parse_ternary(ParserCtx *p)
+{
+    ASTNode *cond = parse_log_or(p);
+    if (!cond)
+    {
+        return NULL;
+    }
+
+    if (parser_peek(p)->kind != TOK_QUESTION)
+    {
+        return cond;
+    }
+
+    Token *t = parser_peek(p);
+    parser_advance(p); /* consume '?' */
+    ASTNode *then_expr = parse_expr(p);
+    if (!then_expr)
+    {
+        return NULL;
+    }
+    if (!parser_expect(p, TOK_COLON, "':'"))
+    {
+        return NULL;
+    }
+    ASTNode *else_expr = parse_ternary(p);
+    if (!else_expr)
+    {
+        return NULL;
+    }
+    return ast_ternary_expr(cond, then_expr, else_expr, t->loc, p->arena);
+}
+
+static ASTNode *parse_assign(ParserCtx *p)
+{
+    ASTNode *left = parse_ternary(p);
     if (!left)
     {
         return NULL;

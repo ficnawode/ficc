@@ -6,7 +6,9 @@
 static i64 operand_val(Operand o, i64 *regs, u32 nregs)
 {
     if (o.is_imm)
+    {
         return o.u.imm;
+    }
     ASSERT(o.u.vreg < nregs);
     return regs[o.u.vreg];
 }
@@ -18,7 +20,9 @@ static Function *find_func(Module *m, const char *name)
     {
         Function *f = (Function *) vec_get(m->funcs, i);
         if (strcmp(f->name, name) == 0)
+        {
             return f;
+        }
     }
     return NULL;
 }
@@ -30,7 +34,9 @@ static Block *find_block(Function *func, const char *label)
     {
         Block *b = (Block *) vec_get(func->blocks, i);
         if (strcmp(b->label, label) == 0)
+        {
             return b;
+        }
     }
     return NULL;
 }
@@ -58,7 +64,9 @@ static void eval_phis(Frame *fr, Block *bb, Block *pred, u32 nregs)
     {
         Instr *in = (Instr *) vec_get(bb->instrs, i);
         if (in->opcode != OP_PHI)
+        {
             break;
+        }
         bool found = false;
         for (u32 e = 0; e < in->extra.phi.nentries; e++)
         {
@@ -82,7 +90,9 @@ static i64 exec_block(Module *m, Frame *fr, Block *start_bb, Block *start_pred, 
     while (bb)
     {
         if (pred)
+        {
             eval_phis(fr, bb, pred, nregs);
+        }
 
         size_t ninstr = vec_size(bb->instrs);
         Block *next_bb = NULL;
@@ -136,6 +146,79 @@ static i64 exec_block(Module *m, Frame *fr, Block *start_bb, Block *start_pred, 
                 case OP_NEG:
                     fr->regs[in->result] = -operand_val(in->ops[0], fr->regs, nregs);
                     break;
+                case OP_NOT:
+                    fr->regs[in->result] = ~operand_val(in->ops[0], fr->regs, nregs);
+                    break;
+                case OP_ICMP_EQ:
+                case OP_ICMP_NE:
+                case OP_ICMP_SLT:
+                case OP_ICMP_SLE:
+                case OP_ICMP_SGT:
+                case OP_ICMP_SGE:
+                {
+                    i64 lhs = operand_val(in->ops[0], fr->regs, nregs);
+                    i64 rhs = operand_val(in->ops[1], fr->regs, nregs);
+                    bool cond = false;
+                    switch (in->opcode)
+                    {
+                        case OP_ICMP_EQ:
+                            cond = lhs == rhs;
+                            break;
+                        case OP_ICMP_NE:
+                            cond = lhs != rhs;
+                            break;
+                        case OP_ICMP_SLT:
+                            cond = lhs < rhs;
+                            break;
+                        case OP_ICMP_SLE:
+                            cond = lhs <= rhs;
+                            break;
+                        case OP_ICMP_SGT:
+                            cond = lhs > rhs;
+                            break;
+                        case OP_ICMP_SGE:
+                            cond = lhs >= rhs;
+                            break;
+                        default:
+                            break;
+                    }
+                    fr->regs[in->result] = cond ? 1 : 0;
+                    break;
+                }
+                case OP_AND:
+                    fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) &
+                                           operand_val(in->ops[1], fr->regs, nregs);
+                    break;
+                case OP_OR:
+                    fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) |
+                                           operand_val(in->ops[1], fr->regs, nregs);
+                    break;
+                case OP_XOR:
+                    fr->regs[in->result] = operand_val(in->ops[0], fr->regs, nregs) ^
+                                           operand_val(in->ops[1], fr->regs, nregs);
+                    break;
+                case OP_SHL:
+                case OP_ASHR:
+                {
+                    i64 lhs = operand_val(in->ops[0], fr->regs, nregs);
+                    i64 rhs = operand_val(in->ops[1], fr->regs, nregs);
+                    if (rhs < 0 || rhs >= 64)
+                    {
+                        fprintf(stderr, "[interp] error: shift by %lld is undefined\n",
+                                (long long) rhs);
+                        ASSERT(false);
+                        return 1;
+                    }
+                    if (in->opcode == OP_SHL)
+                    {
+                        fr->regs[in->result] = lhs << rhs;
+                    }
+                    else
+                    {
+                        fr->regs[in->result] = lhs >> rhs;
+                    }
+                    break;
+                }
                 case OP_CALL:
                 {
                     Function *callee = find_func(m, in->extra.call.name);
@@ -181,7 +264,9 @@ static i64 exec_block(Module *m, Frame *fr, Block *start_bb, Block *start_pred, 
                 {
                     i64 result = 0;
                     if (in->nops > 0)
+                    {
                         result = operand_val(in->ops[0], fr->regs, nregs);
+                    }
                     return result;
                 }
                 case OP_UNREACHABLE:
@@ -194,11 +279,15 @@ static i64 exec_block(Module *m, Frame *fr, Block *start_bb, Block *start_pred, 
                     return 1;
             }
             if (jumped)
+            {
                 break;
+            }
         }
 
         if (!next_bb)
+        {
             return 0;
+        }
 
         pred = next_pred;
         bb = next_bb;

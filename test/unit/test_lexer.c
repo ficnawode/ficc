@@ -104,18 +104,34 @@ TEST(lexer, empty_source)
 TEST(lexer, operators)
 {
     Arena *a = arena_new();
-    LexResult res = lex("t", "+ - * / % = ,", a);
+    LexResult res = lex("t", "+ - * / % = == != < > <= >= && || ! & | ^ << >> ~ : ,", a);
     Token *t = res.tokens;
     EXPECT_TRUE(t != NULL);
-    EXPECT_EQ(res.count, 8);
+    EXPECT_EQ(res.count, 24);
     EXPECT_EQ(t[0].kind, TOK_PLUS);
     EXPECT_EQ(t[1].kind, TOK_MINUS);
     EXPECT_EQ(t[2].kind, TOK_STAR);
     EXPECT_EQ(t[3].kind, TOK_SLASH);
     EXPECT_EQ(t[4].kind, TOK_PERCENT);
     EXPECT_EQ(t[5].kind, TOK_ASSIGN);
-    EXPECT_EQ(t[6].kind, TOK_COMMA);
-    EXPECT_EQ(t[7].kind, TOK_EOF);
+    EXPECT_EQ(t[6].kind, TOK_EQ);
+    EXPECT_EQ(t[7].kind, TOK_NE);
+    EXPECT_EQ(t[8].kind, TOK_LT);
+    EXPECT_EQ(t[9].kind, TOK_GT);
+    EXPECT_EQ(t[10].kind, TOK_LE);
+    EXPECT_EQ(t[11].kind, TOK_GE);
+    EXPECT_EQ(t[12].kind, TOK_LOG_AND);
+    EXPECT_EQ(t[13].kind, TOK_LOG_OR);
+    EXPECT_EQ(t[14].kind, TOK_NOT);
+    EXPECT_EQ(t[15].kind, TOK_BW_AND);
+    EXPECT_EQ(t[16].kind, TOK_BW_OR);
+    EXPECT_EQ(t[17].kind, TOK_BW_XOR);
+    EXPECT_EQ(t[18].kind, TOK_SHL);
+    EXPECT_EQ(t[19].kind, TOK_SHR);
+    EXPECT_EQ(t[20].kind, TOK_TILDE);
+    EXPECT_EQ(t[21].kind, TOK_COLON);
+    EXPECT_EQ(t[22].kind, TOK_COMMA);
+    EXPECT_EQ(t[23].kind, TOK_EOF);
     arena_free(a);
 }
 
@@ -154,6 +170,39 @@ TEST(lexer, if_else_keywords)
     EXPECT_EQ(t[2].kind, TOK_IDENT);
     EXPECT_EQ(t[3].kind, TOK_RPAREN);
     EXPECT_EQ(t[4].kind, TOK_KW_ELSE);
+    EXPECT_EQ(t[5].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, phase4_keywords)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "while for do break continue goto", a);
+    Token *t = res.tokens;
+    EXPECT_TRUE(t != NULL);
+    EXPECT_EQ(res.count, 7);
+    EXPECT_EQ(t[0].kind, TOK_KW_WHILE);
+    EXPECT_EQ(t[1].kind, TOK_KW_FOR);
+    EXPECT_EQ(t[2].kind, TOK_KW_DO);
+    EXPECT_EQ(t[3].kind, TOK_KW_BREAK);
+    EXPECT_EQ(t[4].kind, TOK_KW_CONTINUE);
+    EXPECT_EQ(t[5].kind, TOK_KW_GOTO);
+    EXPECT_EQ(t[6].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, ternary_tokens)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "a ? b : c", a);
+    Token *t = res.tokens;
+    EXPECT_TRUE(t != NULL);
+    EXPECT_EQ(res.count, 6);
+    EXPECT_EQ(t[0].kind, TOK_IDENT);
+    EXPECT_EQ(t[1].kind, TOK_QUESTION);
+    EXPECT_EQ(t[2].kind, TOK_IDENT);
+    EXPECT_EQ(t[3].kind, TOK_COLON);
+    EXPECT_EQ(t[4].kind, TOK_IDENT);
     EXPECT_EQ(t[5].kind, TOK_EOF);
     arena_free(a);
 }

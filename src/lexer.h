@@ -13,18 +13,41 @@
     X(TOK_KW_RETURN)                                                                               \
     X(TOK_KW_IF)                                                                                   \
     X(TOK_KW_ELSE)                                                                                 \
+    X(TOK_KW_WHILE)                                                                                \
+    X(TOK_KW_FOR)                                                                                  \
+    X(TOK_KW_DO)                                                                                   \
+    X(TOK_KW_BREAK)                                                                                \
+    X(TOK_KW_CONTINUE)                                                                             \
+    X(TOK_KW_GOTO)                                                                                 \
     X(TOK_LPAREN)                                                                                  \
     X(TOK_RPAREN)                                                                                  \
     X(TOK_LBRACE)                                                                                  \
     X(TOK_RBRACE)                                                                                  \
     X(TOK_SEMI)                                                                                    \
+    X(TOK_COLON)                                                                                   \
+    X(TOK_COMMA)                                                                                   \
     X(TOK_PLUS)                                                                                    \
     X(TOK_MINUS)                                                                                   \
     X(TOK_STAR)                                                                                    \
     X(TOK_SLASH)                                                                                   \
     X(TOK_PERCENT)                                                                                 \
     X(TOK_ASSIGN)                                                                                  \
-    X(TOK_COMMA)
+    X(TOK_EQ)                                                                                      \
+    X(TOK_NE)                                                                                      \
+    X(TOK_LT)                                                                                      \
+    X(TOK_GT)                                                                                      \
+    X(TOK_LE)                                                                                      \
+    X(TOK_GE)                                                                                      \
+    X(TOK_LOG_AND)                                                                                 \
+    X(TOK_LOG_OR)                                                                                  \
+    X(TOK_NOT)                                                                                     \
+    X(TOK_QUESTION)                                                                                \
+    X(TOK_BW_AND)                                                                                  \
+    X(TOK_BW_OR)                                                                                   \
+    X(TOK_BW_XOR)                                                                                  \
+    X(TOK_SHL)                                                                                     \
+    X(TOK_SHR)                                                                                     \
+    X(TOK_TILDE)
 
 typedef enum
 {

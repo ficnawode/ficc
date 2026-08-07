@@ -22,7 +22,8 @@ static void *ast_new_node(size_t size, ASTKind kind, Loc loc, Arena *arena)
     return base;
 }
 
-ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body, Loc loc, Arena *arena)
+ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body, Loc loc,
+                      Arena *arena)
 {
     ASTFuncDef *n = ast_new_node(sizeof(ASTFuncDef), AST_FUNC_DEF, loc, arena);
     n->ret_type = ret_type;
@@ -108,12 +109,79 @@ ASTNode *ast_ident(const char *name, Loc loc, Arena *arena)
     return &n->base;
 }
 
-ASTNode *ast_if_stmt(ASTNode *cond, ASTNode *then_branch, ASTNode *else_branch, Loc loc, Arena *arena)
+ASTNode *ast_if_stmt(ASTNode *cond, ASTNode *then_branch, ASTNode *else_branch, Loc loc,
+                     Arena *arena)
 {
     ASTIfStmt *n = ast_new_node(sizeof(ASTIfStmt), AST_IF_STMT, loc, arena);
     n->cond = cond;
     n->then_branch = then_branch;
     n->else_branch = else_branch;
+    return &n->base;
+}
+
+ASTNode *ast_while_stmt(ASTNode *cond, ASTNode *body, Loc loc, Arena *arena)
+{
+    ASTWhileStmt *n = ast_new_node(sizeof(ASTWhileStmt), AST_WHILE_STMT, loc, arena);
+    n->cond = cond;
+    n->body = body;
+    return &n->base;
+}
+
+ASTNode *ast_do_while_stmt(ASTNode *cond, ASTNode *body, Loc loc, Arena *arena)
+{
+    ASTDoWhileStmt *n = ast_new_node(sizeof(ASTDoWhileStmt), AST_DO_WHILE_STMT, loc, arena);
+    n->cond = cond;
+    n->body = body;
+    return &n->base;
+}
+
+ASTNode *ast_for_stmt(ASTNode *init, ASTNode *cond, ASTNode *post, ASTNode *body, Loc loc,
+                      Arena *arena)
+{
+    ASTForStmt *n = ast_new_node(sizeof(ASTForStmt), AST_FOR_STMT, loc, arena);
+    n->init = init;
+    n->cond = cond;
+    n->post = post;
+    n->body = body;
+    return &n->base;
+}
+
+ASTNode *ast_break_stmt(Loc loc, Arena *arena)
+{
+    ASTBreakStmt *n = ast_new_node(sizeof(ASTBreakStmt), AST_BREAK_STMT, loc, arena);
+    (void) n;
+    return &n->base;
+}
+
+ASTNode *ast_continue_stmt(Loc loc, Arena *arena)
+{
+    ASTContinueStmt *n = ast_new_node(sizeof(ASTContinueStmt), AST_CONTINUE_STMT, loc, arena);
+    (void) n;
+    return &n->base;
+}
+
+ASTNode *ast_goto_stmt(const char *label, Loc loc, Arena *arena)
+{
+    ASTGotoStmt *n = ast_new_node(sizeof(ASTGotoStmt), AST_GOTO_STMT, loc, arena);
+    n->label = label;
+    return &n->base;
+}
+
+ASTNode *ast_label_stmt(const char *label, ASTNode *stmt, Loc loc, Arena *arena)
+{
+    ASTLabelStmt *n = ast_new_node(sizeof(ASTLabelStmt), AST_LABEL_STMT, loc, arena);
+    n->label = label;
+    n->stmt = stmt;
+    return &n->base;
+}
+
+ASTNode *ast_ternary_expr(ASTNode *cond, ASTNode *then_expr, ASTNode *else_expr, Loc loc,
+                          Arena *arena)
+{
+    ASTTernaryExpr *n = ast_new_node(sizeof(ASTTernaryExpr), AST_TERNARY_EXPR, loc, arena);
+    n->cond = cond;
+    n->then_expr = then_expr;
+    n->else_expr = else_expr;
     return &n->base;
 }
 
@@ -133,6 +201,32 @@ static const char *bin_op_name(BinOpKind op)
             return "%";
         case BIN_ASSIGN:
             return "=";
+        case BIN_EQ:
+            return "==";
+        case BIN_NE:
+            return "!=";
+        case BIN_LT:
+            return "<";
+        case BIN_GT:
+            return ">";
+        case BIN_LE:
+            return "<=";
+        case BIN_GE:
+            return ">=";
+        case BIN_AND:
+            return "&";
+        case BIN_OR:
+            return "|";
+        case BIN_XOR:
+            return "^";
+        case BIN_SHL:
+            return "<<";
+        case BIN_SHR:
+            return ">>";
+        case BIN_LOG_AND:
+            return "&&";
+        case BIN_LOG_OR:
+            return "||";
     }
     return "?";
 }
@@ -143,6 +237,10 @@ static const char *unary_op_name(UnaryOpKind op)
     {
         case UN_NEG:
             return "-";
+        case UN_LOG_NOT:
+            return "!";
+        case UN_BIT_NOT:
+            return "~";
     }
     return "?";
 }
@@ -185,8 +283,7 @@ static void ast_dump_rec(ASTNode *node, int depth)
         case AST_FUNC_DEF:
         {
             ASTFuncDef *func_def = ast_as(ASTFuncDef, node);
-            printf("FUNC_DEF %s -> %s\n", func_def->name,
-                   type_kind_name(func_def->ret_type->kind));
+            printf("FUNC_DEF %s -> %s\n", func_def->name, type_kind_name(func_def->ret_type->kind));
             ast_dump_rec(func_def->body, depth + 1);
             break;
         }
@@ -275,6 +372,64 @@ static void ast_dump_rec(ASTNode *node, int depth)
             {
                 ast_dump_rec(if_stmt->else_branch, depth + 1);
             }
+            break;
+        }
+        case AST_WHILE_STMT:
+        {
+            ASTWhileStmt *while_stmt = ast_as(ASTWhileStmt, node);
+            printf("WHILE\n");
+            ast_dump_rec(while_stmt->cond, depth + 1);
+            ast_dump_rec(while_stmt->body, depth + 1);
+            break;
+        }
+        case AST_DO_WHILE_STMT:
+        {
+            ASTDoWhileStmt *do_stmt = ast_as(ASTDoWhileStmt, node);
+            printf("DO_WHILE\n");
+            ast_dump_rec(do_stmt->body, depth + 1);
+            ast_dump_rec(do_stmt->cond, depth + 1);
+            break;
+        }
+        case AST_FOR_STMT:
+        {
+            ASTForStmt *for_stmt = ast_as(ASTForStmt, node);
+            printf("FOR\n");
+            ast_dump_rec(for_stmt->init, depth + 1);
+            ast_dump_rec(for_stmt->cond, depth + 1);
+            ast_dump_rec(for_stmt->post, depth + 1);
+            ast_dump_rec(for_stmt->body, depth + 1);
+            break;
+        }
+        case AST_BREAK_STMT:
+        {
+            printf("BREAK\n");
+            break;
+        }
+        case AST_CONTINUE_STMT:
+        {
+            printf("CONTINUE\n");
+            break;
+        }
+        case AST_GOTO_STMT:
+        {
+            ASTGotoStmt *goto_stmt = ast_as(ASTGotoStmt, node);
+            printf("GOTO %s\n", goto_stmt->label);
+            break;
+        }
+        case AST_LABEL_STMT:
+        {
+            ASTLabelStmt *label_stmt = ast_as(ASTLabelStmt, node);
+            printf("LABEL %s\n", label_stmt->label);
+            ast_dump_rec(label_stmt->stmt, depth + 1);
+            break;
+        }
+        case AST_TERNARY_EXPR:
+        {
+            ASTTernaryExpr *ternary = ast_as(ASTTernaryExpr, node);
+            printf("TERNARY\n");
+            ast_dump_rec(ternary->cond, depth + 1);
+            ast_dump_rec(ternary->then_expr, depth + 1);
+            ast_dump_rec(ternary->else_expr, depth + 1);
             break;
         }
         default:

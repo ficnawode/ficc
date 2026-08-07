@@ -144,9 +144,10 @@ struct Block
 {
     const char *label;
     Arena *arena;
-    Vec *instrs; /* Vec<Instr*> */
-    Vec *preds;  /* Vec<Block*> — predecessor blocks */
-    bool sealed; /* all predecessors known? */
+    Vec *instrs;         /* Vec<Instr*> */
+    Vec *preds;          /* Vec<Block*> — predecessor blocks */
+    bool sealed;         /* all predecessors known? */
+    bool is_loop_header; /* block is a loop header (back edge added later) */
 };
 
 typedef struct Param Param;
@@ -212,11 +213,17 @@ Instr *ir_emit_sub(Block *bb, u32 dst, Operand lhs, Operand rhs);
 Instr *ir_emit_mul(Block *bb, u32 dst, Operand lhs, Operand rhs);
 Instr *ir_emit_sdiv(Block *bb, u32 dst, Operand lhs, Operand rhs);
 Instr *ir_emit_srem(Block *bb, u32 dst, Operand lhs, Operand rhs);
+Instr *ir_emit_and(Block *bb, u32 dst, Operand lhs, Operand rhs);
+Instr *ir_emit_or(Block *bb, u32 dst, Operand lhs, Operand rhs);
+Instr *ir_emit_xor(Block *bb, u32 dst, Operand lhs, Operand rhs);
+Instr *ir_emit_shl(Block *bb, u32 dst, Operand lhs, Operand rhs);
+Instr *ir_emit_ashr(Block *bb, u32 dst, Operand lhs, Operand rhs);
 Instr *ir_emit_neg(Block *bb, u32 dst, Operand src);
+Instr *ir_emit_not(Block *bb, u32 dst, Operand src);
+Instr *ir_emit_icmp(Block *bb, IrOpcode op, u32 dst, Operand lhs, Operand rhs);
 Instr *ir_emit_call(Block *bb, u32 dst, const char *name, u32 nargs, Operand *args);
 Instr *ir_emit_br(Block *bb, const char *target_label);
-Instr *ir_emit_brcond(Block *bb, Operand cond, const char *true_label,
-                      const char *false_label);
+Instr *ir_emit_brcond(Block *bb, Operand cond, const char *true_label, const char *false_label);
 Instr *ir_emit_phi(Block *bb, u32 dst, u32 nentries);
 void ir_phi_add_entry(Instr *phi, Operand val, Block *pred);
 

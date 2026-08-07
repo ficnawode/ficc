@@ -29,7 +29,6 @@ U64Map *u64map_new(Arena *arena);
 void u64map_set(U64Map *m, u64 key, void *value);
 void *u64map_get(const U64Map *m, u64 key);
 
-/* HashSet: HashMap with value == key — membership only */
 typedef HashMap HashSet;
 HashSet *hashset_new(Arena *arena, u64 (*hash)(const void *key),
                      bool (*eq)(const void *a, const void *b));
