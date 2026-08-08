@@ -164,3 +164,20 @@ TEST(phase6, interp_multiple_strings)
     EXPECT_EQ(run_interp(src, arena), 'f' + 'o' + 'o' + 'b' + 'a' + 'r');
     arena_free(arena);
 }
+
+TEST(phase6, elf_string_literal)
+{
+    const char *src = "int main(void) {\n"
+                      "    char *s = \"ok\";\n"
+                      "    if (s[0] != 111) return 1;\n"
+                      "    if (s[1] != 107) return 2;\n"
+                      "    return 42;\n"
+                      "}\n";
+    Arena *arena = arena_new();
+    int exit_code =
+        run_elf(src, arena, "/tmp/ficc_phase6_str.o", "/tmp/ficc_phase6_str");
+    EXPECT_EQ(exit_code, 42);
+    unlink("/tmp/ficc_phase6_str.o");
+    unlink("/tmp/ficc_phase6_str");
+    arena_free(arena);
+}

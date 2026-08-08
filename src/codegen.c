@@ -10,14 +10,16 @@
 /* Machine-code context                                                */
 /* ------------------------------------------------------------------ */
 
-/* Patch records: a 4-byte PC-relative displacement at `offset` (within the
-   function's bytes) that must be resolved to the label `target` later.
-   IrBlock labels are resolved during emit_func_mc, function names after
-   layout. */
+/* Patch records for function calls and global-data references.
+   For calls: `offset` is the displacement field in a `call rel32` instruction,
+   resolved to the target function's .text offset.
+   For globals: `offset` is the immediate in a `mov reg, imm32` instruction,
+   resolved to the global's absolute rodata address. */
 typedef struct
 {
     size_t offset;
-    const char *target;
+    const char *target; /* function name for calls, global name for data */
+    bool is_global;     /* true if this patch resolves against .rodata */
 } Patch;
 
 /* One copy emitted in a predecessor block for each PHI entry. */
@@ -47,6 +49,7 @@ struct CodegenCtx
     size_t *block_offsets;  /* per-block offset within the function bytes */
     Vec *patches;           /* Vec<Patch*>, function calls */
     Vec *block_patches;     /* Vec<Patch*>, intra-function jumps */
+    Vec *global_patches;    /* Vec<GlobalPatch*>, global-data references */
 };
 
 static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
@@ -887,6 +890,16 @@ static void lower_sext(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
+static void emit_global_addr(ByteBuf *buf, u32 global_idx, Vec *patches, Arena *arena)
+{
+    bytebuf_append(buf, 0xB8); /* mov eax, imm32 (placeholder) */
+    GlobalPatch *gp = arena_alloc(arena, sizeof(GlobalPatch), sizeof(void *));
+    gp->offset = bytebuf_len(buf);
+    gp->global_index = global_idx;
+    vec_push(patches, gp);
+    bytebuf_append_u32(buf, 0);
+}
+
 static void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src)
 {
     u8 rex_b = rex(true, dst_reg >= 8, src.index != NO_REG && src.index >= 8,
@@ -905,9 +918,12 @@ static X86Mem load_mem_ptr(ByteBuf *buf, X86Operand ptr)
 static void lower_load(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
-    /* Globals reside in .rodata; not lowered here. */
     if (in->ops[0].is_global)
     {
+        emit_global_addr(ctx->buf, in->ops[0].u.global_index, ctx->global_patches, ctx->arena);
+        X86Mem indirect = {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
+        emit_mov(ctx->buf, w, xop_reg(R_EDX), xop_mem(indirect));
+        emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EDX));
         return;
     }
     X86Mem indirect = load_mem_ptr(ctx->buf, xop_from_operand(in->ops[0]));
@@ -918,16 +934,18 @@ static void lower_load(IrInstr *in, CodegenCtx *ctx)
 static void lower_store(IrInstr *in, CodegenCtx *ctx)
 {
     u32 w = (u32) in->ops[2].u.imm;
-    /* Globals reside in .rodata; not lowered here. */
-    if (in->ops[1].is_global)
-    {
-        return;
-    }
     X86Operand val = xop_from_operand(in->ops[0]);
     if (val.kind == XOP_MEM)
     {
         emit_mov(ctx->buf, w, xop_reg(R_EDX), val);
         val = xop_reg(R_EDX);
+    }
+    if (in->ops[1].is_global)
+    {
+        emit_global_addr(ctx->buf, in->ops[1].u.global_index, ctx->global_patches, ctx->arena);
+        X86Mem indirect = {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
+        emit_mov(ctx->buf, w, xop_mem(indirect), val);
+        return;
     }
     X86Mem indirect = load_mem_ptr(ctx->buf, xop_from_operand(in->ops[1]));
     emit_mov(ctx->buf, w, xop_mem(indirect), val);
@@ -936,20 +954,38 @@ static void lower_store(IrInstr *in, CodegenCtx *ctx)
 static void lower_gep(IrInstr *in, CodegenCtx *ctx)
 {
     i32 stride = (i32) in->ops[2].u.imm;
-    X86Operand base = xop_from_operand(in->ops[0]);
-    X86Operand index = xop_from_operand(in->ops[1]);
-    if (base.kind == XOP_MEM)
+    X86Operand base;
+    u8 base_reg;
+    if (in->ops[0].is_global)
     {
-        emit_mov(ctx->buf, 8, xop_reg(R_EAX), base);
-        base = xop_reg(R_EAX);
+        emit_global_addr(ctx->buf, in->ops[0].u.global_index, ctx->global_patches, ctx->arena);
+        base_reg = R_EAX;
     }
-    if (index.kind == XOP_MEM)
+    else
+    {
+        base = xop_from_operand(in->ops[0]);
+        if (base.kind == XOP_MEM || base.kind == XOP_IMM)
+        {
+            emit_mov(ctx->buf, 8, xop_reg(R_EAX), base);
+            base_reg = R_EAX;
+        }
+        else
+        {
+            base_reg = base.kind == XOP_REG ? base.u.reg : R_EAX;
+        }
+    }
+
+    X86Operand index = xop_from_operand(in->ops[1]);
+    u8 index_reg;
+    if (index.kind == XOP_MEM || index.kind == XOP_IMM)
     {
         emit_mov(ctx->buf, 8, xop_reg(R_ECX), index);
-        index = xop_reg(R_ECX);
+        index_reg = R_ECX;
     }
-    u8 base_reg = base.kind == XOP_REG ? base.u.reg : R_EAX;
-    u8 index_reg = index.kind == XOP_REG ? index.u.reg : R_ECX;
+    else
+    {
+        index_reg = index.kind == XOP_REG ? index.u.reg : R_ECX;
+    }
     X86Mem scaled = {.base = base_reg, .index = index_reg, .scale = (u8) stride, .disp = 0};
     emit_lea(ctx->buf, R_EDX, scaled);
     emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
@@ -1208,6 +1244,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     bytebuf_init(buf, arena);
     Vec *patches = vec_new(arena);
     Vec *block_patches = vec_new(arena);
+    Vec *global_patches = vec_new(arena);
 
     emit_prologue(buf, f, mod);
 
@@ -1229,6 +1266,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         .block_offsets = arena_alloc(arena, nblocks * sizeof(size_t), sizeof(size_t)),
         .patches = patches,
         .block_patches = block_patches,
+        .global_patches = global_patches,
     };
 
     for (size_t bi = 0; bi < nblocks; bi++)
@@ -1251,6 +1289,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     cf->bytes = buf;
     cf->offset = 0;
     cf->patches = patches;
+    cf->global_patches = global_patches;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1276,6 +1315,17 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena)
     CodegenModule *cm = arena_alloc(arena, sizeof(CodegenModule), sizeof(void *));
     cm->funcs = vec_new(arena);
     cm->globals = ir->globals;
+    cm->rodata_offsets = vec_new(arena);
+
+    /* Lay out rodata: compute each global's byte offset within the section */
+    size_t rodata_off = 0;
+    size_t nglobals = ir->globals ? vec_size(ir->globals) : 0;
+    for (size_t i = 0; i < nglobals; i++)
+    {
+        IrGlobal *g = (IrGlobal *) vec_get(ir->globals, i);
+        vec_push(cm->rodata_offsets, (void *) rodata_off);
+        rodata_off += g->init_len;
+    }
 
     size_t nfuncs = vec_size(ir->funcs);
     for (size_t i = 0; i < nfuncs; i++)
@@ -1311,6 +1361,19 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena)
             }
             i32 rel = (i32) (target->offset - (cf->offset + p->offset + 4));
             bytebuf_poke_u32(cf->bytes, p->offset, (u32) rel);
+        }
+    }
+
+    /* Apply global-data patches: leave placeholder for R_X86_64_32 relocations.
+       The linker reads the addend from the relocation entry, not the instruction. */
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
+        size_t ngp = vec_size(cf->global_patches);
+        for (size_t pi = 0; pi < ngp; pi++)
+        {
+            GlobalPatch *gp = (GlobalPatch *) vec_get(cf->global_patches, pi);
+            bytebuf_poke_u32(cf->bytes, gp->offset, 0);
         }
     }
 

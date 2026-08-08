@@ -43,6 +43,8 @@ typedef uint64_t Elf64_Off;
 
 #define SHN_UNDEF 0
 
+#define R_X86_64_32 10
+
 typedef struct Elf64_Ehdr Elf64_Ehdr;
 struct Elf64_Ehdr
 {
@@ -114,6 +116,7 @@ typedef enum
     SEC_SYMTAB,
     SEC_STRTAB,
     SEC_SHSTRTAB,
+    SEC_RELA_TEXT,
     SEC_COUNT
 } SectionIndex;
 
@@ -139,6 +142,7 @@ void elf_write(CodegenModule *cm, const char *path)
     u32 shname_symtab = strtab_add(&shstrtab, ".symtab");
     u32 shname_strtab = strtab_add(&shstrtab, ".strtab");
     u32 shname_shstrtab = strtab_add(&shstrtab, ".shstrtab");
+    u32 shname_rela_text = strtab_add(&shstrtab, ".rela.text");
 
     ByteBuf strtab;
     strtab_init(&strtab, arena);
@@ -156,7 +160,6 @@ void elf_write(CodegenModule *cm, const char *path)
     /* Build .rodata content from IrGlobals */
     ByteBuf rodata;
     bytebuf_init(&rodata, arena);
-    Vec *rodata_offsets = vec_new(arena);
     size_t nrodata = 0;
     if (cm->globals)
     {
@@ -164,8 +167,6 @@ void elf_write(CodegenModule *cm, const char *path)
         for (size_t i = 0; i < nrodata; i++)
         {
             IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
-            size_t off = bytebuf_len(&rodata);
-            vec_push(rodata_offsets, (void *) off);
             if (g->init_data)
             {
                 bytebuf_append_bytes(&rodata, g->init_data, g->init_len);
@@ -188,7 +189,28 @@ void elf_write(CodegenModule *cm, const char *path)
     bytebuf_append_u16(&symtab, SEC_TEXT);                          /* st_shndx */
     bytebuf_append_u64(&symtab, 0);                                 /* st_value */
     bytebuf_append_u64(&symtab, 0);                                 /* st_size */
-    /* IrGlobal function symbols */
+    /* .rodata section symbol and data symbols (all local, must precede globals) */
+    if (nrodata > 0)
+    {
+        bytebuf_append_u32(&symtab, 0);                                 /* st_name */
+        bytebuf_append(&symtab, ELF64_ST_INFO(STB_LOCAL, STT_SECTION)); /* st_info */
+        bytebuf_append(&symtab, 0);                                     /* st_other */
+        bytebuf_append_u16(&symtab, SEC_RODATA);                        /* st_shndx */
+        bytebuf_append_u64(&symtab, 0);                                 /* st_value */
+        bytebuf_append_u64(&symtab, 0);                                 /* st_size */
+        for (size_t i = 0; i < nrodata; i++)
+        {
+            IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
+            u32 name_off = strtab_add(&strtab, g->name);
+            bytebuf_append_u32(&symtab, name_off);                         /* st_name */
+            bytebuf_append(&symtab, ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE)); /* st_info */
+            bytebuf_append(&symtab, 0);                                    /* st_other */
+            bytebuf_append_u16(&symtab, SEC_RODATA);                       /* st_shndx */
+            bytebuf_append_u64(&symtab, (size_t) vec_get(cm->rodata_offsets, i)); /* st_value */
+            bytebuf_append_u64(&symtab, g->init_len);                      /* st_size */
+        }
+    }
+    /* Function symbols (global) */
     for (size_t i = 0; i < nfuncs; i++)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
@@ -200,29 +222,24 @@ void elf_write(CodegenModule *cm, const char *path)
         bytebuf_append_u64(&symtab, cf->offset);                      /* st_value */
         bytebuf_append_u64(&symtab, bytebuf_len(cf->bytes));          /* st_size */
     }
-    /* .rodata section symbol */
-    if (nrodata > 0)
+    /* Build .rela.text section from codegen global-data patches */
+    ByteBuf rela_text;
+    bytebuf_init(&rela_text, arena);
+    for (size_t fi = 0; fi < nfuncs; fi++)
     {
-        bytebuf_append_u32(&symtab, 0);                                 /* st_name */
-        bytebuf_append(&symtab, ELF64_ST_INFO(STB_LOCAL, STT_SECTION)); /* st_info */
-        bytebuf_append(&symtab, 0);                                     /* st_other */
-        bytebuf_append_u16(&symtab, SEC_RODATA);                        /* st_shndx */
-        bytebuf_append_u64(&symtab, 0);                                 /* st_value */
-        bytebuf_append_u64(&symtab, 0);                                 /* st_size */
-        /* IrGlobal data symbols */
-        for (size_t i = 0; i < nrodata; i++)
+        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, fi);
+        size_t ngp = vec_size(cf->global_patches);
+        for (size_t pi = 0; pi < ngp; pi++)
         {
-            IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
-            u32 name_off = strtab_add(&strtab, g->name);
-            bytebuf_append_u32(&symtab, name_off);                         /* st_name */
-            bytebuf_append(&symtab, ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE)); /* st_info */
-            bytebuf_append(&symtab, 0);                                    /* st_other */
-            bytebuf_append_u16(&symtab, SEC_RODATA);                       /* st_shndx */
-            bytebuf_append_u64(&symtab, (size_t) vec_get(rodata_offsets, i)); /* st_value */
-            bytebuf_append_u64(&symtab, g->init_len);                      /* st_size */
+            GlobalPatch *gp = (GlobalPatch *) vec_get(cf->global_patches, pi);
+            bytebuf_append_u64(&rela_text, cf->offset + gp->offset); /* r_offset */
+            /* Reference the data symbol (index 3 + global_index), not the section
+               symbol, so the linker adjusts for any prepended rodata content. */
+            u64 sym_idx = 3 + gp->global_index;
+            bytebuf_append_u64(&rela_text, (sym_idx << 32) | R_X86_64_32); /* r_info */
+            bytebuf_append_u64(&rela_text, 0);                              /* r_addend */
         }
     }
-
     /* Compute layout */
     size_t off = 0;
     /* ELF header */
@@ -243,6 +260,9 @@ void elf_write(CodegenModule *cm, const char *path)
     /* .shstrtab */
     size_t off_shstrtab = off;
     off += bytebuf_len(&shstrtab);
+    /* .rela.text */
+    size_t off_rela_text = off;
+    off += bytebuf_len(&rela_text);
     /* Section header table */
     size_t off_shdr = (off + 7) & ~7;
 
@@ -283,6 +303,7 @@ void elf_write(CodegenModule *cm, const char *path)
     bytebuf_append_bytes(&out, bytebuf_data(&symtab), bytebuf_len(&symtab));
     bytebuf_append_bytes(&out, bytebuf_data(&strtab), bytebuf_len(&strtab));
     bytebuf_append_bytes(&out, bytebuf_data(&shstrtab), bytebuf_len(&shstrtab));
+    bytebuf_append_bytes(&out, bytebuf_data(&rela_text), bytebuf_len(&rela_text));
     bytebuf_align(&out, 8);
 
     /* Write section headers */
@@ -331,7 +352,7 @@ void elf_write(CodegenModule *cm, const char *path)
     bytebuf_append_u64(&out, off_symtab);
     bytebuf_append_u64(&out, bytebuf_len(&symtab));
     bytebuf_append_u32(&out, SEC_STRTAB); /* sh_link = .strtab */
-    bytebuf_append_u32(&out, 2);          /* sh_info = last local + 1 */
+    bytebuf_append_u32(&out, (u32) (2 + (nrodata > 0 ? 1 + nrodata : 0))); /* sh_info = first global */
     bytebuf_append_u64(&out, 8);
     bytebuf_append_u64(&out, sizeof(Elf64_Sym));
 
@@ -358,6 +379,18 @@ void elf_write(CodegenModule *cm, const char *path)
     bytebuf_append_u32(&out, 0);
     bytebuf_append_u64(&out, 1);
     bytebuf_append_u64(&out, 0);
+
+    /* .rela.text */
+    bytebuf_append_u32(&out, shname_rela_text);
+    bytebuf_append_u32(&out, SHT_RELA);
+    bytebuf_append_u64(&out, 0);
+    bytebuf_append_u64(&out, 0);
+    bytebuf_append_u64(&out, off_rela_text);
+    bytebuf_append_u64(&out, bytebuf_len(&rela_text));
+    bytebuf_append_u32(&out, SEC_SYMTAB); /* sh_link = .symtab */
+    bytebuf_append_u32(&out, SEC_TEXT);   /* sh_info = section .text */
+    bytebuf_append_u64(&out, 8);
+    bytebuf_append_u64(&out, 24); /* sizeof(Elf64_Rela) */
 
     fwrite(bytebuf_data(&out), 1, bytebuf_len(&out), f);
     fclose(f);
