@@ -99,8 +99,9 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
     if (unary_expr->op == UN_LOG_NOT)
     {
         unary_expr->base.expr_type = type_int();
+        return true;
     }
-    else if (unary_expr->op == UN_DEREF)
+    if (unary_expr->op == UN_DEREF)
     {
         if (!type_is_ptr(op_type))
         {
@@ -109,43 +110,38 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
             return false;
         }
         unary_expr->base.expr_type = type_deref(op_type);
+        return true;
     }
-    else if (unary_expr->op == UN_ADDR)
+    if (unary_expr->op == UN_ADDR)
     {
         ASTNode *operand = unary_expr->operand;
         if (operand->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, operand)->op == UN_DEREF)
         {
             unary_expr->base.expr_type = type_ptr(op_type);
+            return true;
         }
-        else if (operand->kind == AST_IDENT)
+        if (operand->kind == AST_SUBSCRIPT_EXPR)
+        {
+            unary_expr->base.expr_type = type_ptr(op_type);
+            return true;
+        }
+        if (operand->kind == AST_IDENT)
         {
             ASTVarDecl *decl = strmap_get(ctx->locals, ast_as(ASTIdent, operand)->name);
-            if (decl && type_is_array(decl->type))
-            {
-                unary_expr->base.expr_type = type_ptr(op_type);
-            }
-            else
+            if (!decl || !type_is_array(decl->type))
             {
                 sem_error(unary_expr->base.loc, "cannot take address of this expression");
                 ctx->error = true;
                 return false;
             }
-        }
-        else if (operand->kind == AST_SUBSCRIPT_EXPR)
-        {
             unary_expr->base.expr_type = type_ptr(op_type);
+            return true;
         }
-        else
-        {
-            sem_error(unary_expr->base.loc, "cannot take address of this expression");
-            ctx->error = true;
-            return false;
-        }
+        sem_error(unary_expr->base.loc, "cannot take address of this expression");
+        ctx->error = true;
+        return false;
     }
-    else
-    {
-        unary_expr->base.expr_type = type_promote(op_type);
-    }
+    unary_expr->base.expr_type = type_promote(op_type);
     return true;
 }
 

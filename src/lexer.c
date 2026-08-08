@@ -1,4 +1,5 @@
 #include "lexer.h"
+#include "util/hashmap.h"
 #include "util/vec.h"
 #include <stdio.h>
 #include <string.h>
@@ -49,73 +50,42 @@ static bool is_whitespace(char c)
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
+static StrMap *keyword_map;
+
+static void init_keyword_map(Arena *arena)
+{
+    (void) arena;
+    if (keyword_map)
+    {
+        return;
+    }
+    static Arena *kw_arena;
+    kw_arena = arena_new();
+    keyword_map = strmap_new(kw_arena);
+#define KW(s, k) strmap_set(keyword_map, s, (void *) (uintptr_t) (k))
+    KW("int", TOK_KW_INT);
+    KW("void", TOK_KW_VOID);
+    KW("return", TOK_KW_RETURN);
+    KW("if", TOK_KW_IF);
+    KW("else", TOK_KW_ELSE);
+    KW("while", TOK_KW_WHILE);
+    KW("for", TOK_KW_FOR);
+    KW("do", TOK_KW_DO);
+    KW("break", TOK_KW_BREAK);
+    KW("continue", TOK_KW_CONTINUE);
+    KW("goto", TOK_KW_GOTO);
+    KW("char", TOK_KW_CHAR);
+    KW("short", TOK_KW_SHORT);
+    KW("long", TOK_KW_LONG);
+    KW("unsigned", TOK_KW_UNSIGNED);
+    KW("sizeof", TOK_KW_SIZEOF);
+#undef KW
+}
+
 static TokenKind keyword_kind(const char *s)
 {
-    if (strcmp(s, "int") == 0)
-    {
-        return TOK_KW_INT;
-    }
-    if (strcmp(s, "void") == 0)
-    {
-        return TOK_KW_VOID;
-    }
-    if (strcmp(s, "return") == 0)
-    {
-        return TOK_KW_RETURN;
-    }
-    if (strcmp(s, "if") == 0)
-    {
-        return TOK_KW_IF;
-    }
-    if (strcmp(s, "else") == 0)
-    {
-        return TOK_KW_ELSE;
-    }
-    if (strcmp(s, "while") == 0)
-    {
-        return TOK_KW_WHILE;
-    }
-    if (strcmp(s, "for") == 0)
-    {
-        return TOK_KW_FOR;
-    }
-    if (strcmp(s, "do") == 0)
-    {
-        return TOK_KW_DO;
-    }
-    if (strcmp(s, "break") == 0)
-    {
-        return TOK_KW_BREAK;
-    }
-    if (strcmp(s, "continue") == 0)
-    {
-        return TOK_KW_CONTINUE;
-    }
-    if (strcmp(s, "goto") == 0)
-    {
-        return TOK_KW_GOTO;
-    }
-    if (strcmp(s, "char") == 0)
-    {
-        return TOK_KW_CHAR;
-    }
-    if (strcmp(s, "short") == 0)
-    {
-        return TOK_KW_SHORT;
-    }
-    if (strcmp(s, "long") == 0)
-    {
-        return TOK_KW_LONG;
-    }
-    if (strcmp(s, "unsigned") == 0)
-    {
-        return TOK_KW_UNSIGNED;
-    }
-    if (strcmp(s, "sizeof") == 0)
-    {
-        return TOK_KW_SIZEOF;
-    }
-    return TOK_IDENT;
+    TokenKind k = (TokenKind) (uintptr_t) strmap_get(keyword_map, s);
+    return k ? k : TOK_IDENT;
 }
 
 static void lexer_init(LexerCtx *ctx, const char *file, const char *src, Arena *arena)
@@ -592,6 +562,7 @@ static bool lex_punct(LexerCtx *ctx)
 
 LexResult lex(const char *file, const char *src, Arena *arena)
 {
+    init_keyword_map(arena);
     LexerCtx ctx;
     lexer_init(&ctx, file, src, arena);
 

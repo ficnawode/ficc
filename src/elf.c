@@ -156,15 +156,16 @@ void elf_write(CodegenModule *cm, const char *path)
     /* Build .rodata content from IrGlobals */
     ByteBuf rodata;
     bytebuf_init(&rodata, arena);
-    size_t rodata_offsets[64];
+    Vec *rodata_offsets = vec_new(arena);
     size_t nrodata = 0;
     if (cm->globals)
     {
         nrodata = vec_size(cm->globals);
-        for (size_t i = 0; i < nrodata && i < 64; i++)
+        for (size_t i = 0; i < nrodata; i++)
         {
             IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
-            rodata_offsets[i] = bytebuf_len(&rodata);
+            size_t off = bytebuf_len(&rodata);
+            vec_push(rodata_offsets, (void *) off);
             if (g->init_data)
             {
                 bytebuf_append_bytes(&rodata, g->init_data, g->init_len);
@@ -217,7 +218,7 @@ void elf_write(CodegenModule *cm, const char *path)
             bytebuf_append(&symtab, ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE)); /* st_info */
             bytebuf_append(&symtab, 0);                                    /* st_other */
             bytebuf_append_u16(&symtab, SEC_RODATA);                       /* st_shndx */
-            bytebuf_append_u64(&symtab, rodata_offsets[i]);                /* st_value */
+            bytebuf_append_u64(&symtab, (size_t) vec_get(rodata_offsets, i)); /* st_value */
             bytebuf_append_u64(&symtab, g->init_len);                      /* st_size */
         }
     }
@@ -225,7 +226,6 @@ void elf_write(CodegenModule *cm, const char *path)
     /* Compute layout */
     size_t off = 0;
     /* ELF header */
-    size_t off_ehdr = off;
     off += sizeof(Elf64_Ehdr);
     /* .text */
     size_t off_text = off;
@@ -286,13 +286,6 @@ void elf_write(CodegenModule *cm, const char *path)
     bytebuf_align(&out, 8);
 
     /* Write section headers */
-    size_t shdr_base = bytebuf_len(&out);
-    (void) shdr_base;
-    (void) off_ehdr;
-    (void) off_text;
-    (void) off_symtab;
-    (void) off_strtab;
-    (void) off_shstrtab;
 
     /* SHT_NULL */
     bytebuf_append_u32(&out, 0);        /* sh_name */

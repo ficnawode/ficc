@@ -284,3 +284,44 @@ TEST(ir_builder, nested_break_continue_preds)
     EXPECT_EQ(ir_interp_run(m), 6);
     arena_free(a);
 }
+
+TEST(ir_builder, global_string_literal)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_from_source("int main(void) { char *s = \"abc\"; return s[1]; }", a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(vec_size(m->globals), 1);
+
+    IrGlobal *g = (IrGlobal *) vec_get(m->globals, 0);
+    EXPECT_TRUE(g->name != NULL);
+    EXPECT_TRUE(strncmp(g->name, "__str_", 6) == 0);
+    EXPECT_EQ(g->type->kind, TYPE_ARRAY);
+    EXPECT_EQ(type_array_elem(g->type), type_char());
+    EXPECT_EQ(type_array_len(g->type), 4); /* "abc" + NUL */
+    EXPECT_EQ(g->init_len, 4);
+    EXPECT_TRUE(g->init_data != NULL);
+    EXPECT_TRUE(memcmp(g->init_data, "abc", 4) == 0);
+    EXPECT_EQ(g->align, 1);
+    EXPECT_EQ(g->section, IR_SECTION_RODATA);
+
+    EXPECT_EQ(ir_interp_run(m), 'b');
+    arena_free(a);
+}
+
+TEST(ir_builder, multiple_string_literals)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_from_source(
+        "int main(void) { char *x = \"hello\"; char *y = \"world\"; return x[0] + y[0]; }", a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(vec_size(m->globals), 2);
+
+    IrGlobal *g0 = (IrGlobal *) vec_get(m->globals, 0);
+    IrGlobal *g1 = (IrGlobal *) vec_get(m->globals, 1);
+    EXPECT_TRUE(strcmp(g0->name, g1->name) != 0); /* distinct names */
+    EXPECT_EQ(g0->section, IR_SECTION_RODATA);
+    EXPECT_EQ(g1->section, IR_SECTION_RODATA);
+
+    EXPECT_EQ(ir_interp_run(m), 'h' + 'w');
+    arena_free(a);
+}

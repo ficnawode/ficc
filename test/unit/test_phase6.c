@@ -151,3 +151,16 @@ TEST(phase6, elf_golden_pointers)
     unlink("/tmp/ficc_phase6_golden");
     arena_free(arena);
 }
+
+TEST(phase6, interp_multiple_strings)
+{
+    const char *src =
+        "int main(void) {\n"
+        "    char *a = \"foo\";\n"
+        "    char *b = \"bar\";\n"
+        "    return a[0] + a[1] + a[2] + b[0] + b[1] + b[2];\n"
+        "}\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 'f' + 'o' + 'o' + 'b' + 'a' + 'r');
+    arena_free(arena);
+}

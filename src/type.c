@@ -164,6 +164,40 @@ Type *type_common(Type *a, Type *b)
     return signed_type;
 }
 
+static Type *fit_hex(u64 uval, bool has_ullong)
+{
+    if (uval <= (u64) INT32_MAX)
+    {
+        return type_int();
+    }
+    if (uval <= (u64) UINT32_MAX)
+    {
+        return type_uint();
+    }
+    if (uval <= (u64) INT64_MAX)
+    {
+        return type_long();
+    }
+    if (has_ullong && uval <= (u64) UINT64_MAX)
+    {
+        return type_ulong();
+    }
+    return has_ullong ? type_ullong() : type_ulong();
+}
+
+static Type *fit_none(u64 uval, IntSuffix length)
+{
+    if (uval <= (u64) INT32_MAX)
+    {
+        return type_int();
+    }
+    if (length == SUFFIX_L)
+    {
+        return type_long();
+    }
+    return type_llong();
+}
+
 Type *type_int_literal(i64 value, bool is_hex, bool is_unsigned, IntSuffix length)
 {
     u64 uval = (u64) value;
@@ -172,95 +206,15 @@ Type *type_int_literal(i64 value, bool is_hex, bool is_unsigned, IntSuffix lengt
     {
         return is_unsigned ? type_ullong() : type_llong();
     }
-    if (length == SUFFIX_L)
+    if (length == SUFFIX_L && is_unsigned)
     {
-        if (is_unsigned)
-        {
-            return type_ulong();
-        }
-        if (is_hex)
-        {
-            if (uval <= (u64) INT32_MAX)
-            {
-                return type_int();
-            }
-            if (uval <= (u64) UINT32_MAX)
-            {
-                return type_uint();
-            }
-            if (uval <= (u64) INT64_MAX)
-            {
-                return type_long();
-            }
-            return type_ulong();
-        }
-        if (uval <= (u64) INT32_MAX)
-        {
-            return type_int();
-        }
-        return type_long();
-    }
-    if (is_unsigned)
-    {
-        if (is_hex)
-        {
-            if (uval <= (u64) INT32_MAX)
-            {
-                return type_int();
-            }
-            if (uval <= (u64) UINT32_MAX)
-            {
-                return type_uint();
-            }
-            if (uval <= (u64) INT64_MAX)
-            {
-                return type_long();
-            }
-            return type_ulong();
-        }
-        if (uval <= (u64) INT32_MAX)
-        {
-            return type_int();
-        }
-        if (uval <= (u64) UINT32_MAX)
-        {
-            return type_uint();
-        }
-        if (uval <= (u64) INT64_MAX)
-        {
-            return type_long();
-        }
         return type_ulong();
     }
-    if (is_hex)
+    if (is_unsigned || is_hex)
     {
-        if (uval <= (u64) INT32_MAX)
-        {
-            return type_int();
-        }
-        if (uval <= (u64) UINT32_MAX)
-        {
-            return type_uint();
-        }
-        if (uval <= (u64) INT64_MAX)
-        {
-            return type_long();
-        }
-        if (uval <= (u64) UINT64_MAX)
-        {
-            return type_ulong();
-        }
-        return type_ullong();
+        return fit_hex(uval, /* has_ullong */ length == SUFFIX_NONE);
     }
-    if (uval <= (u64) INT32_MAX)
-    {
-        return type_int();
-    }
-    if (uval <= (u64) INT64_MAX)
-    {
-        return type_long();
-    }
-    return type_llong();
+    return fit_none(uval, length);
 }
 
 static void type_init_pool(void)

@@ -249,6 +249,28 @@ static ASTNode *parse_return_stmt(ParserCtx *p)
     return ast_return_stmt(expr, start->loc, p->arena);
 }
 
+static Type *parse_array_suffix(ParserCtx *p, Type *type)
+{
+    while (parser_peek(p)->kind == TOK_LBRACKET)
+    {
+        parser_advance(p);
+        u64 len = 0;
+        if (parser_peek(p)->kind != TOK_RBRACKET)
+        {
+            ASTNode *size_expr = parse_expr(p);
+            if (!size_expr || size_expr->kind != AST_INT_LITERAL)
+            {
+                parser_error(p, "array size must be an integer constant");
+                return NULL;
+            }
+            len = (u64) ast_as(ASTIntLiteral, size_expr)->value;
+        }
+        parser_expect(p, TOK_RBRACKET, "]");
+        type = type_array(type, len);
+    }
+    return type;
+}
+
 static ASTNode *parse_var_decl(ParserCtx *p)
 {
     Token *start = parser_peek(p);
@@ -267,22 +289,10 @@ static ASTNode *parse_var_decl(ParserCtx *p)
     }
     parser_advance(p);
 
-    while (parser_peek(p)->kind == TOK_LBRACKET)
+    type = parse_array_suffix(p, type);
+    if (!type)
     {
-        parser_advance(p);
-        u64 len = 0;
-        if (parser_peek(p)->kind != TOK_RBRACKET)
-        {
-            ASTNode *size_expr = parse_expr(p);
-            if (!size_expr || size_expr->kind != AST_INT_LITERAL)
-            {
-                parser_error(p, "array size must be an integer constant");
-                return NULL;
-            }
-            len = (u64) ast_as(ASTIntLiteral, size_expr)->value;
-        }
-        parser_expect(p, TOK_RBRACKET, "]");
-        type = type_array(type, len);
+        return NULL;
     }
 
     ASTNode *init = NULL;
@@ -693,55 +703,26 @@ static ASTNode *parse_primary(ParserCtx *p)
 static ASTNode *parse_unary(ParserCtx *p)
 {
     Token *t = parser_peek(p);
-    if (t->kind == TOK_MINUS)
+    static const struct
     {
-        parser_advance(p);
-        ASTNode *operand = parse_unary(p);
-        if (!operand)
-        {
-            return NULL;
-        }
-        return ast_unary_expr(UN_NEG, operand, t->loc, p->arena);
-    }
-    if (t->kind == TOK_NOT)
+        TokenKind tok;
+        UnaryOpKind uop;
+    } unary_ops[] = {
+        {TOK_MINUS, UN_NEG},   {TOK_NOT, UN_LOG_NOT}, {TOK_TILDE, UN_BIT_NOT},
+        {TOK_STAR, UN_DEREF},  {TOK_BW_AND, UN_ADDR},
+    };
+    for (size_t i = 0; i < sizeof(unary_ops) / sizeof(unary_ops[0]); i++)
     {
-        parser_advance(p);
-        ASTNode *operand = parse_unary(p);
-        if (!operand)
+        if (t->kind == unary_ops[i].tok)
         {
-            return NULL;
+            parser_advance(p);
+            ASTNode *operand = parse_unary(p);
+            if (!operand)
+            {
+                return NULL;
+            }
+            return ast_unary_expr(unary_ops[i].uop, operand, t->loc, p->arena);
         }
-        return ast_unary_expr(UN_LOG_NOT, operand, t->loc, p->arena);
-    }
-    if (t->kind == TOK_TILDE)
-    {
-        parser_advance(p);
-        ASTNode *operand = parse_unary(p);
-        if (!operand)
-        {
-            return NULL;
-        }
-        return ast_unary_expr(UN_BIT_NOT, operand, t->loc, p->arena);
-    }
-    if (t->kind == TOK_STAR)
-    {
-        parser_advance(p);
-        ASTNode *operand = parse_unary(p);
-        if (!operand)
-        {
-            return NULL;
-        }
-        return ast_unary_expr(UN_DEREF, operand, t->loc, p->arena);
-    }
-    if (t->kind == TOK_BW_AND)
-    {
-        parser_advance(p);
-        ASTNode *operand = parse_unary(p);
-        if (!operand)
-        {
-            return NULL;
-        }
-        return ast_unary_expr(UN_ADDR, operand, t->loc, p->arena);
     }
     if (t->kind == TOK_KW_SIZEOF)
     {
@@ -764,22 +745,10 @@ static ASTNode *parse_unary(ParserCtx *p)
             {
                 return NULL;
             }
-            while (parser_peek(p)->kind == TOK_LBRACKET)
+            ty = parse_array_suffix(p, ty);
+            if (!ty)
             {
-                parser_advance(p);
-                u64 len = 0;
-                if (parser_peek(p)->kind != TOK_RBRACKET)
-                {
-                    ASTNode *se = parse_expr(p);
-                    if (!se || se->kind != AST_INT_LITERAL)
-                    {
-                        parser_error(p, "array size must be an integer constant");
-                        return NULL;
-                    }
-                    len = (u64) ast_as(ASTIntLiteral, se)->value;
-                }
-                parser_expect(p, TOK_RBRACKET, "]");
-                ty = type_array(ty, len);
+                return NULL;
             }
             parser_expect(p, TOK_RPAREN, ")");
             return ast_sizeof_type(ty, 0, t->loc, p->arena);

@@ -540,9 +540,9 @@ static void emit_call_placeholder(ByteBuf *buf, const char *target, Vec *patches
 /* ------------------------------------------------------------------ */
 /* IR lowering                                                         */
 /*                                                                      */
-/* Scratch-register contract: all lower_* functions may use R_EAX and   */
-/* R_ECX as temporaries.  The register allocator must not schedule      */
-/* live ranges that overlap the lowering of a single IR instruction.    */
+/* Scratch-register contract: all lower_* functions may use R_EAX, R_ECX,
+   and R_EDX as temporaries.  The register allocator must not schedule
+   live ranges that overlap the lowering of a single IR instruction. */
 /* ------------------------------------------------------------------ */
 
 typedef void (*LowerFn)(IrInstr *in, CodegenCtx *ctx);
@@ -896,36 +896,40 @@ static void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src)
     emit_mem_operand(buf, dst_reg, src);
 }
 
+static X86Mem load_mem_ptr(ByteBuf *buf, X86Operand ptr)
+{
+    emit_mov(buf, 8, xop_reg(R_EAX), ptr);
+    return (X86Mem) {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
+}
+
 static void lower_load(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
+    /* Globals reside in .rodata; not lowered here. */
     if (in->ops[0].is_global)
     {
         return;
     }
-    X86Operand ptr = xop_from_operand(in->ops[0]);
-    emit_mov(ctx->buf, 8, xop_reg(R_EAX), ptr);
-    X86Mem indirect = {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
-    emit_mov(ctx->buf, w, xop_reg(R_ECX), xop_mem(indirect));
-    emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_ECX));
+    X86Mem indirect = load_mem_ptr(ctx->buf, xop_from_operand(in->ops[0]));
+    emit_mov(ctx->buf, w, xop_reg(R_EDX), xop_mem(indirect));
+    emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EDX));
 }
 
 static void lower_store(IrInstr *in, CodegenCtx *ctx)
 {
     u32 w = (u32) in->ops[2].u.imm;
+    /* Globals reside in .rodata; not lowered here. */
     if (in->ops[1].is_global)
     {
         return;
     }
     X86Operand val = xop_from_operand(in->ops[0]);
-    X86Operand ptr = xop_from_operand(in->ops[1]);
     if (val.kind == XOP_MEM)
     {
-        emit_mov(ctx->buf, w, xop_reg(R_ECX), val);
-        val = xop_reg(R_ECX);
+        emit_mov(ctx->buf, w, xop_reg(R_EDX), val);
+        val = xop_reg(R_EDX);
     }
-    emit_mov(ctx->buf, 8, xop_reg(R_EAX), ptr);
-    X86Mem indirect = {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
+    X86Mem indirect = load_mem_ptr(ctx->buf, xop_from_operand(in->ops[1]));
     emit_mov(ctx->buf, w, xop_mem(indirect), val);
 }
 

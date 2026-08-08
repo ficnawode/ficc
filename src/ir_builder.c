@@ -89,16 +89,6 @@ static u32 alloc_vreg_from_type(FuncBuilder *ctx, Type *type)
     return ir_alloc_vreg(ctx->mod, width);
 }
 
-static Type *promote_type(Type *t)
-{
-    return type_promote(t);
-}
-
-static Type *common_type(Type *a, Type *b)
-{
-    return type_common(a, b);
-}
-
 static inline Type *node_type(ASTNode *n)
 {
     return n->expr_type ? n->expr_type : type_int();
@@ -153,7 +143,12 @@ static bool is_divrem_op(BinOpKind op)
 static u32 alloc_phi_vreg(FuncBuilder *ctx, const char *name)
 {
     Type *t = strmap_get(ctx->var_types, name);
-    ASSERT(t != NULL);
+    if (!t)
+    {
+        ir_error(NULL, "PHI for undeclared variable '%s' (internal IR error)", name);
+        ASSERT(false);
+        return alloc_vreg_from_type(ctx, type_int());
+    }
     return alloc_vreg_from_type(ctx, t);
 }
 
@@ -321,10 +316,9 @@ static void seal_block(FuncBuilder *ctx, IrBlock *bb)
 }
 
 static const IrOpcode binop_ir[] = {
-    [BIN_ADD] = OP_ADD,     [BIN_SUB] = OP_SUB,     [BIN_MUL] = OP_MUL,     [BIN_DIV] = OP_SDIV,
-    [BIN_REM] = OP_SREM,    [BIN_AND] = OP_AND,     [BIN_OR] = OP_OR,       [BIN_XOR] = OP_XOR,
-    [BIN_SHL] = OP_SHL,     [BIN_SHR] = OP_ASHR,    [BIN_EQ] = OP_ICMP_EQ,  [BIN_NE] = OP_ICMP_NE,
-    [BIN_LT] = OP_ICMP_SLT, [BIN_GT] = OP_ICMP_SGT, [BIN_LE] = OP_ICMP_SLE, [BIN_GE] = OP_ICMP_SGE,
+    [BIN_ADD] = OP_ADD, [BIN_SUB] = OP_SUB,    [BIN_MUL] = OP_MUL,  [BIN_AND] = OP_AND,
+    [BIN_OR] = OP_OR,   [BIN_XOR] = OP_XOR,    [BIN_SHL] = OP_SHL,  [BIN_SHR] = OP_ASHR,
+    /* BIN_EQ..BIN_GE, BIN_DIV, BIN_REM resolved in build_arith_binop_expr */
 };
 
 static const IrOpcode unary_opcodes[] = {
@@ -364,17 +358,18 @@ static ExprResult build_ident_expr(ASTIdent *id, IrFunction *f, IrBlock *bb, Fun
 }
 
 static ExprResult build_short_circuit(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
-                                      FuncBuilder *ctx)
+                                       FuncBuilder *ctx)
 {
     bool is_or = be->op == BIN_LOG_OR;
+    const char *pfx = is_or ? "lor" : "land";
     ExprResult left = build_expr(be->left, f, bb, ctx);
 
     char name[16];
     IrBlock *true_bb = new_block(f, is_or ? "lor_true" : "land_true");
     IrBlock *false_bb = new_block(f, is_or ? "lor_false" : "land_false");
-    snprintf(name, sizeof(name), "%s_rhs", is_or ? "lor" : "land");
+    snprintf(name, sizeof(name), "%s_rhs", pfx);
     IrBlock *right_bb = new_block(f, name);
-    snprintf(name, sizeof(name), "%s_merge", is_or ? "lor" : "land");
+    snprintf(name, sizeof(name), "%s_merge", pfx);
     IrBlock *merge_bb = new_block(f, name);
 
     if (is_or)
@@ -512,7 +507,7 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
         IrOperand lhs = left.value;
         IrOperand rhs = right.value;
         Type *elem = type_deref(lt);
-        rhs = promote_to(ctx, right.block, rhs, rt, promote_type(rt));
+        rhs = promote_to(ctx, right.block, rhs, rt, type_promote(rt));
         if (be->op == BIN_SUB)
         {
             u32 neg_vreg = alloc_vreg_from_type(ctx, type_int());
@@ -529,7 +524,7 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
 
     if (!is_comparison_op(be->op) && !is_shift_op(be->op) && !is_divrem_op(be->op))
     {
-        Type *promoted = common_type(promote_type(lt), promote_type(rt));
+        Type *promoted = type_common(type_promote(lt), type_promote(rt));
         lhs = promote_to(ctx, right.block, lhs, lt, promoted);
         lt = promoted;
         rhs = promote_to(ctx, right.block, rhs, rt, promoted);
@@ -537,7 +532,7 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
     }
     else if (is_comparison_op(be->op) || is_divrem_op(be->op))
     {
-        Type *promoted = common_type(promote_type(lt), promote_type(rt));
+        Type *promoted = type_common(type_promote(lt), type_promote(rt));
         lhs = promote_to(ctx, right.block, lhs, lt, promoted);
         lt = promoted;
         rhs = promote_to(ctx, right.block, rhs, rt, promoted);
@@ -547,16 +542,11 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
        the shift count only undergoes integer promotion (C11 §6.5.7). */
     else
     {
-        rhs = promote_to(ctx, right.block, rhs, rt, promote_type(rt));
-        rt = promote_type(rt);
+        rhs = promote_to(ctx, right.block, rhs, rt, type_promote(rt));
+        rt = type_promote(rt);
     }
 
     IrOpcode op = binop_ir[be->op];
-    if (op == 0)
-    {
-        ir_error(&be->base, "unsupported binary operator");
-        return expr_result(ir_operand_imm(0), right.block);
-    }
 
     if (is_comparison_op(be->op))
     {
@@ -591,10 +581,20 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
         {
             op = (be->op == BIN_DIV) ? OP_UDIV : OP_UREM;
         }
+        else
+        {
+            op = (be->op == BIN_DIV) ? OP_SDIV : OP_SREM;
+        }
     }
     else if (be->op == BIN_SHR)
     {
         op = type_is_unsigned(lt) ? OP_LSHR : OP_ASHR;
+    }
+
+    if (op == 0)
+    {
+        ir_error(&be->base, "unsupported binary operator");
+        return expr_result(ir_operand_imm(0), right.block);
     }
 
     Type *result_type = node_type((ASTNode *) be);
@@ -623,7 +623,7 @@ static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
     else
     {
         Type *op_type = node_type(ue->operand);
-        Type *promoted = promote_type(op_type);
+        Type *promoted = type_promote(op_type);
         IrOperand promoted_op = promote_to(ctx, src.block, src.value, op_type, promoted);
         emit_unary_op(src.block, dst, ue->op, promoted_op, &ue->base);
     }
