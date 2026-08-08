@@ -189,6 +189,10 @@ static X86Operand xop_vreg(u32 vreg)
 
 static X86Operand xop_from_operand(IrOperand op)
 {
+    if (op.is_global)
+    {
+        return xop_imm(0);
+    }
     if (op.is_imm)
     {
         return xop_imm(op.u.imm);
@@ -309,9 +313,13 @@ static void emit_mov(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
             bytebuf_append(buf, (u8) (imm & 0xFF));
             bytebuf_append(buf, (u8) (imm >> 8));
         }
+        else if (width == 8)
+        {
+            bytebuf_append_u64(buf, (u64) src.u.imm);
+        }
         else
         {
-            bytebuf_append_i32(buf, (i32) src.u.imm);
+            bytebuf_append_u32(buf, (u32) src.u.imm);
         }
         return;
     }
@@ -553,6 +561,10 @@ static void lower_unreachable(IrInstr *in, CodegenCtx *ctx);
 static void lower_trunc(IrInstr *in, CodegenCtx *ctx);
 static void lower_zext(IrInstr *in, CodegenCtx *ctx);
 static void lower_sext(IrInstr *in, CodegenCtx *ctx);
+static void lower_load(IrInstr *in, CodegenCtx *ctx);
+static void lower_store(IrInstr *in, CodegenCtx *ctx);
+static void lower_gep(IrInstr *in, CodegenCtx *ctx);
+static void lower_alloca(IrInstr *in, CodegenCtx *ctx);
 
 #define LOWER_ENTRIES(X)                                                                           \
     X(OP_RET, lower_ret)                                                                           \
@@ -588,7 +600,11 @@ static void lower_sext(IrInstr *in, CodegenCtx *ctx);
     X(OP_BRCOND, lower_brcond)                                                                     \
     X(OP_CALL, lower_call)                                                                         \
     X(OP_PHI, lower_phi)                                                                           \
-    X(OP_UNREACHABLE, lower_unreachable)
+    X(OP_UNREACHABLE, lower_unreachable)                                                           \
+    X(OP_LOAD, lower_load)                                                                         \
+    X(OP_STORE, lower_store)                                                                       \
+    X(OP_GEP, lower_gep)                                                                           \
+    X(OP_ALLOCA, lower_alloca)
 
 /* Dispatch table indexed by opcode; unlisted opcodes are NULL and diagnosed
    in lower_instr rather than silently miscompiled. */
@@ -869,6 +885,93 @@ static void lower_sext(IrInstr *in, CodegenCtx *ctx)
         emit_movsx(ctx->buf, sw, dw, R_EAX, src);
     }
     emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
+}
+
+static void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src)
+{
+    u8 rex_b = rex(true, dst_reg >= 8, src.index != NO_REG && src.index >= 8,
+                   src.base != NO_REG && src.base >= 8);
+    bytebuf_append(buf, rex_b);
+    bytebuf_append(buf, 0x8D);
+    emit_mem_operand(buf, dst_reg, src);
+}
+
+static void lower_load(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 w = vreg_width(ctx, in->result);
+    if (in->ops[0].is_global)
+    {
+        return;
+    }
+    X86Operand ptr = xop_from_operand(in->ops[0]);
+    emit_mov(ctx->buf, 8, xop_reg(R_EAX), ptr);
+    X86Mem indirect = {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
+    emit_mov(ctx->buf, w, xop_reg(R_ECX), xop_mem(indirect));
+    emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_ECX));
+}
+
+static void lower_store(IrInstr *in, CodegenCtx *ctx)
+{
+    u32 w = (u32) in->ops[2].u.imm;
+    if (in->ops[1].is_global)
+    {
+        return;
+    }
+    X86Operand val = xop_from_operand(in->ops[0]);
+    X86Operand ptr = xop_from_operand(in->ops[1]);
+    if (val.kind == XOP_MEM)
+    {
+        emit_mov(ctx->buf, w, xop_reg(R_ECX), val);
+        val = xop_reg(R_ECX);
+    }
+    emit_mov(ctx->buf, 8, xop_reg(R_EAX), ptr);
+    X86Mem indirect = {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
+    emit_mov(ctx->buf, w, xop_mem(indirect), val);
+}
+
+static void lower_gep(IrInstr *in, CodegenCtx *ctx)
+{
+    i32 stride = (i32) in->ops[2].u.imm;
+    X86Operand base = xop_from_operand(in->ops[0]);
+    X86Operand index = xop_from_operand(in->ops[1]);
+    if (base.kind == XOP_MEM)
+    {
+        emit_mov(ctx->buf, 8, xop_reg(R_EAX), base);
+        base = xop_reg(R_EAX);
+    }
+    if (index.kind == XOP_MEM)
+    {
+        emit_mov(ctx->buf, 8, xop_reg(R_ECX), index);
+        index = xop_reg(R_ECX);
+    }
+    u8 base_reg = base.kind == XOP_REG ? base.u.reg : R_EAX;
+    u8 index_reg = index.kind == XOP_REG ? index.u.reg : R_ECX;
+    X86Mem scaled = {.base = base_reg, .index = index_reg, .scale = (u8) stride, .disp = 0};
+    emit_lea(ctx->buf, R_EDX, scaled);
+    emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
+}
+
+static void lower_alloca(IrInstr *in, CodegenCtx *ctx)
+{
+    i64 size = in->ops[0].u.imm;
+    i64 aligned = (size + 15) & ~15;
+    ByteBuf *b = ctx->buf;
+    if (aligned <= 127)
+    {
+        bytebuf_append(b, 0x48);
+        bytebuf_append(b, 0x83);
+        bytebuf_append(b, 0xEC);
+        bytebuf_append(b, (u8) aligned);
+    }
+    else
+    {
+        bytebuf_append(b, 0x48);
+        bytebuf_append(b, 0x81);
+        bytebuf_append(b, 0xEC);
+        bytebuf_append_u32(b, (u32) aligned);
+    }
+    emit_mov(ctx->buf, 8, xop_reg(R_EDX), xop_reg(R_ESP));
+    emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
 }
 
 /* Every immediate is encoded in a signed 32-bit field. Values that do not
@@ -1168,6 +1271,7 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena)
 {
     CodegenModule *cm = arena_alloc(arena, sizeof(CodegenModule), sizeof(void *));
     cm->funcs = vec_new(arena);
+    cm->globals = ir->globals;
 
     size_t nfuncs = vec_size(ir->funcs);
     for (size_t i = 0; i < nfuncs; i++)

@@ -70,27 +70,34 @@ static ASTNode *parse_log_and(ParserCtx *p);
 static ASTNode *parse_log_or(ParserCtx *p);
 static ASTNode *parse_ternary(ParserCtx *p);
 static ASTNode *parse_assign(ParserCtx *p);
+static ASTNode *parse_postfix(ParserCtx *p);
 
 static Type *parse_type_specifier(ParserCtx *p)
 {
     Token *t = parser_peek(p);
+    Type *ty = NULL;
     switch (t->kind)
     {
         case TOK_KW_INT:
             parser_advance(p);
-            return type_int();
+            ty = type_int();
+            break;
         case TOK_KW_VOID:
             parser_advance(p);
-            return type_void();
+            ty = type_void();
+            break;
         case TOK_KW_CHAR:
             parser_advance(p);
-            return type_char();
+            ty = type_char();
+            break;
         case TOK_KW_SHORT:
             parser_advance(p);
-            return type_short();
+            ty = type_short();
+            break;
         case TOK_KW_LONG:
             parser_advance(p);
-            return type_long();
+            ty = type_long();
+            break;
         case TOK_KW_UNSIGNED:
         {
             parser_advance(p);
@@ -98,29 +105,42 @@ static Type *parse_type_specifier(ParserCtx *p)
             if (next->kind == TOK_KW_INT)
             {
                 parser_advance(p);
-                return type_uint();
+                ty = type_uint();
             }
-            if (next->kind == TOK_KW_CHAR)
+            else if (next->kind == TOK_KW_CHAR)
             {
                 parser_advance(p);
-                return type_uchar();
+                ty = type_uchar();
             }
-            if (next->kind == TOK_KW_SHORT)
+            else if (next->kind == TOK_KW_SHORT)
             {
                 parser_advance(p);
-                return type_ushort();
+                ty = type_ushort();
             }
-            if (next->kind == TOK_KW_LONG)
+            else if (next->kind == TOK_KW_LONG)
             {
                 parser_advance(p);
-                return type_ulong();
+                ty = type_ulong();
             }
-            return type_uint();
+            else
+            {
+                ty = type_uint();
+            }
+            break;
         }
         default:
             parser_error(p, "expected type specifier");
             return NULL;
     }
+
+    /* Postfix type operators: * only ([] is part of declarator) */
+    while (parser_peek(p)->kind == TOK_STAR)
+    {
+        parser_advance(p);
+        ty = type_ptr(ty);
+    }
+
+    return ty;
 }
 
 static ASTNode *parse_param(ParserCtx *p)
@@ -246,6 +266,24 @@ static ASTNode *parse_var_decl(ParserCtx *p)
         return NULL;
     }
     parser_advance(p);
+
+    while (parser_peek(p)->kind == TOK_LBRACKET)
+    {
+        parser_advance(p);
+        u64 len = 0;
+        if (parser_peek(p)->kind != TOK_RBRACKET)
+        {
+            ASTNode *size_expr = parse_expr(p);
+            if (!size_expr || size_expr->kind != AST_INT_LITERAL)
+            {
+                parser_error(p, "array size must be an integer constant");
+                return NULL;
+            }
+            len = (u64) ast_as(ASTIntLiteral, size_expr)->value;
+        }
+        parser_expect(p, TOK_RBRACKET, "]");
+        type = type_array(type, len);
+    }
 
     ASTNode *init = NULL;
     if (parser_peek(p)->kind == TOK_ASSIGN)
@@ -625,6 +663,11 @@ static ASTNode *parse_primary(ParserCtx *p)
         {
             return parse_identifier_expr(p, t);
         }
+        case TOK_STRING_LIT:
+        {
+            parser_advance(p);
+            return ast_string_literal(t->payload.str, t->str_len, t->loc, p->arena);
+        }
         case TOK_LPAREN:
         {
             parser_advance(p);
@@ -680,7 +723,110 @@ static ASTNode *parse_unary(ParserCtx *p)
         }
         return ast_unary_expr(UN_BIT_NOT, operand, t->loc, p->arena);
     }
-    return parse_primary(p);
+    if (t->kind == TOK_STAR)
+    {
+        parser_advance(p);
+        ASTNode *operand = parse_unary(p);
+        if (!operand)
+        {
+            return NULL;
+        }
+        return ast_unary_expr(UN_DEREF, operand, t->loc, p->arena);
+    }
+    if (t->kind == TOK_BW_AND)
+    {
+        parser_advance(p);
+        ASTNode *operand = parse_unary(p);
+        if (!operand)
+        {
+            return NULL;
+        }
+        return ast_unary_expr(UN_ADDR, operand, t->loc, p->arena);
+    }
+    if (t->kind == TOK_KW_SIZEOF)
+    {
+        parser_advance(p);
+        bool is_type = false;
+        if (parser_peek(p)->kind == TOK_LPAREN)
+        {
+            Token *la = &p->tokens[p->pos + 1];
+            if (la->kind == TOK_KW_INT || la->kind == TOK_KW_CHAR || la->kind == TOK_KW_VOID ||
+                la->kind == TOK_KW_SHORT || la->kind == TOK_KW_LONG || la->kind == TOK_KW_UNSIGNED)
+            {
+                is_type = true;
+            }
+        }
+        if (is_type)
+        {
+            parser_advance(p); /* consume '(' */
+            Type *ty = parse_type_specifier(p);
+            if (!ty)
+            {
+                return NULL;
+            }
+            while (parser_peek(p)->kind == TOK_LBRACKET)
+            {
+                parser_advance(p);
+                u64 len = 0;
+                if (parser_peek(p)->kind != TOK_RBRACKET)
+                {
+                    ASTNode *se = parse_expr(p);
+                    if (!se || se->kind != AST_INT_LITERAL)
+                    {
+                        parser_error(p, "array size must be an integer constant");
+                        return NULL;
+                    }
+                    len = (u64) ast_as(ASTIntLiteral, se)->value;
+                }
+                parser_expect(p, TOK_RBRACKET, "]");
+                ty = type_array(ty, len);
+            }
+            parser_expect(p, TOK_RPAREN, ")");
+            return ast_sizeof_type(ty, 0, t->loc, p->arena);
+        }
+        else
+        {
+            ASTNode *operand = parse_unary(p);
+            if (!operand)
+            {
+                return NULL;
+            }
+            return ast_sizeof_expr(operand, 0, t->loc, p->arena);
+        }
+    }
+    return parse_postfix(p);
+}
+
+static ASTNode *parse_postfix(ParserCtx *p)
+{
+    ASTNode *node = parse_primary(p);
+    if (!node)
+    {
+        return NULL;
+    }
+    while (true)
+    {
+        Token *t = parser_peek(p);
+        if (t->kind == TOK_LBRACKET)
+        {
+            parser_advance(p);
+            ASTNode *index = parse_expr(p);
+            if (!index)
+            {
+                return NULL;
+            }
+            if (!parser_expect(p, TOK_RBRACKET, "]"))
+            {
+                return NULL;
+            }
+            node = ast_subscript_expr(node, index, t->loc, p->arena);
+        }
+        else
+        {
+            break;
+        }
+    }
+    return node;
 }
 
 static ASTNode *parse_mul(ParserCtx *p)

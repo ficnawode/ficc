@@ -206,3 +206,75 @@ TEST(lexer, ternary_tokens)
     EXPECT_EQ(t[5].kind, TOK_EOF);
     arena_free(a);
 }
+
+TEST(lexer, string_literal_simple)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "\"hello\"", a);
+    Token *t = res.tokens;
+    EXPECT_TRUE(t != NULL);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_STRING_LIT);
+    EXPECT_EQ(t[0].str_len, 5);
+    EXPECT_TRUE(memcmp(t[0].payload.str, "hello", 5) == 0);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, string_literal_empty)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "\"\"", a);
+    Token *t = res.tokens;
+    EXPECT_TRUE(t != NULL);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_STRING_LIT);
+    EXPECT_EQ(t[0].str_len, 0);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, string_literal_escapes)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "\"a\\nb\\tc\\\\d\\\"e\\0f\"", a);
+    Token *t = res.tokens;
+    EXPECT_TRUE(t != NULL);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_STRING_LIT);
+    EXPECT_EQ(t[0].str_len, 11);
+    EXPECT_EQ(t[0].payload.str[0], 'a');
+    EXPECT_EQ(t[0].payload.str[1], '\n');
+    EXPECT_EQ(t[0].payload.str[2], 'b');
+    EXPECT_EQ(t[0].payload.str[3], '\t');
+    EXPECT_EQ(t[0].payload.str[4], 'c');
+    EXPECT_EQ(t[0].payload.str[5], '\\');
+    EXPECT_EQ(t[0].payload.str[6], 'd');
+    EXPECT_EQ(t[0].payload.str[7], '"');
+    EXPECT_EQ(t[0].payload.str[8], 'e');
+    EXPECT_EQ(t[0].payload.str[9], '\0');
+    EXPECT_EQ(t[0].payload.str[10], 'f');
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, string_literal_unterminated)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "\"hello", a);
+    EXPECT_TRUE(res.tokens == NULL);
+    EXPECT_EQ(res.count, 0);
+    arena_free(a);
+}
+
+TEST(lexer, sizeof_keyword)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "sizeof", a);
+    Token *t = res.tokens;
+    EXPECT_TRUE(t != NULL);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_KW_SIZEOF);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}

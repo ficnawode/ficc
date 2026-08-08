@@ -1,20 +1,27 @@
 #include "type.h"
+#include "util/arena.h"
 #include "util/assert.h"
+#include "util/hashmap.h"
 
 /* Integer type singletons. LP64 data model:
    char=8, short=16, int=32, long=64, long long=64. */
-static const Type the_void = {TYPE_VOID, 0, 1, 0};
-static const Type the_bool = {TYPE_BOOL, 8, 1, 1};
-static const Type the_char = {TYPE_CHAR, 8, 1, 1};
-static const Type the_short = {TYPE_SHORT, 16, 2, 2};
-static const Type the_int = {TYPE_INT, 32, 4, 4};
-static const Type the_long = {TYPE_LONG, 64, 8, 8};
-static const Type the_llong = {TYPE_LLONG, 64, 8, 8};
-static const Type the_uchar = {TYPE_UCHAR, 8, 1, 1};
-static const Type the_ushort = {TYPE_USHORT, 16, 2, 2};
-static const Type the_uint = {TYPE_UINT, 32, 4, 4};
-static const Type the_ulong = {TYPE_ULONG, 64, 8, 8};
-static const Type the_ullong = {TYPE_ULLONG, 64, 8, 8};
+static const Type the_void = {.kind = TYPE_VOID, .width = 0, .align = 1, .size = 0};
+static const Type the_bool = {.kind = TYPE_BOOL, .width = 8, .align = 1, .size = 1};
+static const Type the_char = {.kind = TYPE_CHAR, .width = 8, .align = 1, .size = 1};
+static const Type the_short = {.kind = TYPE_SHORT, .width = 16, .align = 2, .size = 2};
+static const Type the_int = {.kind = TYPE_INT, .width = 32, .align = 4, .size = 4};
+static const Type the_long = {.kind = TYPE_LONG, .width = 64, .align = 8, .size = 8};
+static const Type the_llong = {.kind = TYPE_LLONG, .width = 64, .align = 8, .size = 8};
+static const Type the_uchar = {.kind = TYPE_UCHAR, .width = 8, .align = 1, .size = 1};
+static const Type the_ushort = {.kind = TYPE_USHORT, .width = 16, .align = 2, .size = 2};
+static const Type the_uint = {.kind = TYPE_UINT, .width = 32, .align = 4, .size = 4};
+static const Type the_ulong = {.kind = TYPE_ULONG, .width = 64, .align = 8, .size = 8};
+static const Type the_ullong = {.kind = TYPE_ULLONG, .width = 64, .align = 8, .size = 8};
+
+/* Composite type intern pool */
+static Arena *type_arena;
+static U64Map *ptr_cache;
+static U64Map *array_cache;
 
 Type *type_void(void)
 {
@@ -254,6 +261,99 @@ Type *type_int_literal(i64 value, bool is_hex, bool is_unsigned, IntSuffix lengt
         return type_long();
     }
     return type_llong();
+}
+
+static void type_init_pool(void)
+{
+    if (type_arena)
+    {
+        return;
+    }
+    type_arena = arena_new();
+    ptr_cache = u64map_new(type_arena);
+    array_cache = u64map_new(type_arena);
+}
+
+Type *type_ptr(Type *pointee)
+{
+    type_init_pool();
+    u64 key = (u64) (uintptr_t) pointee;
+    Type *cached = u64map_get(ptr_cache, key);
+    if (cached)
+    {
+        return cached;
+    }
+    Type *t = arena_alloc(type_arena, sizeof(Type), _Alignof(Type));
+    t->kind = TYPE_PTR;
+    t->width = 64;
+    t->align = 8;
+    t->size = 8;
+    t->ptr.pointee = pointee;
+    u64map_set(ptr_cache, key, t);
+    return t;
+}
+
+Type *type_array(Type *elem, u64 length)
+{
+    type_init_pool();
+    u64 key = ((u64) (uintptr_t) elem) ^ (length << 3);
+    Type *cached = u64map_get(array_cache, key);
+    if (cached)
+    {
+        return cached;
+    }
+    Type *t = arena_alloc(type_arena, sizeof(Type), _Alignof(Type));
+    t->kind = TYPE_ARRAY;
+    t->width = elem->width;
+    t->align = elem->align;
+    t->size = (u32) (elem->size * length);
+    t->arr.elem = elem;
+    t->arr.length = length;
+    u64map_set(array_cache, key, t);
+    return t;
+}
+
+bool type_is_ptr(Type *t)
+{
+    return t->kind == TYPE_PTR;
+}
+
+bool type_is_array(Type *t)
+{
+    return t->kind == TYPE_ARRAY;
+}
+
+Type *type_deref(Type *t)
+{
+    ASSERT(t->kind == TYPE_PTR);
+    return t->ptr.pointee;
+}
+
+Type *type_array_elem(Type *t)
+{
+    ASSERT(t->kind == TYPE_ARRAY);
+    return t->arr.elem;
+}
+
+u64 type_array_len(Type *t)
+{
+    ASSERT(t->kind == TYPE_ARRAY);
+    return t->arr.length;
+}
+
+Type *type_decay(Type *t)
+{
+    if (t->kind == TYPE_ARRAY)
+    {
+        return type_ptr(t->arr.elem);
+    }
+    return t;
+}
+
+u64 type_sizeof(Type *t)
+{
+    ASSERT(t->kind != TYPE_VOID);
+    return t->size;
 }
 
 const char *type_kind_name(TypeKind kind)

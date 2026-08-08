@@ -190,6 +190,38 @@ ASTNode *ast_ternary_expr(ASTNode *cond, ASTNode *then_expr, ASTNode *else_expr,
     return &n->base;
 }
 
+ASTNode *ast_subscript_expr(ASTNode *array, ASTNode *index, Loc loc, Arena *arena)
+{
+    ASTSubscriptExpr *n = ast_new_node(sizeof(ASTSubscriptExpr), AST_SUBSCRIPT_EXPR, loc, arena);
+    n->array = array;
+    n->index = index;
+    return &n->base;
+}
+
+ASTNode *ast_sizeof_expr(ASTNode *operand, u64 size_value, Loc loc, Arena *arena)
+{
+    ASTSizeofExpr *n = ast_new_node(sizeof(ASTSizeofExpr), AST_SIZEOF_EXPR, loc, arena);
+    n->operand = operand;
+    n->size_value = size_value;
+    return &n->base;
+}
+
+ASTNode *ast_sizeof_type(Type *type, u64 size_value, Loc loc, Arena *arena)
+{
+    ASTSizeofType *n = ast_new_node(sizeof(ASTSizeofType), AST_SIZEOF_TYPE, loc, arena);
+    n->type = type;
+    n->size_value = size_value;
+    return &n->base;
+}
+
+ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena)
+{
+    ASTStringLiteral *n = ast_new_node(sizeof(ASTStringLiteral), AST_STRING_LITERAL, loc, arena);
+    n->data = data;
+    n->length = len;
+    return &n->base;
+}
+
 static const char *bin_op_name(BinOpKind op)
 {
     switch (op)
@@ -246,6 +278,10 @@ static const char *unary_op_name(UnaryOpKind op)
             return "!";
         case UN_BIT_NOT:
             return "~";
+        case UN_DEREF:
+            return "*";
+        case UN_ADDR:
+            return "&";
     }
     return "?";
 }
@@ -435,6 +471,35 @@ static void ast_dump_rec(ASTNode *node, int depth)
             ast_dump_rec(ternary->cond, depth + 1);
             ast_dump_rec(ternary->then_expr, depth + 1);
             ast_dump_rec(ternary->else_expr, depth + 1);
+            break;
+        }
+        case AST_SUBSCRIPT_EXPR:
+        {
+            ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, node);
+            printf("SUBSCRIPT\n");
+            ast_dump_rec(se->array, depth + 1);
+            ast_dump_rec(se->index, depth + 1);
+            break;
+        }
+        case AST_SIZEOF_EXPR:
+        {
+            ASTSizeofExpr *se = ast_as(ASTSizeofExpr, node);
+            printf("SIZEOF_EXPR %llu\n", (unsigned long long) se->size_value);
+            ast_dump_rec(se->operand, depth + 1);
+            break;
+        }
+        case AST_SIZEOF_TYPE:
+        {
+            ASTSizeofType *st = ast_as(ASTSizeofType, node);
+            printf("SIZEOF_TYPE %s %llu\n", type_kind_name(st->type->kind),
+                   (unsigned long long) st->size_value);
+            break;
+        }
+        case AST_STRING_LITERAL:
+        {
+            ASTStringLiteral *sl = ast_as(ASTStringLiteral, node);
+            printf("STRING_LITERAL \"%.*s\" (%llu bytes)\n", (int) sl->length, sl->data,
+                   (unsigned long long) sl->length);
             break;
         }
         default:

@@ -23,6 +23,13 @@ static void interp_error(const char *fmt, ...)
 /* Interpreter context                                                 */
 /* ------------------------------------------------------------------ */
 
+typedef struct InterpGlobal InterpGlobal;
+struct InterpGlobal
+{
+    u8 *data;
+    u64 size;
+};
+
 typedef struct InterpCtx InterpCtx;
 struct InterpCtx
 {
@@ -41,6 +48,13 @@ struct InterpCtx
     IrBlock *next_pred;  /* the block that jumps to next_bb */
     bool jumped;
     bool returned;
+
+    /* Alloca and global state */
+    u8 *alloca_base;
+    u64 alloca_top;
+    u64 alloca_limit;
+    InterpGlobal *globals;
+    u32 nglobals;
 };
 
 /* Frame: call-stack entry with register file */
@@ -60,8 +74,25 @@ static i64 operand_val(IrOperand o, i64 *regs, u32 nregs)
     {
         return o.u.imm;
     }
+    if (o.is_global)
+    {
+        ASSERT(false && "global operand not yet supported in operand_val");
+        return 0;
+    }
     ASSERT(o.u.vreg < nregs);
     return regs[o.u.vreg];
+}
+
+static u8 *resolve_ptr(InterpCtx *ctx, IrOperand op, i64 *regs, u32 nregs)
+{
+    if (op.is_global)
+    {
+        ASSERT(op.u.global_index < ctx->nglobals);
+        return ctx->globals[op.u.global_index].data;
+    }
+    i64 ptr_val = operand_val(op, regs, nregs);
+    ASSERT(ptr_val != 0);
+    return (u8 *) (uintptr_t) ptr_val;
 }
 
 static Frame *frame_new(Arena *arena, IrFunction *func, u32 nregs)
@@ -135,6 +166,10 @@ static i64 eval_trunc(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_zext(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_sext(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_unreachable(IrInstr *in, InterpCtx *ctx, i64 *regs);
+static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs);
+static i64 eval_store(IrInstr *in, InterpCtx *ctx, i64 *regs);
+static i64 eval_gep(IrInstr *in, InterpCtx *ctx, i64 *regs);
+static i64 eval_alloca(IrInstr *in, InterpCtx *ctx, i64 *regs);
 
 /* Forward declaration for recursion */
 static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *start_pred);
@@ -173,7 +208,11 @@ static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *star
     X(OP_BRCOND, eval_brcond)                                                                      \
     X(OP_RET, eval_ret)                                                                            \
     X(OP_PHI, eval_phi)                                                                            \
-    X(OP_UNREACHABLE, eval_unreachable)
+    X(OP_UNREACHABLE, eval_unreachable)                                                            \
+    X(OP_LOAD, eval_load)                                                                          \
+    X(OP_STORE, eval_store)                                                                        \
+    X(OP_GEP, eval_gep)                                                                            \
+    X(OP_ALLOCA, eval_alloca)
 
 /* Dispatch table indexed by opcode; unlisted opcodes are NULL and diagnosed
    in the block loop rather than silently misinterpreting. */
@@ -466,6 +505,58 @@ static i64 eval_unreachable(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 1;
 }
 
+static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    u8 *addr = resolve_ptr(ctx, in->ops[0], regs, ctx->nregs);
+    u8 w = ctx->mod->widths[in->result];
+    i64 val = 0;
+    memcpy(&val, addr, w > 8 ? 8 : w);
+    regs[in->result] = sext_result(val, w);
+    return 0;
+}
+
+static i64 eval_store(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    i64 val = operand_val(in->ops[0], regs, ctx->nregs);
+    u8 *addr = resolve_ptr(ctx, in->ops[1], regs, ctx->nregs);
+    u32 w = (u32) in->ops[2].u.imm;
+    memcpy(addr, &val, w > 8 ? 8 : w);
+    return 0;
+}
+
+static i64 eval_gep(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    i64 base_val;
+    if (in->ops[0].is_global)
+    {
+        base_val = (i64) (uintptr_t) resolve_ptr(ctx, in->ops[0], regs, ctx->nregs);
+    }
+    else
+    {
+        base_val = operand_val(in->ops[0], regs, ctx->nregs);
+    }
+    i64 index = operand_val(in->ops[1], regs, ctx->nregs);
+    i64 stride = in->ops[2].u.imm;
+    regs[in->result] = base_val + index * stride;
+    mask_vreg(ctx, regs, in->result);
+    return 0;
+}
+
+static i64 eval_alloca(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    i64 size = operand_val(in->ops[0], regs, ctx->nregs);
+    u64 aligned = ((u64) size + 7) & ~7ULL;
+    if (ctx->alloca_top + aligned > ctx->alloca_limit)
+    {
+        interp_error("stack overflow");
+        return 1;
+    }
+    regs[in->result] = (i64) (uintptr_t) (ctx->alloca_base + ctx->alloca_top);
+    ctx->alloca_top += aligned;
+    mask_vreg(ctx, regs, in->result);
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* PHI evaluation                                                      */
 /* ------------------------------------------------------------------ */
@@ -612,12 +703,42 @@ i64 ir_interp_run(IrModule *m)
         strmap_set(func_map, f->name, f);
     }
 
+    InterpGlobal *globals = NULL;
+    u32 nglobals = (u32) vec_size(m->globals);
+    if (nglobals > 0)
+    {
+        globals = arena_alloc(frame_arena, nglobals * sizeof(InterpGlobal), _Alignof(InterpGlobal));
+        for (u32 i = 0; i < nglobals; i++)
+        {
+            IrGlobal *ig = (IrGlobal *) vec_get(m->globals, i);
+            globals[i].size = ig->init_len;
+            if (ig->init_data)
+            {
+                globals[i].data = arena_alloc(frame_arena, ig->init_len, ig->align);
+                memcpy(globals[i].data, ig->init_data, ig->init_len);
+            }
+            else
+            {
+                globals[i].data = arena_alloc(frame_arena, ig->init_len, ig->align);
+                memset(globals[i].data, 0, ig->init_len);
+            }
+        }
+    }
+
+#define ALLOCA_SIZE (1ULL << 20)
+    u8 *alloca_buf = arena_alloc(frame_arena, ALLOCA_SIZE, 8);
+
     InterpCtx ctx = {
         .mod = m,
         .stack = stack,
         .frame_arena = frame_arena,
         .nregs = nregs,
         .func_map = func_map,
+        .globals = globals,
+        .nglobals = nglobals,
+        .alloca_base = alloca_buf,
+        .alloca_top = 0,
+        .alloca_limit = ALLOCA_SIZE,
     };
 
     i64 result = run_func(main_fn, &ctx);

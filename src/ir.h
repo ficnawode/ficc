@@ -58,15 +58,17 @@ typedef enum
 
 #define NO_VREG 0xFFFFFFFFU
 
-/* IrOperand: either an immediate or a virtual register index.
-   The union is named `u` so both arms are explicit at every use site. */
+/* IrOperand: immediate, virtual register, or global reference.
+   The union is named `u` so every arm is explicit at every use site. */
 typedef struct
 {
     bool is_imm;
+    bool is_global;
     union
     {
         u32 vreg;
         i64 imm;
+        u32 global_index;
     } u;
 } IrOperand;
 
@@ -170,6 +172,13 @@ struct IrFunction
 
 /* IrGlobal variable / data record.
    init_data == NULL and init_len == 0 → .bss */
+typedef enum
+{
+    IR_SECTION_DATA,
+    IR_SECTION_RODATA,
+    IR_SECTION_BSS,
+} IrSection;
+
 typedef struct IrGlobal IrGlobal;
 struct IrGlobal
 {
@@ -178,6 +187,7 @@ struct IrGlobal
     const u8 *init_data;
     size_t init_len;
     u32 align;
+    IrSection section;
 };
 
 /* An IrModule owns all IR data for a compilation unit.
@@ -220,9 +230,16 @@ IrInstr *ir_emit_brcond(IrBlock *bb, IrOperand cond, const char *true_label,
 IrInstr *ir_emit_phi(IrBlock *bb, u32 dst, u32 nentries);
 void ir_phi_add_entry(IrInstr *phi, IrOperand val, IrBlock *pred);
 
+/* memory ops */
+IrInstr *ir_emit_load(IrBlock *bb, u32 dst, IrOperand ptr);
+IrInstr *ir_emit_store(IrBlock *bb, IrOperand val, IrOperand ptr, u32 width_bytes);
+IrInstr *ir_emit_gep(IrBlock *bb, u32 dst, IrOperand base, IrOperand index, u32 stride);
+IrInstr *ir_emit_alloca(IrBlock *bb, u32 dst, u32 size_bytes);
+
 /* operand helpers */
 IrOperand ir_operand_imm(i64 val);
 IrOperand ir_operand_vreg(u32 vreg);
+IrOperand ir_operand_global(u32 global_index);
 
 /* dump */
 void ir_dump(IrModule *m);

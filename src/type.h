@@ -47,7 +47,18 @@ struct Type
     u8 width; /* in bits */
     u8 align; /* in bytes */
     u32 size; /* in bytes */
-    /* kind-specific payload goes here */
+    union
+    {
+        struct
+        {
+            Type *pointee;
+        } ptr;
+        struct
+        {
+            Type *elem;
+            u64 length;
+        } arr;
+    };
 };
 
 Type *type_void(void);
@@ -66,6 +77,16 @@ Type *type_ullong(void);
 bool type_is_signed(Type *t);
 bool type_is_unsigned(Type *t);
 bool type_is_integer(Type *t);
+bool type_is_ptr(Type *t);
+bool type_is_array(Type *t);
+
+Type *type_ptr(Type *pointee);
+Type *type_array(Type *elem, u64 length);
+Type *type_deref(Type *t);
+Type *type_array_elem(Type *t);
+u64 type_array_len(Type *t);
+Type *type_decay(Type *t);
+u64 type_sizeof(Type *t);
 
 /* C11 §6.3.1.1 integer promotion: promote types narrower than int to int. */
 Type *type_promote(Type *t);

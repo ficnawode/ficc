@@ -39,7 +39,7 @@ static bool check_identifier_expr(ASTIdent *ident, SemanticCtx *ctx)
         ctx->error = true;
         return false;
     }
-    ident->base.expr_type = decl->type;
+    ident->base.expr_type = type_decay(decl->type);
     return true;
 }
 
@@ -59,7 +59,14 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     Type *result = NULL;
     if (binary_expr->op == BIN_ASSIGN)
     {
-        result = lt;
+        if (type_is_ptr(lt) && type_is_ptr(rt))
+        {
+            result = lt;
+        }
+        else
+        {
+            result = lt;
+        }
     }
     else if (binary_expr->op == BIN_LOG_AND || binary_expr->op == BIN_LOG_OR)
     {
@@ -68,6 +75,11 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     else if (is_comparison_op(binary_expr->op))
     {
         result = type_int();
+    }
+    else if (type_is_ptr(lt) && (binary_expr->op == BIN_ADD || binary_expr->op == BIN_SUB) &&
+             !type_is_ptr(rt))
+    {
+        result = lt;
     }
     else
     {
@@ -87,6 +99,48 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
     if (unary_expr->op == UN_LOG_NOT)
     {
         unary_expr->base.expr_type = type_int();
+    }
+    else if (unary_expr->op == UN_DEREF)
+    {
+        if (!type_is_ptr(op_type))
+        {
+            sem_error(unary_expr->base.loc, "cannot dereference non-pointer type");
+            ctx->error = true;
+            return false;
+        }
+        unary_expr->base.expr_type = type_deref(op_type);
+    }
+    else if (unary_expr->op == UN_ADDR)
+    {
+        ASTNode *operand = unary_expr->operand;
+        if (operand->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, operand)->op == UN_DEREF)
+        {
+            unary_expr->base.expr_type = type_ptr(op_type);
+        }
+        else if (operand->kind == AST_IDENT)
+        {
+            ASTVarDecl *decl = strmap_get(ctx->locals, ast_as(ASTIdent, operand)->name);
+            if (decl && type_is_array(decl->type))
+            {
+                unary_expr->base.expr_type = type_ptr(op_type);
+            }
+            else
+            {
+                sem_error(unary_expr->base.loc, "cannot take address of this expression");
+                ctx->error = true;
+                return false;
+            }
+        }
+        else if (operand->kind == AST_SUBSCRIPT_EXPR)
+        {
+            unary_expr->base.expr_type = type_ptr(op_type);
+        }
+        else
+        {
+            sem_error(unary_expr->base.loc, "cannot take address of this expression");
+            ctx->error = true;
+            return false;
+        }
     }
     else
     {
@@ -168,6 +222,61 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
                 return NULL;
             }
             return node->expr_type;
+        case AST_SUBSCRIPT_EXPR:
+        {
+            ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, node);
+            if (!check_expr(se->array, ctx) || !check_expr(se->index, ctx))
+            {
+                return NULL;
+            }
+            Type *arr_type = se->array->expr_type;
+            Type *ptr_type = type_decay(arr_type);
+            if (!type_is_ptr(ptr_type))
+            {
+                sem_error(node->loc, "subscripted value is not a pointer or array");
+                ctx->error = true;
+                return NULL;
+            }
+            node->expr_type = type_deref(ptr_type);
+            return node->expr_type;
+        }
+        case AST_SIZEOF_EXPR:
+        {
+            ASTSizeofExpr *se = ast_as(ASTSizeofExpr, node);
+            if (!check_expr(se->operand, ctx))
+            {
+                return NULL;
+            }
+            Type *op_type = se->operand->expr_type;
+            if (op_type->kind == TYPE_VOID)
+            {
+                sem_error(node->loc, "sizeof(void) is invalid");
+                ctx->error = true;
+                return NULL;
+            }
+            se->size_value = type_sizeof(op_type);
+            node->expr_type = type_ulong();
+            return node->expr_type;
+        }
+        case AST_SIZEOF_TYPE:
+        {
+            ASTSizeofType *st = ast_as(ASTSizeofType, node);
+            if (st->type->kind == TYPE_VOID)
+            {
+                sem_error(node->loc, "sizeof(void) is invalid");
+                ctx->error = true;
+                return NULL;
+            }
+            st->size_value = type_sizeof(st->type);
+            node->expr_type = type_ulong();
+            return node->expr_type;
+        }
+        case AST_STRING_LITERAL:
+        {
+            ASTStringLiteral *sl = ast_as(ASTStringLiteral, node);
+            node->expr_type = type_decay(type_array(type_char(), sl->length + 1));
+            return node->expr_type;
+        }
         default:
             sem_error(node->loc, "unsupported expression kind %s", ast_kind_name(node->kind));
             ctx->error = true;

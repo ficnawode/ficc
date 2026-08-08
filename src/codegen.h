@@ -19,7 +19,8 @@ struct CodegenFunc
 typedef struct CodegenModule CodegenModule;
 struct CodegenModule
 {
-    Vec *funcs; /* Vec<CodegenFunc*> */
+    Vec *funcs;   /* Vec<CodegenFunc*> */
+    Vec *globals; /* Vec<IrGlobal*> — for .rodata/.data emission */
 };
 
 /* Convert IR to machine code bytes. */

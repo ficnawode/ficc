@@ -162,10 +162,43 @@ void ir_phi_add_entry(IrInstr *phi, IrOperand val, IrBlock *pred)
     phi->extra.phi.nfilled++;
 }
 
+IrInstr *ir_emit_load(IrBlock *bb, u32 dst, IrOperand ptr)
+{
+    IrInstr *ins = instr_new(bb, OP_LOAD, dst, 1);
+    ins->ops[0] = ptr;
+    return ins;
+}
+
+IrInstr *ir_emit_store(IrBlock *bb, IrOperand val, IrOperand ptr, u32 width_bytes)
+{
+    IrInstr *ins = instr_new(bb, OP_STORE, NO_VREG, 3);
+    ins->ops[0] = val;
+    ins->ops[1] = ptr;
+    ins->ops[2] = ir_operand_imm((i64) width_bytes);
+    return ins;
+}
+
+IrInstr *ir_emit_gep(IrBlock *bb, u32 dst, IrOperand base, IrOperand index, u32 stride)
+{
+    IrInstr *ins = instr_new(bb, OP_GEP, dst, 3);
+    ins->ops[0] = base;
+    ins->ops[1] = index;
+    ins->ops[2] = ir_operand_imm((i64) stride);
+    return ins;
+}
+
+IrInstr *ir_emit_alloca(IrBlock *bb, u32 dst, u32 size_bytes)
+{
+    IrInstr *ins = instr_new(bb, OP_ALLOCA, dst, 1);
+    ins->ops[0] = ir_operand_imm((i64) size_bytes);
+    return ins;
+}
+
 IrOperand ir_operand_imm(i64 val)
 {
     IrOperand o;
     o.is_imm = true;
+    o.is_global = false;
     o.u.imm = val;
     return o;
 }
@@ -174,13 +207,27 @@ IrOperand ir_operand_vreg(u32 vreg)
 {
     IrOperand o;
     o.is_imm = false;
+    o.is_global = false;
     o.u.vreg = vreg;
+    return o;
+}
+
+IrOperand ir_operand_global(u32 global_index)
+{
+    IrOperand o;
+    o.is_imm = false;
+    o.is_global = true;
+    o.u.global_index = global_index;
     return o;
 }
 
 static void dump_operand(IrOperand op)
 {
-    if (op.is_imm)
+    if (op.is_global)
+    {
+        printf("g%u", op.u.global_index);
+    }
+    else if (op.is_imm)
     {
         printf("%lld", (long long) op.u.imm);
     }

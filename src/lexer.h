@@ -24,10 +24,14 @@
     X(TOK_KW_BREAK)                                                                                \
     X(TOK_KW_CONTINUE)                                                                             \
     X(TOK_KW_GOTO)                                                                                 \
+    X(TOK_KW_SIZEOF)                                                                               \
+    X(TOK_STRING_LIT)                                                                              \
     X(TOK_LPAREN)                                                                                  \
     X(TOK_RPAREN)                                                                                  \
     X(TOK_LBRACE)                                                                                  \
     X(TOK_RBRACE)                                                                                  \
+    X(TOK_LBRACKET)                                                                                \
+    X(TOK_RBRACKET)                                                                                \
     X(TOK_SEMI)                                                                                    \
     X(TOK_COLON)                                                                                   \
     X(TOK_COMMA)                                                                                   \
@@ -83,6 +87,7 @@ typedef struct
         IntSuffix length : 2;
         bool is_hex : 1;
     } int_suffix;
+    u32 str_len;
 } Token;
 
 typedef struct LexResult LexResult;

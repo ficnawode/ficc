@@ -111,6 +111,10 @@ static TokenKind keyword_kind(const char *s)
     {
         return TOK_KW_UNSIGNED;
     }
+    if (strcmp(s, "sizeof") == 0)
+    {
+        return TOK_KW_SIZEOF;
+    }
     return TOK_IDENT;
 }
 
@@ -342,6 +346,101 @@ static bool lex_comment(LexerCtx *ctx)
     return true; /* consumed opening, so don't re-error as unknown char */
 }
 
+static bool lex_string(LexerCtx *ctx)
+{
+    if (*ctx->p != '"')
+    {
+        return false;
+    }
+
+    Loc loc = lexer_loc(ctx);
+    lexer_advance(ctx); /* consume opening " */
+
+    /* Accumulate characters into a scratch buffer (arena-backed). */
+    size_t cap = 64;
+    char *buf = arena_alloc(ctx->arena, cap, 1);
+    size_t len = 0;
+
+    while (*ctx->p && *ctx->p != '"')
+    {
+        if (*ctx->p == '\\')
+        {
+            lexer_advance(ctx); /* consume backslash */
+            char esc = *ctx->p;
+            char ch;
+            switch (esc)
+            {
+                case 'n':
+                    ch = '\n';
+                    break;
+                case 't':
+                    ch = '\t';
+                    break;
+                case '\\':
+                    ch = '\\';
+                    break;
+                case '"':
+                    ch = '"';
+                    break;
+                case '0':
+                    ch = '\0';
+                    break;
+                default:
+                    ch = esc; /* unknown escape: keep the character */
+                    break;
+            }
+            if (len + 1 >= cap)
+            {
+                cap *= 2;
+                char *new_buf = arena_alloc(ctx->arena, cap, 1);
+                memcpy(new_buf, buf, len);
+                buf = new_buf;
+            }
+            buf[len++] = ch;
+            lexer_advance(ctx);
+        }
+        else if (*ctx->p == '\n')
+        {
+            lexer_error(ctx, "unterminated string literal");
+            return true;
+        }
+        else
+        {
+            if (len + 1 >= cap)
+            {
+                cap *= 2;
+                char *new_buf = arena_alloc(ctx->arena, cap, 1);
+                memcpy(new_buf, buf, len);
+                buf = new_buf;
+            }
+            buf[len] = *ctx->p;
+            len++;
+            lexer_advance(ctx);
+        }
+    }
+
+    if (*ctx->p != '"')
+    {
+        lexer_error(ctx, "unterminated string literal");
+        return true;
+    }
+    lexer_advance(ctx); /* consume closing " */
+
+    /* NUL-terminate the string data */
+    if (len >= cap)
+    {
+        cap = len + 1;
+        char *new_buf = arena_alloc(ctx->arena, cap, 1);
+        memcpy(new_buf, buf, len);
+        buf = new_buf;
+    }
+    buf[len] = '\0';
+
+    Token tok = {.kind = TOK_STRING_LIT, .loc = loc, .payload.str = buf, .str_len = (u32) len};
+    lexer_push(ctx, tok);
+    return true;
+}
+
 static bool lex_punct(LexerCtx *ctx)
 {
     Loc loc = lexer_loc(ctx);
@@ -363,6 +462,12 @@ static bool lex_punct(LexerCtx *ctx)
             break;
         case '}':
             kind = TOK_RBRACE;
+            break;
+        case '[':
+            kind = TOK_LBRACKET;
+            break;
+        case ']':
+            kind = TOK_RBRACKET;
             break;
         case ';':
             kind = TOK_SEMI;
@@ -497,6 +602,10 @@ LexResult lex(const char *file, const char *src, Arena *arena)
             continue;
         }
         if (lex_comment(&ctx))
+        {
+            continue;
+        }
+        if (lex_string(&ctx))
         {
             continue;
         }

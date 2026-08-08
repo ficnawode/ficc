@@ -28,7 +28,11 @@
     X(AST_CONTINUE_STMT)                                                                           \
     X(AST_GOTO_STMT)                                                                               \
     X(AST_LABEL_STMT)                                                                              \
-    X(AST_TERNARY_EXPR)
+    X(AST_TERNARY_EXPR)                                                                            \
+    X(AST_SUBSCRIPT_EXPR)                                                                          \
+    X(AST_SIZEOF_EXPR)                                                                             \
+    X(AST_SIZEOF_TYPE)                                                                             \
+    X(AST_STRING_LITERAL)
 
 typedef enum
 {
@@ -64,7 +68,9 @@ typedef enum
 {
     UN_NEG,
     UN_LOG_NOT,
-    UN_BIT_NOT
+    UN_BIT_NOT,
+    UN_DEREF,
+    UN_ADDR,
 } UnaryOpKind;
 
 typedef struct ASTNode ASTNode;
@@ -237,6 +243,38 @@ struct ASTTernaryExpr
     ASTNode *else_expr;
 };
 
+typedef struct ASTSubscriptExpr ASTSubscriptExpr;
+struct ASTSubscriptExpr
+{
+    ASTNode base;
+    ASTNode *array;
+    ASTNode *index;
+};
+
+typedef struct ASTSizeofExpr ASTSizeofExpr;
+struct ASTSizeofExpr
+{
+    ASTNode base;
+    ASTNode *operand;
+    u64 size_value;
+};
+
+typedef struct ASTSizeofType ASTSizeofType;
+struct ASTSizeofType
+{
+    ASTNode base;
+    Type *type;
+    u64 size_value;
+};
+
+typedef struct ASTStringLiteral ASTStringLiteral;
+struct ASTStringLiteral
+{
+    ASTNode base;
+    const char *data;
+    u64 length;
+};
+
 ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body, Loc loc,
                       Arena *arena);
 ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
@@ -262,6 +300,11 @@ ASTNode *ast_goto_stmt(const char *label, Loc loc, Arena *arena);
 ASTNode *ast_label_stmt(const char *label, ASTNode *stmt, Loc loc, Arena *arena);
 ASTNode *ast_ternary_expr(ASTNode *cond, ASTNode *then_expr, ASTNode *else_expr, Loc loc,
                           Arena *arena);
+
+ASTNode *ast_subscript_expr(ASTNode *array, ASTNode *index, Loc loc, Arena *arena);
+ASTNode *ast_sizeof_expr(ASTNode *operand, u64 size_value, Loc loc, Arena *arena);
+ASTNode *ast_sizeof_type(Type *type, u64 size_value, Loc loc, Arena *arena);
+ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena);
 
 void ast_dump(ASTNode *node);
 

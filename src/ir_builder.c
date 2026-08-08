@@ -56,6 +56,12 @@ static IrOperand resolve_variable(FuncBuilder *ctx, const char *name, IrBlock *b
 static IrOperand build_phi(FuncBuilder *ctx, const char *name, IrBlock *bb);
 static IrBlock *label_block(FuncBuilder *ctx, IrFunction *f, const char *name);
 static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
+static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
+static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
+static ExprResult build_subscript_expr(ASTSubscriptExpr *se, IrFunction *f, IrBlock *bb,
+                                       FuncBuilder *ctx);
+static ExprResult build_string_literal_expr(ASTStringLiteral *sl, IrFunction *f, IrBlock *bb,
+                                            FuncBuilder *ctx);
 static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
 
 static void ir_error(ASTNode *node, const char *fmt, ...)
@@ -427,7 +433,7 @@ static ExprResult build_ternary_expr(ASTTernaryExpr *te, IrFunction *f, IrBlock 
         jump(else_val.block, merge_bb);
     }
 
-    Type *tern_type = node_type((ASTNode *)te);
+    Type *tern_type = node_type((ASTNode *) te);
     u32 dst = alloc_vreg_from_type(ctx, tern_type);
     IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, then_val.value, then_val.block);
@@ -439,22 +445,57 @@ static ExprResult build_ternary_expr(ASTTernaryExpr *te, IrFunction *f, IrBlock 
 
 static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
-    ExprResult left = build_expr(be->left, f, bb, ctx);
-    bb = left.block;
-    ExprResult right = build_expr(be->right, f, bb, ctx);
-    bb = right.block;
-    if (be->left->kind != AST_IDENT)
+    ASTNode *target = be->left;
+
+    if (target->kind == AST_IDENT)
     {
-        ir_error(&be->base, "assignment target must be an identifier");
-        return expr_result(ir_operand_imm(0), bb);
+        ExprResult left = build_expr(target, f, bb, ctx);
+        bb = left.block;
+        ExprResult right = build_expr(be->right, f, bb, ctx);
+        bb = right.block;
+        ASTIdent *id = ast_as(ASTIdent, target);
+        Type *lhs_type = strmap_get(ctx->var_types, id->name);
+        ASSERT(lhs_type != NULL);
+        Type *rhs_type = node_type(be->right);
+        IrOperand val = promote_to(ctx, bb, right.value, rhs_type, lhs_type);
+        write_variable(ctx, id->name, bb, val);
+        return expr_result(val, bb);
     }
-    ASTIdent *target = ast_as(ASTIdent, be->left);
-    Type *lhs_type = strmap_get(ctx->var_types, target->name);
-    ASSERT(lhs_type != NULL);
-    Type *rhs_type = node_type(be->right);
-    IrOperand val = promote_to(ctx, bb, right.value, rhs_type, lhs_type);
-    write_variable(ctx, target->name, bb, val);
-    return expr_result(val, bb);
+
+    if (target->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, target)->op == UN_DEREF)
+    {
+        ASTUnaryExpr *ue = ast_as(ASTUnaryExpr, target);
+        ExprResult ptr_res = build_expr(ue->operand, f, bb, ctx);
+        bb = ptr_res.block;
+        ExprResult right = build_expr(be->right, f, bb, ctx);
+        bb = right.block;
+        Type *result_type = node_type(target);
+        Type *rhs_type = node_type(be->right);
+        IrOperand val = promote_to(ctx, bb, right.value, rhs_type, result_type);
+        ir_emit_store(bb, val, ptr_res.value, result_type->size);
+        return expr_result(val, bb);
+    }
+
+    if (target->kind == AST_SUBSCRIPT_EXPR)
+    {
+        ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, target);
+        ExprResult base = build_expr(se->array, f, bb, ctx);
+        ExprResult index = build_expr(se->index, f, base.block, ctx);
+        bb = index.block;
+        ExprResult right = build_expr(be->right, f, bb, ctx);
+        bb = right.block;
+        Type *ptr_type = type_decay(node_type(se->array));
+        Type *elem = type_deref(ptr_type);
+        u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
+        ir_emit_gep(bb, addr, base.value, index.value, elem->size);
+        Type *rhs_type = node_type(be->right);
+        IrOperand val = promote_to(ctx, bb, right.value, rhs_type, elem);
+        ir_emit_store(bb, val, ir_operand_vreg(addr), elem->size);
+        return expr_result(val, bb);
+    }
+
+    ir_error(&be->base, "assignment target must be a variable, dereference, or subscript");
+    return expr_result(ir_operand_imm(0), bb);
 }
 
 static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
@@ -465,6 +506,23 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
 
     Type *lt = node_type(be->left);
     Type *rt = node_type(be->right);
+
+    if (type_is_ptr(lt) && (be->op == BIN_ADD || be->op == BIN_SUB) && !type_is_ptr(rt))
+    {
+        IrOperand lhs = left.value;
+        IrOperand rhs = right.value;
+        Type *elem = type_deref(lt);
+        rhs = promote_to(ctx, right.block, rhs, rt, promote_type(rt));
+        if (be->op == BIN_SUB)
+        {
+            u32 neg_vreg = alloc_vreg_from_type(ctx, type_int());
+            ir_emit_unary(right.block, OP_NEG, neg_vreg, rhs);
+            rhs = ir_operand_vreg(neg_vreg);
+        }
+        u32 gep_vreg = alloc_vreg_from_type(ctx, lt);
+        ir_emit_gep(right.block, gep_vreg, lhs, rhs, elem->size);
+        return expr_result(ir_operand_vreg(gep_vreg), right.block);
+    }
 
     IrOperand lhs = left.value;
     IrOperand rhs = right.value;
@@ -547,6 +605,14 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
 
 static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
+    if (ue->op == UN_DEREF)
+    {
+        return build_deref_expr(ue, f, bb, ctx);
+    }
+    if (ue->op == UN_ADDR)
+    {
+        return build_addr_expr(ue, f, bb, ctx);
+    }
     ExprResult src = build_expr(ue->operand, f, bb, ctx);
     Type *result_type = node_type((ASTNode *) ue);
     u32 dst = alloc_vreg_from_type(ctx, result_type);
@@ -604,6 +670,86 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
     return expr_result(dst == NO_VREG ? ir_operand_imm(0) : ir_operand_vreg(dst), bb);
 }
 
+static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    ExprResult ptr_res = build_expr(ue->operand, f, bb, ctx);
+    Type *result_type = node_type((ASTNode *) ue);
+    u32 dst = alloc_vreg_from_type(ctx, result_type);
+    ir_emit_load(ptr_res.block, dst, ptr_res.value);
+    return expr_result(ir_operand_vreg(dst), ptr_res.block);
+}
+
+static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    ASTNode *operand = ue->operand;
+    if (operand->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, operand)->op == UN_DEREF)
+    {
+        return build_expr(ast_as(ASTUnaryExpr, operand)->operand, f, bb, ctx);
+    }
+    if (operand->kind == AST_SUBSCRIPT_EXPR)
+    {
+        ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, operand);
+        ExprResult base = build_expr(se->array, f, bb, ctx);
+        ExprResult index = build_expr(se->index, f, base.block, ctx);
+        bb = index.block;
+        Type *ptr_type = type_decay(node_type(se->array));
+        Type *elem = type_deref(ptr_type);
+        u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
+        ir_emit_gep(bb, addr, base.value, index.value, elem->size);
+        return expr_result(ir_operand_vreg(addr), bb);
+    }
+    /* &x for array: build_expr already decays to pointer */
+    return build_expr(operand, f, bb, ctx);
+}
+
+static ExprResult build_subscript_expr(ASTSubscriptExpr *se, IrFunction *f, IrBlock *bb,
+                                       FuncBuilder *ctx)
+{
+    ExprResult base = build_expr(se->array, f, bb, ctx);
+    ExprResult index = build_expr(se->index, f, base.block, ctx);
+    bb = index.block;
+    Type *ptr_type = type_decay(node_type(se->array));
+    Type *elem = type_deref(ptr_type);
+    u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
+    ir_emit_gep(bb, addr, base.value, index.value, elem->size);
+    u32 dst = alloc_vreg_from_type(ctx, elem);
+    ir_emit_load(bb, dst, ir_operand_vreg(addr));
+    return expr_result(ir_operand_vreg(dst), bb);
+}
+
+static ExprResult build_sizeof_expr(ASTSizeofExpr *se, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    (void) f;
+    (void) ctx;
+    return expr_result(ir_operand_imm((i64) se->size_value), bb);
+}
+
+static ExprResult build_sizeof_type(ASTSizeofType *st, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    (void) f;
+    (void) ctx;
+    return expr_result(ir_operand_imm((i64) st->size_value), bb);
+}
+
+static ExprResult build_string_literal_expr(ASTStringLiteral *sl, IrFunction *f, IrBlock *bb,
+                                            FuncBuilder *ctx)
+{
+    (void) f;
+    u32 idx = (u32) vec_size(ctx->mod->globals);
+    IrGlobal *g = arena_alloc(ctx->mod->arena, sizeof(IrGlobal), sizeof(void *));
+    size_t name_len = 16;
+    char *name_buf = arena_alloc(ctx->mod->arena, name_len, 1);
+    snprintf(name_buf, name_len, "__str_%u", idx);
+    g->name = name_buf;
+    g->type = type_array(type_char(), sl->length + 1);
+    g->init_data = (const u8 *) sl->data;
+    g->init_len = sl->length + 1;
+    g->align = 1;
+    g->section = IR_SECTION_RODATA;
+    vec_push(ctx->mod->globals, g);
+    return expr_result(ir_operand_global(idx), bb);
+}
+
 static ExprResult build_binary_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     if (be->op == BIN_LOG_AND || be->op == BIN_LOG_OR)
@@ -633,6 +779,14 @@ static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuil
             return build_call_expr(ast_as(ASTCallExpr, node), f, bb, ctx);
         case AST_TERNARY_EXPR:
             return build_ternary_expr(ast_as(ASTTernaryExpr, node), f, bb, ctx);
+        case AST_SUBSCRIPT_EXPR:
+            return build_subscript_expr(ast_as(ASTSubscriptExpr, node), f, bb, ctx);
+        case AST_SIZEOF_EXPR:
+            return build_sizeof_expr(ast_as(ASTSizeofExpr, node), f, bb, ctx);
+        case AST_SIZEOF_TYPE:
+            return build_sizeof_type(ast_as(ASTSizeofType, node), f, bb, ctx);
+        case AST_STRING_LITERAL:
+            return build_string_literal_expr(ast_as(ASTStringLiteral, node), f, bb, ctx);
         default:
             ir_error(node, "unsupported expression kind %s", ast_kind_name(node->kind));
             return expr_result(ir_operand_imm(0), bb);
