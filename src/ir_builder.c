@@ -149,7 +149,9 @@ static u32 alloc_phi_vreg(FuncBuilder *ctx, const char *name)
         ASSERT(false);
         return alloc_vreg_from_type(ctx, type_int());
     }
-    return alloc_vreg_from_type(ctx, t);
+    /* Arrays are stored as a decayed pointer in SSA; allocate the phi slot
+       with the pointer width, not the element width. */
+    return alloc_vreg_from_type(ctx, type_decay(t));
 }
 
 static BlockLocals *get_block_locals(FuncBuilder *ctx, IrBlock *bb)
@@ -481,8 +483,9 @@ static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
         bb = right.block;
         Type *ptr_type = type_decay(node_type(se->array));
         Type *elem = type_deref(ptr_type);
+        IrOperand idx = promote_to(ctx, bb, index.value, node_type(se->index), type_long());
         u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
-        ir_emit_gep(bb, addr, base.value, index.value, elem->size);
+        ir_emit_gep(bb, addr, base.value, idx, elem->size);
         Type *rhs_type = node_type(be->right);
         IrOperand val = promote_to(ctx, bb, right.value, rhs_type, elem);
         ir_emit_store(bb, val, ir_operand_vreg(addr), elem->size);
@@ -507,10 +510,10 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
         IrOperand lhs = left.value;
         IrOperand rhs = right.value;
         Type *elem = type_deref(lt);
-        rhs = promote_to(ctx, right.block, rhs, rt, type_promote(rt));
+        rhs = promote_to(ctx, right.block, rhs, rt, type_long());
         if (be->op == BIN_SUB)
         {
-            u32 neg_vreg = alloc_vreg_from_type(ctx, type_int());
+            u32 neg_vreg = alloc_vreg_from_type(ctx, type_long());
             ir_emit_unary(right.block, OP_NEG, neg_vreg, rhs);
             rhs = ir_operand_vreg(neg_vreg);
         }
@@ -694,8 +697,9 @@ static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, 
         bb = index.block;
         Type *ptr_type = type_decay(node_type(se->array));
         Type *elem = type_deref(ptr_type);
+        IrOperand idx = promote_to(ctx, bb, index.value, node_type(se->index), type_long());
         u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
-        ir_emit_gep(bb, addr, base.value, index.value, elem->size);
+        ir_emit_gep(bb, addr, base.value, idx, elem->size);
         return expr_result(ir_operand_vreg(addr), bb);
     }
     /* &x for array: build_expr already decays to pointer */
@@ -710,8 +714,9 @@ static ExprResult build_subscript_expr(ASTSubscriptExpr *se, IrFunction *f, IrBl
     bb = index.block;
     Type *ptr_type = type_decay(node_type(se->array));
     Type *elem = type_deref(ptr_type);
+    IrOperand idx = promote_to(ctx, bb, index.value, node_type(se->index), type_long());
     u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
-    ir_emit_gep(bb, addr, base.value, index.value, elem->size);
+    ir_emit_gep(bb, addr, base.value, idx, elem->size);
     u32 dst = alloc_vreg_from_type(ctx, elem);
     ir_emit_load(bb, dst, ir_operand_vreg(addr));
     return expr_result(ir_operand_vreg(dst), bb);
@@ -1090,6 +1095,17 @@ static IrBlock *build_return_stmt(ASTReturnStmt *ret, IrFunction *f, IrBlock *bb
 static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     strmap_set(ctx->var_types, vd->name, vd->type);
+    if (type_is_array(vd->type))
+    {
+        /* Arrays are not SSA values: allocate a stack slot and keep the
+           pointer as the variable's value. References decay to a pointer to
+           the first element; subscripting GEPs off this base. */
+        Type *ptr_type = type_decay(vd->type);
+        u32 dst = alloc_vreg_from_type(ctx, ptr_type);
+        ir_emit_alloca(bb, dst, vd->type->size);
+        write_variable(ctx, vd->name, bb, ir_operand_vreg(dst));
+        return bb;
+    }
     IrOperand val = ir_operand_imm(0);
     if (vd->init)
     {

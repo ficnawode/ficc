@@ -48,6 +48,21 @@ static bool is_comparison_op(BinOpKind op)
     return op >= BIN_EQ && op <= BIN_GE;
 }
 
+static bool ptr_assign_compatible(Type *a, Type *b)
+{
+    if (!type_is_ptr(a) || !type_is_ptr(b))
+    {
+        return false;
+    }
+    Type *pa = type_deref(a);
+    Type *pb = type_deref(b);
+    if (pa->kind == TYPE_VOID || pb->kind == TYPE_VOID)
+    {
+        return true;
+    }
+    return pa == pb;
+}
+
 static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
 {
     if (!check_expr(binary_expr->left, ctx) || !check_expr(binary_expr->right, ctx))
@@ -59,14 +74,13 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     Type *result = NULL;
     if (binary_expr->op == BIN_ASSIGN)
     {
-        if (type_is_ptr(lt) && type_is_ptr(rt))
+        if (type_is_ptr(lt) && type_is_ptr(rt) && !ptr_assign_compatible(lt, rt))
         {
-            result = lt;
+            sem_error(binary_expr->base.loc, "incompatible pointer types in assignment");
+            ctx->error = true;
+            return false;
         }
-        else
-        {
-            result = lt;
-        }
+        result = lt;
     }
     else if (binary_expr->op == BIN_LOG_AND || binary_expr->op == BIN_LOG_OR)
     {
@@ -318,6 +332,12 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
             return false;
         }
     }
+    if (var_decl->type->kind == TYPE_VOID)
+    {
+        sem_error(var_decl->base.loc, "variable '%s' has void type", var_decl->name);
+        ctx->error = true;
+        return false;
+    }
     strmap_set(ctx->locals, var_decl->name, var_decl);
     if (var_decl->init && !check_expr(var_decl->init, ctx))
     {
@@ -511,6 +531,13 @@ static bool setup_function_locals(ASTFuncDef *func_def, SemanticCtx *ctx)
         if (strmap_get(ctx->locals, param->name))
         {
             sem_error(param->base.loc, "redeclaration of parameter '%s'", param->name);
+            ctx->error = true;
+            ctx->locals = saved_locals;
+            return false;
+        }
+        if (param->type->kind == TYPE_VOID)
+        {
+            sem_error(param->base.loc, "parameter '%s' has void type", param->name);
             ctx->error = true;
             ctx->locals = saved_locals;
             return false;

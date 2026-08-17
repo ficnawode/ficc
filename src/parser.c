@@ -54,6 +54,8 @@ static bool parser_expect(ParserCtx *p, TokenKind kind, const char *what)
     return true;
 }
 
+static Type *parse_type_specifier(ParserCtx *p);
+static Type *parse_array_suffix(ParserCtx *p, Type *type);
 static ASTNode *parse_expr(ParserCtx *p);
 static ASTNode *parse_stmt(ParserCtx *p);
 static ASTNode *parse_primary(ParserCtx *p);
@@ -159,6 +161,14 @@ static ASTNode *parse_param(ParserCtx *p)
         return NULL;
     }
     parser_advance(p);
+
+    /* Array parameters decay to pointer (C11 §6.7.6.3p7). */
+    type = parse_array_suffix(p, type);
+    if (!type)
+    {
+        return NULL;
+    }
+    type = type_decay(type);
 
     return ast_var_decl(type, name->payload.str, NULL, start->loc, p->arena);
 }
@@ -586,6 +596,7 @@ static ASTNode *parse_stmt(ParserCtx *p)
         case TOK_KW_SHORT:
         case TOK_KW_LONG:
         case TOK_KW_UNSIGNED:
+        case TOK_KW_VOID:
             return parse_var_decl(p);
         case TOK_KW_RETURN:
             return parse_return_stmt(p);

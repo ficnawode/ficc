@@ -1227,10 +1227,18 @@ static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
         for (size_t pi = 0; pi < npc; pi++)
         {
             PhiCopy *pc = (PhiCopy *) vec_get(ctx->phi_copies[bi], pi);
-            u8 pw =
-                pc->src.is_imm ? vreg_width(ctx, pc->dst_vreg) : vreg_width(ctx, pc->src.u.vreg);
-            emit_mov(ctx->buf, pw, xop_reg(R_EAX), xop_from_operand(pc->src));
-            emit_mov(ctx->buf, pw, xop_vreg(pc->dst_vreg), xop_reg(R_EAX));
+            if (pc->src.is_global)
+            {
+                emit_global_addr(ctx->buf, pc->src.u.global_index, ctx->global_patches, ctx->arena);
+                emit_mov(ctx->buf, 8, xop_vreg(pc->dst_vreg), xop_reg(R_EAX));
+            }
+            else
+            {
+                u8 pw = pc->src.is_imm ? vreg_width(ctx, pc->dst_vreg)
+                                       : vreg_width(ctx, pc->src.u.vreg);
+                emit_mov(ctx->buf, pw, xop_reg(R_EAX), xop_from_operand(pc->src));
+                emit_mov(ctx->buf, pw, xop_vreg(pc->dst_vreg), xop_reg(R_EAX));
+            }
         }
         lower_instr((IrInstr *) vec_get(blk->instrs, ii), ctx);
     }

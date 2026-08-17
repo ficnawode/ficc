@@ -48,6 +48,7 @@ struct InterpCtx
     IrBlock *next_pred;  /* the block that jumps to next_bb */
     bool jumped;
     bool returned;
+    bool error; /* set on a runtime trap (e.g. null dereference) */
 
     /* Alloca and global state */
     u8 *alloca_base;
@@ -68,7 +69,7 @@ typedef struct
 /* Frame management                                                    */
 /* ------------------------------------------------------------------ */
 
-static i64 operand_val(IrOperand o, i64 *regs, u32 nregs)
+static i64 operand_val(InterpCtx *ctx, IrOperand o, i64 *regs)
 {
     if (o.is_imm)
     {
@@ -76,22 +77,27 @@ static i64 operand_val(IrOperand o, i64 *regs, u32 nregs)
     }
     if (o.is_global)
     {
-        ASSERT(false && "global operand not yet supported in operand_val");
-        return 0;
+        ASSERT(o.u.global_index < ctx->nglobals);
+        return (i64) (uintptr_t) ctx->globals[o.u.global_index].data;
     }
-    ASSERT(o.u.vreg < nregs);
+    ASSERT(o.u.vreg < ctx->nregs);
     return regs[o.u.vreg];
 }
 
-static u8 *resolve_ptr(InterpCtx *ctx, IrOperand op, i64 *regs, u32 nregs)
+static u8 *resolve_ptr(InterpCtx *ctx, IrOperand op, i64 *regs)
 {
     if (op.is_global)
     {
         ASSERT(op.u.global_index < ctx->nglobals);
         return ctx->globals[op.u.global_index].data;
     }
-    i64 ptr_val = operand_val(op, regs, nregs);
-    ASSERT(ptr_val != 0);
+    i64 ptr_val = operand_val(ctx, op, regs);
+    if (ptr_val == 0)
+    {
+        interp_error("null pointer dereference");
+        ctx->error = true;
+        return NULL;
+    }
     return (u8 *) (uintptr_t) ptr_val;
 }
 
@@ -228,8 +234,8 @@ static const EvalFn eval_fns[] = {
 
 static i64 eval_binary(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 lhs = operand_val(in->ops[0], regs, ctx->nregs);
-    i64 rhs = operand_val(in->ops[1], regs, ctx->nregs);
+    i64 lhs = operand_val(ctx, in->ops[0], regs);
+    i64 rhs = operand_val(ctx, in->ops[1], regs);
     switch (in->opcode)
     {
         case OP_ADD:
@@ -259,14 +265,14 @@ static i64 eval_binary(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_divrem(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 rhs = operand_val(in->ops[1], regs, ctx->nregs);
+    i64 rhs = operand_val(ctx, in->ops[1], regs);
     if (rhs == 0)
     {
         interp_error("division by zero");
         ASSERT(false);
         return 1;
     }
-    i64 lhs = operand_val(in->ops[0], regs, ctx->nregs);
+    i64 lhs = operand_val(ctx, in->ops[0], regs);
     if (in->opcode == OP_SDIV)
     {
         regs[in->result] = lhs / rhs;
@@ -289,7 +295,7 @@ static i64 eval_divrem(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_unary(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 src = operand_val(in->ops[0], regs, ctx->nregs);
+    i64 src = operand_val(ctx, in->ops[0], regs);
     if (in->opcode == OP_NEG)
     {
         regs[in->result] = -src;
@@ -304,8 +310,8 @@ static i64 eval_unary(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_shift(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 lhs = operand_val(in->ops[0], regs, ctx->nregs);
-    i64 rhs = operand_val(in->ops[1], regs, ctx->nregs);
+    i64 lhs = operand_val(ctx, in->ops[0], regs);
+    i64 rhs = operand_val(ctx, in->ops[1], regs);
     u8 w = ctx->mod->widths[in->result];
     u32 limit = (w == 8) ? 64 : (u32) w * 8;
     if (rhs < 0 || rhs >= (i64) limit)
@@ -333,8 +339,8 @@ static i64 eval_shift(IrInstr *in, InterpCtx *ctx, i64 *regs)
 static i64 eval_icmp(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     (void) ctx;
-    i64 lhs = operand_val(in->ops[0], regs, ctx->nregs);
-    i64 rhs = operand_val(in->ops[1], regs, ctx->nregs);
+    i64 lhs = operand_val(ctx, in->ops[0], regs);
+    i64 rhs = operand_val(ctx, in->ops[1], regs);
     bool cond = false;
     switch (in->opcode)
     {
@@ -392,7 +398,7 @@ static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
     for (u32 a = 0; a < in->extra.call.nargs; a++)
     {
         IrParam *p = (IrParam *) vec_get(callee->params, a);
-        callee_fr->regs[p->vreg] = operand_val(in->extra.call.args[a], regs, ctx->nregs);
+        callee_fr->regs[p->vreg] = operand_val(ctx, in->extra.call.args[a], regs);
         u8 pw = ctx->mod->widths[p->vreg];
         callee_fr->regs[p->vreg] = type_is_signed(p->type)
                                        ? sext_result(callee_fr->regs[p->vreg], pw)
@@ -433,7 +439,7 @@ static i64 eval_br(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_brcond(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 cond = operand_val(in->ops[0], regs, ctx->nregs);
+    i64 cond = operand_val(ctx, in->ops[0], regs);
     const char *target_label = cond ? in->extra.brcond.true_label : in->extra.brcond.false_label;
     IrBlock *target = strmap_get(ctx->block_map, target_label);
     ASSERT(target != NULL && "branch target names a block the IR builder created");
@@ -447,7 +453,7 @@ static i64 eval_ret(IrInstr *in, InterpCtx *ctx, i64 *regs)
     i64 result = 0;
     if (in->nops > 0)
     {
-        result = operand_val(in->ops[0], regs, ctx->nregs);
+        result = operand_val(ctx, in->ops[0], regs);
     }
     ctx->returned = true;
     return result;
@@ -464,7 +470,7 @@ static i64 eval_phi(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_trunc(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 src = operand_val(in->ops[0], regs, ctx->nregs);
+    i64 src = operand_val(ctx, in->ops[0], regs);
     regs[in->result] = src;
     mask_vreg(ctx, regs, in->result);
     return 0;
@@ -472,7 +478,7 @@ static i64 eval_trunc(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_zext(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 src = operand_val(in->ops[0], regs, ctx->nregs);
+    i64 src = operand_val(ctx, in->ops[0], regs);
     if (in->ops[0].is_imm)
     {
         regs[in->result] = src;
@@ -485,7 +491,7 @@ static i64 eval_zext(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_sext(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 src = operand_val(in->ops[0], regs, ctx->nregs);
+    i64 src = operand_val(ctx, in->ops[0], regs);
     if (in->ops[0].is_imm)
     {
         regs[in->result] = src;
@@ -507,7 +513,11 @@ static i64 eval_unreachable(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    u8 *addr = resolve_ptr(ctx, in->ops[0], regs, ctx->nregs);
+    u8 *addr = resolve_ptr(ctx, in->ops[0], regs);
+    if (!addr)
+    {
+        return 1;
+    }
     u8 w = ctx->mod->widths[in->result];
     i64 val = 0;
     memcpy(&val, addr, w > 8 ? 8 : w);
@@ -517,8 +527,12 @@ static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_store(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 val = operand_val(in->ops[0], regs, ctx->nregs);
-    u8 *addr = resolve_ptr(ctx, in->ops[1], regs, ctx->nregs);
+    i64 val = operand_val(ctx, in->ops[0], regs);
+    u8 *addr = resolve_ptr(ctx, in->ops[1], regs);
+    if (!addr)
+    {
+        return 1;
+    }
     u32 w = (u32) in->ops[2].u.imm;
     memcpy(addr, &val, w > 8 ? 8 : w);
     return 0;
@@ -529,13 +543,13 @@ static i64 eval_gep(IrInstr *in, InterpCtx *ctx, i64 *regs)
     i64 base_val;
     if (in->ops[0].is_global)
     {
-        base_val = (i64) (uintptr_t) resolve_ptr(ctx, in->ops[0], regs, ctx->nregs);
+        base_val = (i64) (uintptr_t) resolve_ptr(ctx, in->ops[0], regs);
     }
     else
     {
-        base_val = operand_val(in->ops[0], regs, ctx->nregs);
+        base_val = operand_val(ctx, in->ops[0], regs);
     }
-    i64 index = operand_val(in->ops[1], regs, ctx->nregs);
+    i64 index = operand_val(ctx, in->ops[1], regs);
     i64 stride = in->ops[2].u.imm;
     regs[in->result] = base_val + index * stride;
     mask_vreg(ctx, regs, in->result);
@@ -544,7 +558,7 @@ static i64 eval_gep(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_alloca(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 size = operand_val(in->ops[0], regs, ctx->nregs);
+    i64 size = operand_val(ctx, in->ops[0], regs);
     u64 aligned = ((u64) size + 7) & ~7ULL;
     if (ctx->alloca_top + aligned > ctx->alloca_limit)
     {
@@ -576,7 +590,7 @@ static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
         {
             if (strcmp(in->extra.phi.entries[e].label, pred->label) == 0)
             {
-                regs[in->result] = operand_val(in->extra.phi.entries[e].val, regs, ctx->nregs);
+                regs[in->result] = operand_val(ctx, in->extra.phi.entries[e].val, regs);
                 mask_vreg(ctx, regs, in->result);
                 found = true;
                 break;
@@ -624,6 +638,10 @@ static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *star
                 return 1;
             }
             i64 result = fn(in, ctx, regs);
+            if (ctx->error)
+            {
+                return 1;
+            }
             if (ctx->returned)
             {
                 return result;

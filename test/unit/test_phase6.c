@@ -181,3 +181,173 @@ TEST(phase6, elf_string_literal)
     unlink("/tmp/ficc_phase6_str");
     arena_free(arena);
 }
+
+TEST(phase6, interp_array_subscript)
+{
+    const char *src =
+        "int main(void) { int arr[3]; arr[0] = 10; arr[1] = 20; arr[2] = 30; "
+        "return arr[0] + arr[1] + arr[2]; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 60);
+    arena_free(arena);
+}
+
+TEST(phase6, interp_array_write_read)
+{
+    const char *src = "int main(void) { int arr[4]; int i; "
+                      "for (i = 0; i < 4; i = i + 1) arr[i] = i * 7; return arr[3]; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 21);
+    arena_free(arena);
+}
+
+TEST(phase6, interp_ptr_arithmetic)
+{
+    const char *src = "int main(void) { int arr[3]; arr[0] = 5; arr[1] = 6; arr[2] = 7; "
+                      "int *p = arr; return *(p + 2); }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 7);
+    arena_free(arena);
+}
+
+TEST(phase6, interp_ptr_neg_offset)
+{
+    const char *src = "int main(void) { int arr[3]; arr[0] = 5; arr[1] = 6; arr[2] = 7; "
+                      "int *p = &arr[2]; return *(p - 1); }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 6);
+    arena_free(arena);
+}
+
+TEST(phase6, interp_addr_deref)
+{
+    const char *src = "int main(void) { int arr[2]; arr[0] = 9; return *(&arr[0]); }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 9);
+    arena_free(arena);
+}
+
+TEST(phase6, interp_array_param)
+{
+    const char *src = "int sum(int a[], int n) { int s = 0; int i; "
+                      "for (i = 0; i < n; i = i + 1) s = s + a[i]; return s; } "
+                      "int main(void) { int x[3]; x[0] = 1; x[1] = 2; x[2] = 3; "
+                      "return sum(x, 3); }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 6);
+    arena_free(arena);
+}
+
+TEST(phase6, interp_void_ptr_assign)
+{
+    const char *src = "int main(void) { void *v; int *p; v = p; p = v; return sizeof(v); }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 8);
+    arena_free(arena);
+}
+
+TEST(phase6, interp_string_pass_to_func)
+{
+    const char *src =
+        "int first(char *s) { return s[0]; } int main(void) { return first(\"hi\"); }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 'h');
+    arena_free(arena);
+}
+
+TEST(phase6, interp_null_deref_trap)
+{
+    const char *src = "int main(void) { int *p = 0; *p = 42; return 0; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 1);
+    arena_free(arena);
+}
+
+TEST(phase6, elf_array_read_write)
+{
+    const char *src = "int main(void) { int arr[3]; arr[0] = 4; arr[1] = 5; arr[2] = 6; "
+                      "return arr[0] + arr[1] + arr[2]; }\n";
+    Arena *arena = arena_new();
+    int exit_code = run_elf(src, arena, "/tmp/ficc_phase6_arr.o", "/tmp/ficc_phase6_arr");
+    EXPECT_EQ(exit_code, 15);
+    unlink("/tmp/ficc_phase6_arr.o");
+    unlink("/tmp/ficc_phase6_arr");
+    arena_free(arena);
+}
+
+TEST(phase6, elf_ptr_arithmetic)
+{
+    const char *src = "int main(void) { int arr[3]; arr[0] = 10; arr[1] = 20; arr[2] = 30; "
+                      "int *p = arr; return *(p + 2); }\n";
+    Arena *arena = arena_new();
+    int exit_code = run_elf(src, arena, "/tmp/ficc_phase6_pa.o", "/tmp/ficc_phase6_pa");
+    EXPECT_EQ(exit_code, 30);
+    unlink("/tmp/ficc_phase6_pa.o");
+    unlink("/tmp/ficc_phase6_pa");
+    arena_free(arena);
+}
+
+TEST(phase6, elf_array_param)
+{
+    const char *src = "int sum(int a[], int n) { int s = 0; int i; "
+                      "for (i = 0; i < n; i = i + 1) s = s + a[i]; return s; } "
+                      "int main(void) { int x[3]; x[0] = 1; x[1] = 2; x[2] = 3; "
+                      "return sum(x, 3); }\n";
+    Arena *arena = arena_new();
+    int exit_code = run_elf(src, arena, "/tmp/ficc_phase6_ap.o", "/tmp/ficc_phase6_ap");
+    EXPECT_EQ(exit_code, 6);
+    unlink("/tmp/ficc_phase6_ap.o");
+    unlink("/tmp/ficc_phase6_ap");
+    arena_free(arena);
+}
+
+TEST(phase6, interp_string_loop_sum)
+{
+    const char *src = "int main(void) { char *s = \"hello\"; int i = 0; int n = 0; "
+                      "while (s[i] != 0) { n = n + s[i]; i = i + 1; } return n; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 'h' + 'e' + 'l' + 'l' + 'o');
+    arena_free(arena);
+}
+
+TEST(phase6, elf_string_loop)
+{
+    const char *src = "int main(void) { char *s = \"hello\"; int i = 0; "
+                      "while (s[i] != 0) i = i + 1; return i; }\n";
+    Arena *arena = arena_new();
+    int exit_code =
+        run_elf(src, arena, "/tmp/ficc_phase6_ss.o", "/tmp/ficc_phase6_ss");
+    EXPECT_EQ(exit_code, 5);
+    unlink("/tmp/ficc_phase6_ss.o");
+    unlink("/tmp/ficc_phase6_ss");
+    arena_free(arena);
+}
+
+TEST(phase6, negative_deref_non_pointer)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("int main(void) { int x; return *x; }\n", arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase6, negative_addr_non_lvalue)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("int main(void) { return &42; }\n", arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase6, negative_sizeof_void)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("int main(void) { return sizeof(void); }\n", arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase6, negative_incompatible_ptr_assign)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("int main(void) { int *p; char *q; p = q; return 0; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
