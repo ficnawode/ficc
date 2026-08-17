@@ -30,7 +30,7 @@ struct LoopBlocks
 {
     IrBlock *header;
     IrBlock *body;
-    IrBlock *latch; /* continue target */
+    IrBlock *latch;
     IrBlock *exit;
 };
 
@@ -316,8 +316,8 @@ static void seal_block(FuncBuilder *ctx, IrBlock *bb)
 }
 
 static const IrOpcode binop_ir[] = {
-    [BIN_ADD] = OP_ADD, [BIN_SUB] = OP_SUB,    [BIN_MUL] = OP_MUL,  [BIN_AND] = OP_AND,
-    [BIN_OR] = OP_OR,   [BIN_XOR] = OP_XOR,    [BIN_SHL] = OP_SHL,  [BIN_SHR] = OP_ASHR,
+    [BIN_ADD] = OP_ADD, [BIN_SUB] = OP_SUB, [BIN_MUL] = OP_MUL, [BIN_AND] = OP_AND,
+    [BIN_OR] = OP_OR,   [BIN_XOR] = OP_XOR, [BIN_SHL] = OP_SHL, [BIN_SHR] = OP_ASHR,
     /* BIN_EQ..BIN_GE, BIN_DIV, BIN_REM resolved in build_arith_binop_expr */
 };
 
@@ -358,7 +358,7 @@ static ExprResult build_ident_expr(ASTIdent *id, IrFunction *f, IrBlock *bb, Fun
 }
 
 static ExprResult build_short_circuit(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
-                                       FuncBuilder *ctx)
+                                      FuncBuilder *ctx)
 {
     bool is_or = be->op == BIN_LOG_OR;
     const char *pfx = is_or ? "lor" : "land";
@@ -1068,14 +1068,10 @@ static IrBlock *build_goto_stmt(ASTGotoStmt *gs, IrFunction *f, IrBlock *bb, Fun
 static IrBlock *build_label_stmt(ASTLabelStmt *ls, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     IrBlock *label_bb = label_block(ctx, f, ls->label);
-    /* If the current block is not terminated, fall through to the label block. */
     if (!is_terminated(bb))
     {
         jump(bb, label_bb);
     }
-    /* Label blocks are deferred until the end of the function: a backward goto
-       can add a predecessor edge after this point, so PHIs must wait for all
-       predecessors to be known. */
     return build_stmt(ls->stmt, f, label_bb, ctx);
 }
 
@@ -1165,9 +1161,6 @@ static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlo
 
 static void seal_all_blocks(FuncBuilder *ctx, IrFunction *f)
 {
-    /* Seal every block that is still unsealed. Label blocks are deliberately
-       left unsealed during construction so that backward-goto predecessor edges
-       are known before their PHIs are built. */
     size_t nblocks = vec_size(f->blocks);
     for (size_t i = 0; i < nblocks; i++)
     {

@@ -6,23 +6,23 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/* Machine-code context                                                */
-/* ------------------------------------------------------------------ */
-
-/* Patch records for function calls and global-data references.
-   For calls: `offset` is the displacement field in a `call rel32` instruction,
-   resolved to the target function's .text offset.
-   For globals: `offset` is the immediate in a `mov reg, imm32` instruction,
-   resolved to the global's absolute rodata address. */
+/* Patch record for a `call rel32` or intra-function jump placeholder.
+   `offset` is the displacement field in the instruction stream. */
 typedef struct
 {
     size_t offset;
-    const char *target; /* function name for calls, global name for data */
-    bool is_global;     /* true if this patch resolves against .rodata */
-} Patch;
+    const char *target;
+} CallPatch;
 
-/* One copy emitted in a predecessor block for each PHI entry. */
+/* Patch record for a conditional or unconditional intra-function jump.
+   Same shape as CallPatch, but kept separate because the resolution logic
+   (block offset vs. function offset) and target namespace are different. */
+typedef struct
+{
+    size_t offset;
+    const char *target;
+} BranchPatch;
+
 typedef struct
 {
     IrOperand src;
@@ -33,7 +33,7 @@ typedef struct
 typedef struct
 {
     u32 n_vregs;
-    u32 frame_size; /* rounded up to 16 for ABI alignment */
+    u32 frame_size; /* rounded up to 16 (ABI) */
 } FrameInfo;
 
 typedef struct CodegenCtx CodegenCtx;
@@ -47,9 +47,9 @@ struct CodegenCtx
     StrMap *label_to_block; /* block label -> IrBlock* */
     U64Map *block_to_index; /* IrBlock* -> block index */
     size_t *block_offsets;  /* per-block offset within the function bytes */
-    Vec *patches;           /* Vec<Patch*>, function calls */
-    Vec *block_patches;     /* Vec<Patch*>, intra-function jumps */
-    Vec *global_patches;    /* Vec<GlobalPatch*>, global-data references */
+    Vec *patches;           /* Vec<CallPatch*> */
+    Vec *block_patches;     /* Vec<BranchPatch*> */
+    Vec *global_patches;    /* Vec<GlobalPatch*> */
 };
 
 static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
@@ -111,19 +111,77 @@ typedef enum
     CC_G
 } CondCode;
 
+/* x86 opcode and prefix bytes used by the encoder. Values that take a register
+   nibble in the low 3 bits are named *_BASE. */
+typedef enum
+{
+    X86_TWO_BYTE_ESC = 0x0F,
+    X86_UD2 = 0x0B,
+    X86_OPERAND_SIZE = 0x66,
+    X86_REX_W = 0x48,
+
+    X86_PUSH_RBP = 0x55,
+    X86_LEAVE = 0xC9,
+    X86_RET = 0xC3,
+
+    X86_CALL_REL32 = 0xE8,
+    X86_JMP_REL32 = 0xE9,
+
+    X86_ADD_RM8_REG8 = 0x02,
+    X86_MOV_RM8_REG8 = 0x88,
+    X86_MOV_RM32_REG32 = 0x89,
+    X86_MOV_REG8_RM8 = 0x8A,
+    X86_MOV_REG32_RM32 = 0x8B,
+    X86_LEA = 0x8D,
+
+    X86_MOV_REG8_IMM8_BASE = 0xB0,
+    X86_MOV_REG_IMM_BASE = 0xB8,
+
+    X86_GROUP1_IMM8 = 0x80,
+    X86_GROUP1_IMM32 = 0x81,
+    X86_GROUP1_IMM8SX = 0x83,
+
+    X86_GROUP3_RM8 = 0xF6,
+    X86_GROUP3_RM32 = 0xF7,
+
+    X86_SHIFT_RM8_CL = 0xD2,
+    X86_SHIFT_RM32_CL = 0xD3,
+
+    X86_CBW_CWDE_CDQE = 0x98,
+    X86_CWD_CDQ_CQO = 0x99,
+
+    X86_XOR_REG_RM = 0x31,
+    X86_XOR_RM8_REG8 = 0x30,
+    X86_TEST_REG_RM = 0x85,
+
+    X86_MOVZX_REG8 = 0xB6,
+    X86_MOVZX_REG16 = 0xB7,
+    X86_MOVSX_REG8 = 0xBE,
+    X86_MOVSX_REG16 = 0xBF,
+    X86_MOVSXD_REG32 = 0x63,
+
+    X86_JCC_BASE = 0x80,
+    X86_SETCC_BASE = 0x90,
+} X86Opcode;
+
 #define NO_REG 0xFF
+
+static bool reg_is_extended(u8 reg)
+{
+    return reg != NO_REG && reg >= 8;
+}
 
 typedef struct
 {
-    u8 base;  /* X86Reg or NO_REG (RIP-relative) */
-    u8 index; /* X86Reg or NO_REG */
-    u8 scale; /* 1, 2, 4 or 8 */
+    u8 base;
+    u8 index;
+    u8 scale;
     i32 disp;
 } X86Mem;
 
 typedef enum
 {
-    XOP_IMM, /* sign-extended 32-bit immediate in the instruction stream */
+    XOP_IMM,
     XOP_REG,
     XOP_MEM
 } X86OpKind;
@@ -203,10 +261,6 @@ static X86Operand xop_from_operand(IrOperand op)
     return xop_vreg(op.u.vreg);
 }
 
-/* ------------------------------------------------------------------ */
-/* x86-64 encoding                                                     */
-/* ------------------------------------------------------------------ */
-
 static u8 modrm(u8 mod, u8 reg, u8 rm)
 {
     return (mod << 6) | ((reg & 7) << 3) | (rm & 7);
@@ -227,17 +281,33 @@ static bool fits_i32(i64 v)
     return v >= (i64) INT32_MIN && v <= (i64) INT32_MAX;
 }
 
-/* Emit modrm + SIB + displacement for a memory operand, `reg` in the modrm
-   reg field. REX prefix, if any, is emitted by the caller. */
+static u8 encode_sib_scale(u8 scale)
+{
+    switch (scale)
+    {
+        case 1:
+            return 0;
+        case 2:
+            return 1;
+        case 4:
+            return 2;
+        case 8:
+            return 3;
+        default:
+            ASSERT(false && "invalid SIB scale");
+            return 0;
+    }
+}
+
 static void emit_mem_operand(ByteBuf *buf, u8 reg, X86Mem m)
 {
     if (m.base == NO_REG)
     {
-        /* RIP-relative: mod=00, rm=101, disp32 */
         bytebuf_append(buf, modrm(0, reg, 5));
         bytebuf_append_i32(buf, m.disp);
         return;
     }
+
     bool need_sib = m.index != NO_REG || m.base == R_ESP;
     u8 mod;
     if (m.disp == 0 && (need_sib || m.base != R_EBP))
@@ -252,14 +322,15 @@ static void emit_mem_operand(ByteBuf *buf, u8 reg, X86Mem m)
     {
         mod = 2;
     }
+
     bytebuf_append(buf, modrm(mod, reg, need_sib ? 4 : m.base));
     if (need_sib)
     {
-        /* SIB: index=100 means "no index register" */
         u8 idx = m.index == NO_REG ? 4 : (m.index & 7);
-        u8 scale = m.scale == 8 ? 3 : m.scale == 4 ? 2 : m.scale == 2 ? 1 : 0;
+        u8 scale = encode_sib_scale(m.scale);
         bytebuf_append(buf, (u8) ((scale << 6) | (idx << 3) | (m.base & 7)));
     }
+
     if (mod == 1)
     {
         bytebuf_append_i8(buf, (i8) m.disp);
@@ -274,45 +345,49 @@ static void emit_os16(ByteBuf *buf, u8 width)
 {
     if (width == 2)
     {
-        bytebuf_append(buf, 0x66);
+        bytebuf_append(buf, X86_OPERAND_SIZE);
     }
 }
 
-static void emit_mov(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
+static void emit_mov_byte(ByteBuf *buf, X86Operand dst, X86Operand src)
 {
-    if (width == 1)
+    if (src.kind == XOP_IMM)
     {
-        if (src.kind == XOP_IMM)
-        {
-            bytebuf_append(buf, rex(false, false, false, dst.u.reg >= 8));
-            bytebuf_append(buf, (u8) (0xB0 + (dst.u.reg & 7)));
-            bytebuf_append_i8(buf, (i8) src.u.imm);
-            return;
-        }
-        if (dst.kind == XOP_REG && src.kind == XOP_REG)
-        {
-            bytebuf_append(buf, rex(false, src.u.reg >= 8, false, dst.u.reg >= 8));
-            bytebuf_append(buf, 0x88);
-            bytebuf_append(buf, modrm(3, src.u.reg, dst.u.reg));
-            return;
-        }
-        bool to_reg = dst.kind == XOP_REG;
-        u8 reg = to_reg ? dst.u.reg : src.u.reg;
-        X86Mem mem = to_reg ? src.u.mem : dst.u.mem;
-        bytebuf_append(buf, rex(false, reg >= 8, mem.index != NO_REG && mem.index >= 8,
-                                mem.base != NO_REG && mem.base >= 8));
-        bytebuf_append(buf, to_reg ? 0x8A : 0x88);
-        emit_mem_operand(buf, reg, mem);
+        bytebuf_append(buf, rex(false, false, false, dst.u.reg >= 8));
+        bytebuf_append(buf, (u8) (X86_MOV_REG8_IMM8_BASE + (dst.u.reg & 7)));
+        bytebuf_append_i8(buf, (i8) src.u.imm);
         return;
     }
+
+    if (dst.kind == XOP_REG && src.kind == XOP_REG)
+    {
+        bytebuf_append(buf, rex(false, src.u.reg >= 8, false, dst.u.reg >= 8));
+        bytebuf_append(buf, X86_MOV_RM8_REG8);
+        bytebuf_append(buf, modrm(3, src.u.reg, dst.u.reg));
+        return;
+    }
+
+    bool to_reg = dst.kind == XOP_REG;
+    u8 reg = to_reg ? dst.u.reg : src.u.reg;
+    X86Mem mem = to_reg ? src.u.mem : dst.u.mem;
+    bytebuf_append(buf,
+                   rex(false, reg >= 8, reg_is_extended(mem.index), reg_is_extended(mem.base)));
+    bytebuf_append(buf, to_reg ? X86_MOV_REG8_RM8 : X86_MOV_RM8_REG8);
+    emit_mem_operand(buf, reg, mem);
+}
+
+static void emit_mov_scalar(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
+{
+    ASSERT(width == 2 || width == 4 || width == 8);
     emit_os16(buf, width);
+
     if (src.kind == XOP_IMM)
     {
         bytebuf_append(buf, rex(width == 8, false, false, dst.u.reg >= 8));
-        bytebuf_append(buf, (u8) (0xB8 + (dst.u.reg & 7)));
+        bytebuf_append(buf, (u8) (X86_MOV_REG_IMM_BASE + (dst.u.reg & 7)));
         if (width == 2)
         {
-            u16 imm = (u16) (i64) src.u.imm;
+            u16 imm = (u16) src.u.imm;
             bytebuf_append(buf, (u8) (imm & 0xFF));
             bytebuf_append(buf, (u8) (imm >> 8));
         }
@@ -326,32 +401,44 @@ static void emit_mov(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
         }
         return;
     }
+
     if (dst.kind == XOP_REG && src.kind == XOP_REG)
     {
         bytebuf_append(buf, rex(width == 8, src.u.reg >= 8, false, dst.u.reg >= 8));
-        bytebuf_append(buf, 0x89);
+        bytebuf_append(buf, X86_MOV_RM32_REG32);
         bytebuf_append(buf, modrm(3, src.u.reg, dst.u.reg));
         return;
     }
+
     bool to_reg = dst.kind == XOP_REG;
     u8 reg = to_reg ? dst.u.reg : src.u.reg;
     X86Mem mem = to_reg ? src.u.mem : dst.u.mem;
-    bytebuf_append(buf, rex(width == 8, reg >= 8, mem.index != NO_REG && mem.index >= 8,
-                            mem.base != NO_REG && mem.base >= 8));
-    bytebuf_append(buf, to_reg ? 0x8B : 0x89);
+    bytebuf_append(
+        buf, rex(width == 8, reg >= 8, reg_is_extended(mem.index), reg_is_extended(mem.base)));
+    bytebuf_append(buf, to_reg ? X86_MOV_REG32_RM32 : X86_MOV_RM32_REG32);
     emit_mem_operand(buf, reg, mem);
 }
 
-/* Binary operation encodings, indexed by IR opcode. `mem` is the load form
-   (reg op= mem); `imm8`/`imm32` are the 0x83 /digit and 0x81 /digit (or
-   imul's 6B/69) forms. */
+static void emit_mov(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
+{
+    if (width == 1)
+    {
+        emit_mov_byte(buf, dst, src);
+    }
+    else
+    {
+        emit_mov_scalar(buf, width, dst, src);
+    }
+}
+
+/* x86 encoding recipe for a binary arithmetic/logic operation. */
 typedef struct
 {
-    u8 mem;      /* load-form opcode (0x03 addl) */
-    u8 imm8;     /* 0x83 (or 0x6B imul) */
-    u8 imm32;    /* 0x81 (or 0x69 imul) */
+    u8 mem;      /* reg op= r/m opcode */
+    u8 imm8;     /* reg op= imm8 opcode (0x83, or 0x6B for imul) */
+    u8 imm32;    /* reg op= imm32 opcode (0x81, or 0x69 for imul) */
     u8 digit;    /* /digit for all forms */
-    bool mem_0f; /* mem form has a 0x0F prefix (imul) */
+    bool mem_0f; /* true if the mem opcode needs a 0x0F prefix */
 } ArithSpec;
 
 static const ArithSpec arith_specs[] = {
@@ -378,19 +465,16 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
 {
     if (width == 1)
     {
-        /* 8-bit encoding: imm8 uses 0x80 /digit, r/m8 op= reg uses 0x00-based opcodes */
         u8 digit = s->digit;
         if (rhs.kind == XOP_IMM)
         {
-            bytebuf_append(buf, 0x80);
+            bytebuf_append(buf, X86_GROUP1_IMM8);
             bytebuf_append(buf, modrm(3, digit, dst_reg));
             bytebuf_append_i8(buf, (i8) rhs.u.imm);
             return;
         }
-        /* 8-bit r/m8 op= reg: emit_mov to %al, then op %al, r/m8 */
-        /* For 8-bit we always use the reg, reg form: 0x02 + digit parity */
         ASSERT(rhs.kind == XOP_REG || rhs.kind == XOP_MEM);
-        bytebuf_append(buf, 0x02 /* ADD r/m8, reg8 */);
+        bytebuf_append(buf, X86_ADD_RM8_REG8);
         bytebuf_append(buf, modrm(3, dst_reg, rhs.u.reg));
         return;
     }
@@ -414,12 +498,11 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
         return;
     }
     emit_os16(buf, width);
-    bytebuf_append(buf,
-                   rex(width == 8, dst_reg >= 8, rhs.u.mem.index != NO_REG && rhs.u.mem.index >= 8,
-                       rhs.u.mem.base != NO_REG && rhs.u.mem.base >= 8));
+    bytebuf_append(buf, rex(width == 8, dst_reg >= 8, reg_is_extended(rhs.u.mem.index),
+                            reg_is_extended(rhs.u.mem.base)));
     if (s->mem_0f)
     {
-        bytebuf_append(buf, 0x0F);
+        bytebuf_append(buf, X86_TWO_BYTE_ESC);
     }
     bytebuf_append(buf, s->mem);
     emit_mem_operand(buf, dst_reg, rhs.u.mem);
@@ -430,7 +513,7 @@ static void emit_unary(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 {
     emit_os16(buf, width);
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
-    bytebuf_append(buf, width == 1 ? 0xF6 : 0xF7);
+    bytebuf_append(buf, width == 1 ? X86_GROUP3_RM8 : X86_GROUP3_RM32);
     bytebuf_append(buf, modrm(3, digit, reg));
 }
 
@@ -439,7 +522,7 @@ static void emit_shift_cl(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 {
     emit_os16(buf, width);
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
-    bytebuf_append(buf, width == 1 ? 0xD2 : 0xD3);
+    bytebuf_append(buf, width == 1 ? X86_SHIFT_RM8_CL : X86_SHIFT_RM32_CL);
     bytebuf_append(buf, modrm(3, digit, reg));
 }
 
@@ -449,94 +532,92 @@ static void emit_cdq(ByteBuf *buf, u8 width, bool is_unsigned)
     {
         if (is_unsigned)
         {
-            bytebuf_append(buf, 0x30); /* xor %ah, %ah */
+            bytebuf_append(buf, X86_XOR_RM8_REG8);
             bytebuf_append(buf, modrm(3, 4, 4));
         }
         else
         {
-            bytebuf_append(buf, 0x66); /* cbw */
-            bytebuf_append(buf, 0x98);
+            bytebuf_append(buf, X86_OPERAND_SIZE);
+            bytebuf_append(buf, X86_CBW_CWDE_CDQE);
         }
         return;
     }
     if (width == 8)
     {
-        bytebuf_append(buf, 0x48); /* cqo */
+        bytebuf_append(buf, X86_REX_W);
     }
-    bytebuf_append(buf, 0x99);
+    bytebuf_append(buf, X86_CWD_CDQ_CQO);
 }
 
 /* F7 /7: idiv %reg. 8-bit uses F6 /7. */
 static void emit_idiv(ByteBuf *buf, u8 width, u8 reg)
 {
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
-    bytebuf_append(buf, width == 1 ? 0xF6 : 0xF7);
+    bytebuf_append(buf, width == 1 ? X86_GROUP3_RM8 : X86_GROUP3_RM32);
     bytebuf_append(buf, modrm(3, 7, reg));
 }
 
 static void emit_test_eax_eax(ByteBuf *buf)
 {
-    bytebuf_append(buf, 0x85);
+    bytebuf_append(buf, X86_TEST_REG_RM);
     bytebuf_append(buf, modrm(3, 0, 0));
 }
 
 static void emit_xor_eax_eax(ByteBuf *buf)
 {
-    bytebuf_append(buf, 0x31);
+    bytebuf_append(buf, X86_XOR_REG_RM);
     bytebuf_append(buf, modrm(3, 0, 0));
 }
 
 /* 0F 90+cc: setcc %al */
 static void emit_setcc(ByteBuf *buf, u8 cc)
 {
-    bytebuf_append(buf, 0x0F);
-    bytebuf_append(buf, (u8) (0x90 + cc));
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, (u8) (X86_SETCC_BASE + cc));
     bytebuf_append(buf, modrm(3, 0, 0));
 }
 
-/* 0F B6: movzbl %al, %eax */
 static void emit_movzbl_al_eax(ByteBuf *buf)
 {
-    bytebuf_append(buf, 0x0F);
-    bytebuf_append(buf, 0xB6);
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_MOVZX_REG8);
     bytebuf_append(buf, modrm(3, 0, 0));
 }
 
 static void emit_ud2(ByteBuf *buf)
 {
-    bytebuf_append(buf, 0x0F);
-    bytebuf_append(buf, 0x0B);
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_UD2);
 }
 
-/* 0F 80+cc rel32: jcc (placeholder, patched later) */
 static void emit_jcc(ByteBuf *buf, u8 cc, const char *target, Vec *patches, Arena *arena)
 {
-    Patch *p = arena_alloc(arena, sizeof(Patch), sizeof(void *));
-    p->target = target;
-    bytebuf_append(buf, 0x0F);
-    bytebuf_append(buf, (u8) (0x80 + cc));
-    p->offset = bytebuf_len(buf);
-    vec_push(patches, p);
+    BranchPatch *bp = arena_alloc(arena, sizeof(BranchPatch), sizeof(void *));
+    bp->target = target;
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, (u8) (X86_JCC_BASE + cc));
+    bp->offset = bytebuf_len(buf);
+    vec_push(patches, bp);
     bytebuf_append_i32(buf, 0);
 }
 
 static void emit_jmp_placeholder(ByteBuf *buf, const char *target, Vec *patches, Arena *arena)
 {
-    Patch *p = arena_alloc(arena, sizeof(Patch), sizeof(void *));
-    p->target = target;
-    bytebuf_append(buf, 0xE9);
-    p->offset = bytebuf_len(buf);
-    vec_push(patches, p);
+    BranchPatch *bp = arena_alloc(arena, sizeof(BranchPatch), sizeof(void *));
+    bp->target = target;
+    bytebuf_append(buf, X86_JMP_REL32);
+    bp->offset = bytebuf_len(buf);
+    vec_push(patches, bp);
     bytebuf_append_i32(buf, 0);
 }
 
 static void emit_call_placeholder(ByteBuf *buf, const char *target, Vec *patches, Arena *arena)
 {
-    Patch *p = arena_alloc(arena, sizeof(Patch), sizeof(void *));
-    p->target = target;
-    bytebuf_append(buf, 0xE8);
-    p->offset = bytebuf_len(buf);
-    vec_push(patches, p);
+    CallPatch *cp = arena_alloc(arena, sizeof(CallPatch), sizeof(void *));
+    cp->target = target;
+    bytebuf_append(buf, X86_CALL_REL32);
+    cp->offset = bytebuf_len(buf);
+    vec_push(patches, cp);
     bytebuf_append_i32(buf, 0);
 }
 
@@ -743,8 +824,8 @@ static void lower_ret(IrInstr *in, CodegenCtx *ctx)
     {
         emit_mov(ctx->buf, 4, xop_reg(R_EAX), xop_imm(0));
     }
-    bytebuf_append(ctx->buf, 0xC9); /* leave */
-    bytebuf_append(ctx->buf, 0xC3); /* ret */
+    bytebuf_append(ctx->buf, X86_LEAVE);
+    bytebuf_append(ctx->buf, X86_RET);
 }
 
 static void lower_br(IrInstr *in, CodegenCtx *ctx)
@@ -785,20 +866,18 @@ static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand 
     ASSERT(dst_w == 4 || dst_w == 8);
     if (src_w == 1)
     {
-        bytebuf_append(buf,
-                       rex(dst_w == 8, dst_reg >= 8, false,
-                           src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
-        bytebuf_append(buf, 0x0F);
-        bytebuf_append(buf, 0xB6);
+        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
+                                src.kind == XOP_MEM && reg_is_extended(src.u.mem.base)));
+        bytebuf_append(buf, X86_TWO_BYTE_ESC);
+        bytebuf_append(buf, X86_MOVZX_REG8);
     }
     else
     {
-        bytebuf_append(buf, 0x66);
-        bytebuf_append(buf,
-                       rex(dst_w == 8, dst_reg >= 8, false,
-                           src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
-        bytebuf_append(buf, 0x0F);
-        bytebuf_append(buf, 0xB7);
+        bytebuf_append(buf, X86_OPERAND_SIZE);
+        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
+                                src.kind == XOP_MEM && reg_is_extended(src.u.mem.base)));
+        bytebuf_append(buf, X86_TWO_BYTE_ESC);
+        bytebuf_append(buf, X86_MOVZX_REG16);
     }
     if (src.kind == XOP_REG)
     {
@@ -816,18 +895,16 @@ static void emit_movsx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand 
     if (src_w == 4)
     {
         ASSERT(dst_w == 8);
-        bytebuf_append(buf,
-                       rex(true, dst_reg >= 8, false,
-                           src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
-        bytebuf_append(buf, 0x63);
+        bytebuf_append(buf, rex(true, dst_reg >= 8, false,
+                                src.kind == XOP_MEM && reg_is_extended(src.u.mem.base)));
+        bytebuf_append(buf, X86_MOVSXD_REG32);
     }
     else
     {
-        bytebuf_append(buf,
-                       rex(dst_w == 8, dst_reg >= 8, false,
-                           src.kind == XOP_MEM && src.u.mem.base != NO_REG && src.u.mem.base >= 8));
-        bytebuf_append(buf, 0x0F);
-        bytebuf_append(buf, src_w == 1 ? 0xBE : 0xBF);
+        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
+                                src.kind == XOP_MEM && reg_is_extended(src.u.mem.base)));
+        bytebuf_append(buf, X86_TWO_BYTE_ESC);
+        bytebuf_append(buf, src_w == 1 ? X86_MOVSX_REG8 : X86_MOVSX_REG16);
     }
     if (src.kind == XOP_REG)
     {
@@ -846,21 +923,10 @@ static void lower_zext(IrInstr *in, CodegenCtx *ctx)
     if (in->ops[0].is_imm)
     {
         emit_mov(ctx->buf, dw, xop_reg(R_EAX), src);
-        emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
-        return;
-    }
-    u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
-    if (src.kind == XOP_MEM)
-    {
-        emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
-        emit_movzx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
-    }
-    else if (src.kind == XOP_REG && sw == 1)
-    {
-        emit_movzx(ctx->buf, sw, dw, R_EAX, src);
     }
     else
     {
+        u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
         emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
         emit_movzx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
     }
@@ -874,25 +940,19 @@ static void lower_sext(IrInstr *in, CodegenCtx *ctx)
     if (in->ops[0].is_imm)
     {
         emit_mov(ctx->buf, dw, xop_reg(R_EAX), src);
-        emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
-        return;
-    }
-    u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
-    if (src.kind == XOP_MEM)
-    {
-        emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
-        emit_movsx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
     }
     else
     {
-        emit_movsx(ctx->buf, sw, dw, R_EAX, src);
+        u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
+        emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
+        emit_movsx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
     }
     emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
 static void emit_global_addr(ByteBuf *buf, u32 global_idx, Vec *patches, Arena *arena)
 {
-    bytebuf_append(buf, 0xB8); /* mov eax, imm32 (placeholder) */
+    bytebuf_append(buf, X86_MOV_REG_IMM_BASE);
     GlobalPatch *gp = arena_alloc(arena, sizeof(GlobalPatch), sizeof(void *));
     gp->offset = bytebuf_len(buf);
     gp->global_index = global_idx;
@@ -902,31 +962,29 @@ static void emit_global_addr(ByteBuf *buf, u32 global_idx, Vec *patches, Arena *
 
 static void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src)
 {
-    u8 rex_b = rex(true, dst_reg >= 8, src.index != NO_REG && src.index >= 8,
-                   src.base != NO_REG && src.base >= 8);
+    u8 rex_b = rex(true, dst_reg >= 8, reg_is_extended(src.index), reg_is_extended(src.base));
     bytebuf_append(buf, rex_b);
-    bytebuf_append(buf, 0x8D);
+    bytebuf_append(buf, X86_LEA);
     emit_mem_operand(buf, dst_reg, src);
 }
 
-static X86Mem load_mem_ptr(ByteBuf *buf, X86Operand ptr)
+static X86Mem load_ptr(CodegenCtx *ctx, IrOperand ptr)
 {
-    emit_mov(buf, 8, xop_reg(R_EAX), ptr);
+    if (ptr.is_global)
+    {
+        emit_global_addr(ctx->buf, ptr.u.global_index, ctx->global_patches, ctx->arena);
+    }
+    else
+    {
+        emit_mov(ctx->buf, 8, xop_reg(R_EAX), xop_from_operand(ptr));
+    }
     return (X86Mem) {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
 }
 
 static void lower_load(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
-    if (in->ops[0].is_global)
-    {
-        emit_global_addr(ctx->buf, in->ops[0].u.global_index, ctx->global_patches, ctx->arena);
-        X86Mem indirect = {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
-        emit_mov(ctx->buf, w, xop_reg(R_EDX), xop_mem(indirect));
-        emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EDX));
-        return;
-    }
-    X86Mem indirect = load_mem_ptr(ctx->buf, xop_from_operand(in->ops[0]));
+    X86Mem indirect = load_ptr(ctx, in->ops[0]);
     emit_mov(ctx->buf, w, xop_reg(R_EDX), xop_mem(indirect));
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EDX));
 }
@@ -940,53 +998,16 @@ static void lower_store(IrInstr *in, CodegenCtx *ctx)
         emit_mov(ctx->buf, w, xop_reg(R_EDX), val);
         val = xop_reg(R_EDX);
     }
-    if (in->ops[1].is_global)
-    {
-        emit_global_addr(ctx->buf, in->ops[1].u.global_index, ctx->global_patches, ctx->arena);
-        X86Mem indirect = {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
-        emit_mov(ctx->buf, w, xop_mem(indirect), val);
-        return;
-    }
-    X86Mem indirect = load_mem_ptr(ctx->buf, xop_from_operand(in->ops[1]));
+    X86Mem indirect = load_ptr(ctx, in->ops[1]);
     emit_mov(ctx->buf, w, xop_mem(indirect), val);
 }
 
 static void lower_gep(IrInstr *in, CodegenCtx *ctx)
 {
     i32 stride = (i32) in->ops[2].u.imm;
-    X86Operand base;
-    u8 base_reg;
-    if (in->ops[0].is_global)
-    {
-        emit_global_addr(ctx->buf, in->ops[0].u.global_index, ctx->global_patches, ctx->arena);
-        base_reg = R_EAX;
-    }
-    else
-    {
-        base = xop_from_operand(in->ops[0]);
-        if (base.kind == XOP_MEM || base.kind == XOP_IMM)
-        {
-            emit_mov(ctx->buf, 8, xop_reg(R_EAX), base);
-            base_reg = R_EAX;
-        }
-        else
-        {
-            base_reg = base.kind == XOP_REG ? base.u.reg : R_EAX;
-        }
-    }
-
-    X86Operand index = xop_from_operand(in->ops[1]);
-    u8 index_reg;
-    if (index.kind == XOP_MEM || index.kind == XOP_IMM)
-    {
-        emit_mov(ctx->buf, 8, xop_reg(R_ECX), index);
-        index_reg = R_ECX;
-    }
-    else
-    {
-        index_reg = index.kind == XOP_REG ? index.u.reg : R_ECX;
-    }
-    X86Mem scaled = {.base = base_reg, .index = index_reg, .scale = (u8) stride, .disp = 0};
+    X86Mem base = load_ptr(ctx, in->ops[0]);
+    emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_from_operand(in->ops[1]));
+    X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = (u8) stride, .disp = 0};
     emit_lea(ctx->buf, R_EDX, scaled);
     emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
 }
@@ -998,52 +1019,43 @@ static void lower_alloca(IrInstr *in, CodegenCtx *ctx)
     ByteBuf *b = ctx->buf;
     if (aligned <= 127)
     {
-        bytebuf_append(b, 0x48);
-        bytebuf_append(b, 0x83);
-        bytebuf_append(b, 0xEC);
+        bytebuf_append(b, X86_REX_W);
+        bytebuf_append(b, X86_GROUP1_IMM8SX);
+        bytebuf_append(b, modrm(3, 5, R_ESP));
         bytebuf_append(b, (u8) aligned);
     }
     else
     {
-        bytebuf_append(b, 0x48);
-        bytebuf_append(b, 0x81);
-        bytebuf_append(b, 0xEC);
+        bytebuf_append(b, X86_REX_W);
+        bytebuf_append(b, X86_GROUP1_IMM32);
+        bytebuf_append(b, modrm(3, 5, R_ESP));
         bytebuf_append_u32(b, (u32) aligned);
     }
     emit_mov(ctx->buf, 8, xop_reg(R_EDX), xop_reg(R_ESP));
     emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
 }
 
-/* Every immediate is encoded in a signed 32-bit field. Values that do not
-   fit (e.g. a C11 `long` constant, LP64) are user input the current
-   32-bit-only lowering cannot represent: diagnose, never assert. */
-static bool instr_has_bad_imm(IrInstr *in)
+/* arithmetic/compare have no imm64 form: an imm RHS must fit a sign-extended imm32 */
+static bool is_imm_rhs_op(IrOpcode op)
 {
-    for (u8 oi = 0; oi < in->nops; oi++)
-    {
-        if (in->ops[oi].is_imm && !fits_i32(in->ops[oi].u.imm))
-        {
-            return true;
-        }
-    }
-    if (in->opcode == OP_CALL)
-    {
-        for (u32 a = 0; a < in->extra.call.nargs; a++)
-        {
-            if (in->extra.call.args[a].is_imm && !fits_i32(in->extra.call.args[a].u.imm))
-            {
-                return true;
-            }
-        }
-    }
-    return false;
+    return op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_AND ||
+           op == OP_OR || op == OP_XOR ||
+           (op >= OP_ICMP_EQ && op <= OP_ICMP_SGE);
+}
+
+static bool instr_has_bad_imm(IrInstr *in, CodegenCtx *ctx)
+{
+    return is_imm_rhs_op(in->opcode) && vreg_width(ctx, in->result) == 8 &&
+           in->ops[1].is_imm && !fits_i32(in->ops[1].u.imm);
 }
 
 static void lower_instr(IrInstr *in, CodegenCtx *ctx)
 {
-    if (instr_has_bad_imm(in))
+    if (instr_has_bad_imm(in, ctx))
     {
-        codegen_error(ctx, "%s: immediate outside i32 range; 64-bit codegen not implemented yet",
+        codegen_error(ctx,
+                      "%s: 64-bit immediate RHS outside signed i32 range "
+                      "(no imm64 form for arithmetic/compare)",
                       ir_opcode_name(in->opcode));
         emit_ud2(ctx->buf);
         return;
@@ -1142,8 +1154,8 @@ static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod)
 
 static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod)
 {
-    bytebuf_append(buf, 0x55);                        /* push %rbp */
-    emit_mov(buf, 8, xop_reg(R_EBP), xop_reg(R_ESP)); /* mov %rsp, %rbp */
+    bytebuf_append(buf, X86_PUSH_RBP);
+    emit_mov(buf, 8, xop_reg(R_EBP), xop_reg(R_ESP));
 
     /* n_vregs >= 1, so the frame is always at least 16 bytes. */
     emit_binop_rhs(buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(frame_plan(f).frame_size));
@@ -1229,7 +1241,7 @@ static void resolve_block_patches(CodegenCtx *ctx)
     size_t npatches = vec_size(ctx->block_patches);
     for (size_t pi = 0; pi < npatches; pi++)
     {
-        Patch *bp = (Patch *) vec_get(ctx->block_patches, pi);
+        BranchPatch *bp = (BranchPatch *) vec_get(ctx->block_patches, pi);
         IrBlock *target = strmap_get(ctx->label_to_block, bp->target);
         ASSERT(target != NULL && "branch target names a block the IR builder created");
         size_t ti = (size_t) u64map_get(ctx->block_to_index, (u64) (uintptr_t) target);
@@ -1292,10 +1304,6 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     cf->global_patches = global_patches;
 }
 
-/* ------------------------------------------------------------------ */
-/* IrModule emission                                                     */
-/* ------------------------------------------------------------------ */
-
 static CodegenFunc *find_codegen_func(CodegenModule *cm, const char *name)
 {
     size_t n = vec_size(cm->funcs);
@@ -1345,22 +1353,21 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena)
         function_offset += bytebuf_len(cf->bytes);
     }
 
-    /* Apply call patches */
     for (size_t i = 0; i < nfuncs; i++)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
         size_t npatches = vec_size(cf->patches);
         for (size_t pi = 0; pi < npatches; pi++)
         {
-            Patch *p = (Patch *) vec_get(cf->patches, pi);
-            CodegenFunc *target = find_codegen_func(cm, p->target);
+            CallPatch *cp = (CallPatch *) vec_get(cf->patches, pi);
+            CodegenFunc *target = find_codegen_func(cm, cp->target);
             if (!target)
             {
-                codegen_error(NULL, "undefined function '%s'", p->target);
+                codegen_error(NULL, "undefined function '%s'", cp->target);
                 continue;
             }
-            i32 rel = (i32) (target->offset - (cf->offset + p->offset + 4));
-            bytebuf_poke_u32(cf->bytes, p->offset, (u32) rel);
+            i32 rel = (i32) (target->offset - (cf->offset + cp->offset + 4));
+            bytebuf_poke_u32(cf->bytes, cp->offset, (u32) rel);
         }
     }
 
