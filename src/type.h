@@ -76,6 +76,7 @@ struct Type
         struct
         {
             const char *tag; /* identity + diagnostics */
+            bool complete;   /* set by the enum definition */
         } enumm;             /* TYPE_ENUM: underlying int, no members */
     };
 };

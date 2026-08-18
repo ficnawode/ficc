@@ -225,6 +225,40 @@ TEST(phase7, union_incomplete)
     EXPECT_EQ(u->size, 0);
 }
 
+TEST(phase7, enum_is_int)
+{
+    Type *e = type_enum("P7Enum");
+    EXPECT_TRUE(type_is_enum(e));
+    EXPECT_TRUE(type_is_integer(e));
+    EXPECT_TRUE(type_is_signed(e));
+    EXPECT_FALSE(type_is_unsigned(e));
+    EXPECT_EQ(type_sizeof(e), 4);
+    EXPECT_EQ(type_rank(e), type_rank(type_int()));
+    EXPECT_EQ(type_promote(e), type_int());
+}
+
+TEST(phase7, enum_constant_value)
+{
+    Arena *arena = arena_new();
+    LexResult lexed = lex("<test>", "enum Color { RED, GREEN = 5, BLUE };\n", arena);
+    EXPECT_TRUE(lexed.tokens != NULL);
+    ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
+    EXPECT_TRUE(ast != NULL);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTNode *decl = (ASTNode *) vec_get(prog->decls, 0);
+    EXPECT_TRUE(decl->kind == AST_ENUM_DECL);
+    ASTEnumDecl *ed = ast_as(ASTEnumDecl, decl);
+    EXPECT_TRUE(strcmp(ed->tag, "Color") == 0);
+    EXPECT_EQ(vec_size(ed->constants), 3);
+    EnumConstant *c0 = (EnumConstant *) vec_get(ed->constants, 0);
+    EnumConstant *c1 = (EnumConstant *) vec_get(ed->constants, 1);
+    EnumConstant *c2 = (EnumConstant *) vec_get(ed->constants, 2);
+    EXPECT_EQ(c0->value, 0);
+    EXPECT_EQ(c1->value, 5);
+    EXPECT_EQ(c2->value, 6);
+    arena_free(arena);
+}
+
 TEST(phase7, interp_struct_member)
 {
     const char *src = "struct Pt { int x; int y; };\n"
@@ -407,6 +441,53 @@ TEST(phase7, interp_union_array)
     arena_free(arena);
 }
 
+TEST(phase7, interp_enum_const)
+{
+    const char *src = "enum { A = 3, B };\n"
+                      "int main(void) { return A + B; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 7);
+    arena_free(arena);
+}
+
+TEST(phase7, interp_enum_auto)
+{
+    const char *src = "enum { A, B, C = 10, D };\n"
+                      "int main(void) { return A * 100 + B * 10 + C + D; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 31);
+    arena_free(arena);
+}
+
+TEST(phase7, interp_enum_expr_const)
+{
+    const char *src = "enum { A = 1 << 4, B = A * 2 + 1, C = -B };\n"
+                      "int main(void) { return A + B + C; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 16);
+    arena_free(arena);
+}
+
+TEST(phase7, interp_enum_typed_var)
+{
+    const char *src = "enum Color { RED, GREEN, BLUE };\n"
+                      "int main(void) { enum Color c = BLUE; return c; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 2);
+    arena_free(arena);
+}
+
+TEST(phase7, interp_enum_member)
+{
+    const char *src = "enum Color { RED, GREEN };\n"
+                      "struct Pt { int x; enum Color c; };\n"
+                      "int main(void) { struct Pt s; s.x = 1; s.c = GREEN; "
+                      "return sizeof(struct Pt) + s.c; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 9);
+    arena_free(arena);
+}
+
 TEST(phase7, elf_struct_member)
 {
     const char *src = "struct Pt { int x; int y; };\n"
@@ -508,6 +589,18 @@ TEST(phase7, elf_union_byval)
     EXPECT_EQ(rc, 9);
     unlink("/tmp/ficc_p7_ubyval.o");
     unlink("/tmp/ficc_p7_ubyval");
+    arena_free(arena);
+}
+
+TEST(phase7, elf_enum)
+{
+    const char *src = "enum { A = 3, B };\n"
+                      "int main(void) { return A + B; }\n";
+    Arena *arena = arena_new();
+    int rc = run_elf(src, arena, "/tmp/ficc_p7_enum.o", "/tmp/ficc_p7_enum");
+    EXPECT_EQ(rc, 7);
+    unlink("/tmp/ficc_p7_enum.o");
+    unlink("/tmp/ficc_p7_enum");
     arena_free(arena);
 }
 
@@ -626,6 +719,80 @@ TEST(phase7, negative_sizeof_incomplete_union)
     Arena *arena = arena_new();
     EXPECT_TRUE(build_from_source("union U;\n"
                                   "int main(void) { return sizeof(union U); }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase7, negative_enum_nonconst_init)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("enum { A = main() };\n"
+                                  "int main(void) { return 0; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase7, negative_enum_redefinition)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("enum E { A };\n"
+                                  "enum E { B };\n"
+                                  "int main(void) { return 0; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase7, negative_enum_tag_collision)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("struct S { int x; };\n"
+                                  "enum S { A };\n"
+                                  "int main(void) { return 0; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase7, negative_enum_const_shadow)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("enum { A };\n"
+                                  "int main(void) { int A = 1; return A; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase7, negative_enum_duplicate_const)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("enum { A, A };\n"
+                                  "int main(void) { return 0; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase7, negative_enum_value_range)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("enum { A = 2147483648 };\n"
+                                  "int main(void) { return 0; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase7, negative_enum_incomplete)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("enum E;\n"
+                                  "int main(void) { return 0; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase7, negative_enum_div_zero)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("enum { A = 1 / 0 };\n"
+                                  "int main(void) { return 0; }\n",
                                   arena) == NULL);
     arena_free(arena);
 }

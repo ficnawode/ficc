@@ -784,7 +784,7 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
-        if (decl->kind == AST_STRUCT_DECL)
+        if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL)
         {
             continue;
         }

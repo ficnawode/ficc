@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "util/hashmap.h"
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -9,6 +10,7 @@ struct ParserCtx
     u64 count;
     u64 pos;
     Arena *arena;
+    StrMap *enum_consts; /* enumerator name -> i64* value, resolved at parse time */
 };
 
 static Token *parser_peek(ParserCtx *p)
@@ -59,6 +61,7 @@ static Type *parse_array_suffix(ParserCtx *p, Type *type);
 static ASTNode *parse_expr(ParserCtx *p);
 static ASTNode *parse_stmt(ParserCtx *p);
 static ASTNode *parse_primary(ParserCtx *p);
+static bool parser_check_not_enumerator(ParserCtx *p, const char *name);
 static ASTNode *parse_unary(ParserCtx *p);
 static ASTNode *parse_mul(ParserCtx *p);
 static ASTNode *parse_add(ParserCtx *p);
@@ -203,6 +206,11 @@ static ASTNode *parse_param(ParserCtx *p)
     }
     parser_advance(p);
 
+    if (!parser_check_not_enumerator(p, name->payload.str))
+    {
+        return NULL;
+    }
+
     /* Array parameters decay to pointer (C11 §6.7.6.3p7). */
     type = parse_array_suffix(p, type);
     if (!type)
@@ -339,6 +347,11 @@ static ASTNode *parse_var_decl(ParserCtx *p)
         return NULL;
     }
     parser_advance(p);
+
+    if (!parser_check_not_enumerator(p, name->payload.str))
+    {
+        return NULL;
+    }
 
     type = parse_array_suffix(p, type);
     if (!type)
@@ -641,6 +654,7 @@ static ASTNode *parse_stmt(ParserCtx *p)
         case TOK_KW_VOID:
         case TOK_KW_STRUCT:
         case TOK_KW_UNION:
+        case TOK_KW_ENUM:
             return parse_var_decl(p);
         case TOK_KW_RETURN:
             return parse_return_stmt(p);
@@ -726,6 +740,12 @@ static ASTNode *parse_primary(ParserCtx *p)
         }
         case TOK_IDENT:
         {
+            i64 *const_val = strmap_get(p->enum_consts, t->payload.str);
+            if (const_val)
+            {
+                parser_advance(p);
+                return ast_int_literal(*const_val, false, SUFFIX_NONE, false, t->loc, p->arena);
+            }
             return parse_identifier_expr(p, t);
         }
         case TOK_STRING_LIT:
@@ -789,7 +809,7 @@ static ASTNode *parse_unary(ParserCtx *p)
             if (la->kind == TOK_KW_INT || la->kind == TOK_KW_CHAR || la->kind == TOK_KW_VOID ||
                 la->kind == TOK_KW_SHORT || la->kind == TOK_KW_LONG ||
                 la->kind == TOK_KW_UNSIGNED || la->kind == TOK_KW_STRUCT ||
-                la->kind == TOK_KW_UNION)
+                la->kind == TOK_KW_UNION || la->kind == TOK_KW_ENUM)
             {
                 is_type = true;
             }
@@ -1301,6 +1321,241 @@ static ASTNode *parse_record_decl(ParserCtx *p, bool is_union)
     return ast_struct_decl(tag, is_union, field_decls, start->loc, p->arena);
 }
 
+static bool parser_check_not_enumerator(ParserCtx *p, const char *name)
+{
+    if (strmap_get(p->enum_consts, name))
+    {
+        parser_error(p, "redeclaration of enumerator '%s'", name);
+        return false;
+    }
+    return true;
+}
+
+/* Fold an integer constant expression (C11 §6.6). Returns false with an error
+   already reported if the node is not foldable or not constant. */
+static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out)
+{
+    if (!node)
+    {
+        return false;
+    }
+    switch (node->kind)
+    {
+        case AST_INT_LITERAL:
+            *out = ast_as(ASTIntLiteral, node)->value;
+            return true;
+        case AST_UNARY_EXPR:
+        {
+            ASTUnaryExpr *u = ast_as(ASTUnaryExpr, node);
+            i64 v;
+            if (!fold_constant_expr(p, u->operand, &v))
+            {
+                return false;
+            }
+            switch (u->op)
+            {
+                case UN_NEG:
+                    *out = -v;
+                    return true;
+                case UN_BIT_NOT:
+                    *out = ~v;
+                    return true;
+                case UN_LOG_NOT:
+                    *out = !v;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        case AST_BINARY_EXPR:
+        {
+            ASTBinaryExpr *b = ast_as(ASTBinaryExpr, node);
+            i64 l, r;
+            if (!fold_constant_expr(p, b->left, &l) || !fold_constant_expr(p, b->right, &r))
+            {
+                return false;
+            }
+            switch (b->op)
+            {
+                case BIN_ADD:
+                    *out = l + r;
+                    return true;
+                case BIN_SUB:
+                    *out = l - r;
+                    return true;
+                case BIN_MUL:
+                    *out = l * r;
+                    return true;
+                case BIN_DIV:
+                case BIN_REM:
+                    if (r == 0)
+                    {
+                        parser_error(p, "division by zero in enumerator value");
+                        return false;
+                    }
+                    *out = b->op == BIN_DIV ? l / r : l % r;
+                    return true;
+                case BIN_SHL:
+                case BIN_SHR:
+                    if (r < 0 || r > 63)
+                    {
+                        parser_error(p, "shift count out of range in enumerator value");
+                        return false;
+                    }
+                    *out = b->op == BIN_SHL ? l << r : l >> r;
+                    return true;
+                case BIN_AND:
+                    *out = l & r;
+                    return true;
+                case BIN_OR:
+                    *out = l | r;
+                    return true;
+                case BIN_XOR:
+                    *out = l ^ r;
+                    return true;
+                case BIN_EQ:
+                    *out = l == r;
+                    return true;
+                case BIN_NE:
+                    *out = l != r;
+                    return true;
+                case BIN_LT:
+                    *out = l < r;
+                    return true;
+                case BIN_GT:
+                    *out = l > r;
+                    return true;
+                case BIN_LE:
+                    *out = l <= r;
+                    return true;
+                case BIN_GE:
+                    *out = l >= r;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        default:
+            return false;
+    }
+}
+
+static ASTNode *parse_enum_decl(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    parser_advance(p); /* consume 'enum' */
+
+    const char *tag = NULL;
+    if (parser_peek(p)->kind == TOK_IDENT)
+    {
+        Token *tag_tok = parser_peek(p);
+        parser_advance(p);
+        tag = tag_tok->payload.str;
+
+        Type *existing = type_record_lookup(tag);
+        if (existing && existing->kind != TYPE_ENUM)
+        {
+            parser_error(p, "tag '%s' redeclared with a different kind", tag);
+            return NULL;
+        }
+        if (existing && existing->enumm.complete)
+        {
+            parser_error(p, "redefinition of '%s'", tag);
+            return NULL;
+        }
+    }
+
+    if (parser_peek(p)->kind == TOK_SEMI)
+    {
+        parser_error(p, "expected '{' after enum tag; enum types cannot be incomplete");
+        return NULL;
+    }
+    if (!parser_expect(p, TOK_LBRACE, "'{'"))
+    {
+        return NULL;
+    }
+
+    Vec *constants = vec_new(p->arena);
+    i64 next_value = 0;
+    while (parser_peek(p)->kind != TOK_RBRACE)
+    {
+        Token *name_tok = parser_peek(p);
+        if (name_tok->kind != TOK_IDENT)
+        {
+            parser_error(p, "expected enumerator name");
+            return NULL;
+        }
+        parser_advance(p);
+        const char *name = name_tok->payload.str;
+
+        if (strmap_get(p->enum_consts, name))
+        {
+            parser_error(p, "redefinition of enumerator '%s'", name);
+            return NULL;
+        }
+
+        i64 value = next_value; /* auto-increment (C11 §6.7.2.2p3) */
+        if (parser_peek(p)->kind == TOK_ASSIGN)
+        {
+            parser_advance(p); /* consume '=' */
+            ASTNode *init = parse_assign(p);
+            if (!init)
+            {
+                return NULL;
+            }
+            if (!fold_constant_expr(p, init, &value))
+            {
+                parser_error(p, "enumerator value is not an integer constant expression");
+                return NULL;
+            }
+        }
+
+        if (value < INT32_MIN || value > INT32_MAX)
+        {
+            parser_error(p, "enumerator value out of range (must fit in int)");
+            return NULL;
+        }
+
+        i64 *slot = arena_alloc(p->arena, sizeof(i64), _Alignof(i64));
+        *slot = value;
+        strmap_set(p->enum_consts, name, slot);
+
+        EnumConstant *c = arena_alloc(p->arena, sizeof(EnumConstant), _Alignof(EnumConstant));
+        c->name = name;
+        c->value = value;
+        vec_push(constants, c);
+
+        next_value = value + 1;
+
+        TokenKind sep = parser_peek(p)->kind;
+        if (sep == TOK_COMMA)
+        {
+            parser_advance(p);
+        }
+        else if (sep != TOK_RBRACE)
+        {
+            parser_error(p, "expected ',' or '}' in enum declaration");
+            return NULL;
+        }
+    }
+    if (!parser_expect(p, TOK_RBRACE, "'}'"))
+    {
+        return NULL;
+    }
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
+        return NULL;
+    }
+
+    if (tag)
+    {
+        Type *et = type_enum(tag); /* completes the type registered by `enum tag` */
+        et->enumm.complete = true;
+    }
+
+    return ast_enum_decl(tag, constants, start->loc, p->arena);
+}
+
 static ASTNode *parse_func_def(ParserCtx *p)
 {
     Token *start = parser_peek(p);
@@ -1317,6 +1572,11 @@ static ASTNode *parse_func_def(ParserCtx *p)
         return NULL;
     }
     parser_advance(p);
+
+    if (!parser_check_not_enumerator(p, name->payload.str))
+    {
+        return NULL;
+    }
 
     if (!parser_expect(p, TOK_LPAREN, "'('"))
     {
@@ -1346,7 +1606,7 @@ static ASTNode *parse_func_def(ParserCtx *p)
 ASTNode *parse(Token *tokens, u64 count, Arena *arena)
 {
     ASSERT(count > 0);
-    ParserCtx p = {tokens, count, 0, arena};
+    ParserCtx p = {tokens, count, 0, arena, strmap_new(arena)};
 
     Vec *decls = vec_new(arena);
     while (parser_peek(&p)->kind != TOK_EOF)
@@ -1367,6 +1627,30 @@ ASTNode *parse(Token *tokens, u64 count, Arena *arena)
             if (is_record_decl)
             {
                 node = parse_record_decl(&p, /* is_union */ k == TOK_KW_UNION);
+            }
+            else
+            {
+                node = parse_func_def(&p);
+            }
+        }
+        else if (k == TOK_KW_ENUM)
+        {
+            /* `enum Tag { ... }` (or anonymous `enum { ... }`) is an enum
+               declaration; anything else (e.g. `enum E f(...)`) is a function
+               definition whose return type is that enum. */
+            bool is_enum_decl = false;
+            if (p.pos + 1 < p.count && p.tokens[p.pos + 1].kind == TOK_LBRACE)
+            {
+                is_enum_decl = true; /* anonymous enum */
+            }
+            else if (p.pos + 1 < p.count && p.tokens[p.pos + 1].kind == TOK_IDENT)
+            {
+                TokenKind after_tag = (p.pos + 2 < p.count) ? p.tokens[p.pos + 2].kind : TOK_EOF;
+                is_enum_decl = (after_tag == TOK_LBRACE || after_tag == TOK_SEMI);
+            }
+            if (is_enum_decl)
+            {
+                node = parse_enum_decl(&p);
             }
             else
             {

@@ -34,6 +34,7 @@
     X(AST_SIZEOF_TYPE)                                                                             \
     X(AST_STRING_LITERAL)                                                                          \
     X(AST_STRUCT_DECL)                                                                             \
+    X(AST_ENUM_DECL)                                                                               \
     X(AST_MEMBER_ACCESS)
 
 typedef enum
@@ -286,6 +287,20 @@ struct ASTStructDecl
     Vec *fields; /* Vec<ASTVarDecl*> */
 };
 
+typedef struct EnumConstant
+{
+    const char *name;
+    i64 value;
+} EnumConstant;
+
+typedef struct ASTEnumDecl ASTEnumDecl;
+struct ASTEnumDecl
+{
+    ASTNode base;
+    const char *tag; /* NULL for anonymous enums */
+    Vec *constants;  /* Vec<EnumConstant*> */
+};
+
 typedef struct ASTMemberAccess ASTMemberAccess;
 struct ASTMemberAccess
 {
@@ -328,6 +343,7 @@ ASTNode *ast_sizeof_expr(ASTNode *operand, u64 size_value, Loc loc, Arena *arena
 ASTNode *ast_sizeof_type(Type *type, u64 size_value, Loc loc, Arena *arena);
 ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena);
 ASTNode *ast_struct_decl(const char *tag, bool is_union, Vec *fields, Loc loc, Arena *arena);
+ASTNode *ast_enum_decl(const char *tag, Vec *constants, Loc loc, Arena *arena);
 ASTNode *ast_member_access(ASTNode *object, const char *member, bool is_arrow, Loc loc,
                            Arena *arena);
 

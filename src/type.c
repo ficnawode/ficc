@@ -160,7 +160,8 @@ Type *type_promote(Type *t)
     {
         return t;
     }
-    if (type_rank(t) < type_rank(type_int()))
+    /* Enums are int-sized (D7); promote them to int proper. */
+    if (t->kind == TYPE_ENUM || type_rank(t) < type_rank(type_int()))
     {
         return type_int();
     }
@@ -412,6 +413,7 @@ Type *type_enum(const char *tag)
     t->align = type_int()->align;
     t->size = type_int()->size;
     t->enumm.tag = tag;
+    t->enumm.complete = false;
     strmap_set(tag_table, tag, t);
     return t;
 }

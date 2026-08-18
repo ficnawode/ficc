@@ -231,6 +231,14 @@ ASTNode *ast_struct_decl(const char *tag, bool is_union, Vec *fields, Loc loc, A
     return &n->base;
 }
 
+ASTNode *ast_enum_decl(const char *tag, Vec *constants, Loc loc, Arena *arena)
+{
+    ASTEnumDecl *n = ast_new_node(sizeof(ASTEnumDecl), AST_ENUM_DECL, loc, arena);
+    n->tag = tag;
+    n->constants = constants;
+    return &n->base;
+}
+
 ASTNode *ast_member_access(ASTNode *object, const char *member, bool is_arrow, Loc loc,
                            Arena *arena)
 {
@@ -529,6 +537,18 @@ static void ast_dump_rec(ASTNode *node, int depth)
             printf("STRUCT_DECL %s%s (%zu fields)\n", sd->is_union ? "union " : "struct ", sd->tag,
                    vec_size(sd->fields));
             dump_node_list(sd->fields, depth);
+            break;
+        }
+        case AST_ENUM_DECL:
+        {
+            ASTEnumDecl *ed = ast_as(ASTEnumDecl, node);
+            printf("ENUM_DECL %s (%zu constants)\n", ed->tag ? ed->tag : "<anon>",
+                   vec_size(ed->constants));
+            for (size_t i = 0; i < vec_size(ed->constants); i++)
+            {
+                EnumConstant *c = (EnumConstant *) vec_get(ed->constants, i);
+                printf("%*s%s = %lld\n", depth, "", c->name, (long long) c->value);
+            }
             break;
         }
         case AST_MEMBER_ACCESS:
