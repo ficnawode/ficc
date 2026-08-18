@@ -130,6 +130,47 @@ static Type *parse_type_specifier(ParserCtx *p)
             }
             break;
         }
+        case TOK_KW_STRUCT:
+        case TOK_KW_UNION:
+        {
+            bool is_union = t->kind == TOK_KW_UNION;
+            parser_advance(p);
+            Token *tag_tok = parser_peek(p);
+            if (tag_tok->kind != TOK_IDENT)
+            {
+                parser_error(p, "expected tag name after '%s'", is_union ? "union" : "struct");
+                return NULL;
+            }
+            parser_advance(p);
+            TypeKind kind = is_union ? TYPE_UNION : TYPE_STRUCT;
+            Type *existing = type_record_lookup(tag_tok->payload.str);
+            if (existing && existing->kind != kind)
+            {
+                parser_error(p, "tag '%s' redeclared with a different kind", tag_tok->payload.str);
+                return NULL;
+            }
+            ty = type_record(kind, tag_tok->payload.str);
+            break;
+        }
+        case TOK_KW_ENUM:
+        {
+            parser_advance(p);
+            Token *tag_tok = parser_peek(p);
+            if (tag_tok->kind != TOK_IDENT)
+            {
+                parser_error(p, "expected tag name after 'enum'");
+                return NULL;
+            }
+            parser_advance(p);
+            Type *existing = type_record_lookup(tag_tok->payload.str);
+            if (existing && existing->kind != TYPE_ENUM)
+            {
+                parser_error(p, "tag '%s' redeclared with a different kind", tag_tok->payload.str);
+                return NULL;
+            }
+            ty = type_enum(tag_tok->payload.str);
+            break;
+        }
         default:
             parser_error(p, "expected type specifier");
             return NULL;
@@ -467,7 +508,8 @@ static ASTNode *parse_for_stmt(ParserCtx *p)
     {
         if (parser_peek(p)->kind == TOK_KW_INT || parser_peek(p)->kind == TOK_KW_CHAR ||
             parser_peek(p)->kind == TOK_KW_SHORT || parser_peek(p)->kind == TOK_KW_LONG ||
-            parser_peek(p)->kind == TOK_KW_UNSIGNED)
+            parser_peek(p)->kind == TOK_KW_UNSIGNED || parser_peek(p)->kind == TOK_KW_STRUCT ||
+            parser_peek(p)->kind == TOK_KW_UNION)
         {
             init = parse_var_decl(p);
         }
@@ -597,6 +639,8 @@ static ASTNode *parse_stmt(ParserCtx *p)
         case TOK_KW_LONG:
         case TOK_KW_UNSIGNED:
         case TOK_KW_VOID:
+        case TOK_KW_STRUCT:
+        case TOK_KW_UNION:
             return parse_var_decl(p);
         case TOK_KW_RETURN:
             return parse_return_stmt(p);
@@ -719,8 +763,8 @@ static ASTNode *parse_unary(ParserCtx *p)
         TokenKind tok;
         UnaryOpKind uop;
     } unary_ops[] = {
-        {TOK_MINUS, UN_NEG},   {TOK_NOT, UN_LOG_NOT}, {TOK_TILDE, UN_BIT_NOT},
-        {TOK_STAR, UN_DEREF},  {TOK_BW_AND, UN_ADDR},
+        {TOK_MINUS, UN_NEG},  {TOK_NOT, UN_LOG_NOT}, {TOK_TILDE, UN_BIT_NOT},
+        {TOK_STAR, UN_DEREF}, {TOK_BW_AND, UN_ADDR},
     };
     for (size_t i = 0; i < sizeof(unary_ops) / sizeof(unary_ops[0]); i++)
     {
@@ -743,7 +787,9 @@ static ASTNode *parse_unary(ParserCtx *p)
         {
             Token *la = &p->tokens[p->pos + 1];
             if (la->kind == TOK_KW_INT || la->kind == TOK_KW_CHAR || la->kind == TOK_KW_VOID ||
-                la->kind == TOK_KW_SHORT || la->kind == TOK_KW_LONG || la->kind == TOK_KW_UNSIGNED)
+                la->kind == TOK_KW_SHORT || la->kind == TOK_KW_LONG ||
+                la->kind == TOK_KW_UNSIGNED || la->kind == TOK_KW_STRUCT ||
+                la->kind == TOK_KW_UNION)
             {
                 is_type = true;
             }
@@ -800,6 +846,19 @@ static ASTNode *parse_postfix(ParserCtx *p)
                 return NULL;
             }
             node = ast_subscript_expr(node, index, t->loc, p->arena);
+        }
+        else if (t->kind == TOK_DOT || t->kind == TOK_ARROW)
+        {
+            bool is_arrow = t->kind == TOK_ARROW;
+            parser_advance(p);
+            Token *member = parser_peek(p);
+            if (member->kind != TOK_IDENT)
+            {
+                parser_error(p, "expected member name after '%s'", is_arrow ? "->" : ".");
+                return NULL;
+            }
+            parser_advance(p);
+            node = ast_member_access(node, member->payload.str, is_arrow, t->loc, p->arena);
         }
         else
         {
@@ -1147,6 +1206,101 @@ static ASTNode *parse_assign(ParserCtx *p)
     return left;
 }
 
+static ASTNode *parse_record_decl(ParserCtx *p, bool is_union)
+{
+    Token *start = parser_peek(p);
+    parser_advance(p);
+
+    Token *tag_tok = parser_peek(p);
+    if (tag_tok->kind != TOK_IDENT)
+    {
+        parser_error(p, "expected tag name");
+        return NULL;
+    }
+    parser_advance(p);
+    const char *tag = tag_tok->payload.str;
+
+    TypeKind kind = is_union ? TYPE_UNION : TYPE_STRUCT;
+    Type *existing = type_record_lookup(tag);
+    if (existing && existing->kind != kind)
+    {
+        parser_error(p, "tag '%s' redeclared with a different kind", tag);
+        return NULL;
+    }
+    Type *rec = type_record(kind, tag); /* register incomplete before members (self-ref) */
+
+    /* Forward declaration: "struct tag;" */
+    if (parser_peek(p)->kind == TOK_SEMI)
+    {
+        parser_advance(p);
+        return ast_struct_decl(tag, is_union, vec_new(p->arena), start->loc, p->arena);
+    }
+
+    if (rec->record.complete)
+    {
+        parser_error(p, "redefinition of '%s'", tag);
+        return NULL;
+    }
+
+    if (!parser_expect(p, TOK_LBRACE, "'{'"))
+    {
+        return NULL;
+    }
+
+    Vec *field_decls = vec_new(p->arena);   /* Vec<ASTVarDecl*>, kept for the AST dump */
+    Vec *record_fields = vec_new(p->arena); /* Vec<RecordField*>, completes the type */
+    while (parser_peek(p)->kind != TOK_RBRACE)
+    {
+        Token *fstart = parser_peek(p);
+        Type *ftype = parse_type_specifier(p);
+        if (!ftype)
+        {
+            return NULL;
+        }
+
+        Token *fname = parser_peek(p);
+        if (fname->kind != TOK_IDENT)
+        {
+            parser_error(p, "expected field name");
+            return NULL;
+        }
+        parser_advance(p);
+
+        ftype = parse_array_suffix(p, ftype);
+        if (!ftype)
+        {
+            return NULL;
+        }
+
+        if (!parser_expect(p, TOK_SEMI, "';'"))
+        {
+            return NULL;
+        }
+        ASTNode *field_decl = ast_var_decl(ftype, fname->payload.str, NULL, fstart->loc, p->arena);
+        vec_push(field_decls, field_decl);
+
+        RecordField *rf = arena_alloc(p->arena, sizeof(RecordField), _Alignof(RecordField));
+        rf->name = fname->payload.str;
+        rf->type = ftype;
+        rf->offset = 0;
+        vec_push(record_fields, rf);
+    }
+    if (!parser_expect(p, TOK_RBRACE, "'}'"))
+    {
+        return NULL;
+    }
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
+        return NULL;
+    }
+
+    /* Complete the type now so array/pointer types formed later (and the
+       type's size/alignment) see the finished layout. */
+    type_record_complete(rec, record_fields);
+
+    return ast_struct_decl(tag, is_union, field_decls, start->loc, p->arena);
+}
+
 static ASTNode *parse_func_def(ParserCtx *p)
 {
     Token *start = parser_peek(p);
@@ -1197,7 +1351,32 @@ ASTNode *parse(Token *tokens, u64 count, Arena *arena)
     Vec *decls = vec_new(arena);
     while (parser_peek(&p)->kind != TOK_EOF)
     {
-        ASTNode *node = parse_func_def(&p);
+        TokenKind k = parser_peek(&p)->kind;
+        ASTNode *node;
+        if (k == TOK_KW_STRUCT || k == TOK_KW_UNION)
+        {
+            /* A record declaration is `struct Tag { ... }` or `struct Tag;`.
+               Anything else starting with `struct` (e.g. `struct Tag f(...)`)
+               is a function definition whose return type is that record. */
+            bool is_record_decl = false;
+            if (p.pos + 1 < p.count && p.tokens[p.pos + 1].kind == TOK_IDENT)
+            {
+                TokenKind after_tag = (p.pos + 2 < p.count) ? p.tokens[p.pos + 2].kind : TOK_EOF;
+                is_record_decl = (after_tag == TOK_LBRACE || after_tag == TOK_SEMI);
+            }
+            if (is_record_decl)
+            {
+                node = parse_record_decl(&p, /* is_union */ k == TOK_KW_UNION);
+            }
+            else
+            {
+                node = parse_func_def(&p);
+            }
+        }
+        else
+        {
+            node = parse_func_def(&p);
+        }
         if (!node)
         {
             return NULL;

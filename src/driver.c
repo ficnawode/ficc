@@ -150,6 +150,8 @@ static bool parse_args(int argc, char **argv, DriverArgs *out)
 
 static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
 {
+    type_reset();
+
     LexResult lexed = lex(args->input_file, src, arena);
     if (!lexed.tokens)
     {

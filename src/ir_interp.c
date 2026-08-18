@@ -176,6 +176,7 @@ static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_store(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_gep(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_alloca(IrInstr *in, InterpCtx *ctx, i64 *regs);
+static i64 eval_memcpy(IrInstr *in, InterpCtx *ctx, i64 *regs);
 
 /* Forward declaration for recursion */
 static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *start_pred);
@@ -218,7 +219,8 @@ static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *star
     X(OP_LOAD, eval_load)                                                                          \
     X(OP_STORE, eval_store)                                                                        \
     X(OP_GEP, eval_gep)                                                                            \
-    X(OP_ALLOCA, eval_alloca)
+    X(OP_ALLOCA, eval_alloca)                                                                      \
+    X(OP_MEMCPY, eval_memcpy)
 
 /* Dispatch table indexed by opcode; unlisted opcodes are NULL and diagnosed
    in the block loop rather than silently misinterpreting. */
@@ -422,8 +424,11 @@ static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
     ctx->returned = false;
     ctx->jumped = false;
     ctx->block_map = saved_block_map;
-    regs[in->result] = ret;
-    mask_vreg(ctx, regs, in->result);
+    if (in->result != NO_VREG)
+    {
+        regs[in->result] = ret;
+        mask_vreg(ctx, regs, in->result);
+    }
     return 0;
 }
 
@@ -568,6 +573,23 @@ static i64 eval_alloca(IrInstr *in, InterpCtx *ctx, i64 *regs)
     regs[in->result] = (i64) (uintptr_t) (ctx->alloca_base + ctx->alloca_top);
     ctx->alloca_top += aligned;
     mask_vreg(ctx, regs, in->result);
+    return 0;
+}
+
+static i64 eval_memcpy(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    u8 *dst = resolve_ptr(ctx, in->ops[0], regs);
+    if (!dst)
+    {
+        return 1;
+    }
+    u8 *src = resolve_ptr(ctx, in->ops[1], regs);
+    if (!src)
+    {
+        return 1;
+    }
+    u64 size = (u64) in->ops[2].u.imm;
+    memcpy(dst, src, size);
     return 0;
 }
 

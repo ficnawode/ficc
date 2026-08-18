@@ -194,6 +194,15 @@ IrInstr *ir_emit_alloca(IrBlock *bb, u32 dst, u32 size_bytes)
     return ins;
 }
 
+IrInstr *ir_emit_memcpy(IrBlock *bb, IrOperand dst, IrOperand src, u32 size_bytes)
+{
+    IrInstr *ins = instr_new(bb, OP_MEMCPY, NO_VREG, 3);
+    ins->ops[0] = dst;
+    ins->ops[1] = src;
+    ins->ops[2] = ir_operand_imm((i64) size_bytes);
+    return ins;
+}
+
 IrOperand ir_operand_imm(i64 val)
 {
     IrOperand o;

@@ -79,6 +79,9 @@ static void init_keyword_map(Arena *arena)
     KW("long", TOK_KW_LONG);
     KW("unsigned", TOK_KW_UNSIGNED);
     KW("sizeof", TOK_KW_SIZEOF);
+    KW("struct", TOK_KW_STRUCT);
+    KW("union", TOK_KW_UNION);
+    KW("enum", TOK_KW_ENUM);
 #undef KW
 }
 
@@ -452,7 +455,18 @@ static bool lex_punct(LexerCtx *ctx)
             kind = TOK_PLUS;
             break;
         case '-':
-            kind = TOK_MINUS;
+            if (n == '>')
+            {
+                kind = TOK_ARROW;
+                advance = 2;
+            }
+            else
+            {
+                kind = TOK_MINUS;
+            }
+            break;
+        case '.':
+            kind = TOK_DOT;
             break;
         case '*':
             kind = TOK_STAR;

@@ -50,6 +50,7 @@ struct FuncBuilder
     StrMap *goto_labels;  /* label name -> IrBlock* */
     StrMap *var_types;    /* variable name -> Type* */
     StrMap *func_types;   /* function name -> Type* (return type) */
+    u32 sret_vreg;        /* hidden sret pointer vreg for record-returning funcs */
 };
 
 static IrOperand resolve_variable(FuncBuilder *ctx, const char *name, IrBlock *bb);
@@ -62,6 +63,10 @@ static ExprResult build_subscript_expr(ASTSubscriptExpr *se, IrFunction *f, IrBl
                                        FuncBuilder *ctx);
 static ExprResult build_string_literal_expr(ASTStringLiteral *sl, IrFunction *f, IrBlock *bb,
                                             FuncBuilder *ctx);
+static ExprResult build_member_lvalue(ASTMemberAccess *ma, IrFunction *f, IrBlock *bb,
+                                      FuncBuilder *ctx);
+static ExprResult build_member_access_expr(ASTMemberAccess *ma, IrFunction *f, IrBlock *bb,
+                                           FuncBuilder *ctx);
 static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
 
 static void ir_error(ASTNode *node, const char *fmt, ...)
@@ -87,6 +92,22 @@ static u32 alloc_vreg_from_type(FuncBuilder *ctx, Type *type)
     u8 width = type->width / 8;
     ASSERT(width == 1 || width == 2 || width == 4 || width == 8);
     return ir_alloc_vreg(ctx->mod, width);
+}
+
+/* Records and arrays are memory, not SSA values: their SSA slot holds a
+   pointer (width 8) to their storage. */
+static Type *var_ssa_type(Type *t)
+{
+    if (type_is_record(t))
+    {
+        return type_ptr(t);
+    }
+    return type_decay(t);
+}
+
+static u32 alloc_vreg_for_var(FuncBuilder *ctx, Type *type)
+{
+    return alloc_vreg_from_type(ctx, var_ssa_type(type));
 }
 
 static inline Type *node_type(ASTNode *n)
@@ -149,9 +170,9 @@ static u32 alloc_phi_vreg(FuncBuilder *ctx, const char *name)
         ASSERT(false);
         return alloc_vreg_from_type(ctx, type_int());
     }
-    /* Arrays are stored as a decayed pointer in SSA; allocate the phi slot
-       with the pointer width, not the element width. */
-    return alloc_vreg_from_type(ctx, type_decay(t));
+    /* Arrays are stored as a decayed pointer in SSA; records are stored as a
+       pointer to their storage; allocate the phi slot with that width. */
+    return alloc_vreg_for_var(ctx, t);
 }
 
 static BlockLocals *get_block_locals(FuncBuilder *ctx, IrBlock *bb)
@@ -453,9 +474,33 @@ static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
         ASTIdent *id = ast_as(ASTIdent, target);
         Type *lhs_type = strmap_get(ctx->var_types, id->name);
         ASSERT(lhs_type != NULL);
+        if (type_is_record(lhs_type))
+        {
+            ir_emit_memcpy(bb, left.value, right.value, lhs_type->size);
+            return expr_result(left.value, bb);
+        }
         Type *rhs_type = node_type(be->right);
         IrOperand val = promote_to(ctx, bb, right.value, rhs_type, lhs_type);
         write_variable(ctx, id->name, bb, val);
+        return expr_result(val, bb);
+    }
+
+    if (target->kind == AST_MEMBER_ACCESS)
+    {
+        ASTMemberAccess *ma = ast_as(ASTMemberAccess, target);
+        ExprResult lv = build_member_lvalue(ma, f, bb, ctx);
+        bb = lv.block;
+        ExprResult right = build_expr(be->right, f, bb, ctx);
+        bb = right.block;
+        Type *field_type = ma->field_type;
+        if (type_is_record(field_type))
+        {
+            ir_emit_memcpy(bb, lv.value, right.value, field_type->size);
+            return expr_result(lv.value, bb);
+        }
+        Type *rhs_type = node_type(be->right);
+        IrOperand val = promote_to(ctx, bb, right.value, rhs_type, field_type);
+        ir_emit_store(bb, val, lv.value, field_type->size);
         return expr_result(val, bb);
     }
 
@@ -467,6 +512,11 @@ static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
         ExprResult right = build_expr(be->right, f, bb, ctx);
         bb = right.block;
         Type *result_type = node_type(target);
+        if (type_is_record(result_type))
+        {
+            ir_emit_memcpy(bb, ptr_res.value, right.value, result_type->size);
+            return expr_result(ptr_res.value, bb);
+        }
         Type *rhs_type = node_type(be->right);
         IrOperand val = promote_to(ctx, bb, right.value, rhs_type, result_type);
         ir_emit_store(bb, val, ptr_res.value, result_type->size);
@@ -486,6 +536,11 @@ static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
         IrOperand idx = promote_to(ctx, bb, index.value, node_type(se->index), type_long());
         u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
         ir_emit_gep(bb, addr, base.value, idx, elem->size);
+        if (type_is_record(elem))
+        {
+            ir_emit_memcpy(bb, ir_operand_vreg(addr), right.value, elem->size);
+            return expr_result(ir_operand_vreg(addr), bb);
+        }
         Type *rhs_type = node_type(be->right);
         IrOperand val = promote_to(ctx, bb, right.value, rhs_type, elem);
         ir_emit_store(bb, val, ir_operand_vreg(addr), elem->size);
@@ -635,8 +690,6 @@ static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
 
 static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
-    u32 nargs = (u32) vec_size(ce->args);
-    IrOperand *args = arena_alloc(ctx->mod->arena, nargs * sizeof(IrOperand), sizeof(IrOperand));
     Type *callee_ret = strmap_get(ctx->func_types, ce->callee);
     ASSERT(callee_ret != NULL);
     IrFunction *callee_ir = NULL;
@@ -650,26 +703,67 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
             break;
         }
     }
+
+    /* By-memory convention (D4.2): a record return is written through a hidden
+       sret pointer argument (allocated here); record arguments are copied into
+       a fresh temp and passed by pointer. Everything else is a plain value. */
+    bool sret = type_is_record(callee_ret);
+    u32 nargs = (u32) vec_size(ce->args);
+    u32 total_args = (sret ? 1 : 0) + nargs;
+    IrOperand *args =
+        arena_alloc(ctx->mod->arena, total_args * sizeof(IrOperand), sizeof(IrOperand));
+
+    u32 sret_vreg = NO_VREG;
+    if (sret)
+    {
+        sret_vreg = alloc_vreg_for_var(ctx, callee_ret);
+        ir_emit_alloca(bb, sret_vreg, callee_ret->size);
+        args[0] = ir_operand_vreg(sret_vreg);
+    }
+
     for (u32 i = 0; i < nargs; i++)
     {
         ASTNode *arg = (ASTNode *) vec_get(ce->args, i);
         ExprResult arg_res = build_expr(arg, f, bb, ctx);
         bb = arg_res.block;
         Type *arg_type = arg->expr_type;
-        Type *param_type = NULL;
-        if (callee_ir && i < vec_size(callee_ir->params))
+        u32 slot = sret ? i + 1 : i;
+        if (type_is_record(arg_type))
         {
-            IrParam *p = (IrParam *) vec_get(callee_ir->params, i);
+            u32 tmp = alloc_vreg_for_var(ctx, arg_type);
+            ir_emit_alloca(bb, tmp, arg_type->size);
+            ir_emit_memcpy(bb, ir_operand_vreg(tmp), arg_res.value, arg_type->size);
+            args[slot] = ir_operand_vreg(tmp);
+            continue;
+        }
+        Type *param_type = NULL;
+        if (callee_ir && slot < vec_size(callee_ir->params))
+        {
+            IrParam *p = (IrParam *) vec_get(callee_ir->params, slot);
             param_type = p->type;
         }
         else
         {
             param_type = arg_type;
         }
-        args[i] = promote_to(ctx, bb, arg_res.value, arg_type, param_type);
+        args[slot] = promote_to(ctx, bb, arg_res.value, arg_type, param_type);
     }
-    u32 dst = callee_ret->kind == TYPE_VOID ? NO_VREG : alloc_vreg_from_type(ctx, callee_ret);
-    ir_emit_call(bb, dst, ce->callee, nargs, args);
+
+    u32 dst;
+    if (sret)
+    {
+        /* The result is the sret slot pointer, which we already hold. */
+        dst = NO_VREG;
+    }
+    else
+    {
+        dst = callee_ret->kind == TYPE_VOID ? NO_VREG : alloc_vreg_from_type(ctx, callee_ret);
+    }
+    ir_emit_call(bb, dst, ce->callee, total_args, args);
+    if (sret)
+    {
+        return expr_result(ir_operand_vreg(sret_vreg), bb);
+    }
     return expr_result(dst == NO_VREG ? ir_operand_imm(0) : ir_operand_vreg(dst), bb);
 }
 
@@ -677,6 +771,11 @@ static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
 {
     ExprResult ptr_res = build_expr(ue->operand, f, bb, ctx);
     Type *result_type = node_type((ASTNode *) ue);
+    if (type_is_record(result_type) || type_is_array(result_type))
+    {
+        /* Records/arrays are memory: the pointer is the value, no load. */
+        return ptr_res;
+    }
     u32 dst = alloc_vreg_from_type(ctx, result_type);
     ir_emit_load(ptr_res.block, dst, ptr_res.value);
     return expr_result(ir_operand_vreg(dst), ptr_res.block);
@@ -702,6 +801,10 @@ static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, 
         ir_emit_gep(bb, addr, base.value, idx, elem->size);
         return expr_result(ir_operand_vreg(addr), bb);
     }
+    if (operand->kind == AST_MEMBER_ACCESS)
+    {
+        return build_member_lvalue(ast_as(ASTMemberAccess, operand), f, bb, ctx);
+    }
     /* &x for array: build_expr already decays to pointer */
     return build_expr(operand, f, bb, ctx);
 }
@@ -717,6 +820,11 @@ static ExprResult build_subscript_expr(ASTSubscriptExpr *se, IrFunction *f, IrBl
     IrOperand idx = promote_to(ctx, bb, index.value, node_type(se->index), type_long());
     u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
     ir_emit_gep(bb, addr, base.value, idx, elem->size);
+    if (type_is_record(elem) || type_is_array(elem))
+    {
+        /* Record/array elements are memory: the pointer is the value. */
+        return expr_result(ir_operand_vreg(addr), bb);
+    }
     u32 dst = alloc_vreg_from_type(ctx, elem);
     ir_emit_load(bb, dst, ir_operand_vreg(addr));
     return expr_result(ir_operand_vreg(dst), bb);
@@ -753,6 +861,34 @@ static ExprResult build_string_literal_expr(ASTStringLiteral *sl, IrFunction *f,
     g->section = IR_SECTION_RODATA;
     vec_push(ctx->mod->globals, g);
     return expr_result(ir_operand_global(idx), bb);
+}
+
+/* Compute the address (pointer) of a member. Both `.` and `->` lower to a GEP:
+   the object's SSA value is a pointer to the record (the alloca pointer for
+   `.`, the pointer value for `->`), so both GEP from that pointer by
+   field_offset. */
+static ExprResult build_member_lvalue(ASTMemberAccess *ma, IrFunction *f, IrBlock *bb,
+                                      FuncBuilder *ctx)
+{
+    ExprResult obj = build_expr(ma->object, f, bb, ctx);
+    bb = obj.block;
+    u32 addr = alloc_vreg_from_type(ctx, type_ptr(ma->field_type));
+    ir_emit_gep(bb, addr, obj.value, ir_operand_imm(1), ma->field_offset);
+    return expr_result(ir_operand_vreg(addr), bb);
+}
+
+static ExprResult build_member_access_expr(ASTMemberAccess *ma, IrFunction *f, IrBlock *bb,
+                                           FuncBuilder *ctx)
+{
+    ExprResult lv = build_member_lvalue(ma, f, bb, ctx);
+    if (type_is_record(ma->field_type) || type_is_array(ma->field_type))
+    {
+        /* Record/array members are memory: the pointer is the value. */
+        return lv;
+    }
+    u32 dst = alloc_vreg_from_type(ctx, ma->field_type);
+    ir_emit_load(lv.block, dst, lv.value);
+    return expr_result(ir_operand_vreg(dst), lv.block);
 }
 
 static ExprResult build_binary_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
@@ -792,6 +928,8 @@ static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuil
             return build_sizeof_type(ast_as(ASTSizeofType, node), f, bb, ctx);
         case AST_STRING_LITERAL:
             return build_string_literal_expr(ast_as(ASTStringLiteral, node), f, bb, ctx);
+        case AST_MEMBER_ACCESS:
+            return build_member_access_expr(ast_as(ASTMemberAccess, node), f, bb, ctx);
         default:
             ir_error(node, "unsupported expression kind %s", ast_kind_name(node->kind));
             return expr_result(ir_operand_imm(0), bb);
@@ -1085,6 +1223,13 @@ static IrBlock *build_return_stmt(ASTReturnStmt *ret, IrFunction *f, IrBlock *bb
     if (ret->expr)
     {
         ExprResult val = build_expr(ret->expr, f, bb, ctx);
+        if (type_is_record(f->ret_type))
+        {
+            ir_emit_memcpy(val.block, ir_operand_vreg(ctx->sret_vreg), val.value,
+                           f->ret_type->size);
+            ir_emit_ret(val.block, ir_operand_vreg(ctx->sret_vreg));
+            return val.block;
+        }
         ir_emit_ret(val.block, val.value);
         return val.block;
     }
@@ -1103,6 +1248,21 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
         Type *ptr_type = type_decay(vd->type);
         u32 dst = alloc_vreg_from_type(ctx, ptr_type);
         ir_emit_alloca(bb, dst, vd->type->size);
+        write_variable(ctx, vd->name, bb, ir_operand_vreg(dst));
+        return bb;
+    }
+    if (type_is_record(vd->type))
+    {
+        /* Records are memory, not SSA values: allocate a stack slot and keep
+           the pointer as the variable's value. */
+        u32 dst = alloc_vreg_for_var(ctx, vd->type);
+        ir_emit_alloca(bb, dst, vd->type->size);
+        if (vd->init)
+        {
+            ExprResult init = build_expr(vd->init, f, bb, ctx);
+            bb = init.block;
+            ir_emit_memcpy(bb, ir_operand_vreg(dst), init.value, vd->type->size);
+        }
         write_variable(ctx, vd->name, bb, ir_operand_vreg(dst));
         return bb;
     }
@@ -1160,14 +1320,29 @@ static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilde
 
 static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlock *entry)
 {
+    ctx->sret_vreg = NO_VREG;
+    if (type_is_record(ast->ret_type))
+    {
+        /* Record returns arrive through a hidden sret pointer (D4.2). */
+        u32 vreg = alloc_vreg_for_var(ctx, ast->ret_type);
+        IrParam *p = arena_alloc(ctx->mod->arena, sizeof(IrParam), sizeof(void *));
+        p->name = "__sret";
+        p->type = type_ptr(ast->ret_type);
+        p->vreg = vreg;
+        vec_push(f->params, p);
+        ctx->sret_vreg = vreg;
+    }
+
     size_t nparams = vec_size(ast->params);
     for (size_t i = 0; i < nparams; i++)
     {
         ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(ast->params, i));
-        u32 vreg = alloc_vreg_from_type(ctx, param->type);
+        /* Struct params arrive as a pointer to the caller's copy (D4.2). */
+        Type *ssa_type = var_ssa_type(param->type);
+        u32 vreg = alloc_vreg_from_type(ctx, ssa_type);
         IrParam *p = arena_alloc(ctx->mod->arena, sizeof(IrParam), sizeof(void *));
         p->name = param->name;
-        p->type = param->type;
+        p->type = ssa_type;
         p->vreg = vreg;
         vec_push(f->params, p);
         strmap_set(ctx->var_types, param->name, param->type);
@@ -1224,7 +1399,8 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types)
                        vec_new(mod->arena),
                        strmap_new(mod->arena),
                        strmap_new(mod->arena),
-                       func_types};
+                       func_types,
+                       NO_VREG};
 
     /* Pre-create blocks for all labels so gotos can target them. */
     collect_labels(func_ast->body, func, &ctx);
@@ -1264,6 +1440,10 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
+        if (decl->kind == AST_STRUCT_DECL)
+        {
+            continue;
+        }
         if (!build_func(decl, mod, func_types))
         {
             return NULL;

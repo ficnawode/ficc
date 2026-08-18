@@ -119,10 +119,15 @@ typedef enum
     X86_UD2 = 0x0B,
     X86_OPERAND_SIZE = 0x66,
     X86_REX_W = 0x48,
+    X86_REP = 0xF3,
 
     X86_PUSH_RBP = 0x55,
     X86_LEAVE = 0xC9,
     X86_RET = 0xC3,
+    X86_MOVSB = 0xA4,
+
+    X86_IMUL_IMM8 = 0x6B,
+    X86_IMUL_IMM32 = 0x69,
 
     X86_CALL_REL32 = 0xE8,
     X86_JMP_REL32 = 0xE9,
@@ -557,6 +562,24 @@ static void emit_idiv(ByteBuf *buf, u8 width, u8 reg)
     bytebuf_append(buf, modrm(3, 7, reg));
 }
 
+/* imul r, r/m, imm (6B ib / 69 id) for the GEP fallback path. */
+static void emit_imul_imm(ByteBuf *buf, u8 width, u8 reg, i64 imm)
+{
+    bytebuf_append(buf, rex(width == 8, reg >= 8, false, reg >= 8));
+    if (fits_i8(imm))
+    {
+        bytebuf_append(buf, X86_IMUL_IMM8);
+        bytebuf_append(buf, modrm(3, reg, reg));
+        bytebuf_append_i8(buf, (i8) imm);
+    }
+    else
+    {
+        bytebuf_append(buf, X86_IMUL_IMM32);
+        bytebuf_append(buf, modrm(3, reg, reg));
+        bytebuf_append_i32(buf, (i32) imm);
+    }
+}
+
 static void emit_test_eax_eax(ByteBuf *buf)
 {
     bytebuf_append(buf, X86_TEST_REG_RM);
@@ -649,6 +672,7 @@ static void lower_load(IrInstr *in, CodegenCtx *ctx);
 static void lower_store(IrInstr *in, CodegenCtx *ctx);
 static void lower_gep(IrInstr *in, CodegenCtx *ctx);
 static void lower_alloca(IrInstr *in, CodegenCtx *ctx);
+static void lower_memcpy(IrInstr *in, CodegenCtx *ctx);
 
 #define LOWER_ENTRIES(X)                                                                           \
     X(OP_RET, lower_ret)                                                                           \
@@ -688,7 +712,8 @@ static void lower_alloca(IrInstr *in, CodegenCtx *ctx);
     X(OP_LOAD, lower_load)                                                                         \
     X(OP_STORE, lower_store)                                                                       \
     X(OP_GEP, lower_gep)                                                                           \
-    X(OP_ALLOCA, lower_alloca)
+    X(OP_ALLOCA, lower_alloca)                                                                     \
+    X(OP_MEMCPY, lower_memcpy)
 
 /* Dispatch table indexed by opcode; unlisted opcodes are NULL and diagnosed
    in lower_instr rather than silently miscompiled. */
@@ -1004,10 +1029,34 @@ static void lower_store(IrInstr *in, CodegenCtx *ctx)
 
 static void lower_gep(IrInstr *in, CodegenCtx *ctx)
 {
-    i32 stride = (i32) in->ops[2].u.imm;
+    i64 stride = in->ops[2].u.imm;
+
+    /* Member access hot path: index is imm(1), so base + 1*offset folds into a
+       plain displacement (offset ∉ {1,2,4,8} breaks the SIB scale field). */
+    if (in->ops[1].is_imm && in->ops[1].u.imm == 1)
+    {
+        X86Mem base = load_ptr(ctx, in->ops[0]);
+        X86Mem m = {.base = base.base, .index = NO_REG, .scale = 1, .disp = (i32) stride};
+        emit_lea(ctx->buf, R_EDX, m);
+        emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
+        return;
+    }
+
+    if (stride == 1 || stride == 2 || stride == 4 || stride == 8)
+    {
+        X86Mem base = load_ptr(ctx, in->ops[0]);
+        emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_from_operand(in->ops[1]));
+        X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = (u8) stride, .disp = 0};
+        emit_lea(ctx->buf, R_EDX, scaled);
+        emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
+        return;
+    }
+
+    /* General stride: index *= stride, then lea (base, index, 1). */
     X86Mem base = load_ptr(ctx, in->ops[0]);
     emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_from_operand(in->ops[1]));
-    X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = (u8) stride, .disp = 0};
+    emit_imul_imm(ctx->buf, 8, R_ECX, stride);
+    X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = 1, .disp = 0};
     emit_lea(ctx->buf, R_EDX, scaled);
     emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
 }
@@ -1035,18 +1084,28 @@ static void lower_alloca(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
 }
 
+static void lower_memcpy(IrInstr *in, CodegenCtx *ctx)
+{
+    (void) load_ptr(ctx, in->ops[0]); /* dst address -> %rax */
+    emit_mov(ctx->buf, 8, xop_reg(R_EDI), xop_reg(R_EAX));
+    (void) load_ptr(ctx, in->ops[1]); /* src address -> %rax */
+    emit_mov(ctx->buf, 8, xop_reg(R_ESI), xop_reg(R_EAX));
+    emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_imm(in->ops[2].u.imm));
+    bytebuf_append(ctx->buf, X86_REP);
+    bytebuf_append(ctx->buf, X86_MOVSB);
+}
+
 /* arithmetic/compare have no imm64 form: an imm RHS must fit a sign-extended imm32 */
 static bool is_imm_rhs_op(IrOpcode op)
 {
-    return op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_AND ||
-           op == OP_OR || op == OP_XOR ||
-           (op >= OP_ICMP_EQ && op <= OP_ICMP_SGE);
+    return op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_AND || op == OP_OR ||
+           op == OP_XOR || (op >= OP_ICMP_EQ && op <= OP_ICMP_SGE);
 }
 
 static bool instr_has_bad_imm(IrInstr *in, CodegenCtx *ctx)
 {
-    return is_imm_rhs_op(in->opcode) && vreg_width(ctx, in->result) == 8 &&
-           in->ops[1].is_imm && !fits_i32(in->ops[1].u.imm);
+    return is_imm_rhs_op(in->opcode) && vreg_width(ctx, in->result) == 8 && in->ops[1].is_imm &&
+           !fits_i32(in->ops[1].u.imm);
 }
 
 static void lower_instr(IrInstr *in, CodegenCtx *ctx)

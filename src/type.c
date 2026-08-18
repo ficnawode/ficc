@@ -2,6 +2,8 @@
 #include "util/arena.h"
 #include "util/assert.h"
 #include "util/hashmap.h"
+#include "util/vec.h"
+#include <string.h>
 
 /* Integer type singletons. LP64 data model:
    char=8, short=16, int=32, long=64, long long=64. */
@@ -22,6 +24,10 @@ static const Type the_ullong = {.kind = TYPE_ULLONG, .width = 64, .align = 8, .s
 static Arena *type_arena;
 static U64Map *ptr_cache;
 static U64Map *array_cache;
+
+/* Tag namespace: tag string -> record/enum Type* (interning, pointer-equality). */
+static Arena *tag_arena;
+static StrMap *tag_table;
 
 Type *type_void(void)
 {
@@ -75,7 +81,8 @@ Type *type_ullong(void)
 bool type_is_signed(Type *t)
 {
     return t->kind == TYPE_BOOL || t->kind == TYPE_CHAR || t->kind == TYPE_SHORT ||
-           t->kind == TYPE_INT || t->kind == TYPE_LONG || t->kind == TYPE_LLONG;
+           t->kind == TYPE_INT || t->kind == TYPE_LONG || t->kind == TYPE_LLONG ||
+           t->kind == TYPE_ENUM;
 }
 
 bool type_is_unsigned(Type *t)
@@ -87,6 +94,35 @@ bool type_is_unsigned(Type *t)
 bool type_is_integer(Type *t)
 {
     return type_is_signed(t) || type_is_unsigned(t);
+}
+
+bool type_is_record(Type *t)
+{
+    return t->kind == TYPE_STRUCT || t->kind == TYPE_UNION;
+}
+
+bool type_is_struct(Type *t)
+{
+    return t->kind == TYPE_STRUCT;
+}
+
+bool type_is_union(Type *t)
+{
+    return t->kind == TYPE_UNION;
+}
+
+bool type_is_enum(Type *t)
+{
+    return t->kind == TYPE_ENUM;
+}
+
+bool type_is_complete(Type *t)
+{
+    if (!type_is_record(t))
+    {
+        return true;
+    }
+    return t->record.complete;
 }
 
 int type_rank(Type *t)
@@ -103,6 +139,7 @@ int type_rank(Type *t)
             return 2;
         case TYPE_INT:
         case TYPE_UINT:
+        case TYPE_ENUM:
             return 3;
         case TYPE_LONG:
         case TYPE_ULONG:
@@ -265,6 +302,158 @@ Type *type_array(Type *elem, u64 length)
     t->arr.length = length;
     u64map_set(array_cache, key, t);
     return t;
+}
+
+static void type_init_tags(void)
+{
+    if (tag_arena)
+    {
+        return;
+    }
+    tag_arena = arena_new();
+    tag_table = strmap_new(tag_arena);
+}
+
+void type_reset(void)
+{
+    type_init_tags();
+    tag_table = strmap_new(tag_arena);
+}
+
+Type *type_record(TypeKind kind, const char *tag)
+{
+    ASSERT(kind == TYPE_STRUCT || kind == TYPE_UNION);
+    type_init_tags();
+
+    Type *existing = strmap_get(tag_table, tag);
+    if (existing)
+    {
+        return existing;
+    }
+
+    Type *t = arena_alloc(tag_arena, sizeof(Type), _Alignof(Type));
+    t->kind = kind;
+    t->width = 0;
+    t->align = 1;
+    t->size = 0;
+    t->record.tag = tag;
+    t->record.fields = NULL;
+    t->record.complete = false;
+    strmap_set(tag_table, tag, t);
+    return t;
+}
+
+static u32 align_up(u32 n, u32 align)
+{
+    return (n + align - 1) / align * align;
+}
+
+void type_record_complete(Type *t, Vec *fields)
+{
+    ASSERT(type_is_record(t));
+    t->record.fields = fields;
+
+    u32 max_align = 1;
+    size_t n = vec_size(fields);
+    for (size_t i = 0; i < n; i++)
+    {
+        RecordField *f = (RecordField *) vec_get(fields, i);
+        if (f->type->align > max_align)
+        {
+            max_align = f->type->align;
+        }
+    }
+
+    if (t->kind == TYPE_STRUCT)
+    {
+        u32 offset = 0;
+        for (size_t i = 0; i < n; i++)
+        {
+            RecordField *f = (RecordField *) vec_get(fields, i);
+            offset = align_up(offset, f->type->align);
+            f->offset = offset;
+            offset += (u32) f->type->size;
+        }
+        t->align = max_align;
+        t->size = align_up(offset, max_align);
+    }
+    else
+    {
+        u32 max_size = 0;
+        for (size_t i = 0; i < n; i++)
+        {
+            RecordField *f = (RecordField *) vec_get(fields, i);
+            f->offset = 0;
+            if (f->type->size > max_size)
+            {
+                max_size = (u32) f->type->size;
+            }
+        }
+        t->align = max_align;
+        t->size = align_up(max_size, max_align);
+    }
+
+    t->record.complete = true;
+}
+
+Type *type_enum(const char *tag)
+{
+    type_init_tags();
+
+    Type *existing = strmap_get(tag_table, tag);
+    if (existing)
+    {
+        return existing;
+    }
+
+    Type *t = arena_alloc(tag_arena, sizeof(Type), _Alignof(Type));
+    t->kind = TYPE_ENUM;
+    t->width = type_int()->width;
+    t->align = type_int()->align;
+    t->size = type_int()->size;
+    t->enumm.tag = tag;
+    strmap_set(tag_table, tag, t);
+    return t;
+}
+
+Type *type_record_lookup(const char *tag)
+{
+    if (!tag_table)
+    {
+        return NULL;
+    }
+    return strmap_get(tag_table, tag);
+}
+
+static RecordField *find_record_field(Type *t, const char *name)
+{
+    ASSERT(type_is_record(t));
+    if (!t->record.fields)
+    {
+        return NULL;
+    }
+    size_t n = vec_size(t->record.fields);
+    for (size_t i = 0; i < n; i++)
+    {
+        RecordField *f = (RecordField *) vec_get(t->record.fields, i);
+        if (strcmp(f->name, name) == 0)
+        {
+            return f;
+        }
+    }
+    return NULL;
+}
+
+Type *type_record_field(Type *t, const char *name)
+{
+    RecordField *f = find_record_field(t, name);
+    return f ? f->type : NULL;
+}
+
+u32 type_record_field_offset(Type *t, const char *name)
+{
+    RecordField *f = find_record_field(t, name);
+    return f ? f->offset : 0;
 }
 
 bool type_is_ptr(Type *t)

@@ -32,7 +32,9 @@
     X(AST_SUBSCRIPT_EXPR)                                                                          \
     X(AST_SIZEOF_EXPR)                                                                             \
     X(AST_SIZEOF_TYPE)                                                                             \
-    X(AST_STRING_LITERAL)
+    X(AST_STRING_LITERAL)                                                                          \
+    X(AST_STRUCT_DECL)                                                                             \
+    X(AST_MEMBER_ACCESS)
 
 typedef enum
 {
@@ -275,6 +277,26 @@ struct ASTStringLiteral
     u64 length;
 };
 
+typedef struct ASTStructDecl ASTStructDecl;
+struct ASTStructDecl
+{
+    ASTNode base;
+    const char *tag;
+    bool is_union;
+    Vec *fields; /* Vec<ASTVarDecl*> */
+};
+
+typedef struct ASTMemberAccess ASTMemberAccess;
+struct ASTMemberAccess
+{
+    ASTNode base;
+    ASTNode *object;
+    const char *member;
+    bool is_arrow;
+    u32 field_offset; /* filled by semantic */
+    Type *field_type; /* filled by semantic */
+};
+
 ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body, Loc loc,
                       Arena *arena);
 ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
@@ -305,6 +327,9 @@ ASTNode *ast_subscript_expr(ASTNode *array, ASTNode *index, Loc loc, Arena *aren
 ASTNode *ast_sizeof_expr(ASTNode *operand, u64 size_value, Loc loc, Arena *arena);
 ASTNode *ast_sizeof_type(Type *type, u64 size_value, Loc loc, Arena *arena);
 ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena);
+ASTNode *ast_struct_decl(const char *tag, bool is_union, Vec *fields, Loc loc, Arena *arena);
+ASTNode *ast_member_access(ASTNode *object, const char *member, bool is_arrow, Loc loc,
+                           Arena *arena);
 
 void ast_dump(ASTNode *node);
 

@@ -40,6 +40,15 @@ typedef enum
 } TypeKind;
 
 typedef struct Type Type;
+typedef struct Vec Vec;
+typedef struct RecordField RecordField;
+
+struct RecordField
+{
+    const char *name; /* field name, compared by content (not interned) */
+    Type *type;
+    u32 offset; /* byte offset in the record (always 0 for unions) */
+};
 
 struct Type
 {
@@ -58,6 +67,16 @@ struct Type
             Type *elem;
             u64 length;
         } arr;
+        struct
+        {
+            const char *tag; /* NULL only for anonymous (out of scope) */
+            Vec *fields;     /* Vec<RecordField*> */
+            bool complete;
+        } record; /* TYPE_STRUCT / TYPE_UNION */
+        struct
+        {
+            const char *tag; /* identity + diagnostics */
+        } enumm;             /* TYPE_ENUM: underlying int, no members */
     };
 };
 
@@ -79,9 +98,25 @@ bool type_is_unsigned(Type *t);
 bool type_is_integer(Type *t);
 bool type_is_ptr(Type *t);
 bool type_is_array(Type *t);
+bool type_is_record(Type *t);
+bool type_is_struct(Type *t);
+bool type_is_union(Type *t);
+bool type_is_enum(Type *t);
+bool type_is_complete(Type *t); /* records only */
 
 Type *type_ptr(Type *pointee);
 Type *type_array(Type *elem, u64 length);
+Type *type_record(TypeKind kind, const char *tag);
+void type_record_complete(Type *t, Vec *fields);
+Type *type_enum(const char *tag);
+Type *type_record_lookup(const char *tag);
+Type *type_record_field(Type *t, const char *name);
+u32 type_record_field_offset(Type *t, const char *name);
+
+/* Reset the tag table for a new compilation unit. Record types remain
+   immortal (they may be referenced by interned pointer/array types), but the
+   tag-name mapping is cleared so a later compilation may reuse tag names. */
+void type_reset(void);
 Type *type_deref(Type *t);
 Type *type_array_elem(Type *t);
 u64 type_array_len(Type *t);

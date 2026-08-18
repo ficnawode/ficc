@@ -72,11 +72,23 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     Type *lt = binary_expr->left->expr_type;
     Type *rt = binary_expr->right->expr_type;
     Type *result = NULL;
+    if ((type_is_record(lt) || type_is_record(rt)) && binary_expr->op != BIN_ASSIGN)
+    {
+        sem_error(binary_expr->base.loc, "invalid operands to operator (record type)");
+        ctx->error = true;
+        return false;
+    }
     if (binary_expr->op == BIN_ASSIGN)
     {
         if (type_is_ptr(lt) && type_is_ptr(rt) && !ptr_assign_compatible(lt, rt))
         {
             sem_error(binary_expr->base.loc, "incompatible pointer types in assignment");
+            ctx->error = true;
+            return false;
+        }
+        if (type_is_record(lt) && lt != rt)
+        {
+            sem_error(binary_expr->base.loc, "incompatible types in struct assignment");
             ctx->error = true;
             return false;
         }
@@ -139,10 +151,15 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
             unary_expr->base.expr_type = type_ptr(op_type);
             return true;
         }
+        if (operand->kind == AST_MEMBER_ACCESS)
+        {
+            unary_expr->base.expr_type = type_ptr(op_type);
+            return true;
+        }
         if (operand->kind == AST_IDENT)
         {
             ASTVarDecl *decl = strmap_get(ctx->locals, ast_as(ASTIdent, operand)->name);
-            if (!decl || !type_is_array(decl->type))
+            if (!decl || (!type_is_array(decl->type) && !type_is_record(decl->type)))
             {
                 sem_error(unary_expr->base.loc, "cannot take address of this expression");
                 ctx->error = true;
@@ -152,6 +169,12 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
             return true;
         }
         sem_error(unary_expr->base.loc, "cannot take address of this expression");
+        ctx->error = true;
+        return false;
+    }
+    if (type_is_record(op_type))
+    {
+        sem_error(unary_expr->base.loc, "invalid operand of record type to unary operator");
         ctx->error = true;
         return false;
     }
@@ -188,6 +211,53 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
         }
     }
     call_expr->base.expr_type = callee->ret_type;
+    return true;
+}
+
+static bool check_member_access(ASTMemberAccess *ma, SemanticCtx *ctx)
+{
+    if (!check_expr(ma->object, ctx))
+    {
+        return false;
+    }
+    Type *obj_type = ma->object->expr_type;
+    Type *record_type;
+    if (ma->is_arrow)
+    {
+        if (!type_is_ptr(obj_type))
+        {
+            sem_error(ma->base.loc, "cannot use '->' on non-pointer type");
+            ctx->error = true;
+            return false;
+        }
+        record_type = type_deref(obj_type);
+    }
+    else
+    {
+        record_type = obj_type;
+    }
+    if (!type_is_record(record_type))
+    {
+        sem_error(ma->base.loc, "member access on non-struct type");
+        ctx->error = true;
+        return false;
+    }
+    if (!type_is_complete(record_type))
+    {
+        sem_error(ma->base.loc, "member access on incomplete type '%s'", record_type->record.tag);
+        ctx->error = true;
+        return false;
+    }
+    Type *field_type = type_record_field(record_type, ma->member);
+    if (!field_type)
+    {
+        sem_error(ma->base.loc, "no member named '%s'", ma->member);
+        ctx->error = true;
+        return false;
+    }
+    ma->field_offset = type_record_field_offset(record_type, ma->member);
+    ma->field_type = field_type;
+    ma->base.expr_type = type_decay(field_type);
     return true;
 }
 
@@ -264,6 +334,12 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
                 ctx->error = true;
                 return NULL;
             }
+            if (type_is_record(op_type) && !type_is_complete(op_type))
+            {
+                sem_error(node->loc, "sizeof of incomplete type");
+                ctx->error = true;
+                return NULL;
+            }
             se->size_value = type_sizeof(op_type);
             node->expr_type = type_ulong();
             return node->expr_type;
@@ -277,6 +353,12 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
                 ctx->error = true;
                 return NULL;
             }
+            if (type_is_record(st->type) && !type_is_complete(st->type))
+            {
+                sem_error(node->loc, "sizeof of incomplete type");
+                ctx->error = true;
+                return NULL;
+            }
             st->size_value = type_sizeof(st->type);
             node->expr_type = type_ulong();
             return node->expr_type;
@@ -287,6 +369,12 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
             node->expr_type = type_decay(type_array(type_char(), sl->length + 1));
             return node->expr_type;
         }
+        case AST_MEMBER_ACCESS:
+            if (!check_member_access(ast_as(ASTMemberAccess, node), ctx))
+            {
+                return NULL;
+            }
+            return node->expr_type;
         default:
             sem_error(node->loc, "unsupported expression kind %s", ast_kind_name(node->kind));
             ctx->error = true;
@@ -318,6 +406,15 @@ static bool check_return_stmt(ASTReturnStmt *return_stmt, SemanticCtx *ctx, Type
     {
         return false;
     }
+    if (type_is_record(ret_type) && return_stmt->expr && return_stmt->expr->expr_type != ret_type)
+    {
+        sem_error(return_stmt->base.loc,
+                  "returning a non-struct value from function returning "
+                  "struct '%s'",
+                  ret_type->record.tag);
+        ctx->error = true;
+        return false;
+    }
 
     return true;
 }
@@ -341,6 +438,14 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
     strmap_set(ctx->locals, var_decl->name, var_decl);
     if (var_decl->init && !check_expr(var_decl->init, ctx))
     {
+        return false;
+    }
+    if (type_is_record(var_decl->type) && var_decl->init &&
+        var_decl->init->expr_type != var_decl->type)
+    {
+        sem_error(var_decl->base.loc, "invalid initializer for struct type '%s'",
+                  var_decl->type->record.tag);
+        ctx->error = true;
         return false;
     }
     return true;
@@ -475,6 +580,13 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     if (!check_expr(ternary->cond, ctx) || !check_expr(ternary->then_expr, ctx) ||
         !check_expr(ternary->else_expr, ctx))
     {
+        return false;
+    }
+    if (type_is_record(ternary->then_expr->expr_type) ||
+        type_is_record(ternary->else_expr->expr_type))
+    {
+        sem_error(ternary->base.loc, "conditional operator on record type");
+        ctx->error = true;
         return false;
     }
     ternary->base.expr_type =
@@ -672,6 +784,10 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
+        if (decl->kind == AST_STRUCT_DECL)
+        {
+            continue;
+        }
         if (decl->kind != AST_FUNC_DEF)
         {
             sem_error(decl->loc, "expected function definition at top level");
@@ -695,6 +811,10 @@ static bool check_function_bodies(ASTProgram *prog, SemanticCtx *ctx)
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
+        if (decl->kind != AST_FUNC_DEF)
+        {
+            continue;
+        }
         if (!check_func(decl, ctx))
         {
             return false;

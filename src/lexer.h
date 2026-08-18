@@ -25,6 +25,11 @@
     X(TOK_KW_CONTINUE)                                                                             \
     X(TOK_KW_GOTO)                                                                                 \
     X(TOK_KW_SIZEOF)                                                                               \
+    X(TOK_KW_STRUCT)                                                                               \
+    X(TOK_KW_UNION)                                                                                \
+    X(TOK_KW_ENUM)                                                                                 \
+    X(TOK_DOT)                                                                                     \
+    X(TOK_ARROW)                                                                                   \
     X(TOK_STRING_LIT)                                                                              \
     X(TOK_LPAREN)                                                                                  \
     X(TOK_RPAREN)                                                                                  \

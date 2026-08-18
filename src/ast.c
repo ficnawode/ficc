@@ -222,6 +222,27 @@ ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena)
     return &n->base;
 }
 
+ASTNode *ast_struct_decl(const char *tag, bool is_union, Vec *fields, Loc loc, Arena *arena)
+{
+    ASTStructDecl *n = ast_new_node(sizeof(ASTStructDecl), AST_STRUCT_DECL, loc, arena);
+    n->tag = tag;
+    n->is_union = is_union;
+    n->fields = fields;
+    return &n->base;
+}
+
+ASTNode *ast_member_access(ASTNode *object, const char *member, bool is_arrow, Loc loc,
+                           Arena *arena)
+{
+    ASTMemberAccess *n = ast_new_node(sizeof(ASTMemberAccess), AST_MEMBER_ACCESS, loc, arena);
+    n->object = object;
+    n->member = member;
+    n->is_arrow = is_arrow;
+    n->field_offset = 0;
+    n->field_type = NULL;
+    return &n->base;
+}
+
 static const char *bin_op_name(BinOpKind op)
 {
     switch (op)
@@ -500,6 +521,21 @@ static void ast_dump_rec(ASTNode *node, int depth)
             ASTStringLiteral *sl = ast_as(ASTStringLiteral, node);
             printf("STRING_LITERAL \"%.*s\" (%llu bytes)\n", (int) sl->length, sl->data,
                    (unsigned long long) sl->length);
+            break;
+        }
+        case AST_STRUCT_DECL:
+        {
+            ASTStructDecl *sd = ast_as(ASTStructDecl, node);
+            printf("STRUCT_DECL %s%s (%zu fields)\n", sd->is_union ? "union " : "struct ", sd->tag,
+                   vec_size(sd->fields));
+            dump_node_list(sd->fields, depth);
+            break;
+        }
+        case AST_MEMBER_ACCESS:
+        {
+            ASTMemberAccess *ma = ast_as(ASTMemberAccess, node);
+            printf("MEMBER_ACCESS %s%s\n", ma->is_arrow ? "->" : ".", ma->member);
+            ast_dump_rec(ma->object, depth + 1);
             break;
         }
         default:

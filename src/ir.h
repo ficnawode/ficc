@@ -41,6 +41,7 @@
     X(OP_STORE)                                                                                    \
     X(OP_GEP)                                                                                      \
     X(OP_ALLOCA)                                                                                   \
+    X(OP_MEMCPY)                                                                                   \
     X(OP_BR)                                                                                       \
     X(OP_BRCOND)                                                                                   \
     X(OP_SWITCH)                                                                                   \
@@ -235,6 +236,7 @@ IrInstr *ir_emit_load(IrBlock *bb, u32 dst, IrOperand ptr);
 IrInstr *ir_emit_store(IrBlock *bb, IrOperand val, IrOperand ptr, u32 width_bytes);
 IrInstr *ir_emit_gep(IrBlock *bb, u32 dst, IrOperand base, IrOperand index, u32 stride);
 IrInstr *ir_emit_alloca(IrBlock *bb, u32 dst, u32 size_bytes);
+IrInstr *ir_emit_memcpy(IrBlock *bb, IrOperand dst, IrOperand src, u32 size_bytes);
 
 /* operand helpers */
 IrOperand ir_operand_imm(i64 val);
