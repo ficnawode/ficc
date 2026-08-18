@@ -84,6 +84,7 @@ static void init_keyword_map(Arena *arena)
     KW("enum", TOK_KW_ENUM);
     KW("static", TOK_KW_STATIC);
     KW("extern", TOK_KW_EXTERN);
+    KW("const", TOK_KW_CONST);
 #undef KW
 }
 

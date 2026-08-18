@@ -1,5 +1,6 @@
 CC      := gcc
 CFLAGS  := -std=c11 -Wall -Wextra -Werror -Isrc -Itest
+DEPFLAGS := -MMD -MP
 LDFLAGS :=
 
 
@@ -34,13 +35,15 @@ $(TEST_BIN): $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) | dirs
 	$(CC) $(LDFLAGS) $^ -o $@
 
 $(OBJ_DIR)/src/%.o: src/%.c | dirs
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(TEST_OBJ_DIR)/src/%.o: src/%.c | dirs
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(TEST_OBJ_DIR)/test/%.o: test/%.c | dirs
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+-include $(OBJ_DIR)/src/*.d $(TEST_OBJ_DIR)/src/*.d $(TEST_OBJ_DIR)/test/*.d
 
 dirs:
 	@mkdir -p $(DIRS)

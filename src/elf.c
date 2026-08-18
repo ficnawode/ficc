@@ -132,6 +132,7 @@ typedef enum
     SEC_SHSTRTAB,
     SEC_RELA_TEXT,
     SEC_RELA_DATA,
+    SEC_RELA_RODATA,
     SEC_COUNT
 } SectionIndex;
 
@@ -234,6 +235,7 @@ void elf_write(CodegenModule *cm, const char *path)
     u32 shname_shstrtab = strtab_add(&shstrtab, ".shstrtab");
     u32 shname_rela_text = strtab_add(&shstrtab, ".rela.text");
     u32 shname_rela_data = strtab_add(&shstrtab, ".rela.data");
+    u32 shname_rela_rodata = strtab_add(&shstrtab, ".rela.rodata");
 
     ByteBuf strtab;
     strtab_init(&strtab, arena);
@@ -252,12 +254,19 @@ void elf_write(CodegenModule *cm, const char *path)
         switch (g->section)
         {
             case IR_SECTION_RODATA:
-                global_off[i] = bytebuf_len(&rodata);
+            {
+                u64 off = align_up(bytebuf_len(&rodata), g->align);
+                while ((u64) bytebuf_len(&rodata) < off)
+                {
+                    bytebuf_append(&rodata, 0);
+                }
+                global_off[i] = off;
                 if (g->init_data)
                 {
                     bytebuf_append_bytes(&rodata, g->init_data, g->init_len);
                 }
                 break;
+            }
             case IR_SECTION_DATA:
             {
                 u64 off = align_up(bytebuf_len(&data), g->align);
@@ -341,14 +350,16 @@ void elf_write(CodegenModule *cm, const char *path)
     }
 
     ByteBuf rela_data;
+    ByteBuf rela_rodata;
     bytebuf_init(&rela_data, arena);
+    bytebuf_init(&rela_rodata, arena);
     for (size_t i = 0; i < nglobals; i++)
     {
         IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
         if (g->init_reloc_target >= 0)
         {
-            rela_emit(&rela_data, global_off[i], FIRST_GLOBAL_SYM + g->init_reloc_target,
-                      R_X86_64_64);
+            ByteBuf *target = g->section == IR_SECTION_RODATA ? &rela_rodata : &rela_data;
+            rela_emit(target, global_off[i], FIRST_GLOBAL_SYM + g->init_reloc_target, R_X86_64_64);
         }
     }
 
@@ -371,6 +382,8 @@ void elf_write(CodegenModule *cm, const char *path)
     off += bytebuf_len(&rela_text);
     size_t off_rela_data = off;
     off += bytebuf_len(&rela_data);
+    size_t off_rela_rodata = off;
+    off += bytebuf_len(&rela_rodata);
     size_t off_shdr = (off + 7) & ~7;
 
     ByteBuf out;
@@ -418,6 +431,7 @@ void elf_write(CodegenModule *cm, const char *path)
     bytebuf_append_bytes(&out, bytebuf_data(&shstrtab), bytebuf_len(&shstrtab));
     bytebuf_append_bytes(&out, bytebuf_data(&rela_text), bytebuf_len(&rela_text));
     bytebuf_append_bytes(&out, bytebuf_data(&rela_data), bytebuf_len(&rela_data));
+    bytebuf_append_bytes(&out, bytebuf_data(&rela_rodata), bytebuf_len(&rela_rodata));
     while ((size_t) bytebuf_len(&out) < off_shdr)
     {
         bytebuf_append(&out, 0);
@@ -427,7 +441,7 @@ void elf_write(CodegenModule *cm, const char *path)
     shdr_emit(&out, shname_text, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, off_text,
               bytebuf_len(&text), 0, 0, 1, 0);
     shdr_emit(&out, shname_rodata, SHT_PROGBITS, SHF_ALLOC, off_rodata, bytebuf_len(&rodata), 0, 0,
-              1, 0);
+              8, 0);
     shdr_emit(&out, shname_data, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, off_data, bytebuf_len(&data),
               0, 0, 8, 0);
     shdr_emit(&out, shname_bss, SHT_NOBITS, SHF_ALLOC | SHF_WRITE, off_bss, bss_size, 0, 0, 8, 0);
@@ -440,6 +454,8 @@ void elf_write(CodegenModule *cm, const char *path)
               bytebuf_len(&rela_text), SEC_SYMTAB, SEC_TEXT, 8, sizeof(Elf64_Rela));
     shdr_emit(&out, shname_rela_data, SHT_RELA, SHF_INFO_LINK, off_rela_data,
               bytebuf_len(&rela_data), SEC_SYMTAB, SEC_DATA, 8, sizeof(Elf64_Rela));
+    shdr_emit(&out, shname_rela_rodata, SHT_RELA, SHF_INFO_LINK, off_rela_rodata,
+              bytebuf_len(&rela_rodata), SEC_SYMTAB, SEC_RODATA, 8, sizeof(Elf64_Rela));
 
     fwrite(bytebuf_data(&out), 1, bytebuf_len(&out), f);
     fclose(f);

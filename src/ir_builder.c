@@ -950,6 +950,10 @@ static void fill_global(IrGlobal *g, ASTVarDecl *vd, int init_str_idx, Arena *ar
     g->align = vd->type->align;
     g->init_reloc_target = -1;
 
+    /* Const-qualified objects (top-level) are read-only: they land in
+       `.rodata` (no SHF_WRITE) even when zero-initialized — never `.bss`. */
+    bool is_const = type_is_const(vd->type);
+
     if (vd->storage == SC_EXTERN)
     {
         g->init_data = NULL;
@@ -959,10 +963,12 @@ static void fill_global(IrGlobal *g, ASTVarDecl *vd, int init_str_idx, Arena *ar
     }
     else if (vd->init && vd->init->kind == AST_STRING_LITERAL)
     {
-        /* char *p = "..." → 8-byte address in .data, patched by .rela.data. */
+        /* char *p = "..." → 8-byte address, patched by a relocation against
+           the string symbol. Read-only pointer (`char * const p`) in
+           .rodata, plain pointer in .data. */
         g->init_data = encode_const_bytes(arena, 0, 8);
         g->init_len = 8;
-        g->section = IR_SECTION_DATA;
+        g->section = is_const ? IR_SECTION_RODATA : IR_SECTION_DATA;
         g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;
         g->init_reloc_target = init_str_idx;
     }
@@ -970,7 +976,17 @@ static void fill_global(IrGlobal *g, ASTVarDecl *vd, int init_str_idx, Arena *ar
     {
         g->init_data = encode_const_bytes(arena, vd->const_init, (u32) vd->type->size);
         g->init_len = (size_t) vd->type->size;
-        g->section = IR_SECTION_DATA;
+        g->section = is_const ? IR_SECTION_RODATA : IR_SECTION_DATA;
+        g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;
+    }
+    else if (is_const)
+    {
+        /* Zero / folded-0 const data still needs real bytes in `.rodata`
+           (PROGBITS): encode the zeroed object so the symbol is backed by
+           storage, unlike `.bss`. */
+        g->init_data = encode_const_bytes(arena, 0, (u32) vd->type->size);
+        g->init_len = (size_t) vd->type->size;
+        g->section = IR_SECTION_RODATA;
         g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;
     }
     else

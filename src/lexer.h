@@ -30,6 +30,7 @@
     X(TOK_KW_ENUM)                                                                                 \
     X(TOK_KW_STATIC)                                                                               \
     X(TOK_KW_EXTERN)                                                                               \
+    X(TOK_KW_CONST)                                                                                \
     X(TOK_DOT)                                                                                     \
     X(TOK_ARROW)                                                                                   \
     X(TOK_STRING_LIT)                                                                              \

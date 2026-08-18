@@ -11,6 +11,14 @@ typedef enum
     SUFFIX_LL,
 } IntSuffix;
 
+/* Type qualifiers (C11 §6.7.3). `const` today; volatile/restrict land later
+   in the same bitmask (append-only — do not reorder or repurpose bits). */
+typedef enum
+{
+    Q_NONE = 0,
+    Q_CONST = 1 << 0,
+} Qualifier;
+
 /* X-macro for type kinds. Append only. */
 #define TYPE_KINDS(X)                                                                              \
     X(TYPE_VOID)                                                                                   \
@@ -53,9 +61,13 @@ struct RecordField
 struct Type
 {
     TypeKind kind;
-    u8 width; /* in bits */
-    u8 align; /* in bytes */
-    u32 size; /* in bytes */
+    u8 width;          /* in bits */
+    u8 align;          /* in bytes */
+    u32 size;          /* in bytes */
+    u8 qualifiers;     /* V8 qualifier bitmask (Q_CONST) */
+    Type *unqual_base; /* the unqualified type this qualified variant wraps
+                          (NULL for unqualified types; arrays store no
+                          wrapper — const lives in the element type) */
     union
     {
         struct
@@ -72,7 +84,9 @@ struct Type
             const char *tag; /* NULL only for anonymous (out of scope) */
             Vec *fields;     /* Vec<RecordField*> */
             bool complete;
-        } record; /* TYPE_STRUCT / TYPE_UNION */
+            Vec *qual_variants; /* Vec<Type*>: const variants of this record,
+                                   kept in sync by type_record_complete */
+        } record;               /* TYPE_STRUCT / TYPE_UNION */
         struct
         {
             const char *tag; /* identity + diagnostics */
@@ -104,6 +118,7 @@ bool type_is_struct(Type *t);
 bool type_is_union(Type *t);
 bool type_is_enum(Type *t);
 bool type_is_complete(Type *t); /* records only */
+bool type_is_const(Type *t);
 
 Type *type_ptr(Type *pointee);
 Type *type_array(Type *elem, u64 length);
@@ -123,6 +138,14 @@ Type *type_array_elem(Type *t);
 u64 type_array_len(Type *t);
 Type *type_decay(Type *t);
 u64 type_sizeof(Type *t);
+
+/* Qualifier composition (C11 §6.7.3). Qualifying an array qualifies its
+   element type (`const int a[3]` is an array of const int), so decay yields
+   `const int*` and `a[i]` lvalues are const. Qualifying is idempotent.
+   `type_unqual` removes every qualifier (rvalues are always unqualified). */
+Type *type_const(Type *t);
+Type *type_unqual(Type *t);
+Type *type_rvalue(Type *t); /* alias for type_unqual: strip qualifiers on read */
 
 /* C11 §6.3.1.1 integer promotion: promote types narrower than int to int. */
 Type *type_promote(Type *t);

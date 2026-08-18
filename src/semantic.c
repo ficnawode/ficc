@@ -90,19 +90,44 @@ static bool is_comparison_op(BinOpKind op)
     return op >= BIN_EQ && op <= BIN_GE;
 }
 
-static bool ptr_assign_compatible(Type *a, Type *b)
+/* C11 §6.5.16.1p1 assignment compatibility, used by `=`, call arguments,
+   returns, and initializers. Pointers: the pointee types must match after
+   stripping qualifiers, and the left may only *gain* qualifiers at the first
+   pointee level (adding const is fine; discarding it is a constraint
+   violation; deeper pointer levels must match exactly — `int**` is not
+   assignable to `const int**`). Records: identical unqualified type. Other
+   scalar conversions are permitted (width conversions happen at IR lowering). */
+static bool type_assignable(Type *dst, Type *src)
 {
-    if (!type_is_ptr(a) || !type_is_ptr(b))
+    dst = type_unqual(dst);
+    src = type_unqual(src);
+    if (type_is_ptr(dst) && type_is_ptr(src))
+    {
+        Type *pd = type_deref(dst);
+        Type *ps = type_deref(src);
+        if (pd->kind == TYPE_VOID || ps->kind == TYPE_VOID)
+        {
+            return true;
+        }
+        if (pd->kind == TYPE_PTR || ps->kind == TYPE_PTR)
+        {
+            return pd == ps;
+        }
+        if (type_unqual(pd) != type_unqual(ps))
+        {
+            return false;
+        }
+        return !type_is_const(ps) || type_is_const(pd);
+    }
+    if (type_is_record(dst) && type_is_record(src))
+    {
+        return dst == src;
+    }
+    if (type_is_record(dst) || type_is_record(src))
     {
         return false;
     }
-    Type *pa = type_deref(a);
-    Type *pb = type_deref(b);
-    if (pa->kind == TYPE_VOID || pb->kind == TYPE_VOID)
-    {
-        return true;
-    }
-    return pa == pb;
+    return true;
 }
 
 static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
@@ -122,36 +147,48 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     }
     if (binary_expr->op == BIN_ASSIGN)
     {
-        if (type_is_ptr(lt) && type_is_ptr(rt) && !ptr_assign_compatible(lt, rt))
+        if (type_is_const(lt))
+        {
+            sem_error(binary_expr->base.loc,
+                      "assignment to const-qualified lvalue (read-only object)");
+            ctx->error = true;
+            return false;
+        }
+        if (type_is_ptr(lt) && type_is_ptr(rt) && !type_assignable(lt, rt))
         {
             sem_error(binary_expr->base.loc, "incompatible pointer types in assignment");
             ctx->error = true;
             return false;
         }
-        if (type_is_record(lt) && lt != rt)
+        if ((type_is_record(lt) || type_is_record(rt)) && !type_assignable(lt, rt))
         {
             sem_error(binary_expr->base.loc, "incompatible types in struct/union assignment");
             ctx->error = true;
             return false;
         }
-        result = lt;
-    }
-    else if (binary_expr->op == BIN_LOG_AND || binary_expr->op == BIN_LOG_OR)
-    {
-        result = type_int();
-    }
-    else if (is_comparison_op(binary_expr->op))
-    {
-        result = type_int();
-    }
-    else if (type_is_ptr(lt) && (binary_expr->op == BIN_ADD || binary_expr->op == BIN_SUB) &&
-             !type_is_ptr(rt))
-    {
-        result = lt;
+        result = type_rvalue(lt);
     }
     else
     {
-        result = type_common(type_promote(lt), type_promote(rt));
+        lt = type_rvalue(lt);
+        rt = type_rvalue(rt);
+        if (binary_expr->op == BIN_LOG_AND || binary_expr->op == BIN_LOG_OR)
+        {
+            result = type_int();
+        }
+        else if (is_comparison_op(binary_expr->op))
+        {
+            result = type_int();
+        }
+        else if (type_is_ptr(lt) && (binary_expr->op == BIN_ADD || binary_expr->op == BIN_SUB) &&
+                 !type_is_ptr(rt))
+        {
+            result = lt;
+        }
+        else
+        {
+            result = type_common(type_promote(lt), type_promote(rt));
+        }
     }
     binary_expr->base.expr_type = result;
     return true;
@@ -177,12 +214,15 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
             ctx->error = true;
             return false;
         }
+        /* Lvalue: the pointee type carries the const (const int* -> const int). */
         unary_expr->base.expr_type = type_deref(op_type);
         return true;
     }
     if (unary_expr->op == UN_ADDR)
     {
         ASTNode *operand = unary_expr->operand;
+        /* Address-of yields a pointer to the operand's *declared* (lvalue)
+           type, qualifiers included: &const_x is `const int*`. */
         if (operand->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, operand)->op == UN_DEREF)
         {
             unary_expr->base.expr_type = type_ptr(op_type);
@@ -212,7 +252,7 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
                 ctx->error = true;
                 return false;
             }
-            unary_expr->base.expr_type = type_ptr(op_type);
+            unary_expr->base.expr_type = type_ptr(type_decay(decl->type));
             return true;
         }
         sem_error(unary_expr->base.loc, "cannot take address of this expression");
@@ -225,7 +265,7 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
         ctx->error = true;
         return false;
     }
-    unary_expr->base.expr_type = type_promote(op_type);
+    unary_expr->base.expr_type = type_promote(type_rvalue(op_type));
     return true;
 }
 
@@ -252,12 +292,22 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
     size_t nargs = vec_size(call_expr->args);
     for (size_t i = 0; i < nargs; i++)
     {
-        if (!check_expr((ASTNode *) vec_get(call_expr->args, i), ctx))
+        ASTNode *arg = (ASTNode *) vec_get(call_expr->args, i);
+        if (!check_expr(arg, ctx))
         {
             return false;
         }
+        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(callee->params, i));
+        if (!type_assignable(param->type, arg->expr_type))
+        {
+            sem_error(arg->loc, "incompatible argument type for parameter '%s'", param->name);
+            ctx->error = true;
+            return false;
+        }
     }
-    call_expr->base.expr_type = callee->ret_type;
+    /* The function value is an unqualified rvalue even for a const return
+       type (`const int f()`). */
+    call_expr->base.expr_type = type_rvalue(callee->ret_type);
     return true;
 }
 
@@ -302,9 +352,20 @@ static bool check_member_access(ASTMemberAccess *ma, SemanticCtx *ctx)
         ctx->error = true;
         return false;
     }
+    /* C11 §6.5.2.3p4: member access on a const-qualified object (or through a
+       pointer to one) yields a const-qualified member lvalue. For array
+       members the qualifier lands on the element via type_const, so `s.a[i]`
+       writes are caught and decay gives `const T*`. */
     ma->field_offset = type_record_field_offset(record_type, ma->member);
     ma->field_type = field_type;
-    ma->base.expr_type = type_decay(field_type);
+    if (type_is_const(record_type))
+    {
+        ma->base.expr_type = type_decay(type_const(field_type));
+    }
+    else
+    {
+        ma->base.expr_type = type_decay(field_type);
+    }
     return true;
 }
 
@@ -453,12 +514,19 @@ static bool check_return_stmt(ASTReturnStmt *return_stmt, SemanticCtx *ctx, Type
     {
         return false;
     }
-    if (type_is_record(ret_type) && return_stmt->expr && return_stmt->expr->expr_type != ret_type)
+    if (return_stmt->expr && type_is_record(ret_type) &&
+        !type_assignable(ret_type, return_stmt->expr->expr_type))
     {
         sem_error(return_stmt->base.loc,
-                  "returning a non-struct/union value from function returning "
-                  "struct/union '%s'",
+                  "returning a value incompatible with struct/union return type '%s'",
                   ret_type->record.tag);
+        ctx->error = true;
+        return false;
+    }
+    if (return_stmt->expr && type_is_ptr(ret_type) && type_is_ptr(return_stmt->expr->expr_type) &&
+        !type_assignable(ret_type, return_stmt->expr->expr_type))
+    {
+        sem_error(return_stmt->base.loc, "incompatible pointer type in return");
         ctx->error = true;
         return false;
     }
@@ -556,10 +624,18 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
         return false;
     }
     if (type_is_record(var_decl->type) && var_decl->init &&
-        var_decl->init->expr_type != var_decl->type)
+        !type_assignable(var_decl->type, var_decl->init->expr_type))
     {
         sem_error(var_decl->base.loc, "invalid initializer for struct/union type '%s'",
                   var_decl->type->record.tag);
+        ctx->error = true;
+        return false;
+    }
+    if (type_is_ptr(var_decl->type) && var_decl->init &&
+        !type_assignable(var_decl->type, var_decl->init->expr_type))
+    {
+        sem_error(var_decl->base.loc, "incompatible pointer type in initializer for '%s'",
+                  var_decl->name);
         ctx->error = true;
         return false;
     }
@@ -701,15 +777,15 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     {
         return false;
     }
-    if (type_is_record(ternary->then_expr->expr_type) ||
-        type_is_record(ternary->else_expr->expr_type))
+    Type *tt = type_rvalue(ternary->then_expr->expr_type);
+    Type *te = type_rvalue(ternary->else_expr->expr_type);
+    if (type_is_record(tt) || type_is_record(te))
     {
         sem_error(ternary->base.loc, "conditional operator on record type");
         ctx->error = true;
         return false;
     }
-    ternary->base.expr_type =
-        type_common(ternary->then_expr->expr_type, ternary->else_expr->expr_type);
+    ternary->base.expr_type = type_common(type_promote(tt), type_promote(te));
     return true;
 }
 
@@ -964,6 +1040,16 @@ static bool collect_global_variables(ASTProgram *prog, SemanticCtx *ctx)
                 sem_error(vd->base.loc, "%s declaration of '%s' follows %s declaration",
                           vd->storage == SC_STATIC ? "static" : "non-static", vd->name,
                           existing->storage == SC_STATIC ? "static" : "non-static");
+                ctx->error = true;
+                return false;
+            }
+            /* C11 §6.7.3p8-10: compatible types must have identical qualifiers;
+               `int x;` followed by `const int x;` is incompatible. */
+            if (type_unqual(existing->type) == type_unqual(vd->type) &&
+                type_is_const(existing->type) != type_is_const(vd->type))
+            {
+                sem_error(vd->base.loc, "conflicting type qualifiers in declaration of '%s'",
+                          vd->name);
                 ctx->error = true;
                 return false;
             }

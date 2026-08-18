@@ -81,6 +81,16 @@ static Type *parse_type_specifier(ParserCtx *p)
 {
     Token *t = parser_peek(p);
     Type *ty = NULL;
+
+    /* Leading qualifiers: `const int`, `const struct point`. */
+    bool lead_const = false;
+    while (t->kind == TOK_KW_CONST)
+    {
+        lead_const = true;
+        parser_advance(p);
+        t = parser_peek(p);
+    }
+
     switch (t->kind)
     {
         case TOK_KW_INT:
@@ -179,11 +189,28 @@ static Type *parse_type_specifier(ParserCtx *p)
             return NULL;
     }
 
-    /* Postfix type operators: * only ([] is part of declarator) */
+    /* Trailing qualifiers apply to the type itself: `int const x`. */
+    if (lead_const)
+    {
+        ty = type_const(ty);
+    }
+    while (parser_peek(p)->kind == TOK_KW_CONST)
+    {
+        parser_advance(p);
+        ty = type_const(ty);
+    }
+
+    /* Postfix type operators: * only ([] is part of declarator). A qualifier
+       after a `*` applies to the pointer being formed: `int * const p`. */
     while (parser_peek(p)->kind == TOK_STAR)
     {
         parser_advance(p);
         ty = type_ptr(ty);
+        while (parser_peek(p)->kind == TOK_KW_CONST)
+        {
+            parser_advance(p);
+            ty = type_const(ty);
+        }
     }
 
     return ty;
@@ -677,6 +704,29 @@ static ASTNode *parse_stmt(ParserCtx *p)
         case TOK_KW_EXTERN:
             parser_advance(p);
             return parse_var_decl(p, SC_EXTERN);
+        case TOK_KW_CONST:
+        {
+            /* const may either precede the storage class (`const static int x`)
+               or the type (`const int x`); the latter is consumed by
+               parse_type_specifier. */
+            size_t nconst = 0;
+            while (p->pos + nconst < p->count && p->tokens[p->pos + nconst].kind == TOK_KW_CONST)
+            {
+                nconst++;
+            }
+            TokenKind nxt =
+                (p->pos + nconst < p->count) ? p->tokens[p->pos + nconst].kind : TOK_EOF;
+            if (nxt == TOK_KW_STATIC || nxt == TOK_KW_EXTERN)
+            {
+                for (size_t i = 0; i < nconst; i++)
+                {
+                    parser_advance(p);
+                }
+                parser_advance(p);
+                return parse_var_decl(p, nxt == TOK_KW_STATIC ? SC_STATIC : SC_EXTERN);
+            }
+            return parse_var_decl(p, SC_NONE);
+        }
         case TOK_KW_RETURN:
             return parse_return_stmt(p);
         case TOK_KW_IF:
@@ -1605,16 +1655,42 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
     Token *start = parser_peek(p);
 
     StorageClass storage = SC_NONE;
+    u32 pre_storage_consts = 0; /* consts consumed before static/extern; the
+                                   type must still be qualified by them */
     if (parser_peek(p)->kind == TOK_KW_STATIC || parser_peek(p)->kind == TOK_KW_EXTERN)
     {
         storage = parser_peek(p)->kind == TOK_KW_STATIC ? SC_STATIC : SC_EXTERN;
         parser_advance(p);
+    }
+    else if (parser_peek(p)->kind == TOK_KW_CONST)
+    {
+        /* A qualifier may precede the storage class: `const static int g;`. */
+        size_t nconst = 0;
+        while (p->pos + nconst < p->count && p->tokens[p->pos + nconst].kind == TOK_KW_CONST)
+        {
+            nconst++;
+        }
+        TokenKind nxt = (p->pos + nconst < p->count) ? p->tokens[p->pos + nconst].kind : TOK_EOF;
+        if (nxt == TOK_KW_STATIC || nxt == TOK_KW_EXTERN)
+        {
+            for (size_t i = 0; i < nconst; i++)
+            {
+                parser_advance(p);
+            }
+            parser_advance(p);
+            storage = nxt == TOK_KW_STATIC ? SC_STATIC : SC_EXTERN;
+            pre_storage_consts = (u32) nconst;
+        }
     }
 
     Type *ret_type = parse_type_specifier(p);
     if (!ret_type)
     {
         return NULL;
+    }
+    for (u32 i = 0; i < pre_storage_consts; i++)
+    {
+        ret_type = type_const(ret_type);
     }
 
     Token *name = parser_peek(p);
