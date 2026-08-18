@@ -205,14 +205,15 @@ struct IrGlobal
 };
 
 /* An IrModule owns all IR data for a compilation unit.
-   Vreg ids are dense and module-wide; the width table is indexed by vreg. */
+   Vreg ids are dense and module-wide; the width tables are indexed by vreg. */
 typedef struct IrModule IrModule;
 struct IrModule
 {
     Arena *arena;
-    Vec *funcs;   /* Vec<IrFunction*> */
-    Vec *globals; /* Vec<IrGlobal*> */
-    u8 *widths;   /* value-width table, indexed by vreg id */
+    Vec *funcs;       /* Vec<IrFunction*> */
+    Vec *globals;     /* Vec<IrGlobal*> */
+    u8 *widths;       /* value-width table, indexed by vreg id */
+    bool *signedness; /* signedness table, indexed by vreg id (parallel to widths) */
     u32 width_count;
     u32 width_cap;
     u32 next_vreg; /* module-wide vreg allocator */
@@ -226,7 +227,8 @@ IrFunction *ir_module_add_func(IrModule *m, const char *name, Type *ret_type);
 IrBlock *ir_func_add_block(IrFunction *f, const char *label);
 
 /* vreg allocation */
-u32 ir_alloc_vreg(IrModule *m, u8 width);
+u32 ir_alloc_vreg(IrModule *m, u8 width, bool is_signed);
+bool ir_vreg_signed(const IrModule *m, u32 vreg);
 
 /* instruction creation */
 IrInstr *ir_emit_ret(IrBlock *bb, IrOperand val);

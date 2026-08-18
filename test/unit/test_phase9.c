@@ -575,3 +575,74 @@ TEST(phase9, addr_of_spills_to_alloca)
     EXPECT_TRUE(found_alloca);
     arena_free(arena);
 }
+/* --- narrow integer memory semantics (signedness-aware extension) --- */
+
+TEST(phase9, narrow_unsigned_char_load_no_sext)
+{
+    /* Regression: the interpreter used to sign-extend every narrow load, so
+       unsigned char glob=200 read back as -56 instead of 200. */
+    Arena *arena = arena_new();
+    const char *src = "unsigned char g; int main(void){ g = 200; "
+                      "return g == 200 ? 42 : 0; }\n";
+    EXPECT_EQ(run_interp(src, arena), 42);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_uc.o", "/tmp/ficc_p9_uc"), 42);
+    arena_free(arena);
+}
+
+TEST(phase9, narrow_unsigned_short_memory_exact)
+{
+    /* 0xFFFF stored and reloaded must compare equal as 65535 (not -1). */
+    Arena *arena = arena_new();
+    const char *src = "unsigned short g; int main(void){ unsigned short *p = &g; "
+                      "*p = 65535; return *p == 65535 ? 42 : 0; }\n";
+    EXPECT_EQ(run_interp(src, arena), 42);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_us.o", "/tmp/ficc_p9_us"), 42);
+    arena_free(arena);
+}
+
+TEST(phase9, narrow_signed_short_return)
+{
+    /* Signed narrow values must still sign-extend, so comparing against a
+       negative literal holds. */
+    Arena *arena = arena_new();
+    const char *src = "short g; int main(void){ g = -7; short *p = &g; "
+                      "return *p == -7 ? 42 : 0; }\n";
+    EXPECT_EQ(run_interp(src, arena), 42);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_ss.o", "/tmp/ficc_p9_ss"), 42);
+    arena_free(arena);
+}
+
+TEST(phase9, narrow_unsigned_member_load)
+{
+    Arena *arena = arena_new();
+    const char *src = "struct P { unsigned char x; unsigned short y; }; "
+                      "struct P pt; int main(void){ pt.x = 200; pt.y = 65535; "
+                      "return (pt.x == 200 && pt.y == 65535) ? 42 : 0; }\n";
+    EXPECT_EQ(run_interp(src, arena), 42);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_mem.o", "/tmp/ficc_p9_mem"), 42);
+    arena_free(arena);
+}
+
+TEST(phase9, narrow_unsigned_param_preserves_value)
+{
+    /* A narrow unsigned value passed as an argument must arrive whole. */
+    Arena *arena = arena_new();
+    const char *src = "int f(unsigned char a){ return a == 200 ? 42 : 0; }\n"
+                      "int main(void){ return f(200); }\n";
+    EXPECT_EQ(run_interp(src, arena), 42);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_arg.o", "/tmp/ficc_p9_arg"), 42);
+    arena_free(arena);
+}
+
+TEST(phase9, narrow_signed_load_in_memory_vars)
+{
+    /* Address-of spilled locals: signed char/ short must sign-extend on the
+       way back out of memory. */
+    Arena *arena = arena_new();
+    const char *src = "int main(void){ char c = -7; char *cp = &c; "
+                      "short s; short *sp = &s; *sp = -1234; "
+                      "return (*cp == -7 && *sp == -1234) ? 42 : 0; }\n";
+    EXPECT_EQ(run_interp(src, arena), 42);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_sl.o", "/tmp/ficc_p9_sl"), 42);
+    arena_free(arena);
+}

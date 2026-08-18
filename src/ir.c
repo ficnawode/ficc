@@ -24,6 +24,7 @@ IrModule *ir_module_new(Arena *arena)
     m->funcs = vec_new(arena);
     m->globals = vec_new(arena);
     m->widths = NULL;
+    m->signedness = NULL;
     m->width_count = 0;
     m->width_cap = 0;
     m->next_vreg = 0;
@@ -55,21 +56,32 @@ IrBlock *ir_func_add_block(IrFunction *f, const char *label)
     return bb;
 }
 
-u32 ir_alloc_vreg(IrModule *m, u8 width)
+u32 ir_alloc_vreg(IrModule *m, u8 width, bool is_signed)
 {
     if (m->width_count >= m->width_cap)
     {
         u32 new_cap = m->width_cap ? m->width_cap * 2 : 8;
         u8 *new_widths = arena_alloc(m->arena, new_cap, sizeof(u8));
+        bool *new_signed = arena_alloc(m->arena, new_cap, sizeof(bool));
         if (m->widths)
         {
             memcpy(new_widths, m->widths, m->width_count);
+            memcpy(new_signed, m->signedness, m->width_count);
         }
         m->widths = new_widths;
+        m->signedness = new_signed;
         m->width_cap = new_cap;
     }
-    m->widths[m->width_count++] = width;
+    m->widths[m->width_count] = width;
+    m->signedness[m->width_count] = is_signed;
+    m->width_count++;
     return m->next_vreg++;
+}
+
+bool ir_vreg_signed(const IrModule *m, u32 vreg)
+{
+    ASSERT(vreg < m->width_count);
+    return m->signedness[vreg];
 }
 
 static IrInstr *instr_new(IrBlock *bb, IrOpcode opcode, u32 result, u8 nops)

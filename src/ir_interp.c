@@ -148,7 +148,8 @@ static void mask_vreg(InterpCtx *ctx, i64 *regs, u32 vreg)
 {
     ASSERT(vreg < ctx->nregs);
     u8 w = ctx->mod->widths[vreg];
-    regs[vreg] = sext_result(regs[vreg], w);
+    bool is_signed = ir_vreg_signed(ctx->mod, vreg);
+    regs[vreg] = is_signed ? sext_result(regs[vreg], w) : trunc_result(regs[vreg], w);
 }
 
 /* ------------------------------------------------------------------ */
@@ -526,7 +527,8 @@ static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs)
     u8 w = ctx->mod->widths[in->result];
     i64 val = 0;
     memcpy(&val, addr, w > 8 ? 8 : w);
-    regs[in->result] = sext_result(val, w);
+    regs[in->result] = val;
+    mask_vreg(ctx, regs, in->result);
     return 0;
 }
 

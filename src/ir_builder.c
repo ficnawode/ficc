@@ -96,7 +96,7 @@ static u32 alloc_vreg_from_type(FuncBuilder *ctx, Type *type)
 {
     u8 width = type->width / 8;
     ASSERT(width == 1 || width == 2 || width == 4 || width == 8);
-    return ir_alloc_vreg(ctx->mod, width);
+    return ir_alloc_vreg(ctx->mod, width, type_is_signed(type));
 }
 
 /* Records and arrays are memory, not SSA values: their SSA slot holds a
@@ -125,15 +125,15 @@ static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *
 {
     u8 src_w = src_type->width / 8;
     u8 tgt_w = target_type->width / 8;
+    if (src_type->kind == target_type->kind || src_w == tgt_w)
+    {
+        return val;
+    }
     if (val.is_imm)
     {
         u32 src_vreg = alloc_vreg_from_type(ctx, src_type);
         ir_emit_unary(bb, type_is_signed(src_type) ? OP_SEXT : OP_ZEXT, src_vreg, val);
         val = ir_operand_vreg(src_vreg);
-    }
-    if (src_type->kind == target_type->kind || src_w == tgt_w)
-    {
-        return val;
     }
     if (tgt_w > src_w)
     {
@@ -1480,6 +1480,7 @@ static IrBlock *build_return_stmt(ASTReturnStmt *ret, IrFunction *f, IrBlock *bb
             ir_emit_ret(val.block, ir_operand_vreg(ctx->sret_vreg));
             return val.block;
         }
+        val.value = promote_to(ctx, val.block, val.value, node_type(ret->expr), f->ret_type);
         ir_emit_ret(val.block, val.value);
         return val.block;
     }

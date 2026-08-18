@@ -910,7 +910,6 @@ static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand 
     }
     else
     {
-        bytebuf_append(buf, X86_OPERAND_SIZE);
         bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
                                 src.kind == XOP_MEM && reg_is_extended(src.u.mem.base)));
         bytebuf_append(buf, X86_TWO_BYTE_ESC);
@@ -1041,7 +1040,7 @@ static void lower_store(IrInstr *in, CodegenCtx *ctx)
     /* Materialize the value first (ECX) so a global-pointer operand for the
        destination (load_ptr -> EAX) cannot clobber it. */
     X86Operand val = lowered_operand(ctx, in->ops[0], R_ECX);
-    if (val.kind == XOP_MEM)
+    if (val.kind == XOP_MEM || val.kind == XOP_IMM)
     {
         emit_mov(ctx->buf, w, xop_reg(R_EDX), val);
         val = xop_reg(R_EDX);

@@ -20,9 +20,9 @@ TEST(ir, vreg_allocation)
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
 
-    u32 v0 = ir_alloc_vreg(m, 4);
-    u32 v1 = ir_alloc_vreg(m, 8);
-    u32 v2 = ir_alloc_vreg(m, 1);
+    u32 v0 = ir_alloc_vreg(m, 4, true);
+    u32 v1 = ir_alloc_vreg(m, 8, true);
+    u32 v2 = ir_alloc_vreg(m, 1, true);
 
     EXPECT_EQ(v0, 0);
     EXPECT_EQ(v1, 1);
@@ -42,7 +42,7 @@ TEST(ir, vreg_table_growth)
 
     for (int i = 0; i < 20; i++)
     {
-        ir_alloc_vreg(m, (u8) (i + 1));
+        ir_alloc_vreg(m, (u8) (i + 1), true);
     }
 
     EXPECT_EQ(m->width_count, 20);
