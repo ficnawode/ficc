@@ -88,7 +88,7 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
         }
         if (type_is_record(lt) && lt != rt)
         {
-            sem_error(binary_expr->base.loc, "incompatible types in struct assignment");
+            sem_error(binary_expr->base.loc, "incompatible types in struct/union assignment");
             ctx->error = true;
             return false;
         }
@@ -238,7 +238,7 @@ static bool check_member_access(ASTMemberAccess *ma, SemanticCtx *ctx)
     }
     if (!type_is_record(record_type))
     {
-        sem_error(ma->base.loc, "member access on non-struct type");
+        sem_error(ma->base.loc, "member access on non-struct/union type");
         ctx->error = true;
         return false;
     }
@@ -409,8 +409,8 @@ static bool check_return_stmt(ASTReturnStmt *return_stmt, SemanticCtx *ctx, Type
     if (type_is_record(ret_type) && return_stmt->expr && return_stmt->expr->expr_type != ret_type)
     {
         sem_error(return_stmt->base.loc,
-                  "returning a non-struct value from function returning "
-                  "struct '%s'",
+                  "returning a non-struct/union value from function returning "
+                  "struct/union '%s'",
                   ret_type->record.tag);
         ctx->error = true;
         return false;
@@ -443,7 +443,7 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
     if (type_is_record(var_decl->type) && var_decl->init &&
         var_decl->init->expr_type != var_decl->type)
     {
-        sem_error(var_decl->base.loc, "invalid initializer for struct type '%s'",
+        sem_error(var_decl->base.loc, "invalid initializer for struct/union type '%s'",
                   var_decl->type->record.tag);
         ctx->error = true;
         return false;

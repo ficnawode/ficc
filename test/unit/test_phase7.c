@@ -149,6 +149,82 @@ TEST(phase7, incomplete_until_complete)
     EXPECT_EQ(s->size, 0);
 }
 
+TEST(phase7, union_layout)
+{
+    Arena *a = arena_new();
+    Type *u = type_record(TYPE_UNION, "P7UnionLayout");
+    Vec *fields = vec_new(a);
+    vec_push(fields, make_field(a, "i", type_int()));
+    vec_push(fields, make_field(a, "c", type_char()));
+    vec_push(fields, make_field(a, "l", type_long()));
+    type_record_complete(u, fields);
+    EXPECT_TRUE(type_is_union(u));
+    EXPECT_TRUE(type_is_record(u));
+    EXPECT_EQ(type_record_field_offset(u, "i"), 0);
+    EXPECT_EQ(type_record_field_offset(u, "c"), 0);
+    EXPECT_EQ(type_record_field_offset(u, "l"), 0);
+    EXPECT_EQ(u->size, 8);
+    EXPECT_EQ(u->align, 8);
+    arena_free(a);
+}
+
+TEST(phase7, union_size_align)
+{
+    Arena *a = arena_new();
+    Type *u = type_record(TYPE_UNION, "P7UnionSizeAlign");
+    Vec *fields = vec_new(a);
+    vec_push(fields, make_field(a, "c", type_char()));
+    vec_push(fields, make_field(a, "i", type_int()));
+    type_record_complete(u, fields);
+    EXPECT_EQ(u->size, 4);
+    EXPECT_EQ(u->align, 4);
+    arena_free(a);
+}
+
+TEST(phase7, union_nested_layout)
+{
+    Arena *a = arena_new();
+    Type *pt = type_record(TYPE_STRUCT, "P7UPoint");
+    Vec *pt_fields = vec_new(a);
+    vec_push(pt_fields, make_field(a, "x", type_int()));
+    vec_push(pt_fields, make_field(a, "y", type_int()));
+    type_record_complete(pt, pt_fields);
+
+    Type *u = type_record(TYPE_UNION, "P7UNested");
+    Vec *u_fields = vec_new(a);
+    vec_push(u_fields, make_field(a, "p", pt));
+    vec_push(u_fields, make_field(a, "l", type_long()));
+    type_record_complete(u, u_fields);
+    EXPECT_EQ(u->size, 8);
+    EXPECT_EQ(u->align, 8);
+    EXPECT_EQ(type_record_field_offset(u, "p"), 0);
+
+    Type *s = type_record(TYPE_STRUCT, "P7UWrap");
+    Vec *s_fields = vec_new(a);
+    vec_push(s_fields, make_field(a, "tag", type_char()));
+    vec_push(s_fields, make_field(a, "u", u));
+    type_record_complete(s, s_fields);
+    EXPECT_EQ(type_record_field_offset(s, "tag"), 0);
+    EXPECT_EQ(type_record_field_offset(s, "u"), 8);
+    EXPECT_EQ(s->size, 16);
+    EXPECT_EQ(s->align, 8);
+    arena_free(a);
+}
+
+TEST(phase7, union_intern_tag)
+{
+    Type *a = type_record(TYPE_UNION, "P7UInternTag");
+    Type *b = type_record(TYPE_UNION, "P7UInternTag");
+    EXPECT_TRUE(a == b);
+}
+
+TEST(phase7, union_incomplete)
+{
+    Type *u = type_record(TYPE_UNION, "P7UIncomplete");
+    EXPECT_FALSE(type_is_complete(u));
+    EXPECT_EQ(u->size, 0);
+}
+
 TEST(phase7, interp_struct_member)
 {
     const char *src = "struct Pt { int x; int y; };\n"
@@ -251,6 +327,86 @@ TEST(phase7, interp_deref_addr_record)
     arena_free(arena);
 }
 
+TEST(phase7, interp_union_pun)
+{
+    const char *src = "union Mix { int i; char c; };\n"
+                      "int main(void) { union Mix m; m.i = 65; return m.c; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 65);
+    arena_free(arena);
+}
+
+TEST(phase7, interp_union_pun_word)
+{
+    const char *src = "union Mix { int i; char c; };\n"
+                      "int main(void) { union Mix m; m.i = 0x1234; return m.c; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 52);
+    arena_free(arena);
+}
+
+TEST(phase7, interp_union_struct_member)
+{
+    const char *src = "struct Pt { int x; int y; };\n"
+                      "union U { int i; struct Pt p; };\n"
+                      "int main(void) { union U u; u.p.x = 3; u.p.y = 4; "
+                      "return u.p.x * 10 + u.p.y; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 34);
+    arena_free(arena);
+}
+
+TEST(phase7, interp_union_in_struct)
+{
+    const char *src = "union U { int i; char c; };\n"
+                      "struct S { char tag; union U u; int n; };\n"
+                      "int main(void) { struct S s; s.u.i = 7; s.n = 10; return s.u.i + s.n; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 17);
+    arena_free(arena);
+}
+
+TEST(phase7, interp_union_assign)
+{
+    const char *src = "union U { int i; char c; };\n"
+                      "int main(void) { union U a; union U b; a.i = 42; b = a; b.c = 7; "
+                      "return a.i + b.i; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 49);
+    arena_free(arena);
+}
+
+TEST(phase7, interp_union_byval_arg)
+{
+    const char *src = "union U { int i; char c; };\n"
+                      "int mut(union U u) { u.i = u.i + 1; return u.i; }\n"
+                      "int main(void) { union U a; a.i = 10; int r = mut(a); return a.i + r; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 21);
+    arena_free(arena);
+}
+
+TEST(phase7, interp_union_return)
+{
+    const char *src = "union U { int i; char c; };\n"
+                      "union U make(int v) { union U u; u.i = v; return u; }\n"
+                      "int main(void) { union U u = make(9); return u.c; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 9);
+    arena_free(arena);
+}
+
+TEST(phase7, interp_union_array)
+{
+    const char *src = "union U { int i; char c; };\n"
+                      "int main(void) { union U arr[4]; int k; "
+                      "for (k = 0; k < 4; k = k + 1) arr[k].i = k * 10; "
+                      "return arr[0].i + arr[3].i; }\n";
+    Arena *arena = arena_new();
+    EXPECT_EQ(run_interp(src, arena), 30);
+    arena_free(arena);
+}
+
 TEST(phase7, elf_struct_member)
 {
     const char *src = "struct Pt { int x; int y; };\n"
@@ -327,6 +483,31 @@ TEST(phase7, elf_struct_array)
     EXPECT_EQ(rc, 9);
     unlink("/tmp/ficc_p7_arr.o");
     unlink("/tmp/ficc_p7_arr");
+    arena_free(arena);
+}
+
+TEST(phase7, elf_union_pun)
+{
+    const char *src = "union Mix { int i; char c; };\n"
+                      "int main(void) { union Mix m; m.i = 65; return m.c; }\n";
+    Arena *arena = arena_new();
+    int rc = run_elf(src, arena, "/tmp/ficc_p7_upun.o", "/tmp/ficc_p7_upun");
+    EXPECT_EQ(rc, 65);
+    unlink("/tmp/ficc_p7_upun.o");
+    unlink("/tmp/ficc_p7_upun");
+    arena_free(arena);
+}
+
+TEST(phase7, elf_union_byval)
+{
+    const char *src = "union U { int i; char c; };\n"
+                      "union U make(int v) { union U u; u.i = v; return u; }\n"
+                      "int main(void) { union U u = make(9); return u.c; }\n";
+    Arena *arena = arena_new();
+    int rc = run_elf(src, arena, "/tmp/ficc_p7_ubyval.o", "/tmp/ficc_p7_ubyval");
+    EXPECT_EQ(rc, 9);
+    unlink("/tmp/ficc_p7_ubyval.o");
+    unlink("/tmp/ficc_p7_ubyval");
     arena_free(arena);
 }
 
@@ -417,6 +598,34 @@ TEST(phase7, negative_record_return_scalar)
     EXPECT_TRUE(build_from_source("struct Pt { int x; };\n"
                                   "struct Pt f(void) { return 5; }\n"
                                   "int main(void) { return 0; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase7, negative_unknown_member_union)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("union U { int i; };\n"
+                                  "int main(void) { union U u; return u.x; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase7, negative_tag_kind_collision)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("struct S { int x; };\n"
+                                  "union S { int y; };\n"
+                                  "int main(void) { return 0; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase7, negative_sizeof_incomplete_union)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("union U;\n"
+                                  "int main(void) { return sizeof(union U); }\n",
                                   arena) == NULL);
     arena_free(arena);
 }
