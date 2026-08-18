@@ -241,12 +241,10 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
         if (operand->kind == AST_IDENT)
         {
             ASTVarDecl *decl = ast_as(ASTIdent, operand)->decl;
-            bool is_global = decl != NULL && !decl->is_block_scope;
-            bool is_static = decl != NULL && decl->storage == SC_STATIC;
-            /* File globals and block statics have a real address constant;
-               block-scope scalars don't (no spill slot). */
-            if (!decl || (!is_global && !is_static && !type_is_array(decl->type) &&
-                          !type_is_record(decl->type)))
+            /* Any lvalue identifier is addressable: file globals and block
+               statics are address constants, and block-scope autos spill to a
+               stack slot (Phase 9b). */
+            if (!decl)
             {
                 sem_error(unary_expr->base.loc, "cannot take address of this expression");
                 ctx->error = true;

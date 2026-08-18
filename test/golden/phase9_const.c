@@ -34,6 +34,10 @@ int main(void)
     const int local = 5; /* const local (block scope) */
     const int *p = &g;   /* pointer to const from a scalar global address */
 
+    int spill = 11; /* block-scope auto spilled because &spill is taken */
+    int *sp = &spill;
+    *sp = 21; /* write through the pointer to the spill slot */
+
     struct point pt;
     pt.x = 1;
     pt.y = 2;
@@ -41,6 +45,6 @@ int main(void)
 
     int d = delta(&lo_val, &hi_val); /* int* -> const int* arguments */
 
-    /* 5 + 40 + 3 + 9 + 2 + 104 - 121 = 42 */
-    return local + LIMIT + s + d + step() + GREET[0] - 121;
+    /* 21 + 5 + 40 + 3 + 9 + 2 + 104 - 142 = 42 */
+    return spill + local + LIMIT + s + d + step() + GREET[0] - 142;
 }

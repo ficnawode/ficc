@@ -51,6 +51,8 @@ struct FuncBuilder
     StrMap *func_types;   /* function name -> Type* (return type) */
     StrMap *global_map;   /* file-scope variable name -> u32* (index into mod->globals) */
     U64Map *static_map;   /* (u64)ASTVarDecl* -> u32* (index into mod->globals) */
+    Vec *spilled;         /* Vec<ASTVarDecl*>: block-scope autos whose address is taken */
+    U64Map *spill_slots;  /* (u64)ASTVarDecl* -> IrOperand* (function-entry slot addr) */
     u32 sret_vreg;        /* hidden sret pointer vreg for record-returning funcs */
 };
 
@@ -223,8 +225,49 @@ static void declare_pred(IrBlock *bb, IrBlock *pred)
     vec_push(bb->preds, pred);
 }
 
+/* --- scalar address-of spill machinery (Phase 9b) ---
+   A block-scope auto whose address is taken becomes memory-resident: it gets a
+   function-entry `OP_ALLOCA` slot whose address is stored in `spill_slots`,
+   and every read/write goes through `OP_LOAD`/`OP_STORE` — bypassing the Braun
+   SSA stack entirely, exactly like globals. Loads see current memory, so loops
+   and CFG merges stay correct with no PHIs. */
+
+static bool is_spillable_var(ASTVarDecl *decl)
+{
+    return decl->is_block_scope && decl->storage == SC_NONE && !type_is_array(decl->type) &&
+           !type_is_record(decl->type);
+}
+
+static IrOperand *spill_slot(FuncBuilder *ctx, ASTVarDecl *var)
+{
+    return u64map_get(ctx->spill_slots, (u64) (uintptr_t) var);
+}
+
+/* Emit one alloca per address-taken auto into the function entry block and
+   record the slot address. Allocas are hoisted first so slot addresses are
+   invariant and dominate every use. */
+static void emit_spill_allocas(FuncBuilder *ctx, IrBlock *entry)
+{
+    size_t n = vec_size(ctx->spilled);
+    for (size_t i = 0; i < n; i++)
+    {
+        ASTVarDecl *vd = (ASTVarDecl *) vec_get(ctx->spilled, i);
+        u32 slot = alloc_vreg_from_type(ctx, type_ptr(vd->type));
+        ir_emit_alloca(entry, slot, type_sizeof(vd->type));
+        IrOperand *op = box_operand(ctx, ir_operand_vreg(slot));
+        u64map_set(ctx->spill_slots, (u64) (uintptr_t) vd, op);
+    }
+}
+
 static IrOperand read_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
 {
+    IrOperand *slot = spill_slot(ctx, var);
+    if (slot)
+    {
+        u32 dst = alloc_vreg_from_type(ctx, var->type);
+        ir_emit_load(bb, dst, *slot);
+        return ir_operand_vreg(dst);
+    }
     BlockLocals *bl = get_block_locals(ctx, bb);
     IrOperand *p = u64map_get(bl->locals, (u64) (uintptr_t) var);
     if (p)
@@ -276,6 +319,12 @@ static IrOperand resolve_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb
 
 static void write_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb, IrOperand val)
 {
+    IrOperand *slot = spill_slot(ctx, var);
+    if (slot)
+    {
+        ir_emit_store(bb, val, *slot, var->type->size);
+        return;
+    }
     BlockLocals *bl = get_block_locals(ctx, bb);
     u64map_set(bl->locals, (u64) (uintptr_t) var, box_operand(ctx, val));
 }
@@ -881,6 +930,12 @@ static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, 
         if (midx != NO_VREG)
         {
             return expr_result(ir_operand_global(midx), bb);
+        }
+        /* &x on an address-taken block-scope auto: the slot address. */
+        IrOperand *slot = spill_slot(ctx, decl);
+        if (slot)
+        {
+            return expr_result(*slot, bb);
         }
     }
     /* &x for array: build_expr already decays to pointer */
@@ -1597,6 +1652,145 @@ static void finish_func(IrFunction *f, IrBlock *exit, FuncBuilder *ctx)
     seal_all_blocks(ctx, f);
 }
 
+/* Pre-pass: record every block-scope auto whose address is taken so its slot
+   alloca exists in the entry block before any lowering starts (reads/writes of
+   a spilled var must consistently go through memory, even before the `&`
+   operator itself is visited). */
+static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx);
+static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx);
+
+static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
+{
+    if (!node)
+    {
+        return;
+    }
+    switch (node->kind)
+    {
+        case AST_UNARY_EXPR:
+        {
+            ASTUnaryExpr *ue = ast_as(ASTUnaryExpr, node);
+            if (ue->op == UN_ADDR && ue->operand->kind == AST_IDENT)
+            {
+                ASTVarDecl *decl = ast_as(ASTIdent, ue->operand)->decl;
+                if (decl && is_spillable_var(decl) && !spill_slot(ctx, decl))
+                {
+                    u64map_set(ctx->spill_slots, (u64) (uintptr_t) decl, (void *) 1);
+                    vec_push(ctx->spilled, decl);
+                }
+            }
+            mark_addr_taken_expr(ue->operand, ctx);
+            break;
+        }
+        case AST_BINARY_EXPR:
+        {
+            ASTBinaryExpr *be = ast_as(ASTBinaryExpr, node);
+            mark_addr_taken_expr(be->left, ctx);
+            mark_addr_taken_expr(be->right, ctx);
+            break;
+        }
+        case AST_TERNARY_EXPR:
+        {
+            ASTTernaryExpr *te = ast_as(ASTTernaryExpr, node);
+            mark_addr_taken_expr(te->cond, ctx);
+            mark_addr_taken_expr(te->then_expr, ctx);
+            mark_addr_taken_expr(te->else_expr, ctx);
+            break;
+        }
+        case AST_CALL_EXPR:
+        {
+            ASTCallExpr *ce = ast_as(ASTCallExpr, node);
+            size_t n = vec_size(ce->args);
+            for (size_t i = 0; i < n; i++)
+            {
+                mark_addr_taken_expr((ASTNode *) vec_get(ce->args, i), ctx);
+            }
+            break;
+        }
+        case AST_SUBSCRIPT_EXPR:
+        {
+            ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, node);
+            mark_addr_taken_expr(se->array, ctx);
+            mark_addr_taken_expr(se->index, ctx);
+            break;
+        }
+        case AST_SIZEOF_EXPR:
+            mark_addr_taken_expr(ast_as(ASTSizeofExpr, node)->operand, ctx);
+            break;
+        case AST_MEMBER_ACCESS:
+            mark_addr_taken_expr(ast_as(ASTMemberAccess, node)->object, ctx);
+            break;
+        default:
+            break; /* literals, identifiers, sizeof-type: nothing to walk */
+    }
+}
+
+static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx)
+{
+    if (!node)
+    {
+        return;
+    }
+    switch (node->kind)
+    {
+        case AST_RETURN_STMT:
+            mark_addr_taken_expr(ast_as(ASTReturnStmt, node)->expr, ctx);
+            break;
+        case AST_VAR_DECL:
+            mark_addr_taken_expr(ast_as(ASTVarDecl, node)->init, ctx);
+            break;
+        case AST_EXPR_STMT:
+            mark_addr_taken_expr(ast_as(ASTExprStmt, node)->expr, ctx);
+            break;
+        case AST_COMPOUND_STMT:
+        {
+            ASTCompoundStmt *cs = ast_as(ASTCompoundStmt, node);
+            size_t n = vec_size(cs->stmts);
+            for (size_t i = 0; i < n; i++)
+            {
+                mark_addr_taken_stmt((ASTNode *) vec_get(cs->stmts, i), ctx);
+            }
+            break;
+        }
+        case AST_IF_STMT:
+        {
+            ASTIfStmt *is = ast_as(ASTIfStmt, node);
+            mark_addr_taken_expr(is->cond, ctx);
+            mark_addr_taken_stmt(is->then_branch, ctx);
+            mark_addr_taken_stmt(is->else_branch, ctx);
+            break;
+        }
+        case AST_WHILE_STMT:
+        {
+            ASTWhileStmt *ws = ast_as(ASTWhileStmt, node);
+            mark_addr_taken_expr(ws->cond, ctx);
+            mark_addr_taken_stmt(ws->body, ctx);
+            break;
+        }
+        case AST_DO_WHILE_STMT:
+        {
+            ASTDoWhileStmt *ds = ast_as(ASTDoWhileStmt, node);
+            mark_addr_taken_stmt(ds->body, ctx);
+            mark_addr_taken_expr(ds->cond, ctx);
+            break;
+        }
+        case AST_FOR_STMT:
+        {
+            ASTForStmt *fs = ast_as(ASTForStmt, node);
+            mark_addr_taken_stmt(fs->init, ctx);
+            mark_addr_taken_expr(fs->cond, ctx);
+            mark_addr_taken_expr(fs->post, ctx);
+            mark_addr_taken_stmt(fs->body, ctx);
+            break;
+        }
+        case AST_LABEL_STMT:
+            mark_addr_taken_stmt(ast_as(ASTLabelStmt, node)->stmt, ctx);
+            break;
+        default:
+            break; /* break/continue/goto: no subexpressions */
+    }
+}
+
 static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *global_map)
 {
     if (ast->kind != AST_FUNC_DEF)
@@ -1616,17 +1810,18 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
         return false;
     }
 
-    FuncBuilder ctx = {mod,
-                       u64map_new(mod->arena),
-                       vec_new(mod->arena),
-                       strmap_new(mod->arena),
-                       func_types,
-                       global_map,
-                       u64map_new(mod->arena),
-                       NO_VREG};
+    FuncBuilder ctx = {
+        mod,        u64map_new(mod->arena), vec_new(mod->arena), strmap_new(mod->arena), func_types,
+        global_map, u64map_new(mod->arena), vec_new(mod->arena), u64map_new(mod->arena), NO_VREG};
 
     /* Pre-create blocks for all labels so gotos can target them. */
     collect_labels(func_ast->body, func, &ctx);
+
+    /* Collect address-taken autos, hoist their slot allocas into the entry
+       block, then wire params (address-taken params store their incoming
+       vregs into the already-existing slots). */
+    mark_addr_taken_stmt(func_ast->body, &ctx);
+    emit_spill_allocas(&ctx, entry);
 
     setup_params(&ctx, func, func_ast, entry);
 

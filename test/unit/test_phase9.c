@@ -427,3 +427,151 @@ TEST(phase9, negative_consistency_ok_same_qualifiers)
                                   arena) != NULL);
     arena_free(arena);
 }
+
+/* --- Part 9b: scalar address-of (`&x`) --- */
+
+TEST(phase9, addr_of_scalar_write_through)
+{
+    Arena *arena = arena_new();
+    const char *src = "int main(void) { int x = 3; int *p = &x; *p = 7; return x; }\n";
+    EXPECT_EQ(run_interp(src, arena), 7);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_ao1.o", "/tmp/ficc_p9_ao1"), 7);
+    arena_free(arena);
+    unlink("/tmp/ficc_p9_ao1.o");
+    unlink("/tmp/ficc_p9_ao1");
+}
+
+TEST(phase9, addr_of_const_scalar)
+{
+    Arena *arena = arena_new();
+    const char *src = "int main(void) { const int x = 41; const int *p = &x; return *p + 1; }\n";
+    EXPECT_EQ(run_interp(src, arena), 42);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_ao2.o", "/tmp/ficc_p9_ao2"), 42);
+    arena_free(arena);
+    unlink("/tmp/ficc_p9_ao2.o");
+    unlink("/tmp/ficc_p9_ao2");
+}
+
+TEST(phase9, addr_of_in_loop)
+{
+    Arena *arena = arena_new();
+    const char *src = "int main(void) { int i = 0; int s = 0; int *p = &i;\n"
+                      "  while (i < 4) { i = i + 1; s = s + i; } return s + i; }\n";
+    EXPECT_EQ(run_interp(src, arena), 14);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_ao3.o", "/tmp/ficc_p9_ao3"), 14);
+    arena_free(arena);
+    unlink("/tmp/ficc_p9_ao3.o");
+    unlink("/tmp/ficc_p9_ao3");
+}
+
+TEST(phase9, addr_of_param)
+{
+    Arena *arena = arena_new();
+    const char *src = "void bump(int *p) { *p = *p + 1; }\n"
+                      "int main(void) { int v = 9; bump(&v); return v; }\n";
+    EXPECT_EQ(run_interp(src, arena), 10);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_ao4.o", "/tmp/ficc_p9_ao4"), 10);
+    arena_free(arena);
+    unlink("/tmp/ficc_p9_ao4.o");
+    unlink("/tmp/ficc_p9_ao4");
+}
+
+TEST(phase9, addr_of_pointer_to_pointer)
+{
+    Arena *arena = arena_new();
+    const char *src = "int main(void) { int x = 2; int *p = &x; int **q = &p; **q = 6; "
+                      "return x; }\n";
+    EXPECT_EQ(run_interp(src, arena), 6);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_ao5.o", "/tmp/ficc_p9_ao5"), 6);
+    arena_free(arena);
+    unlink("/tmp/ficc_p9_ao5.o");
+    unlink("/tmp/ficc_p9_ao5");
+}
+
+TEST(phase9, addr_of_nested_block)
+{
+    Arena *arena = arena_new();
+    const char *src = "int main(void) { int r = 0; { int y = 3; int *p = &y; *p = 9; "
+                      "r = y; } return r; }\n";
+    EXPECT_EQ(run_interp(src, arena), 9);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_ao6.o", "/tmp/ficc_p9_ao6"), 9);
+    arena_free(arena);
+    unlink("/tmp/ficc_p9_ao6.o");
+    unlink("/tmp/ficc_p9_ao6");
+}
+
+TEST(phase9, addr_of_deref_of_addr)
+{
+    Arena *arena = arena_new();
+    const char *src = "int main(void) { int x = 1; *&x = 5; return x; }\n";
+    EXPECT_EQ(run_interp(src, arena), 5);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_ao7.o", "/tmp/ficc_p9_ao7"), 5);
+    arena_free(arena);
+    unlink("/tmp/ficc_p9_ao7.o");
+    unlink("/tmp/ficc_p9_ao7");
+}
+
+TEST(phase9, addr_of_struct_const_ptr_from_local)
+{
+    Arena *arena = arena_new();
+    const char *src = "struct point { int x; int y; };\n"
+                      "int main(void) { struct point pt; pt.x = 20; pt.y = 22;\n"
+                      "  const struct point *p = &pt; return p->x + p->y; }\n";
+    EXPECT_EQ(run_interp(src, arena), 42);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_ao8.o", "/tmp/ficc_p9_ao8"), 42);
+    arena_free(arena);
+    unlink("/tmp/ficc_p9_ao8.o");
+    unlink("/tmp/ficc_p9_ao8");
+}
+
+TEST(phase9, addr_of_ifelse_through_pointer)
+{
+    Arena *arena = arena_new();
+    const char *src = "int main(void) { int v = 0; int *p = &v;\n"
+                      "  if (1) { *p = 11; } else { *p = 22; } return v; }\n";
+    EXPECT_EQ(run_interp(src, arena), 11);
+    EXPECT_EQ(run_elf(src, arena, "/tmp/ficc_p9_ao9.o", "/tmp/ficc_p9_ao9"), 11);
+    arena_free(arena);
+    unlink("/tmp/ficc_p9_ao9.o");
+    unlink("/tmp/ficc_p9_ao9");
+}
+
+TEST(phase9, negative_addr_of_const_discard)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("int main(void) { const int x = 5; int *p = &x; return 0; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase9, negative_addr_of_const_write_through)
+{
+    Arena *arena = arena_new();
+    EXPECT_TRUE(build_from_source("int main(void) { const int x = 5; const int *p = &x; "
+                                  "*p = 6; return 0; }\n",
+                                  arena) == NULL);
+    arena_free(arena);
+}
+
+TEST(phase9, addr_of_spills_to_alloca)
+{
+    /* The spill slot alloca must land in the function's entry block. */
+    Arena *arena = arena_new();
+    IrModule *mod =
+        build_from_source("int main(void) { int x = 3; int *p = &x; return *p; }\n", arena);
+    EXPECT_TRUE(mod != NULL);
+    IrFunction *f = (IrFunction *) vec_get(mod->funcs, 0);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    bool found_alloca = false;
+    size_t n = vec_size(entry->instrs);
+    for (size_t i = 0; i < n; i++)
+    {
+        IrInstr *in = (IrInstr *) vec_get(entry->instrs, i);
+        if (in->opcode == OP_ALLOCA)
+        {
+            found_alloca = true;
+        }
+    }
+    EXPECT_TRUE(found_alloca);
+    arena_free(arena);
+}
