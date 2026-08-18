@@ -167,8 +167,9 @@ struct IrFunction
     const char *name;
     Type *ret_type;
     Arena *arena;
-    Vec *params; /* Vec<IrParam*> */
-    Vec *blocks; /* Vec<IrBlock*> */
+    Vec *params;    /* Vec<IrParam*> */
+    Vec *blocks;    /* Vec<IrBlock*> */
+    bool is_static; /* internal linkage (stays local in the object file) */
 };
 
 /* IrGlobal variable / data record.
@@ -180,6 +181,15 @@ typedef enum
     IR_SECTION_BSS,
 } IrSection;
 
+/* ELF-ish symbol linkage. Strings and static vars are local; default file-scope
+   vars are global; extern vars are undefined, resolved at link. */
+typedef enum
+{
+    IR_LINK_LOCAL,
+    IR_LINK_GLOBAL,
+    IR_LINK_EXTERN,
+} IrLinkage;
+
 typedef struct IrGlobal IrGlobal;
 struct IrGlobal
 {
@@ -189,6 +199,9 @@ struct IrGlobal
     size_t init_len;
     u32 align;
     IrSection section;
+    IrLinkage linkage;
+    int init_reloc_target; /* global index whose address is written into the
+                              init bytes (.rela.data R_X86_64_64), or -1 */
 };
 
 /* An IrModule owns all IR data for a compilation unit.

@@ -28,6 +28,8 @@
     X(TOK_KW_STRUCT)                                                                               \
     X(TOK_KW_UNION)                                                                                \
     X(TOK_KW_ENUM)                                                                                 \
+    X(TOK_KW_STATIC)                                                                               \
+    X(TOK_KW_EXTERN)                                                                               \
     X(TOK_DOT)                                                                                     \
     X(TOK_ARROW)                                                                                   \
     X(TOK_STRING_LIT)                                                                              \

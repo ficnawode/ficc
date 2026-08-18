@@ -82,6 +82,8 @@ static void init_keyword_map(Arena *arena)
     KW("struct", TOK_KW_STRUCT);
     KW("union", TOK_KW_UNION);
     KW("enum", TOK_KW_ENUM);
+    KW("static", TOK_KW_STATIC);
+    KW("extern", TOK_KW_EXTERN);
 #undef KW
 }
 
@@ -301,15 +303,15 @@ static bool lex_comment(LexerCtx *ctx)
         return false;
     }
 
-    lexer_advance(ctx); /* consume '/' */
-    lexer_advance(ctx); /* consume '*' */
+    lexer_advance(ctx);
+    lexer_advance(ctx);
 
     while (*ctx->p)
     {
         if (ctx->p[0] == '*' && ctx->p[1] == '/')
         {
-            lexer_advance(ctx); /* consume '*' */
-            lexer_advance(ctx); /* consume '/' */
+            lexer_advance(ctx);
+            lexer_advance(ctx);
             return true;
         }
         lexer_advance(ctx);

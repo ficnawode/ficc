@@ -23,14 +23,15 @@ static void *ast_new_node(size_t size, ASTKind kind, Loc loc, Arena *arena)
     return base;
 }
 
-ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body, Loc loc,
-                      Arena *arena)
+ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body,
+                      StorageClass storage, Loc loc, Arena *arena)
 {
     ASTFuncDef *n = ast_new_node(sizeof(ASTFuncDef), AST_FUNC_DEF, loc, arena);
     n->ret_type = ret_type;
     n->name = name;
     n->params = params;
     n->body = body;
+    n->storage = storage;
     return &n->base;
 }
 
@@ -66,12 +67,17 @@ ASTNode *ast_program(Vec *decls, Loc loc, Arena *arena)
     return &n->base;
 }
 
-ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, Loc loc, Arena *arena)
+ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, StorageClass storage, Loc loc,
+                      Arena *arena)
 {
     ASTVarDecl *n = ast_new_node(sizeof(ASTVarDecl), AST_VAR_DECL, loc, arena);
     n->type = type;
     n->name = name;
     n->init = init;
+    n->storage = storage;
+    n->const_init = 0;
+    n->has_const_init = false;
+    n->is_block_scope = false;
     return &n->base;
 }
 
@@ -111,6 +117,7 @@ ASTNode *ast_ident(const char *name, Loc loc, Arena *arena)
 {
     ASTIdent *n = ast_new_node(sizeof(ASTIdent), AST_IDENT, loc, arena);
     n->name = name;
+    n->decl = NULL;
     return &n->base;
 }
 

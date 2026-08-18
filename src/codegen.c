@@ -141,6 +141,7 @@ typedef enum
 
     X86_MOV_REG8_IMM8_BASE = 0xB0,
     X86_MOV_REG_IMM_BASE = 0xB8,
+    X86_MOV_RM_IMM32SX = 0xC7, /* mov r/m64, imm32 sign-extended (for global addrs) */
 
     X86_GROUP1_IMM8 = 0x80,
     X86_GROUP1_IMM32 = 0x81,
@@ -264,6 +265,17 @@ static X86Operand xop_from_operand(IrOperand op)
         return xop_imm(op.u.imm);
     }
     return xop_vreg(op.u.vreg);
+}
+
+static void emit_global_addr_to(ByteBuf *buf, u8 reg, u32 global_idx, Vec *patches, Arena *arena);
+static X86Operand lowered_operand(CodegenCtx *ctx, IrOperand op, u8 reg)
+{
+    if (op.is_global)
+    {
+        emit_global_addr_to(ctx->buf, reg, op.u.global_index, ctx->global_patches, ctx->arena);
+        return xop_reg(reg);
+    }
+    return xop_from_operand(op);
 }
 
 static u8 modrm(u8 mod, u8 reg, u8 rm)
@@ -732,8 +744,8 @@ static void lower_binary(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
     const ArithSpec *s = &arith_specs[in->opcode];
-    X86Operand rhs = xop_from_operand(in->ops[1]);
-    emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
+    X86Operand rhs = lowered_operand(ctx, in->ops[1], R_ECX);
+    emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
     if (in->opcode == OP_AND && w == 4 && rhs.kind == XOP_IMM && rhs.u.imm == 0xFF)
     {
         emit_movzbl_al_eax(ctx->buf); /* andl $0xFF, %eax → movzbl %al, %eax */
@@ -752,7 +764,7 @@ static void lower_binary(IrInstr *in, CodegenCtx *ctx)
 static void lower_unary(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
-    emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
+    emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
     emit_unary(ctx->buf, w, R_EAX, unary_digit[in->opcode]);
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
 }
@@ -760,8 +772,8 @@ static void lower_unary(IrInstr *in, CodegenCtx *ctx)
 static void lower_shift(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
-    emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
-    emit_mov(ctx->buf, w, xop_reg(R_ECX), xop_from_operand(in->ops[1]));
+    emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
+    emit_mov(ctx->buf, w, xop_reg(R_ECX), lowered_operand(ctx, in->ops[1], R_ECX));
     emit_shift_cl(ctx->buf, w, R_EAX, shift_digit[in->opcode]);
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
 }
@@ -770,9 +782,9 @@ static void lower_div(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
     bool is_unsigned = in->opcode == OP_UDIV || in->opcode == OP_UREM;
-    emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
+    emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
     emit_cdq(ctx->buf, w, is_unsigned);
-    emit_mov(ctx->buf, w, xop_reg(R_ECX), xop_from_operand(in->ops[1]));
+    emit_mov(ctx->buf, w, xop_reg(R_ECX), lowered_operand(ctx, in->ops[1], R_ECX));
     emit_idiv(ctx->buf, w, R_ECX);
     if (in->opcode == OP_SREM || in->opcode == OP_UREM)
     {
@@ -784,8 +796,8 @@ static void lower_div(IrInstr *in, CodegenCtx *ctx)
 static void lower_icmp(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
-    emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
-    emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, xop_from_operand(in->ops[1]));
+    emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
+    emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, lowered_operand(ctx, in->ops[1], R_ECX));
     emit_setcc(ctx->buf, icmp_cc[in->opcode]);
     emit_movzbl_al_eax(ctx->buf);
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
@@ -810,7 +822,7 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
     {
         IrOperand arg = in->extra.call.args[i];
         u8 w = arg.is_imm ? 4 : vreg_width(ctx, arg.u.vreg);
-        emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(arg));
+        emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, arg, R_EAX));
         emit_mov(ctx->buf, 8, xop_mem(x86_mem_rsp((i32) (i - 6) * 8)), xop_reg(R_EAX));
     }
 
@@ -819,7 +831,7 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
     {
         IrOperand arg = in->extra.call.args[i];
         u8 w = arg.is_imm ? 4 : vreg_width(ctx, arg.u.vreg);
-        emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(arg));
+        emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, arg, R_EAX));
         emit_mov(ctx->buf, w, xop_reg(abi_arg_regs[i]), xop_reg(R_EAX));
     }
 
@@ -843,7 +855,7 @@ static void lower_ret(IrInstr *in, CodegenCtx *ctx)
     {
         IrOperand val = in->ops[0];
         u8 w = val.is_imm ? 4 : vreg_width(ctx, val.u.vreg);
-        emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_from_operand(val));
+        emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, val, R_ECX));
     }
     else
     {
@@ -860,7 +872,7 @@ static void lower_br(IrInstr *in, CodegenCtx *ctx)
 
 static void lower_brcond(IrInstr *in, CodegenCtx *ctx)
 {
-    emit_mov(ctx->buf, 4, xop_reg(R_EAX), xop_from_operand(in->ops[0]));
+    emit_mov(ctx->buf, 4, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
     emit_test_eax_eax(ctx->buf);
     emit_jcc(ctx->buf, CC_E, in->extra.brcond.false_label, ctx->block_patches, ctx->arena);
     emit_jmp_placeholder(ctx->buf, in->extra.brcond.true_label, ctx->block_patches, ctx->arena);
@@ -881,7 +893,7 @@ static void lower_unreachable(IrInstr *in, CodegenCtx *ctx)
 static void lower_trunc(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
-    X86Operand src = xop_from_operand(in->ops[0]);
+    X86Operand src = lowered_operand(ctx, in->ops[0], R_EAX);
     emit_mov(ctx->buf, w, xop_reg(R_EAX), src);
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
 }
@@ -944,7 +956,7 @@ static void emit_movsx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand 
 static void lower_zext(IrInstr *in, CodegenCtx *ctx)
 {
     u8 dw = vreg_width(ctx, in->result);
-    X86Operand src = xop_from_operand(in->ops[0]);
+    X86Operand src = lowered_operand(ctx, in->ops[0], R_EAX);
     if (in->ops[0].is_imm)
     {
         emit_mov(ctx->buf, dw, xop_reg(R_EAX), src);
@@ -961,7 +973,7 @@ static void lower_zext(IrInstr *in, CodegenCtx *ctx)
 static void lower_sext(IrInstr *in, CodegenCtx *ctx)
 {
     u8 dw = vreg_width(ctx, in->result);
-    X86Operand src = xop_from_operand(in->ops[0]);
+    X86Operand src = lowered_operand(ctx, in->ops[0], R_EAX);
     if (in->ops[0].is_imm)
     {
         emit_mov(ctx->buf, dw, xop_reg(R_EAX), src);
@@ -975,14 +987,23 @@ static void lower_sext(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
-static void emit_global_addr(ByteBuf *buf, u32 global_idx, Vec *patches, Arena *arena)
+static void emit_global_addr_to(ByteBuf *buf, u8 reg, u32 global_idx, Vec *patches, Arena *arena)
 {
-    bytebuf_append(buf, X86_MOV_REG_IMM_BASE);
+    /* mov r64, imm32 sign-extended (C7 /0): this zero-extension-free encoding is
+       what GNU ld relocates against undefined (cross-TU) symbols. */
+    bytebuf_append(buf, rex(true, false, false, reg >= 8));
+    bytebuf_append(buf, X86_MOV_RM_IMM32SX);
+    bytebuf_append(buf, modrm(3, 0, reg));
     GlobalPatch *gp = arena_alloc(arena, sizeof(GlobalPatch), sizeof(void *));
     gp->offset = bytebuf_len(buf);
     gp->global_index = global_idx;
     vec_push(patches, gp);
     bytebuf_append_u32(buf, 0);
+}
+
+static void emit_global_addr(ByteBuf *buf, u32 global_idx, Vec *patches, Arena *arena)
+{
+    emit_global_addr_to(buf, R_EAX, global_idx, patches, arena);
 }
 
 static void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src)
@@ -1001,7 +1022,7 @@ static X86Mem load_ptr(CodegenCtx *ctx, IrOperand ptr)
     }
     else
     {
-        emit_mov(ctx->buf, 8, xop_reg(R_EAX), xop_from_operand(ptr));
+        emit_mov(ctx->buf, 8, xop_reg(R_EAX), lowered_operand(ctx, ptr, R_EAX));
     }
     return (X86Mem) {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
 }
@@ -1017,7 +1038,9 @@ static void lower_load(IrInstr *in, CodegenCtx *ctx)
 static void lower_store(IrInstr *in, CodegenCtx *ctx)
 {
     u32 w = (u32) in->ops[2].u.imm;
-    X86Operand val = xop_from_operand(in->ops[0]);
+    /* Materialize the value first (ECX) so a global-pointer operand for the
+       destination (load_ptr -> EAX) cannot clobber it. */
+    X86Operand val = lowered_operand(ctx, in->ops[0], R_ECX);
     if (val.kind == XOP_MEM)
     {
         emit_mov(ctx->buf, w, xop_reg(R_EDX), val);
@@ -1045,7 +1068,7 @@ static void lower_gep(IrInstr *in, CodegenCtx *ctx)
     if (stride == 1 || stride == 2 || stride == 4 || stride == 8)
     {
         X86Mem base = load_ptr(ctx, in->ops[0]);
-        emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_from_operand(in->ops[1]));
+        emit_mov(ctx->buf, 8, xop_reg(R_ECX), lowered_operand(ctx, in->ops[1], R_ECX));
         X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = (u8) stride, .disp = 0};
         emit_lea(ctx->buf, R_EDX, scaled);
         emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
@@ -1054,7 +1077,7 @@ static void lower_gep(IrInstr *in, CodegenCtx *ctx)
 
     /* General stride: index *= stride, then lea (base, index, 1). */
     X86Mem base = load_ptr(ctx, in->ops[0]);
-    emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_from_operand(in->ops[1]));
+    emit_mov(ctx->buf, 8, xop_reg(R_ECX), lowered_operand(ctx, in->ops[1], R_ECX));
     emit_imul_imm(ctx->buf, 8, R_ECX, stride);
     X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = 1, .disp = 0};
     emit_lea(ctx->buf, R_EDX, scaled);
@@ -1295,7 +1318,7 @@ static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
             {
                 u8 pw = pc->src.is_imm ? vreg_width(ctx, pc->dst_vreg)
                                        : vreg_width(ctx, pc->src.u.vreg);
-                emit_mov(ctx->buf, pw, xop_reg(R_EAX), xop_from_operand(pc->src));
+                emit_mov(ctx->buf, pw, xop_reg(R_EAX), lowered_operand(ctx, pc->src, R_ECX));
                 emit_mov(ctx->buf, pw, xop_vreg(pc->dst_vreg), xop_reg(R_EAX));
             }
         }
@@ -1369,6 +1392,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     cf->offset = 0;
     cf->patches = patches;
     cf->global_patches = global_patches;
+    cf->is_static = f->is_static;
 }
 
 static CodegenFunc *find_codegen_func(CodegenModule *cm, const char *name)
@@ -1390,17 +1414,6 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena)
     CodegenModule *cm = arena_alloc(arena, sizeof(CodegenModule), sizeof(void *));
     cm->funcs = vec_new(arena);
     cm->globals = ir->globals;
-    cm->rodata_offsets = vec_new(arena);
-
-    /* Lay out rodata: compute each global's byte offset within the section */
-    size_t rodata_off = 0;
-    size_t nglobals = ir->globals ? vec_size(ir->globals) : 0;
-    for (size_t i = 0; i < nglobals; i++)
-    {
-        IrGlobal *g = (IrGlobal *) vec_get(ir->globals, i);
-        vec_push(cm->rodata_offsets, (void *) rodata_off);
-        rodata_off += g->init_len;
-    }
 
     size_t nfuncs = vec_size(ir->funcs);
     for (size_t i = 0; i < nfuncs; i++)

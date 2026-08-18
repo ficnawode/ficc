@@ -751,16 +751,30 @@ i64 ir_interp_run(IrModule *m)
         for (u32 i = 0; i < nglobals; i++)
         {
             IrGlobal *ig = (IrGlobal *) vec_get(m->globals, i);
-            globals[i].size = ig->init_len;
+            /* BSS globals carry no init data, so size must come from the type,
+               not init_len (which is 0). */
+            u32 size = (u32) type_sizeof(ig->type);
+            globals[i].size = size;
+            globals[i].data = arena_alloc(frame_arena, size, ig->align);
             if (ig->init_data)
             {
-                globals[i].data = arena_alloc(frame_arena, ig->init_len, ig->align);
                 memcpy(globals[i].data, ig->init_data, ig->init_len);
             }
             else
             {
-                globals[i].data = arena_alloc(frame_arena, ig->init_len, ig->align);
-                memset(globals[i].data, 0, ig->init_len);
+                memset(globals[i].data, 0, size);
+            }
+        }
+        /* Second pass: pointer globals initialized to strings hold the target's
+           address (the ELF writer patches this via .rela.data). */
+        for (u32 i = 0; i < nglobals; i++)
+        {
+            IrGlobal *ig = (IrGlobal *) vec_get(m->globals, i);
+            if (ig->init_reloc_target >= 0)
+            {
+                u64 addr = (u64) (uintptr_t) globals[ig->init_reloc_target].data;
+                memcpy(globals[i].data, &addr, 8);
+                globals[i].size = 8;
             }
         }
     }

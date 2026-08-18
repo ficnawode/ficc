@@ -126,3 +126,28 @@ TEST(semantic, if_undeclared_cond)
     EXPECT_TRUE(ast == NULL);
     arena_free(a);
 }
+
+TEST(semantic, nested_shadowing_ok)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = check_from_source("int main(void) { int x; { int x; return x; } return 0; }", a);
+    EXPECT_TRUE(ast != NULL);
+    arena_free(a);
+}
+
+TEST(semantic, param_shadow_nested_ok)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = check_from_source(
+        "int f(int x) { { int x; return x; } return 0; } int main(void) { return f(1); }", a);
+    EXPECT_TRUE(ast != NULL);
+    arena_free(a);
+}
+
+TEST(semantic, param_body_redeclaration_error)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = check_from_source("int f(int x) { int x; return 0; }", a);
+    EXPECT_TRUE(ast == NULL);
+    arena_free(a);
+}

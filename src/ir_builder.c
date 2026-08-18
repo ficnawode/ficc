@@ -7,14 +7,14 @@
 typedef struct PendingPhi PendingPhi;
 struct PendingPhi
 {
-    const char *name;
+    ASTVarDecl *var;
     u32 vreg;
 };
 
 typedef struct BlockLocals BlockLocals;
 struct BlockLocals
 {
-    StrMap *locals;    /* name -> IrOperand* */
+    U64Map *locals;    /* (u64)ASTVarDecl* -> IrOperand* */
     Vec *pending_phis; /* Vec<PendingPhi*> */
 };
 
@@ -48,13 +48,16 @@ struct FuncBuilder
     U64Map *block_locals; /* (u64)IrBlock* -> BlockLocals* */
     Vec *loop_stack;      /* Vec<LoopContext*> */
     StrMap *goto_labels;  /* label name -> IrBlock* */
-    StrMap *var_types;    /* variable name -> Type* */
     StrMap *func_types;   /* function name -> Type* (return type) */
+    StrMap *global_map;   /* file-scope variable name -> u32* (index into mod->globals) */
+    U64Map *static_map;   /* (u64)ASTVarDecl* -> u32* (index into mod->globals) */
     u32 sret_vreg;        /* hidden sret pointer vreg for record-returning funcs */
 };
 
-static IrOperand resolve_variable(FuncBuilder *ctx, const char *name, IrBlock *bb);
-static IrOperand build_phi(FuncBuilder *ctx, const char *name, IrBlock *bb);
+static IrOperand resolve_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb);
+static u32 global_index_of(FuncBuilder *ctx, const char *name);
+static u32 block_static_index(FuncBuilder *ctx, ASTVarDecl *var);
+static IrOperand build_phi(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb);
 static IrBlock *label_block(FuncBuilder *ctx, IrFunction *f, const char *name);
 static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
 static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
@@ -161,18 +164,11 @@ static bool is_divrem_op(BinOpKind op)
     return op == BIN_DIV || op == BIN_REM;
 }
 
-static u32 alloc_phi_vreg(FuncBuilder *ctx, const char *name)
+static u32 alloc_phi_vreg(FuncBuilder *ctx, ASTVarDecl *var)
 {
-    Type *t = strmap_get(ctx->var_types, name);
-    if (!t)
-    {
-        ir_error(NULL, "PHI for undeclared variable '%s' (internal IR error)", name);
-        ASSERT(false);
-        return alloc_vreg_from_type(ctx, type_int());
-    }
     /* Arrays are stored as a decayed pointer in SSA; records are stored as a
        pointer to their storage; allocate the phi slot with that width. */
-    return alloc_vreg_for_var(ctx, t);
+    return alloc_vreg_for_var(ctx, var->type);
 }
 
 static BlockLocals *get_block_locals(FuncBuilder *ctx, IrBlock *bb)
@@ -181,7 +177,7 @@ static BlockLocals *get_block_locals(FuncBuilder *ctx, IrBlock *bb)
     if (!bl)
     {
         bl = arena_alloc(ctx->mod->arena, sizeof(BlockLocals), sizeof(void *));
-        bl->locals = strmap_new(ctx->mod->arena);
+        bl->locals = u64map_new(ctx->mod->arena);
         bl->pending_phis = vec_new(ctx->mod->arena);
         u64map_set(ctx->block_locals, (u64) (uintptr_t) bb, bl);
     }
@@ -227,18 +223,18 @@ static void declare_pred(IrBlock *bb, IrBlock *pred)
     vec_push(bb->preds, pred);
 }
 
-static IrOperand read_variable(FuncBuilder *ctx, const char *name, IrBlock *bb)
+static IrOperand read_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
 {
     BlockLocals *bl = get_block_locals(ctx, bb);
-    IrOperand *p = strmap_get(bl->locals, name);
+    IrOperand *p = u64map_get(bl->locals, (u64) (uintptr_t) var);
     if (p)
     {
         return *p;
     }
-    return resolve_variable(ctx, name, bb);
+    return resolve_variable(ctx, var, bb);
 }
 
-static IrOperand resolve_variable(FuncBuilder *ctx, const char *name, IrBlock *bb)
+static IrOperand resolve_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
 {
     BlockLocals *bl = get_block_locals(ctx, bb);
     size_t npreds = vec_size(bb->preds);
@@ -254,12 +250,12 @@ static IrOperand resolve_variable(FuncBuilder *ctx, const char *name, IrBlock *b
            from the predecessor. For an unsealed predecessor this creates a
            placeholder that will be filled when that block is sealed. */
         IrBlock *pred = (IrBlock *) vec_get(bb->preds, 0);
-        val = read_variable(ctx, name, pred);
+        val = read_variable(ctx, var, pred);
     }
     else if (bb->sealed && !bb->is_loop_header)
     {
         /* Sealed non-loop block with multiple predecessors: build a PHI now. */
-        val = build_phi(ctx, name, bb);
+        val = build_phi(ctx, var, bb);
     }
     else
     {
@@ -267,21 +263,21 @@ static IrOperand resolve_variable(FuncBuilder *ctx, const char *name, IrBlock *b
            placeholder PHI that will be filled when the block is sealed. Loop
            headers are pre-emptively treated as merge points because their back
            edge is added after the body is built. */
-        u32 dst = alloc_phi_vreg(ctx, name);
+        u32 dst = alloc_phi_vreg(ctx, var);
         PendingPhi *ip = arena_alloc(ctx->mod->arena, sizeof(PendingPhi), sizeof(void *));
-        ip->name = name;
+        ip->var = var;
         ip->vreg = dst;
         vec_push(bl->pending_phis, ip);
         val = ir_operand_vreg(dst);
     }
-    strmap_set(bl->locals, name, box_operand(ctx, val));
+    u64map_set(bl->locals, (u64) (uintptr_t) var, box_operand(ctx, val));
     return val;
 }
 
-static void write_variable(FuncBuilder *ctx, const char *name, IrBlock *bb, IrOperand val)
+static void write_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb, IrOperand val)
 {
     BlockLocals *bl = get_block_locals(ctx, bb);
-    strmap_set(bl->locals, name, box_operand(ctx, val));
+    u64map_set(bl->locals, (u64) (uintptr_t) var, box_operand(ctx, val));
 }
 
 static IrInstr *emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries)
@@ -293,31 +289,31 @@ static IrInstr *emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries)
     return phi;
 }
 
-static void fill_phi_entries(FuncBuilder *ctx, IrBlock *bb, const char *name, IrInstr *phi)
+static void fill_phi_entries(FuncBuilder *ctx, IrBlock *bb, ASTVarDecl *var, IrInstr *phi)
 {
     size_t n = vec_size(bb->preds);
     for (size_t e = 0; e < n; e++)
     {
         IrBlock *pred = (IrBlock *) vec_get(bb->preds, e);
-        IrOperand pval = read_variable(ctx, name, pred);
+        IrOperand pval = read_variable(ctx, var, pred);
         ir_phi_add_entry(phi, pval, pred);
     }
 }
 
-static IrOperand build_phi(FuncBuilder *ctx, const char *name, IrBlock *bb)
+static IrOperand build_phi(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
 {
     u32 nentries = (u32) vec_size(bb->preds);
-    u32 dst = alloc_phi_vreg(ctx, name);
+    u32 dst = alloc_phi_vreg(ctx, var);
     IrInstr *phi = emit_phi_at_start(bb, dst, nentries);
-    fill_phi_entries(ctx, bb, name, phi);
+    fill_phi_entries(ctx, bb, var, phi);
     return ir_operand_vreg(dst);
 }
 
-static void insert_phi(FuncBuilder *ctx, IrBlock *bb, const char *name, u32 dst)
+static void insert_phi(FuncBuilder *ctx, IrBlock *bb, ASTVarDecl *var, u32 dst)
 {
     u32 nentries = (u32) vec_size(bb->preds);
     IrInstr *phi = emit_phi_at_start(bb, dst, nentries);
-    fill_phi_entries(ctx, bb, name, phi);
+    fill_phi_entries(ctx, bb, var, phi);
 }
 
 static void seal_block(FuncBuilder *ctx, IrBlock *bb)
@@ -334,7 +330,7 @@ static void seal_block(FuncBuilder *ctx, IrBlock *bb)
     for (size_t i = 0; i < n; i++)
     {
         PendingPhi *ip = (PendingPhi *) vec_get(phis, i);
-        insert_phi(ctx, bb, ip->name, ip->vreg);
+        insert_phi(ctx, bb, ip->var, ip->vreg);
     }
 }
 
@@ -377,7 +373,34 @@ static ExprResult build_int_literal_expr(ASTIntLiteral *lit, IrFunction *f, IrBl
 static ExprResult build_ident_expr(ASTIdent *id, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     (void) f;
-    return expr_result(read_variable(ctx, id->name, bb), bb);
+    ASTVarDecl *decl = id->decl;
+    ASSERT(decl != NULL);
+    if (decl->is_block_scope && decl->storage != SC_STATIC)
+    {
+        return expr_result(read_variable(ctx, decl, bb), bb);
+    }
+    u32 midx = NO_VREG;
+    if (decl->is_block_scope)
+    {
+        midx = block_static_index(ctx, decl);
+    }
+    if (midx == NO_VREG)
+    {
+        midx = global_index_of(ctx, decl->name);
+    }
+    if (midx != NO_VREG)
+    {
+        IrGlobal *g = (IrGlobal *) vec_get(ctx->mod->globals, midx);
+        IrOperand addr = ir_operand_global(midx);
+        if (type_is_array(g->type) || type_is_record(g->type))
+        {
+            return expr_result(addr, bb);
+        }
+        u32 dst = alloc_vreg_from_type(ctx, g->type);
+        ir_emit_load(bb, dst, addr);
+        return expr_result(ir_operand_vreg(dst), bb);
+    }
+    return expr_result(ir_operand_imm(0), bb);
 }
 
 static ExprResult build_short_circuit(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
@@ -467,13 +490,46 @@ static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
 
     if (target->kind == AST_IDENT)
     {
+        ASTIdent *id = ast_as(ASTIdent, target);
+        ASTVarDecl *decl = id->decl;
+        ASSERT(decl != NULL);
+        u32 midx = NO_VREG;
+        if (decl->is_block_scope)
+        {
+            if (decl->storage == SC_STATIC)
+            {
+                midx = block_static_index(ctx, decl);
+            }
+        }
+        else
+        {
+            midx = global_index_of(ctx, decl->name);
+        }
+        if (midx != NO_VREG)
+        {
+            IrGlobal *g = (IrGlobal *) vec_get(ctx->mod->globals, midx);
+            ExprResult right = build_expr(be->right, f, bb, ctx);
+            bb = right.block;
+            if (type_is_record(g->type))
+            {
+                ir_emit_memcpy(bb, ir_operand_global(midx), right.value, g->type->size);
+                return expr_result(ir_operand_global(midx), bb);
+            }
+            if (type_is_array(g->type))
+            {
+                ir_error(&be->base, "array '%s' is not assignable", id->name);
+                return expr_result(ir_operand_imm(0), bb);
+            }
+            Type *rhs_type = node_type(be->right);
+            IrOperand val = promote_to(ctx, bb, right.value, rhs_type, g->type);
+            ir_emit_store(bb, val, ir_operand_global(midx), g->type->size);
+            return expr_result(val, bb);
+        }
         ExprResult left = build_expr(target, f, bb, ctx);
         bb = left.block;
         ExprResult right = build_expr(be->right, f, bb, ctx);
         bb = right.block;
-        ASTIdent *id = ast_as(ASTIdent, target);
-        Type *lhs_type = strmap_get(ctx->var_types, id->name);
-        ASSERT(lhs_type != NULL);
+        Type *lhs_type = decl->type;
         if (type_is_record(lhs_type))
         {
             ir_emit_memcpy(bb, left.value, right.value, lhs_type->size);
@@ -481,7 +537,7 @@ static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
         }
         Type *rhs_type = node_type(be->right);
         IrOperand val = promote_to(ctx, bb, right.value, rhs_type, lhs_type);
-        write_variable(ctx, id->name, bb, val);
+        write_variable(ctx, decl, bb, val);
         return expr_result(val, bb);
     }
 
@@ -805,6 +861,28 @@ static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, 
     {
         return build_member_lvalue(ast_as(ASTMemberAccess, operand), f, bb, ctx);
     }
+    if (operand->kind == AST_IDENT)
+    {
+        ASTIdent *id = ast_as(ASTIdent, operand);
+        ASTVarDecl *decl = id->decl;
+        ASSERT(decl != NULL);
+        u32 midx = NO_VREG;
+        if (decl->is_block_scope)
+        {
+            if (decl->storage == SC_STATIC)
+            {
+                midx = block_static_index(ctx, decl);
+            }
+        }
+        else
+        {
+            midx = global_index_of(ctx, decl->name);
+        }
+        if (midx != NO_VREG)
+        {
+            return expr_result(ir_operand_global(midx), bb);
+        }
+    }
     /* &x for array: build_expr already decays to pointer */
     return build_expr(operand, f, bb, ctx);
 }
@@ -844,14 +922,105 @@ static ExprResult build_sizeof_type(ASTSizeofType *st, IrFunction *f, IrBlock *b
     return expr_result(ir_operand_imm((i64) st->size_value), bb);
 }
 
-static ExprResult build_string_literal_expr(ASTStringLiteral *sl, IrFunction *f, IrBlock *bb,
-                                            FuncBuilder *ctx)
+static u32 global_index_of(FuncBuilder *ctx, const char *name)
 {
-    (void) f;
-    u32 idx = (u32) vec_size(ctx->mod->globals);
-    IrGlobal *g = arena_alloc(ctx->mod->arena, sizeof(IrGlobal), sizeof(void *));
+    u32 *idx = strmap_get(ctx->global_map, name);
+    return idx ? *idx : NO_VREG;
+}
+
+static u32 block_static_index(FuncBuilder *ctx, ASTVarDecl *var)
+{
+    u32 *idx = u64map_get(ctx->static_map, (u64) (uintptr_t) var);
+    return idx ? *idx : NO_VREG;
+}
+
+static const u8 *encode_const_bytes(Arena *arena, i64 value, u32 size)
+{
+    u8 *buf = arena_alloc(arena, size, 1);
+    for (u32 i = 0; i < size; i++)
+    {
+        buf[i] = (u8) (value >> (8 * i));
+    }
+    return buf;
+}
+
+static void fill_global(IrGlobal *g, ASTVarDecl *vd, int init_str_idx, Arena *arena)
+{
+    g->type = vd->type;
+    g->align = vd->type->align;
+    g->init_reloc_target = -1;
+
+    if (vd->storage == SC_EXTERN)
+    {
+        g->init_data = NULL;
+        g->init_len = 0;
+        g->section = IR_SECTION_BSS;
+        g->linkage = IR_LINK_EXTERN;
+    }
+    else if (vd->init && vd->init->kind == AST_STRING_LITERAL)
+    {
+        /* char *p = "..." → 8-byte address in .data, patched by .rela.data. */
+        g->init_data = encode_const_bytes(arena, 0, 8);
+        g->init_len = 8;
+        g->section = IR_SECTION_DATA;
+        g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;
+        g->init_reloc_target = init_str_idx;
+    }
+    else if (vd->has_const_init && vd->const_init != 0)
+    {
+        g->init_data = encode_const_bytes(arena, vd->const_init, (u32) vd->type->size);
+        g->init_len = (size_t) vd->type->size;
+        g->section = IR_SECTION_DATA;
+        g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;
+    }
+    else
+    {
+        g->init_data = NULL;
+        g->init_len = 0;
+        g->section = IR_SECTION_BSS;
+        g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;
+    }
+}
+
+static u32 emit_global_decl(ASTVarDecl *vd, IrModule *mod, Arena *arena, StrMap *global_map,
+                            int init_str_idx)
+{
+    u32 idx = (u32) vec_size(mod->globals);
+    IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
+    g->name = vd->name;
+    fill_global(g, vd, init_str_idx, arena);
+    vec_push(mod->globals, g);
+
+    u32 *slot = arena_alloc(arena, sizeof(u32), sizeof(u32));
+    *slot = idx;
+    strmap_set(global_map, vd->name, slot);
+    return idx;
+}
+
+static u32 emit_block_static(ASTVarDecl *vd, IrModule *mod, Arena *arena, U64Map *static_map,
+                             int init_str_idx)
+{
+    u32 idx = (u32) vec_size(mod->globals);
+    IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
+    size_t name_len = 32;
+    char *name_buf = arena_alloc(arena, name_len, 1);
+    snprintf(name_buf, name_len, "__static_%u", idx);
+    g->name = name_buf;
+    fill_global(g, vd, init_str_idx, arena);
+    vec_push(mod->globals, g);
+
+    u32 *slot = arena_alloc(arena, sizeof(u32), sizeof(u32));
+    *slot = idx;
+    u64map_set(static_map, (u64) (uintptr_t) vd, slot);
+    return idx;
+}
+
+static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *arena)
+{
+    u32 idx = (u32) vec_size(mod->globals);
+    IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
     size_t name_len = 16;
-    char *name_buf = arena_alloc(ctx->mod->arena, name_len, 1);
+    char *name_buf = arena_alloc(arena, name_len, 1);
     snprintf(name_buf, name_len, "__str_%u", idx);
     g->name = name_buf;
     g->type = type_array(type_char(), sl->length + 1);
@@ -859,7 +1028,17 @@ static ExprResult build_string_literal_expr(ASTStringLiteral *sl, IrFunction *f,
     g->init_len = sl->length + 1;
     g->align = 1;
     g->section = IR_SECTION_RODATA;
-    vec_push(ctx->mod->globals, g);
+    g->linkage = IR_LINK_LOCAL;
+    g->init_reloc_target = -1;
+    vec_push(mod->globals, g);
+    return idx;
+}
+
+static ExprResult build_string_literal_expr(ASTStringLiteral *sl, IrFunction *f, IrBlock *bb,
+                                            FuncBuilder *ctx)
+{
+    (void) f;
+    u32 idx = ir_add_string_global(sl, ctx->mod, ctx->mod->arena);
     return expr_result(ir_operand_global(idx), bb);
 }
 
@@ -1239,7 +1418,34 @@ static IrBlock *build_return_stmt(ASTReturnStmt *ret, IrFunction *f, IrBlock *bb
 
 static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
-    strmap_set(ctx->var_types, vd->name, vd->type);
+    if (vd->storage == SC_STATIC)
+    {
+        /* Block-scope statics are file-backed objects: emit the IrGlobal once
+           (the loaded image already holds its constant initializer), then the
+           declaration is a no-op at runtime. */
+        if (block_static_index(ctx, vd) == NO_VREG)
+        {
+            int init_str_idx = -1;
+            if (vd->init && vd->init->kind == AST_STRING_LITERAL)
+            {
+                init_str_idx = (int) ir_add_string_global(ast_as(ASTStringLiteral, vd->init),
+                                                          ctx->mod, ctx->mod->arena);
+            }
+            emit_block_static(vd, ctx->mod, ctx->mod->arena, ctx->static_map, init_str_idx);
+        }
+        return bb;
+    }
+    if (vd->storage == SC_EXTERN)
+    {
+        /* Block-scope extern refers to an external entity: emit an undefined
+           global once (module-wide) if no file-scope declaration preceded it. */
+        if (global_index_of(ctx, vd->name) == NO_VREG)
+        {
+            emit_global_decl(vd, ctx->mod, ctx->mod->arena, ctx->global_map, -1);
+        }
+        return bb;
+    }
+
     if (type_is_array(vd->type))
     {
         /* Arrays are not SSA values: allocate a stack slot and keep the
@@ -1248,7 +1454,7 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
         Type *ptr_type = type_decay(vd->type);
         u32 dst = alloc_vreg_from_type(ctx, ptr_type);
         ir_emit_alloca(bb, dst, vd->type->size);
-        write_variable(ctx, vd->name, bb, ir_operand_vreg(dst));
+        write_variable(ctx, vd, bb, ir_operand_vreg(dst));
         return bb;
     }
     if (type_is_record(vd->type))
@@ -1263,7 +1469,7 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
             bb = init.block;
             ir_emit_memcpy(bb, ir_operand_vreg(dst), init.value, vd->type->size);
         }
-        write_variable(ctx, vd->name, bb, ir_operand_vreg(dst));
+        write_variable(ctx, vd, bb, ir_operand_vreg(dst));
         return bb;
     }
     IrOperand val = ir_operand_imm(0);
@@ -1274,7 +1480,7 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
         Type *rhs_type = node_type(vd->init);
         val = promote_to(ctx, bb, init.value, rhs_type, vd->type);
     }
-    write_variable(ctx, vd->name, bb, val);
+    write_variable(ctx, vd, bb, val);
     return bb;
 }
 
@@ -1345,8 +1551,7 @@ static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlo
         p->type = ssa_type;
         p->vreg = vreg;
         vec_push(f->params, p);
-        strmap_set(ctx->var_types, param->name, param->type);
-        write_variable(ctx, param->name, entry, ir_operand_vreg(vreg));
+        write_variable(ctx, param, entry, ir_operand_vreg(vreg));
     }
 }
 
@@ -1376,7 +1581,7 @@ static void finish_func(IrFunction *f, IrBlock *exit, FuncBuilder *ctx)
     seal_all_blocks(ctx, f);
 }
 
-static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types)
+static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *global_map)
 {
     if (ast->kind != AST_FUNC_DEF)
     {
@@ -1386,6 +1591,7 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types)
     ASTFuncDef *func_ast = (ASTFuncDef *) ast;
 
     IrFunction *func = ir_module_add_func(mod, func_ast->name, func_ast->ret_type);
+    func->is_static = func_ast->storage == SC_STATIC;
     IrBlock *entry = ir_func_add_block(func, "entry");
 
     if (func_ast->body->kind != AST_COMPOUND_STMT)
@@ -1394,12 +1600,13 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types)
         return false;
     }
 
-    FuncBuilder ctx = {mod, //
+    FuncBuilder ctx = {mod,
                        u64map_new(mod->arena),
                        vec_new(mod->arena),
                        strmap_new(mod->arena),
-                       strmap_new(mod->arena),
                        func_types,
+                       global_map,
+                       u64map_new(mod->arena),
                        NO_VREG};
 
     /* Pre-create blocks for all labels so gotos can target them. */
@@ -1437,14 +1644,31 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
     }
 
     IrModule *mod = ir_module_new(arena);
+    StrMap *global_map = strmap_new(arena);
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
-        if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL)
+        if (decl->kind == AST_VAR_DECL)
+        {
+            ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
+            int init_str_idx = -1;
+            if (vd->init && vd->init->kind == AST_STRING_LITERAL)
+            {
+                init_str_idx =
+                    (int) ir_add_string_global(ast_as(ASTStringLiteral, vd->init), mod, arena);
+            }
+            emit_global_decl(vd, mod, arena, global_map, init_str_idx);
+        }
+    }
+    for (size_t i = 0; i < ndecls; i++)
+    {
+        ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
+        if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL ||
+            decl->kind == AST_VAR_DECL)
         {
             continue;
         }
-        if (!build_func(decl, mod, func_types))
+        if (!build_func(decl, mod, func_types, global_map))
         {
             return NULL;
         }

@@ -8,9 +8,10 @@ typedef struct SemanticCtx SemanticCtx;
 struct SemanticCtx
 {
     Arena *arena;
-    StrMap *globals; /* function name -> ASTFuncDef */
-    StrMap *locals;  /* variable name -> ASTVarDecl */
-    StrMap *labels;  /* label name -> ASTLabelStmt (collected per function) */
+    StrMap *globals;     /* function name -> ASTFuncDef */
+    StrMap *global_vars; /* file-scope variable name -> ASTVarDecl */
+    Vec *scopes;         /* Vec<StrMap*> — lexical scope stack (name -> ASTVarDecl) */
+    StrMap *labels;      /* label name -> ASTLabelStmt (collected per function) */
     int loop_depth;
     bool error;
 };
@@ -30,15 +31,56 @@ static void sem_error(Loc loc, const char *fmt, ...)
     fprintf(stderr, "\n");
 }
 
+static StrMap *current_scope(SemanticCtx *ctx)
+{
+    return (StrMap *) vec_last(ctx->scopes);
+}
+
+static void push_scope(SemanticCtx *ctx)
+{
+    vec_push(ctx->scopes, strmap_new(ctx->arena));
+}
+
+static void pop_scope(SemanticCtx *ctx)
+{
+    vec_pop(ctx->scopes);
+}
+
+/* Walk the scope stack innermost-first. */
+static ASTVarDecl *scope_lookup(SemanticCtx *ctx, const char *name)
+{
+    size_t n = vec_size(ctx->scopes);
+    for (size_t i = n; i > 0; i--)
+    {
+        ASTVarDecl *decl = strmap_get((StrMap *) vec_get(ctx->scopes, i - 1), name);
+        if (decl)
+        {
+            return decl;
+        }
+    }
+    return NULL;
+}
+
+/* Look up only the innermost scope (for same-scope redeclaration checks). */
+static ASTVarDecl *scope_top_lookup(SemanticCtx *ctx, const char *name)
+{
+    return strmap_get(current_scope(ctx), name);
+}
+
 static bool check_identifier_expr(ASTIdent *ident, SemanticCtx *ctx)
 {
-    ASTVarDecl *decl = strmap_get(ctx->locals, ident->name);
+    ASTVarDecl *decl = scope_lookup(ctx, ident->name);
+    if (!decl)
+    {
+        decl = strmap_get(ctx->global_vars, ident->name);
+    }
     if (!decl)
     {
         sem_error(ident->base.loc, "undeclared identifier '%s'", ident->name);
         ctx->error = true;
         return false;
     }
+    ident->decl = decl;
     ident->base.expr_type = type_decay(decl->type);
     return true;
 }
@@ -158,8 +200,13 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
         }
         if (operand->kind == AST_IDENT)
         {
-            ASTVarDecl *decl = strmap_get(ctx->locals, ast_as(ASTIdent, operand)->name);
-            if (!decl || (!type_is_array(decl->type) && !type_is_record(decl->type)))
+            ASTVarDecl *decl = ast_as(ASTIdent, operand)->decl;
+            bool is_global = decl != NULL && !decl->is_block_scope;
+            bool is_static = decl != NULL && decl->storage == SC_STATIC;
+            /* File globals and block statics have a real address constant;
+               block-scope scalars don't (no spill slot). */
+            if (!decl || (!is_global && !is_static && !type_is_array(decl->type) &&
+                          !type_is_record(decl->type)))
             {
                 sem_error(unary_expr->base.loc, "cannot take address of this expression");
                 ctx->error = true;
@@ -421,7 +468,7 @@ static bool check_return_stmt(ASTReturnStmt *return_stmt, SemanticCtx *ctx, Type
 
 static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
 {
-    if (strmap_get(ctx->locals, var_decl->name))
+    if (scope_top_lookup(ctx, var_decl->name))
     {
         sem_error(var_decl->base.loc, "redeclaration of '%s'", var_decl->name);
         ctx->error = true;
@@ -435,7 +482,75 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
         ctx->error = true;
         return false;
     }
-    strmap_set(ctx->locals, var_decl->name, var_decl);
+    if (var_decl->storage == SC_STATIC)
+    {
+        /* Block-scope statics are file-backed objects: the parser already
+           folded a constant initializer into const_init (or a char* string
+           literal into init); everything else is rejected. */
+        if (type_is_record(var_decl->type) && !type_is_complete(var_decl->type))
+        {
+            sem_error(var_decl->base.loc, "variable '%s' has incomplete type", var_decl->name);
+            ctx->error = true;
+            return false;
+        }
+        if (var_decl->init)
+        {
+            if (!type_is_ptr(var_decl->type) || type_deref(var_decl->type)->kind != TYPE_CHAR)
+            {
+                sem_error(var_decl->base.loc,
+                          "string-literal initializer requires a 'char *' variable");
+                ctx->error = true;
+                return false;
+            }
+        }
+        else if ((var_decl->type->kind == TYPE_ARRAY || type_is_record(var_decl->type)) &&
+                 var_decl->has_const_init)
+        {
+            sem_error(var_decl->base.loc,
+                      "'%s' is an aggregate and must be "
+                      "zero-initialized",
+                      var_decl->name);
+            ctx->error = true;
+            return false;
+        }
+    }
+    if (var_decl->storage == SC_EXTERN)
+    {
+        /* Block-scope extern declares the external-linkage entity (C11
+           §6.2.2p5); it allocates no local storage and resolves through the
+           file-scope/external namespace, not the block locals. */
+        if (var_decl->init)
+        {
+            sem_error(var_decl->base.loc, "'%s' has both 'extern' and an initializer",
+                      var_decl->name);
+            ctx->error = true;
+            return false;
+        }
+        if (strmap_get(ctx->globals, var_decl->name))
+        {
+            sem_error(var_decl->base.loc, "'%s' redeclared as different kind of symbol",
+                      var_decl->name);
+            ctx->error = true;
+            return false;
+        }
+        ASTVarDecl *existing = strmap_get(ctx->global_vars, var_decl->name);
+        if (existing && existing->storage == SC_STATIC)
+        {
+            sem_error(var_decl->base.loc,
+                      "extern declaration of '%s' follows static "
+                      "declaration",
+                      var_decl->name);
+            ctx->error = true;
+            return false;
+        }
+        if (!existing)
+        {
+            strmap_set(ctx->global_vars, var_decl->name, var_decl);
+        }
+        return true;
+    }
+    var_decl->is_block_scope = true;
+    strmap_set(current_scope(ctx), var_decl->name, var_decl);
     if (var_decl->init && !check_expr(var_decl->init, ctx))
     {
         return false;
@@ -459,16 +574,20 @@ static bool check_expression_statement(ASTExprStmt *expr_stmt, SemanticCtx *ctx)
 static bool check_compound_statement(ASTCompoundStmt *compound_stmt, SemanticCtx *ctx,
                                      Type *ret_type)
 {
+    push_scope(ctx);
+    bool ok = true;
     size_t nstmts = vec_size(compound_stmt->stmts);
     for (size_t i = 0; i < nstmts; i++)
     {
         ASTNode *stmt = (ASTNode *) vec_get(compound_stmt->stmts, i);
         if (!check_stmt(stmt, ctx, ret_type))
         {
-            return false;
+            ok = false;
+            break;
         }
     }
-    return true;
+    pop_scope(ctx);
+    return ok;
 }
 
 static bool check_if_statement(ASTIfStmt *if_stmt, SemanticCtx *ctx, Type *ret_type)
@@ -629,32 +748,28 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
     }
 }
 
-static bool setup_function_locals(ASTFuncDef *func_def, SemanticCtx *ctx)
+static bool setup_function_params(ASTFuncDef *func_def, SemanticCtx *ctx)
 {
-    /* Set up local scope: parameters + locals */
-    StrMap *saved_locals = ctx->locals;
-    ctx->locals = strmap_new(ctx->arena);
-
-    /* Insert parameters into local scope */
+    /* Parameters live in the function's outermost scope, which check_func has
+       already pushed. */
     size_t nparams = vec_size(func_def->params);
     for (size_t i = 0; i < nparams; i++)
     {
         ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(func_def->params, i));
-        if (strmap_get(ctx->locals, param->name))
+        if (scope_top_lookup(ctx, param->name))
         {
             sem_error(param->base.loc, "redeclaration of parameter '%s'", param->name);
             ctx->error = true;
-            ctx->locals = saved_locals;
             return false;
         }
         if (param->type->kind == TYPE_VOID)
         {
             sem_error(param->base.loc, "parameter '%s' has void type", param->name);
             ctx->error = true;
-            ctx->locals = saved_locals;
             return false;
         }
-        strmap_set(ctx->locals, param->name, param);
+        param->is_block_scope = true;
+        strmap_set(current_scope(ctx), param->name, param);
     }
     return true;
 }
@@ -753,8 +868,10 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
     ctx->loop_depth = 0;
     ctx->labels = strmap_new(ctx->arena);
 
-    if (!setup_function_locals(fn, ctx))
+    push_scope(ctx);
+    if (!setup_function_params(fn, ctx))
     {
+        pop_scope(ctx);
         ctx->loop_depth = saved_loop_depth;
         ctx->labels = saved_labels;
         return false;
@@ -772,19 +889,120 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
         result = false;
     }
 
+    pop_scope(ctx);
     ctx->loop_depth = saved_loop_depth;
     ctx->labels = saved_labels;
     return result;
 }
 
-/* Pass 1: Collect all function definitions */
+/* Pass 1: Collect all file-scope variables, enforcing linkage rules (D8.3):
+   repeated tentative/extern declarations merge; two definitions with a
+   constant initializer collide. */
+static bool collect_global_variables(ASTProgram *prog, SemanticCtx *ctx)
+{
+    size_t ndecls = vec_size(prog->decls);
+    for (size_t i = 0; i < ndecls; i++)
+    {
+        ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
+        if (decl->kind != AST_VAR_DECL)
+        {
+            continue;
+        }
+        ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
+
+        if (strmap_get(ctx->globals, vd->name))
+        {
+            sem_error(vd->base.loc, "redefinition of '%s' as a global variable", vd->name);
+            ctx->error = true;
+            return false;
+        }
+        if (vd->type->kind == TYPE_VOID)
+        {
+            sem_error(vd->base.loc, "variable '%s' has void type", vd->name);
+            ctx->error = true;
+            return false;
+        }
+        if (type_is_record(vd->type) && !type_is_complete(vd->type))
+        {
+            sem_error(vd->base.loc, "variable '%s' has incomplete type", vd->name);
+            ctx->error = true;
+            return false;
+        }
+        if ((vd->type->kind == TYPE_ARRAY || type_is_record(vd->type)) &&
+            (vd->init || vd->has_const_init))
+        {
+            sem_error(vd->base.loc,
+                      "file-scope '%s' cannot have an initializer yet "
+                      "(aggregates are zero-initialized)",
+                      vd->name);
+            ctx->error = true;
+            return false;
+        }
+        if (vd->init)
+        {
+            /* Only string-literal pointer initializers survive the parser. */
+            if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_CHAR)
+            {
+                sem_error(vd->base.loc, "string-literal initializer requires a 'char *' variable");
+                ctx->error = true;
+                return false;
+            }
+        }
+
+        /* C11 §6.9.2p2: a declaration with an initializer is a definition even
+           with `extern`, so normalize it to a plain external definition. */
+        if (vd->storage == SC_EXTERN && (vd->has_const_init || vd->init))
+        {
+            vd->storage = SC_NONE;
+        }
+
+        ASTVarDecl *existing = strmap_get(ctx->global_vars, vd->name);
+        if (existing)
+        {
+            if ((existing->storage == SC_STATIC) != (vd->storage == SC_STATIC))
+            {
+                sem_error(vd->base.loc, "%s declaration of '%s' follows %s declaration",
+                          vd->storage == SC_STATIC ? "static" : "non-static", vd->name,
+                          existing->storage == SC_STATIC ? "static" : "non-static");
+                ctx->error = true;
+                return false;
+            }
+            if (existing->has_const_init && vd->has_const_init)
+            {
+                sem_error(vd->base.loc, "redefinition of '%s'", vd->name);
+                ctx->error = true;
+                return false;
+            }
+        }
+        /* The most-defined declaration wins: a definition replaces an
+           extern-only declaration; an initialized definition replaces a
+           tentative one. */
+        bool replace = existing == NULL;
+        if (existing && existing->storage == SC_EXTERN && vd->storage != SC_EXTERN)
+        {
+            replace = true;
+        }
+        if (existing && vd->has_const_init && !existing->has_const_init)
+        {
+            replace = true;
+        }
+        if (replace)
+        {
+            strmap_set(ctx->global_vars, vd->name, vd);
+        }
+    }
+    return true;
+}
+
+/* Pass 2: Collect all function definitions */
 static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
 {
     size_t ndecls = vec_size(prog->decls);
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
-        if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL)
+        if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL ||
+            decl->kind == AST_VAR_DECL)
         {
             continue;
         }
@@ -794,9 +1012,23 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
             return false;
         }
         ASTFuncDef *fn = ast_as(ASTFuncDef, decl);
-        if (strmap_get(ctx->globals, fn->name))
+        ASTNode *prev = strmap_get(ctx->globals, fn->name);
+        if (prev)
         {
-            sem_error(decl->loc, "redefinition of function '%s'", fn->name);
+            ASTFuncDef *pfn = ast_as(ASTFuncDef, prev);
+            if ((pfn->storage == SC_STATIC) != (fn->storage == SC_STATIC))
+            {
+                sem_error(decl->loc, "%s declaration of '%s' follows %s declaration",
+                          fn->storage == SC_STATIC ? "static" : "non-static", fn->name,
+                          pfn->storage == SC_STATIC ? "static" : "non-static");
+                return false;
+            }
+            sem_error(decl->loc, "redefinition of '%s'", fn->name);
+            return false;
+        }
+        if (strmap_get(ctx->global_vars, fn->name))
+        {
+            sem_error(decl->loc, "redefinition of '%s'", fn->name);
             return false;
         }
         strmap_set(ctx->globals, fn->name, fn);
@@ -804,7 +1036,7 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
     return true;
 }
 
-/* Pass 2: Check each function body */
+/* Pass 3: Check each function body */
 static bool check_function_bodies(ASTProgram *prog, SemanticCtx *ctx)
 {
     size_t ndecls = vec_size(prog->decls);
@@ -837,7 +1069,20 @@ ASTNode *semantic_check(ASTNode *ast, Arena *arena)
     }
 
     ASTProgram *prog = ast_as(ASTProgram, ast);
-    SemanticCtx ctx = {arena, strmap_new(arena), NULL, NULL, 0, false};
+    SemanticCtx ctx = {
+        .arena = arena,
+        .globals = strmap_new(arena),
+        .global_vars = strmap_new(arena),
+        .scopes = vec_new(arena),
+        .labels = NULL,
+        .loop_depth = 0,
+        .error = false,
+    };
+
+    if (!collect_global_variables(prog, &ctx))
+    {
+        return NULL;
+    }
 
     if (!collect_function_definitions(prog, &ctx))
     {

@@ -8,7 +8,7 @@ TEST(ast, func_def_constructor)
     Arena *a = arena_new();
     Vec *params = vec_new(a);
     ASTNode *body = ast_compound_stmt(vec_new(a), (Loc) {"t", 1, 1}, a);
-    ASTNode *node = ast_func_def(type_int(), "foo", params, body, (Loc) {"t", 1, 1}, a);
+    ASTNode *node = ast_func_def(type_int(), "foo", params, body, SC_NONE, (Loc) {"t", 1, 1}, a);
 
     EXPECT_TRUE(node != NULL);
     EXPECT_EQ(node->kind, AST_FUNC_DEF);
@@ -85,7 +85,7 @@ TEST(ast, dump_does_not_crash)
     Vec *params = vec_new(a);
     Vec *stmts = vec_new(a);
     ASTNode *body = ast_compound_stmt(stmts, (Loc) {"t", 1, 1}, a);
-    ASTNode *fn = ast_func_def(type_int(), "bar", params, body, (Loc) {"t", 1, 1}, a);
+    ASTNode *fn = ast_func_def(type_int(), "bar", params, body, SC_NONE, (Loc) {"t", 1, 1}, a);
     ast_dump(fn);
     arena_free(a);
 }
@@ -111,12 +111,13 @@ TEST(ast, var_decl_constructor)
 {
     Arena *a = arena_new();
     ASTNode *init = ast_int_literal(7, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
-    ASTNode *d = ast_var_decl(type_int(), "x", init, (Loc) {"t", 1, 1}, a);
+    ASTNode *d = ast_var_decl(type_int(), "x", init, SC_NONE, (Loc) {"t", 1, 1}, a);
     EXPECT_TRUE(d != NULL);
     EXPECT_EQ(d->kind, AST_VAR_DECL);
     ASTVarDecl *vd = ast_as(ASTVarDecl, d);
     EXPECT_TRUE(strcmp(vd->name, "x") == 0);
     EXPECT_TRUE(vd->init == init);
+    EXPECT_EQ(vd->storage, SC_NONE);
     arena_free(a);
 }
 

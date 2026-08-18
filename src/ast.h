@@ -76,6 +76,13 @@ typedef enum
     UN_ADDR,
 } UnaryOpKind;
 
+typedef enum
+{
+    SC_NONE,
+    SC_STATIC,
+    SC_EXTERN,
+} StorageClass;
+
 typedef struct ASTNode ASTNode;
 struct ASTNode
 {
@@ -94,6 +101,7 @@ struct ASTFuncDef
     const char *name;
     Vec *params; /* Vec<ASTNode*> (parameter declarations; empty for void) */
     ASTNode *body;
+    StorageClass storage; /* SC_STATIC = internal linkage */
 };
 
 typedef struct ASTCompoundStmt ASTCompoundStmt;
@@ -134,6 +142,10 @@ struct ASTVarDecl
     Type *type;
     const char *name;
     ASTNode *init; /* NULL if no initializer */
+    StorageClass storage;
+    i64 const_init;      /* folded file-scope constant initializer */
+    bool has_const_init; /* true when const_init is valid */
+    bool is_block_scope; /* declared inside a function body (vs file scope) */
 };
 
 typedef struct ASTExprStmt ASTExprStmt;
@@ -173,6 +185,7 @@ struct ASTIdent
 {
     ASTNode base;
     const char *name;
+    ASTVarDecl *decl; /* resolved declaration (filled by semantic) */
 };
 
 typedef struct ASTIfStmt ASTIfStmt;
@@ -312,14 +325,15 @@ struct ASTMemberAccess
     Type *field_type; /* filled by semantic */
 };
 
-ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body, Loc loc,
-                      Arena *arena);
+ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body,
+                      StorageClass storage, Loc loc, Arena *arena);
 ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
 ASTNode *ast_return_stmt(ASTNode *expr, Loc loc, Arena *arena);
 ASTNode *ast_int_literal(i64 value, bool is_unsigned, IntSuffix length, bool is_hex, Loc loc,
                          Arena *arena);
 ASTNode *ast_program(Vec *decls, Loc loc, Arena *arena);
-ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, Loc loc, Arena *arena);
+ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, StorageClass storage, Loc loc,
+                      Arena *arena);
 ASTNode *ast_expr_stmt(ASTNode *expr, Loc loc, Arena *arena);
 ASTNode *ast_binary_expr(BinOpKind op, ASTNode *left, ASTNode *right, Loc loc, Arena *arena);
 ASTNode *ast_unary_expr(UnaryOpKind op, ASTNode *operand, Loc loc, Arena *arena);
