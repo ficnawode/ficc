@@ -1,8 +1,12 @@
-int main(void) {
+int main(void)
+{
     int x = 0;
-    if (x) {
+    if (x)
+    {
         x = 10;
-    } else {
+    }
+    else
+    {
         x = 20;
     }
     return x;

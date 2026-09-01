@@ -1,6 +1,7 @@
 #include "harness.h"
 #include "lexer.h"
 #include "util/arena.h"
+
 #include <string.h>
 
 TEST(lexer, keywords_and_punct)
@@ -8,7 +9,7 @@ TEST(lexer, keywords_and_punct)
     Arena *a = arena_new();
     LexResult res = lex("t", "int main(void) { return 42; }", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 11);
 
     EXPECT_EQ(t[0].kind, TOK_KW_INT);
@@ -31,7 +32,7 @@ TEST(lexer, literal_value)
     Arena *a = arena_new();
     LexResult res = lex("t", "return 123;", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(t[0].kind, TOK_KW_RETURN);
     EXPECT_EQ(t[1].kind, TOK_INT_LIT);
     EXPECT_EQ(t[1].payload.int_val, 123);
@@ -43,9 +44,9 @@ TEST(lexer, identifier_name)
     Arena *a = arena_new();
     LexResult res = lex("t", "foo_bar;", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(t[0].kind, TOK_IDENT);
-    EXPECT_TRUE(strcmp(t[0].payload.str, "foo_bar") == 0);
+    EXPECT_STR_EQ(t[0].payload.str, "foo_bar");
     arena_free(a);
 }
 
@@ -54,7 +55,7 @@ TEST(lexer, location_tracking)
     Arena *a = arena_new();
     LexResult res = lex("t", "int\nmain", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(t[0].loc.line, 1);
     EXPECT_EQ(t[0].loc.col, 1);
     EXPECT_EQ(t[1].loc.line, 2);
@@ -67,7 +68,7 @@ TEST(lexer, tab_advances_col)
     Arena *a = arena_new();
     LexResult res = lex("t", "int\tmain", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(t[1].loc.col, 8); /* tab from col 4 -> col 9 */
     arena_free(a);
 }
@@ -77,7 +78,7 @@ TEST(lexer, overflow_is_error)
     Arena *a = arena_new();
     LexResult res = lex("t", "999999999999999999999999999999", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t == NULL);
+    EXPECT_NULL(t);
     arena_free(a);
 }
 
@@ -86,7 +87,7 @@ TEST(lexer, unknown_char_is_error)
     Arena *a = arena_new();
     LexResult res = lex("t", "int @;", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t == NULL);
+    EXPECT_NULL(t);
     arena_free(a);
 }
 
@@ -95,7 +96,7 @@ TEST(lexer, empty_source)
     Arena *a = arena_new();
     LexResult res = lex("t", "", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 1);
     EXPECT_EQ(t[0].kind, TOK_EOF);
     arena_free(a);
@@ -106,7 +107,7 @@ TEST(lexer, operators)
     Arena *a = arena_new();
     LexResult res = lex("t", "+ - * / % = == != < > <= >= && || ! & | ^ << >> ~ : ,", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 24);
     EXPECT_EQ(t[0].kind, TOK_PLUS);
     EXPECT_EQ(t[1].kind, TOK_MINUS);
@@ -140,7 +141,7 @@ TEST(lexer, block_comment)
     Arena *a = arena_new();
     LexResult res = lex("t", "int /* comment */ x;", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 4);
     EXPECT_EQ(t[0].kind, TOK_KW_INT);
     EXPECT_EQ(t[1].kind, TOK_IDENT);
@@ -154,7 +155,7 @@ TEST(lexer, unterminated_comment)
     Arena *a = arena_new();
     LexResult res = lex("t", "int /* never ends", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t == NULL);
+    EXPECT_NULL(t);
     arena_free(a);
 }
 
@@ -163,7 +164,7 @@ TEST(lexer, if_else_keywords)
     Arena *a = arena_new();
     LexResult res = lex("t", "if (x) else", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 6);
     EXPECT_EQ(t[0].kind, TOK_KW_IF);
     EXPECT_EQ(t[1].kind, TOK_LPAREN);
@@ -174,12 +175,12 @@ TEST(lexer, if_else_keywords)
     arena_free(a);
 }
 
-TEST(lexer, phase4_keywords)
+TEST(lexer, loop_keywords)
 {
     Arena *a = arena_new();
     LexResult res = lex("t", "while for do break continue goto", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 7);
     EXPECT_EQ(t[0].kind, TOK_KW_WHILE);
     EXPECT_EQ(t[1].kind, TOK_KW_FOR);
@@ -196,7 +197,7 @@ TEST(lexer, ternary_tokens)
     Arena *a = arena_new();
     LexResult res = lex("t", "a ? b : c", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 6);
     EXPECT_EQ(t[0].kind, TOK_IDENT);
     EXPECT_EQ(t[1].kind, TOK_QUESTION);
@@ -212,7 +213,7 @@ TEST(lexer, string_literal_simple)
     Arena *a = arena_new();
     LexResult res = lex("t", "\"hello\"", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 2);
     EXPECT_EQ(t[0].kind, TOK_STRING_LIT);
     EXPECT_EQ(t[0].str_len, 5);
@@ -226,7 +227,7 @@ TEST(lexer, string_literal_empty)
     Arena *a = arena_new();
     LexResult res = lex("t", "\"\"", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 2);
     EXPECT_EQ(t[0].kind, TOK_STRING_LIT);
     EXPECT_EQ(t[0].str_len, 0);
@@ -239,7 +240,7 @@ TEST(lexer, string_literal_escapes)
     Arena *a = arena_new();
     LexResult res = lex("t", "\"a\\nb\\tc\\\\d\\\"e\\0f\"", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 2);
     EXPECT_EQ(t[0].kind, TOK_STRING_LIT);
     EXPECT_EQ(t[0].str_len, 11);
@@ -262,7 +263,7 @@ TEST(lexer, string_literal_unterminated)
 {
     Arena *a = arena_new();
     LexResult res = lex("t", "\"hello", a);
-    EXPECT_TRUE(res.tokens == NULL);
+    EXPECT_NULL(res.tokens);
     EXPECT_EQ(res.count, 0);
     arena_free(a);
 }
@@ -272,7 +273,7 @@ TEST(lexer, sizeof_keyword)
     Arena *a = arena_new();
     LexResult res = lex("t", "sizeof", a);
     Token *t = res.tokens;
-    EXPECT_TRUE(t != NULL);
+    EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 2);
     EXPECT_EQ(t[0].kind, TOK_KW_SIZEOF);
     EXPECT_EQ(t[1].kind, TOK_EOF);

@@ -1,41 +1,22 @@
 #include "harness.h"
+#include "testdriver.h"
+
+#include "ast.h"
 #include "ir_builder.h"
 #include "ir_interp.h"
 #include "lexer.h"
-#include "parser.h"
-#include "semantic.h"
-#include "util/arena.h"
-#include <string.h>
 
-static IrModule *build_from_source(const char *src, Arena *arena)
-{
-    LexResult lexed = lex("<test>", src, arena);
-    if (!lexed.tokens)
-    {
-        return NULL;
-    }
-    ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
-    if (!ast)
-    {
-        return NULL;
-    }
-    ast = semantic_check(ast, arena);
-    if (!ast)
-    {
-        return NULL;
-    }
-    return ir_build_module(ast, arena);
-}
+#include <string.h>
 
 TEST(ir_builder, return42)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source("int main(void) { return 42; }", a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) { return 42; }", a);
+    EXPECT_NOTNULL(m);
     EXPECT_EQ(vec_size(m->funcs), 1);
 
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
-    EXPECT_TRUE(strcmp(f->name, "main") == 0);
+    EXPECT_STR_EQ(f->name, "main");
     EXPECT_EQ(vec_size(f->blocks), 1);
 
     IrBlock *bb = (IrBlock *) vec_get(f->blocks, 0);
@@ -53,11 +34,11 @@ TEST(ir_builder, return42)
 TEST(ir_builder, return_void)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source("void f(void) { return; }", a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("void f(void) { return; }", a);
+    EXPECT_NOTNULL(m);
 
     IrFunction *fn = (IrFunction *) vec_get(m->funcs, 0);
-    EXPECT_TRUE(strcmp(fn->name, "f") == 0);
+    EXPECT_STR_EQ(fn->name, "f");
     IrBlock *bb = (IrBlock *) vec_get(fn->blocks, 0);
     IrInstr *ret = (IrInstr *) vec_get(bb->instrs, 0);
     EXPECT_EQ(ret->opcode, OP_RET);
@@ -69,8 +50,8 @@ TEST(ir_builder, return_void)
 TEST(ir_builder, empty_body_gets_unreachable)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source("int main(void) { }", a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) { }", a);
+    EXPECT_NOTNULL(m);
 
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     IrBlock *bb = (IrBlock *) vec_get(f->blocks, 0);
@@ -88,16 +69,24 @@ TEST(ir_builder, wrong_toplevel_returns_null)
     /* Build an int literal AST directly, bypass parser */
     ASTNode *lit = ast_int_literal(42, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     IrModule *m = ir_build_module(lit, a);
-    EXPECT_TRUE(m == NULL);
+    EXPECT_NULL(m);
     arena_free(a);
 }
 
 TEST(ir_builder, if_else_then_taken)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source(
-        "int main(void) { int x; if (1) { x = 10; } else { x = 20; } return x; }", a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int x;\n"
+                                  "    if (1) {\n"
+                                  "        x = 10;\n"
+                                  "    } else {\n"
+                                  "        x = 20;\n"
+                                  "    }\n"
+                                  "    return x;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
     i64 result = ir_interp_run(m);
     EXPECT_EQ(result, 10);
     arena_free(a);
@@ -106,9 +95,17 @@ TEST(ir_builder, if_else_then_taken)
 TEST(ir_builder, if_else_else_taken)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source(
-        "int main(void) { int x; if (0) { x = 10; } else { x = 20; } return x; }", a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int x;\n"
+                                  "    if (0) {\n"
+                                  "        x = 10;\n"
+                                  "    } else {\n"
+                                  "        x = 20;\n"
+                                  "    }\n"
+                                  "    return x;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
     i64 result = ir_interp_run(m);
     EXPECT_EQ(result, 20);
     arena_free(a);
@@ -117,9 +114,16 @@ TEST(ir_builder, if_else_else_taken)
 TEST(ir_builder, if_no_else)
 {
     Arena *a = arena_new();
-    IrModule *m =
-        build_from_source("int main(void) { int x; x = 5; if (1) { x = 10; } return x; }", a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int x;\n"
+                                  "    x = 5;\n"
+                                  "    if (1) {\n"
+                                  "        x = 10;\n"
+                                  "    }\n"
+                                  "    return x;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
     i64 result = ir_interp_run(m);
     EXPECT_EQ(result, 10);
     arena_free(a);
@@ -157,16 +161,22 @@ static IrBlock *find_block_by_prefix(IrFunction *f, const char *prefix)
 TEST(ir_builder, while_loop_structure)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source(
-        "int main(void) { int i = 0; while (i < 3) { i = i + 1; } return i; }", a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int i = 0;\n"
+                                  "    while (i < 3) {\n"
+                                  "        i = i + 1;\n"
+                                  "    }\n"
+                                  "    return i;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
 
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     /* entry + while_header + while_body + while_exit */
     EXPECT_EQ(vec_size(f->blocks), 4);
 
     IrBlock *header = (IrBlock *) vec_get(f->blocks, 1);
-    EXPECT_TRUE(strcmp(header->label, "while_header_1") == 0);
+    EXPECT_STR_EQ(header->label, "while_header_1");
     EXPECT_TRUE(header->is_loop_header);
 
     /* The loop header is the merge point (entry + back edge): its PHI carries
@@ -184,17 +194,22 @@ TEST(ir_builder, while_loop_structure)
 TEST(ir_builder, for_loop_structure)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source(
-        "int main(void) { int s = 0; for (int i = 0; i < 4; i = i + 1) { s = s + i; } return s; }",
-        a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 4; i = i + 1) {\n"
+                                  "        s = s + i;\n"
+                                  "    }\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
 
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     /* entry + for_header + for_body + for_latch + for_exit */
     EXPECT_EQ(vec_size(f->blocks), 5);
 
     IrBlock *header = (IrBlock *) vec_get(f->blocks, 1);
-    EXPECT_TRUE(strcmp(header->label, "for_header_1") == 0);
+    EXPECT_STR_EQ(header->label, "for_header_1");
     EXPECT_TRUE(header->is_loop_header);
     IrInstr *last = (IrInstr *) vec_last(header->instrs);
     EXPECT_EQ(last->opcode, OP_BRCOND);
@@ -202,13 +217,22 @@ TEST(ir_builder, for_loop_structure)
     EXPECT_EQ(ir_interp_run(m), 6);
 
     /* No-cond form: the header falls through to the body with a plain BR. */
-    IrModule *m2 = build_from_source(
-        "int main(void) { int i = 0; for (;;) { i = i + 1; if (i > 2) break; } return i; }", a);
-    EXPECT_TRUE(m2 != NULL);
+    IrModule *m2 = tc_build_module("int main(void) {\n"
+                                   "    int i = 0;\n"
+                                   "    for (;;) {\n"
+                                   "        i = i + 1;\n"
+                                   "        if (i > 2) {\n"
+                                   "            break;\n"
+                                   "        }\n"
+                                   "    }\n"
+                                   "    return i;\n"
+                                   "}\n",
+                                   a);
+    EXPECT_NOTNULL(m2);
 
     IrFunction *f2 = (IrFunction *) vec_get(m2->funcs, 0);
     IrBlock *hdr2 = (IrBlock *) vec_get(f2->blocks, 1);
-    EXPECT_TRUE(strcmp(hdr2->label, "for_header_1") == 0);
+    EXPECT_STR_EQ(hdr2->label, "for_header_1");
     IrInstr *last2 = (IrInstr *) vec_last(hdr2->instrs);
     EXPECT_EQ(last2->opcode, OP_BR);
 
@@ -219,16 +243,16 @@ TEST(ir_builder, for_loop_structure)
 TEST(ir_builder, short_circuit_structure)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source("int main(void) { return (1 && 0) ? 1 : 0; }", a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) { return (1 && 0) ? 1 : 0; }", a);
+    EXPECT_NOTNULL(m);
 
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
-    EXPECT_TRUE(find_block_by_prefix(f, "land_true") != NULL);
-    EXPECT_TRUE(find_block_by_prefix(f, "land_false") != NULL);
-    EXPECT_TRUE(find_block_by_prefix(f, "land_rhs") != NULL);
+    EXPECT_NOTNULL(find_block_by_prefix(f, "land_true"));
+    EXPECT_NOTNULL(find_block_by_prefix(f, "land_false"));
+    EXPECT_NOTNULL(find_block_by_prefix(f, "land_rhs"));
 
     IrBlock *merge = find_block_by_prefix(f, "land_merge");
-    EXPECT_TRUE(merge != NULL);
+    EXPECT_NOTNULL(merge);
     IrInstr *first = (IrInstr *) vec_get(merge->instrs, 0);
     EXPECT_EQ(first->opcode, OP_PHI);
     EXPECT_EQ(first->extra.phi.nentries, 2);
@@ -244,12 +268,18 @@ TEST(ir_builder, short_circuit_structure)
 TEST(ir_builder, goto_label_block)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source("int main(void) { goto a; return 0; a: return 42; }", a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    goto a;\n"
+                                  "    return 0;\n"
+                                  "a:\n"
+                                  "    return 42;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
 
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     IrBlock *label_bb = find_block(f, "a");
-    EXPECT_TRUE(label_bb != NULL);
+    EXPECT_NOTNULL(label_bb);
     EXPECT_TRUE(label_bb->is_loop_header);
 
     EXPECT_EQ(ir_interp_run(m), 42);
@@ -259,11 +289,21 @@ TEST(ir_builder, goto_label_block)
 TEST(ir_builder, nested_break_continue_preds)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source(
-        "int main(void) { int s = 0; for (int i = 0; i < 10; i = i + 1) { if (i == 3) continue; "
-        "if (i == 7) break; s = s + 1; } return s; }",
-        a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 10; i = i + 1) {\n"
+                                  "        if (i == 3) {\n"
+                                  "            continue;\n"
+                                  "        }\n"
+                                  "        if (i == 7) {\n"
+                                  "            break;\n"
+                                  "        }\n"
+                                  "        s = s + 1;\n"
+                                  "    }\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
 
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     size_t nblocks = vec_size(f->blocks);
@@ -288,18 +328,22 @@ TEST(ir_builder, nested_break_continue_preds)
 TEST(ir_builder, global_string_literal)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source("int main(void) { char *s = \"abc\"; return s[1]; }", a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    char *s = \"abc\";\n"
+                                  "    return s[1];\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
     EXPECT_EQ(vec_size(m->globals), 1);
 
     IrGlobal *g = (IrGlobal *) vec_get(m->globals, 0);
-    EXPECT_TRUE(g->name != NULL);
+    EXPECT_NOTNULL(g->name);
     EXPECT_TRUE(strncmp(g->name, "__str_", 6) == 0);
     EXPECT_EQ(g->type->kind, TYPE_ARRAY);
     EXPECT_EQ(type_array_elem(g->type), type_char());
     EXPECT_EQ(type_array_len(g->type), 4); /* "abc" + NUL */
     EXPECT_EQ(g->init_len, 4);
-    EXPECT_TRUE(g->init_data != NULL);
+    EXPECT_NOTNULL(g->init_data);
     EXPECT_TRUE(memcmp(g->init_data, "abc", 4) == 0);
     EXPECT_EQ(g->align, 1);
     EXPECT_EQ(g->section, IR_SECTION_RODATA);
@@ -311,14 +355,18 @@ TEST(ir_builder, global_string_literal)
 TEST(ir_builder, multiple_string_literals)
 {
     Arena *a = arena_new();
-    IrModule *m = build_from_source(
-        "int main(void) { char *x = \"hello\"; char *y = \"world\"; return x[0] + y[0]; }", a);
-    EXPECT_TRUE(m != NULL);
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    char *x = \"hello\";\n"
+                                  "    char *y = \"world\";\n"
+                                  "    return x[0] + y[0];\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
     EXPECT_EQ(vec_size(m->globals), 2);
 
     IrGlobal *g0 = (IrGlobal *) vec_get(m->globals, 0);
     IrGlobal *g1 = (IrGlobal *) vec_get(m->globals, 1);
-    EXPECT_TRUE(strcmp(g0->name, g1->name) != 0); /* distinct names */
+    EXPECT_STR_NE(g0->name, g1->name); /* distinct names */
     EXPECT_EQ(g0->section, IR_SECTION_RODATA);
     EXPECT_EQ(g1->section, IR_SECTION_RODATA);
 

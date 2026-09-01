@@ -1,17 +1,22 @@
-int main(void) {
+int main(void)
+{
     int a = 1;
     int b = 0;
     int c = 0;
-    if (a && b) {
+    if (a && b)
+    {
         c = 1;
     }
-    if (a || b) {
+    if (a || b)
+    {
         c = c + 10;
     }
-    if (b && a) {
+    if (b && a)
+    {
         c = c + 100;
     }
-    if (!a) {
+    if (!a)
+    {
         c = c + 1;
     }
     c = c & 15;

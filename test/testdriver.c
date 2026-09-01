@@ -1,0 +1,176 @@
+#include "testdriver.h"
+
+#include "codegen.h"
+#include "elf.h"
+#include "ir_builder.h"
+#include "ir_interp.h"
+#include "lexer.h"
+#include "parser.h"
+#include "semantic.h"
+#include "type.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int tc_run_shell(const char *cmd)
+{
+    int rc = system(cmd);
+    if (rc == -1)
+    {
+        return -1;
+    }
+    return WEXITSTATUS(rc);
+}
+
+ASTNode *tc_parse(const char *src, Arena *arena)
+{
+    LexResult lexed = lex("<test>", src, arena);
+    if (!lexed.tokens)
+    {
+        return NULL;
+    }
+    return parse(lexed.tokens, lexed.count, arena);
+}
+
+IrModule *tc_build_module(const char *src, Arena *arena)
+{
+    type_reset();
+    ASTNode *ast = tc_parse(src, arena);
+    if (!ast)
+    {
+        return NULL;
+    }
+    ast = semantic_check(ast, arena);
+    if (!ast)
+    {
+        return NULL;
+    }
+    return ir_build_module(ast, arena);
+}
+
+i64 tc_run_interp(const char *src)
+{
+    Arena *arena = arena_new();
+    IrModule *mod = tc_build_module(src, arena);
+    if (!mod)
+    {
+        fprintf(stderr, "  [testdriver] build failed for: %s\n", src);
+        test_fail();
+        arena_free(arena);
+        return 0;
+    }
+    i64 result = ir_interp_run(mod);
+    arena_free(arena);
+    return result;
+}
+
+static unsigned int tc_temp_seq;
+
+static void tc_temp_path(char *buf, size_t buf_sz, const char *suffix)
+{
+    snprintf(buf, buf_sz, "/tmp/ficc_%06u_%s", tc_temp_seq++, suffix);
+}
+
+static void tc_temp_cleanup(char *paths[], size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+    {
+        unlink(paths[i]);
+    }
+}
+
+int tc_run_elf(const char *src)
+{
+    Arena *arena = arena_new();
+    IrModule *mod = tc_build_module(src, arena);
+    if (!mod)
+    {
+        fprintf(stderr, "  [testdriver] build failed for: %s\n", src);
+        test_fail();
+        arena_free(arena);
+        return -1;
+    }
+
+    CodegenModule *cm = codegen_ir_to_machine(mod, arena);
+    if (!cm)
+    {
+        fprintf(stderr, "  [testdriver] codegen failed for: %s\n", src);
+        test_fail();
+        arena_free(arena);
+        return -1;
+    }
+
+    char obj[256], bin[256];
+    tc_temp_path(obj, sizeof(obj), "main.o");
+    tc_temp_path(bin, sizeof(bin), "bin");
+    elf_write(cm, obj);
+
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "gcc -no-pie %s -o %s >/dev/null 2>&1 && %s", obj, bin, bin);
+    int rc = tc_run_shell(cmd);
+
+    char *paths[] = {obj, bin};
+    tc_temp_cleanup(paths, 2);
+    arena_free(arena);
+    return rc;
+}
+
+int tc_run_elf_with_extra_tu(const char *src, const char *extra_src)
+{
+    Arena *arena = arena_new();
+    IrModule *mod = tc_build_module(src, arena);
+    if (!mod)
+    {
+        fprintf(stderr, "  [testdriver] build failed for: %s\n", src);
+        test_fail();
+        arena_free(arena);
+        return -1;
+    }
+
+    CodegenModule *cm = codegen_ir_to_machine(mod, arena);
+    if (!cm)
+    {
+        fprintf(stderr, "  [testdriver] codegen failed for: %s\n", src);
+        test_fail();
+        arena_free(arena);
+        return -1;
+    }
+
+    /* The test's own TUs live here; the ficc-compiled unit links against
+       symbols they define. All files are unique per call and removed below. */
+    char main_o[256], extra_c[256], extra_o[256], bin[256];
+    tc_temp_path(main_o, sizeof(main_o), "main.o");
+    tc_temp_path(extra_c, sizeof(extra_c), "extra.c");
+    tc_temp_path(extra_o, sizeof(extra_o), "extra.o");
+    tc_temp_path(bin, sizeof(bin), "bin");
+    elf_write(cm, main_o);
+
+    FILE *f = fopen(extra_c, "w");
+    if (!f)
+    {
+        fprintf(stderr, "  [testdriver] cannot write %s\n", extra_c);
+        test_fail();
+        unlink(main_o);
+        arena_free(arena);
+        return -1;
+    }
+    fputs(extra_src, f);
+    fclose(f);
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "gcc -c %s -o %s >/dev/null 2>&1", extra_c, extra_o);
+    int rc = tc_run_shell(cmd);
+    if (rc == 0)
+    {
+        snprintf(cmd, sizeof(cmd), "gcc -no-pie %s %s -o %s >/dev/null 2>&1 && %s", main_o, extra_o,
+                 bin, bin);
+        rc = tc_run_shell(cmd);
+    }
+
+    char *paths[] = {main_o, extra_c, extra_o, bin};
+    tc_temp_cleanup(paths, 4);
+    arena_free(arena);
+    return rc;
+}

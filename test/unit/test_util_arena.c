@@ -1,14 +1,15 @@
 #include "harness.h"
 #include "util/arena.h"
+
 #include <stdint.h>
 #include <string.h>
 
 TEST(arena, create_and_alloc)
 {
     Arena *a = arena_new();
-    EXPECT_TRUE(a != NULL);
+    EXPECT_NOTNULL(a);
     void *p = arena_alloc(a, 64, 8);
-    EXPECT_TRUE(p != NULL);
+    EXPECT_NOTNULL(p);
     arena_free(a);
 }
 
@@ -46,8 +47,8 @@ TEST(arena, chunk_growth)
     /* two 3000-byte allocations exceed the 4096 CHUNK_SIZE: second chunk */
     char *p1 = arena_alloc(a, 3000, 8);
     char *p2 = arena_alloc(a, 3000, 8);
-    EXPECT_TRUE(p1 != NULL);
-    EXPECT_TRUE(p2 != NULL);
+    EXPECT_NOTNULL(p1);
+    EXPECT_NOTNULL(p2);
     memset(p1, 0x11, 3000);
     memset(p2, 0x22, 3000);
     EXPECT_TRUE(p1[2999] == (char) 0x11);
@@ -60,13 +61,13 @@ TEST(arena, big_alloc_gets_own_chunk)
     Arena *a = arena_new();
     /* larger than CHUNK_SIZE: served from a dedicated chunk */
     char *big = arena_alloc(a, 10000, 8);
-    EXPECT_TRUE(big != NULL);
+    EXPECT_NOTNULL(big);
     memset(big, 0x33, 10000);
     EXPECT_TRUE(big[0] == (char) 0x33);
     EXPECT_TRUE(big[9999] == (char) 0x33);
     /* the arena stays usable after a big allocation */
     void *small = arena_alloc(a, 8, 8);
-    EXPECT_TRUE(small != NULL);
+    EXPECT_NOTNULL(small);
     arena_free(a);
 }
 
@@ -81,7 +82,7 @@ TEST(arena, many_small_allocs)
     for (size_t i = 0; i < NALLOCS; i++)
     {
         ptrs[i] = arena_alloc(a, 16, 8);
-        EXPECT_TRUE(ptrs[i] != NULL);
+        EXPECT_NOTNULL(ptrs[i]);
     }
     /* every allocation is individually writable */
     for (size_t i = 0; i < NALLOCS; i++)

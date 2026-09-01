@@ -1,6 +1,7 @@
 #include "ast.h"
 #include "harness.h"
 #include "util/arena.h"
+
 #include <string.h>
 
 TEST(ast, func_def_constructor)
@@ -10,12 +11,12 @@ TEST(ast, func_def_constructor)
     ASTNode *body = ast_compound_stmt(vec_new(a), (Loc) {"t", 1, 1}, a);
     ASTNode *node = ast_func_def(type_int(), "foo", params, body, SC_NONE, (Loc) {"t", 1, 1}, a);
 
-    EXPECT_TRUE(node != NULL);
+    EXPECT_NOTNULL(node);
     EXPECT_EQ(node->kind, AST_FUNC_DEF);
 
     ASTFuncDef *fn = ast_as(ASTFuncDef, node);
     EXPECT_TRUE(fn->ret_type == type_int());
-    EXPECT_TRUE(strcmp(fn->name, "foo") == 0);
+    EXPECT_STR_EQ(fn->name, "foo");
     EXPECT_TRUE(fn->body == body);
 
     arena_free(a);
@@ -27,7 +28,7 @@ TEST(ast, compound_stmt_constructor)
     Vec *stmts = vec_new(a);
     ASTNode *node = ast_compound_stmt(stmts, (Loc) {"t", 1, 1}, a);
 
-    EXPECT_TRUE(node != NULL);
+    EXPECT_NOTNULL(node);
     EXPECT_EQ(node->kind, AST_COMPOUND_STMT);
 
     ASTCompoundStmt *cs = ast_as(ASTCompoundStmt, node);
@@ -42,7 +43,7 @@ TEST(ast, return_stmt_constructor)
     ASTNode *expr = ast_int_literal(7, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     ASTNode *node = ast_return_stmt(expr, (Loc) {"t", 1, 1}, a);
 
-    EXPECT_TRUE(node != NULL);
+    EXPECT_NOTNULL(node);
     EXPECT_EQ(node->kind, AST_RETURN_STMT);
 
     ASTReturnStmt *rs = ast_as(ASTReturnStmt, node);
@@ -56,11 +57,11 @@ TEST(ast, return_stmt_null_expr)
     Arena *a = arena_new();
     ASTNode *node = ast_return_stmt(NULL, (Loc) {"t", 1, 1}, a);
 
-    EXPECT_TRUE(node != NULL);
+    EXPECT_NOTNULL(node);
     EXPECT_EQ(node->kind, AST_RETURN_STMT);
 
     ASTReturnStmt *rs = ast_as(ASTReturnStmt, node);
-    EXPECT_TRUE(rs->expr == NULL);
+    EXPECT_NULL(rs->expr);
 
     arena_free(a);
 }
@@ -70,7 +71,7 @@ TEST(ast, int_literal_constructor)
     Arena *a = arena_new();
     ASTNode *node = ast_int_literal(-123, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
 
-    EXPECT_TRUE(node != NULL);
+    EXPECT_NOTNULL(node);
     EXPECT_EQ(node->kind, AST_INT_LITERAL);
 
     ASTIntLiteral *lit = ast_as(ASTIntLiteral, node);
@@ -92,8 +93,8 @@ TEST(ast, dump_does_not_crash)
 
 TEST(ast, kind_names)
 {
-    EXPECT_TRUE(strcmp(ast_kind_name(AST_FUNC_DEF), "AST_FUNC_DEF") == 0);
-    EXPECT_TRUE(strcmp(ast_kind_name(AST_INT_LITERAL), "AST_INT_LITERAL") == 0);
+    EXPECT_STR_EQ(ast_kind_name(AST_FUNC_DEF), "AST_FUNC_DEF");
+    EXPECT_STR_EQ(ast_kind_name(AST_INT_LITERAL), "AST_INT_LITERAL");
 }
 
 TEST(ast, program_constructor)
@@ -101,7 +102,7 @@ TEST(ast, program_constructor)
     Arena *a = arena_new();
     Vec *decls = vec_new(a);
     ASTNode *p = ast_program(decls, (Loc) {"t", 1, 1}, a);
-    EXPECT_TRUE(p != NULL);
+    EXPECT_NOTNULL(p);
     EXPECT_EQ(p->kind, AST_PROGRAM);
     EXPECT_TRUE(ast_as(ASTProgram, p)->decls == decls);
     arena_free(a);
@@ -112,10 +113,10 @@ TEST(ast, var_decl_constructor)
     Arena *a = arena_new();
     ASTNode *init = ast_int_literal(7, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     ASTNode *d = ast_var_decl(type_int(), "x", init, SC_NONE, (Loc) {"t", 1, 1}, a);
-    EXPECT_TRUE(d != NULL);
+    EXPECT_NOTNULL(d);
     EXPECT_EQ(d->kind, AST_VAR_DECL);
     ASTVarDecl *vd = ast_as(ASTVarDecl, d);
-    EXPECT_TRUE(strcmp(vd->name, "x") == 0);
+    EXPECT_STR_EQ(vd->name, "x");
     EXPECT_TRUE(vd->init == init);
     EXPECT_EQ(vd->storage, SC_NONE);
     arena_free(a);
@@ -127,7 +128,7 @@ TEST(ast, binary_expr_constructor)
     ASTNode *l = ast_int_literal(1, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     ASTNode *r = ast_int_literal(2, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     ASTNode *b = ast_binary_expr(BIN_ADD, l, r, (Loc) {"t", 1, 1}, a);
-    EXPECT_TRUE(b != NULL);
+    EXPECT_NOTNULL(b);
     EXPECT_EQ(b->kind, AST_BINARY_EXPR);
     ASTBinaryExpr *be = ast_as(ASTBinaryExpr, b);
     EXPECT_EQ(be->op, BIN_ADD);
@@ -141,7 +142,7 @@ TEST(ast, unary_expr_constructor)
     Arena *a = arena_new();
     ASTNode *o = ast_int_literal(5, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     ASTNode *u = ast_unary_expr(UN_NEG, o, (Loc) {"t", 1, 1}, a);
-    EXPECT_TRUE(u != NULL);
+    EXPECT_NOTNULL(u);
     EXPECT_EQ(u->kind, AST_UNARY_EXPR);
     EXPECT_TRUE(ast_as(ASTUnaryExpr, u)->operand == o);
     arena_free(a);
@@ -152,9 +153,9 @@ TEST(ast, call_expr_constructor)
     Arena *a = arena_new();
     Vec *args = vec_new(a);
     ASTNode *c = ast_call_expr("foo", args, (Loc) {"t", 1, 1}, a);
-    EXPECT_TRUE(c != NULL);
+    EXPECT_NOTNULL(c);
     EXPECT_EQ(c->kind, AST_CALL_EXPR);
-    EXPECT_TRUE(strcmp(ast_as(ASTCallExpr, c)->callee, "foo") == 0);
+    EXPECT_STR_EQ(ast_as(ASTCallExpr, c)->callee, "foo");
     arena_free(a);
 }
 
@@ -162,8 +163,8 @@ TEST(ast, ident_constructor)
 {
     Arena *a = arena_new();
     ASTNode *id = ast_ident("bar", (Loc) {"t", 1, 1}, a);
-    EXPECT_TRUE(id != NULL);
+    EXPECT_NOTNULL(id);
     EXPECT_EQ(id->kind, AST_IDENT);
-    EXPECT_TRUE(strcmp(ast_as(ASTIdent, id)->name, "bar") == 0);
+    EXPECT_STR_EQ(ast_as(ASTIdent, id)->name, "bar");
     arena_free(a);
 }

@@ -46,5 +46,5 @@ int main(void)
     int d = delta(&lo_val, &hi_val); /* int* -> const int* arguments */
 
     /* 21 + 5 + 40 + 3 + 9 + 2 + 104 - 142 = 42 */
-    return spill + local + LIMIT + s + d + step() + GREET[0] - 142;
+    return spill + local + LIMIT + s + d + step() + GREET[0] + *p - 12 - 142;
 }

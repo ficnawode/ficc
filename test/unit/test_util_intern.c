@@ -1,7 +1,6 @@
 #include "harness.h"
 #include "util/arena.h"
 #include "util/intern.h"
-#include <string.h>
 
 TEST(intern, same_string_same_pointer)
 {
@@ -10,7 +9,7 @@ TEST(intern, same_string_same_pointer)
     const char *s1 = intern(pool, "hello");
     const char *s2 = intern(pool, "hello");
     EXPECT_TRUE(s1 == s2);
-    EXPECT_TRUE(strcmp(s1, "hello") == 0);
+    EXPECT_STR_EQ(s1, "hello");
     arena_free(a);
 }
 
@@ -21,8 +20,8 @@ TEST(intern, different_strings_different_pointers)
     const char *s1 = intern(pool, "foo");
     const char *s2 = intern(pool, "bar");
     EXPECT_TRUE(s1 != s2);
-    EXPECT_TRUE(strcmp(s1, "foo") == 0);
-    EXPECT_TRUE(strcmp(s2, "bar") == 0);
+    EXPECT_STR_EQ(s1, "foo");
+    EXPECT_STR_EQ(s2, "bar");
     arena_free(a);
 }
 
@@ -38,7 +37,7 @@ TEST(intern, many_strings)
         buf[1] = '0' + (i % 10);
         buf[2] = '\0';
         ptrs[i] = intern(pool, buf);
-        EXPECT_TRUE(strcmp(ptrs[i], buf) == 0);
+        EXPECT_STR_EQ(ptrs[i], buf);
     }
     /* intern again, should get same pointers */
     for (int i = 0; i < 64; i++)
@@ -59,6 +58,6 @@ TEST(intern, empty_string)
     const char *s1 = intern(pool, "");
     const char *s2 = intern(pool, "");
     EXPECT_TRUE(s1 == s2);
-    EXPECT_TRUE(strcmp(s1, "") == 0);
+    EXPECT_STR_EQ(s1, "");
     arena_free(a);
 }

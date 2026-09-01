@@ -1,121 +1,94 @@
+#include "ast.h"
 #include "harness.h"
-#include "lexer.h"
-#include "parser.h"
+#include "testdriver.h"
 #include "util/arena.h"
-#include <string.h>
 
-static ASTNode *parse_string(const char *src, Arena *arena)
-{
-    LexResult lexed = lex("<test>", src, arena);
-    if (!lexed.tokens)
-    {
-        return NULL;
-    }
-    return parse(lexed.tokens, lexed.count, arena);
-}
+#include <string.h>
 
 TEST(parser, minimal_program)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { return 42; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) { return 42; }", a);
+    EXPECT_NOTNULL(ast);
     EXPECT_EQ(ast->kind, AST_PROGRAM);
     arena_free(a);
 }
 
 TEST(parser, missing_semicolon)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { return 42 }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_PARSE_FAIL("int main(void) { return 42 }");
 }
 
 TEST(parser, missing_brace)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { return 42;", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_PARSE_FAIL("int main(void) { return 42;");
 }
 
 TEST(parser, missing_lparen)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main void) { return 42; }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_PARSE_FAIL("int main void) { return 42; }");
 }
 
 TEST(parser, missing_rparen)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void { return 42; }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_PARSE_FAIL("int main(void { return 42; }");
 }
 
 TEST(parser, empty_param_list)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main() { return 42; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main() { return 42; }", a);
+    EXPECT_NOTNULL(ast);
     EXPECT_EQ(ast->kind, AST_PROGRAM);
     arena_free(a);
 }
 
 TEST(parser, unknown_type)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = parse_string("foo main(void) { return 42; }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_PARSE_FAIL("foo main(void) { return 42; }");
 }
 
 TEST(parser, no_return_value)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { return; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) { return; }", a);
+    EXPECT_NOTNULL(ast);
     EXPECT_EQ(ast->kind, AST_PROGRAM);
     arena_free(a);
 }
 
 TEST(parser, trailing_junk)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { return 42; } extra", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_PARSE_FAIL("int main(void) { return 42; } extra");
 }
 
 TEST(parser, func_def_shape)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { return 42; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) { return 42; }", a);
+    EXPECT_NOTNULL(ast);
 
     ASTProgram *prog = ast_as(ASTProgram, ast);
-    EXPECT_TRUE(prog != NULL);
+    EXPECT_NOTNULL(prog);
     EXPECT_EQ(vec_size(prog->decls), 1);
 
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
-    EXPECT_TRUE(fn != NULL);
+    EXPECT_NOTNULL(fn);
     EXPECT_EQ(fn->base.kind, AST_FUNC_DEF);
-    EXPECT_TRUE(strcmp(fn->name, "main") == 0);
+    EXPECT_STR_EQ(fn->name, "main");
     EXPECT_TRUE(fn->ret_type == type_int());
-    EXPECT_TRUE(fn->body != NULL);
+    EXPECT_NOTNULL(fn->body);
 
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
-    EXPECT_TRUE(body != NULL);
+    EXPECT_NOTNULL(body);
     EXPECT_EQ(vec_size(body->stmts), 1);
 
     ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
-    EXPECT_TRUE(ret != NULL);
-    EXPECT_TRUE(ret->expr != NULL);
+    EXPECT_NOTNULL(ret);
+    EXPECT_NOTNULL(ret->expr);
 
     ASTIntLiteral *lit = ast_as(ASTIntLiteral, ret->expr);
-    EXPECT_TRUE(lit != NULL);
+    EXPECT_NOTNULL(lit);
     EXPECT_EQ(lit->value, 42);
 
     arena_free(a);
@@ -124,37 +97,47 @@ TEST(parser, func_def_shape)
 TEST(parser, multiple_functions)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int f(void) { return 1; } int g(void) { return 2; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int f(void) {\n"
+                            "    return 1;\n"
+                            "}\n"
+                            "int g(void) {\n"
+                            "    return 2;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     EXPECT_EQ(vec_size(prog->decls), 2);
     ASTFuncDef *f = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTFuncDef *g = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 1));
-    EXPECT_TRUE(strcmp(f->name, "f") == 0);
-    EXPECT_TRUE(strcmp(g->name, "g") == 0);
+    EXPECT_STR_EQ(f->name, "f");
+    EXPECT_STR_EQ(g->name, "g");
     arena_free(a);
 }
 
 TEST(parser, params_with_names)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int add(int a, int b) { return a + b; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int add(int a, int b) { return a + b; }", a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     EXPECT_EQ(vec_size(fn->params), 2);
     ASTVarDecl *p0 = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->params, 0));
     ASTVarDecl *p1 = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->params, 1));
-    EXPECT_TRUE(strcmp(p0->name, "a") == 0);
-    EXPECT_TRUE(strcmp(p1->name, "b") == 0);
+    EXPECT_STR_EQ(p0->name, "a");
+    EXPECT_STR_EQ(p1->name, "b");
     arena_free(a);
 }
 
 TEST(parser, local_var_decl)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { int x; return x; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int x;\n"
+                            "    return x;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -166,13 +149,17 @@ TEST(parser, local_var_decl)
 TEST(parser, var_decl_with_init)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { int x = 5; return x; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int x = 5;\n"
+                            "    return x;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
     ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(body->stmts, 0));
-    EXPECT_TRUE(vd->init != NULL);
+    EXPECT_NOTNULL(vd->init);
     EXPECT_EQ(vd->init->kind, AST_INT_LITERAL);
     arena_free(a);
 }
@@ -180,8 +167,8 @@ TEST(parser, var_decl_with_init)
 TEST(parser, binary_precedence)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { return 1 + 2 * 3; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) { return 1 + 2 * 3; }", a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -198,8 +185,8 @@ TEST(parser, binary_precedence)
 TEST(parser, unary_minus)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { return -42; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) { return -42; }", a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -213,14 +200,14 @@ TEST(parser, unary_minus)
 TEST(parser, function_call)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { return foo(1, 2); }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) { return foo(1, 2); }", a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
     ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
     ASTCallExpr *call = ast_as(ASTCallExpr, ret->expr);
-    EXPECT_TRUE(strcmp(call->callee, "foo") == 0);
+    EXPECT_STR_EQ(call->callee, "foo");
     EXPECT_EQ(vec_size(call->args), 2);
     arena_free(a);
 }
@@ -228,8 +215,13 @@ TEST(parser, function_call)
 TEST(parser, assignment)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { int x; x = 5; return x; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int x;\n"
+                            "    x = 5;\n"
+                            "    return x;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -244,53 +236,75 @@ TEST(parser, assignment)
 TEST(parser, if_else)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { if (1) { return 10; } else { return 20; } }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    if (1) {\n"
+                            "        return 10;\n"
+                            "    } else {\n"
+                            "        return 20;\n"
+                            "    }\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
     EXPECT_EQ(vec_size(body->stmts), 1);
     ASTIfStmt *is = ast_as(ASTIfStmt, (ASTNode *) vec_get(body->stmts, 0));
-    EXPECT_TRUE(is->cond != NULL);
-    EXPECT_TRUE(is->then_branch != NULL);
-    EXPECT_TRUE(is->else_branch != NULL);
+    EXPECT_NOTNULL(is->cond);
+    EXPECT_NOTNULL(is->then_branch);
+    EXPECT_NOTNULL(is->else_branch);
     arena_free(a);
 }
 
 TEST(parser, if_no_else)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { if (1) return 10; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    if (1)\n"
+                            "        return 10;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
     ASTIfStmt *is = ast_as(ASTIfStmt, (ASTNode *) vec_get(body->stmts, 0));
-    EXPECT_TRUE(is->cond != NULL);
-    EXPECT_TRUE(is->then_branch != NULL);
-    EXPECT_TRUE(is->else_branch == NULL);
+    EXPECT_NOTNULL(is->cond);
+    EXPECT_NOTNULL(is->then_branch);
+    EXPECT_NULL(is->else_branch);
     arena_free(a);
 }
 
 TEST(parser, dangling_else)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { if (1) if (0) return 10; else return 20; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    if (1)\n"
+                            "        if (0)\n"
+                            "            return 10;\n"
+                            "        else\n"
+                            "            return 20;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
     ASTIfStmt *outer = ast_as(ASTIfStmt, (ASTNode *) vec_get(body->stmts, 0));
     ASTIfStmt *inner = ast_as(ASTIfStmt, outer->then_branch);
-    EXPECT_TRUE(inner->else_branch != NULL);
+    EXPECT_NOTNULL(inner->else_branch);
     arena_free(a);
 }
 
 TEST(parser, string_literal_expr)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { char *s = \"hello\"; return 0; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    char *s = \"hello\";\n"
+                            "    return 0;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -306,8 +320,8 @@ TEST(parser, string_literal_expr)
 TEST(parser, sizeof_expr)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { return sizeof(int); }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) { return sizeof(int); }", a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -319,8 +333,12 @@ TEST(parser, sizeof_expr)
 TEST(parser, sizeof_var_expr)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { int x; return sizeof x; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int x;\n"
+                            "    return sizeof x;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -334,8 +352,12 @@ TEST(parser, sizeof_var_expr)
 TEST(parser, deref_expr)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { int *p; return *p; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int *p;\n"
+                            "    return *p;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -348,8 +370,13 @@ TEST(parser, deref_expr)
 TEST(parser, addr_expr)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { int arr[1]; int *p = &arr; return 0; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int arr[1];\n"
+                            "    int *p = &arr;\n"
+                            "    return 0;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -362,8 +389,12 @@ TEST(parser, addr_expr)
 TEST(parser, subscript_expr)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { int arr[2]; return arr[0]; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int arr[2];\n"
+                            "    return arr[0];\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -378,8 +409,12 @@ TEST(parser, subscript_expr)
 TEST(parser, pointer_type_specifier)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { int *p; return 0; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int *p;\n"
+                            "    return 0;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -392,8 +427,12 @@ TEST(parser, pointer_type_specifier)
 TEST(parser, array_declarator)
 {
     Arena *a = arena_new();
-    ASTNode *ast = parse_string("int main(void) { int arr[10]; return 0; }", a);
-    EXPECT_TRUE(ast != NULL);
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int arr[10];\n"
+                            "    return 0;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);

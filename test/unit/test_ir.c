@@ -1,17 +1,16 @@
 #include "harness.h"
 #include "ir.h"
 #include "util/arena.h"
-#include <string.h>
 
 TEST(ir, module_creation)
 {
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
-    EXPECT_TRUE(m != NULL);
+    EXPECT_NOTNULL(m);
     EXPECT_EQ(m->next_vreg, 0);
     EXPECT_EQ(m->width_count, 0);
-    EXPECT_TRUE(m->funcs != NULL);
-    EXPECT_TRUE(m->globals != NULL);
+    EXPECT_NOTNULL(m->funcs);
+    EXPECT_NOTNULL(m->globals);
     arena_free(a);
 }
 
@@ -61,11 +60,11 @@ TEST(ir, function_and_block)
     IrFunction *f = ir_module_add_func(m, "main", type_int());
     IrBlock *bb = ir_func_add_block(f, "entry");
 
-    EXPECT_TRUE(f != NULL);
-    EXPECT_TRUE(strcmp(f->name, "main") == 0);
+    EXPECT_NOTNULL(f);
+    EXPECT_STR_EQ(f->name, "main");
     EXPECT_EQ(vec_size(f->blocks), 1);
-    EXPECT_TRUE(bb != NULL);
-    EXPECT_TRUE(strcmp(bb->label, "entry") == 0);
+    EXPECT_NOTNULL(bb);
+    EXPECT_STR_EQ(bb->label, "entry");
 
     arena_free(a);
 }
@@ -78,7 +77,7 @@ TEST(ir, emit_ret)
     IrBlock *bb = ir_func_add_block(f, "entry");
 
     IrInstr *i = ir_emit_ret(bb, ir_operand_imm(42));
-    EXPECT_TRUE(i != NULL);
+    EXPECT_NOTNULL(i);
     EXPECT_EQ(i->opcode, OP_RET);
     EXPECT_EQ(i->nops, 1);
     EXPECT_TRUE(i->ops[0].is_imm);
@@ -95,7 +94,7 @@ TEST(ir, emit_unreachable)
     IrBlock *bb = ir_func_add_block(f, "entry");
 
     IrInstr *i = ir_emit_unreachable(bb);
-    EXPECT_TRUE(i != NULL);
+    EXPECT_NOTNULL(i);
     EXPECT_EQ(i->opcode, OP_UNREACHABLE);
     EXPECT_EQ(i->nops, 0);
 
@@ -118,9 +117,9 @@ TEST(ir, operand_imm)
 
 TEST(ir, opcode_names)
 {
-    EXPECT_TRUE(strcmp(ir_opcode_name(OP_RET), "OP_RET") == 0);
-    EXPECT_TRUE(strcmp(ir_opcode_name(OP_ADD), "OP_ADD") == 0);
-    EXPECT_TRUE(strcmp(ir_opcode_name(OP_ICMP_SLT), "OP_ICMP_SLT") == 0);
+    EXPECT_STR_EQ(ir_opcode_name(OP_RET), "OP_RET");
+    EXPECT_STR_EQ(ir_opcode_name(OP_ADD), "OP_ADD");
+    EXPECT_STR_EQ(ir_opcode_name(OP_ICMP_SLT), "OP_ICMP_SLT");
 }
 
 TEST(ir, emit_ret_void)
@@ -162,7 +161,7 @@ TEST(ir, emit_call)
     EXPECT_EQ(i->opcode, OP_CALL);
     EXPECT_EQ(i->result, 0);
     EXPECT_EQ(i->extra.call.nargs, 2);
-    EXPECT_TRUE(strcmp(i->extra.call.name, "foo") == 0);
+    EXPECT_STR_EQ(i->extra.call.name, "foo");
     EXPECT_EQ(i->extra.call.args[0].u.imm, 1);
     arena_free(a);
 }
@@ -175,7 +174,7 @@ TEST(ir, emit_br)
     IrBlock *bb = ir_func_add_block(f, "entry");
     IrInstr *i = ir_emit_br(bb, "target");
     EXPECT_EQ(i->opcode, OP_BR);
-    EXPECT_TRUE(strcmp(i->extra.br.target_label, "target") == 0);
+    EXPECT_STR_EQ(i->extra.br.target_label, "target");
     arena_free(a);
 }
 
@@ -187,8 +186,8 @@ TEST(ir, emit_brcond)
     IrBlock *bb = ir_func_add_block(f, "entry");
     IrInstr *i = ir_emit_brcond(bb, ir_operand_vreg(0), "then", "else");
     EXPECT_EQ(i->opcode, OP_BRCOND);
-    EXPECT_TRUE(strcmp(i->extra.brcond.true_label, "then") == 0);
-    EXPECT_TRUE(strcmp(i->extra.brcond.false_label, "else") == 0);
+    EXPECT_STR_EQ(i->extra.brcond.true_label, "then");
+    EXPECT_STR_EQ(i->extra.brcond.false_label, "else");
     arena_free(a);
 }
 

@@ -1,8 +1,7 @@
 #ifndef FICC_TEST_HARNESS_H
 #define FICC_TEST_HARNESS_H
-
 #include <stdio.h>
-#include <stdlib.h>
+#include <string.h>
 
 typedef struct TestCase
 {
@@ -51,6 +50,46 @@ void test_fail(void);
         if ((a) != (b))                                                                            \
         {                                                                                          \
             fprintf(stderr, "  EXPECT_EQ failed at %s:%d\n", __FILE__, __LINE__);                  \
+            test_fail();                                                                           \
+        }                                                                                          \
+    } while (0)
+
+#define EXPECT_STR_EQ(a, b)                                                                        \
+    do                                                                                             \
+    {                                                                                              \
+        if (strcmp((a), (b)) != 0)                                                                 \
+        {                                                                                          \
+            fprintf(stderr, "  EXPECT_STR_EQ failed at %s:%d\n", __FILE__, __LINE__);              \
+            test_fail();                                                                           \
+        }                                                                                          \
+    } while (0)
+
+#define EXPECT_STR_NE(a, b)                                                                        \
+    do                                                                                             \
+    {                                                                                              \
+        if (strcmp((a), (b)) == 0)                                                                 \
+        {                                                                                          \
+            fprintf(stderr, "  EXPECT_STR_NE failed at %s:%d\n", __FILE__, __LINE__);              \
+            test_fail();                                                                           \
+        }                                                                                          \
+    } while (0)
+
+#define EXPECT_NULL(p)                                                                             \
+    do                                                                                             \
+    {                                                                                              \
+        if ((p) != NULL)                                                                           \
+        {                                                                                          \
+            fprintf(stderr, "  EXPECT_NULL failed at %s:%d\n", __FILE__, __LINE__);                \
+            test_fail();                                                                           \
+        }                                                                                          \
+    } while (0)
+
+#define EXPECT_NOTNULL(p)                                                                          \
+    do                                                                                             \
+    {                                                                                              \
+        if ((p) == NULL)                                                                           \
+        {                                                                                          \
+            fprintf(stderr, "  EXPECT_NOTNULL failed at %s:%d\n", __FILE__, __LINE__);             \
             test_fail();                                                                           \
         }                                                                                          \
     } while (0)

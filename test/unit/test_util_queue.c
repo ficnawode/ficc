@@ -6,10 +6,10 @@ TEST(queue, create_empty)
 {
     Arena *a = arena_new();
     Queue *q = queue_new(a);
-    EXPECT_TRUE(q != NULL);
+    EXPECT_NOTNULL(q);
     EXPECT_TRUE(queue_is_empty(q));
     EXPECT_EQ(queue_size(q), 0);
-    EXPECT_TRUE(queue_pop(q) == NULL);
+    EXPECT_NULL(queue_pop(q));
     arena_free(a);
 }
 
@@ -43,7 +43,7 @@ TEST(queue, fifo_order)
     for (int i = 0; i < 100; i++)
     {
         int *p = (int *) queue_pop(q);
-        EXPECT_TRUE(p != NULL);
+        EXPECT_NOTNULL(p);
         EXPECT_EQ(*p, i);
     }
     arena_free(a);
@@ -88,7 +88,7 @@ TEST(queue, front_peeks_without_removing)
 {
     Arena *a = arena_new();
     Queue *q = queue_new(a);
-    EXPECT_TRUE(queue_front(q) == NULL);
+    EXPECT_NULL(queue_front(q));
     int x = 10, y = 20;
     queue_push(q, &x);
     queue_push(q, &y);

@@ -1,7 +1,6 @@
 #include "harness.h"
 #include "util/arena.h"
 #include "util/hashmap.h"
-#include <string.h>
 
 TEST(strmap, basic_set_get)
 {
@@ -17,7 +16,7 @@ TEST(strmap, missing_key)
 {
     Arena *a = arena_new();
     StrMap *m = strmap_new(a);
-    EXPECT_TRUE(strmap_get(m, "nope") == NULL);
+    EXPECT_NULL(strmap_get(m, "nope"));
     arena_free(a);
 }
 
@@ -51,7 +50,7 @@ TEST(strmap, many_keys)
     for (int i = 0; i < 256; i++)
     {
         int *p = (int *) strmap_get(m, keys[i]);
-        EXPECT_TRUE(p != NULL);
+        EXPECT_NOTNULL(p);
         EXPECT_EQ(*p, i);
     }
     arena_free(a);
@@ -78,7 +77,7 @@ TEST(u64map, basic_set_get)
     int x = 42;
     u64map_set(m, 7, &x);
     EXPECT_TRUE(u64map_get(m, 7) == &x);
-    EXPECT_TRUE(u64map_get(m, 99) == NULL);
+    EXPECT_NULL(u64map_get(m, 99));
     arena_free(a);
 }
 
@@ -95,7 +94,7 @@ TEST(u64map, many_keys)
     for (int i = 0; i < 512; i++)
     {
         int *p = (int *) u64map_get(m, (u64) i);
-        EXPECT_TRUE(p != NULL);
+        EXPECT_NOTNULL(p);
         EXPECT_EQ(*p, i);
     }
     arena_free(a);
@@ -145,7 +144,7 @@ TEST(hashmap, remove_basic)
     EXPECT_TRUE(hashmap_contains(m, "k"));
     EXPECT_TRUE(hashmap_remove(m, "k"));
     EXPECT_FALSE(hashmap_contains(m, "k"));
-    EXPECT_TRUE(hashmap_get(m, "k") == NULL);
+    EXPECT_NULL(hashmap_get(m, "k"));
     EXPECT_FALSE(hashmap_remove(m, "k"));
     arena_free(a);
 }
@@ -173,7 +172,7 @@ TEST(u64map, remove_mid_chain)
         u64map_set(m, keys[i], &vals[i]);
     }
     EXPECT_TRUE(hashmap_remove((HashMap *) m, (const void *) (uintptr_t) 23));
-    EXPECT_TRUE(hashmap_get((HashMap *) m, (const void *) (uintptr_t) 23) == NULL);
+    EXPECT_NULL(hashmap_get((HashMap *) m, (const void *) (uintptr_t) 23));
     for (int i = 0; i < 6; i++)
     {
         if (keys[i] != 23)
@@ -244,7 +243,7 @@ TEST(u64map, remove_many_after_growth)
     }
     for (int i = 0; i < 256; i += 2)
     {
-        EXPECT_TRUE(u64map_get(m, (u64) i) == NULL);
+        EXPECT_NULL(u64map_get(m, (u64) i));
     }
     arena_free(a);
 }

@@ -1,5 +1,7 @@
 #include "harness.h"
 
+#include <stdlib.h>
+
 static TestCase *head;
 static int global_failures;
 static int total_tests;

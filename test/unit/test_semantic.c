@@ -1,153 +1,148 @@
 #include "harness.h"
-#include "lexer.h"
-#include "parser.h"
-#include "semantic.h"
-#include "util/arena.h"
-#include <string.h>
-
-static ASTNode *check_from_source(const char *src, Arena *arena)
-{
-    LexResult lexed = lex("<test>", src, arena);
-    if (!lexed.tokens)
-    {
-        return NULL;
-    }
-    ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
-    if (!ast)
-    {
-        return NULL;
-    }
-    return semantic_check(ast, arena);
-}
+#include "testdriver.h"
 
 TEST(semantic, ok_single_func)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int main(void) { return 42; }", a);
-    EXPECT_TRUE(ast != NULL);
-    arena_free(a);
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    return 42;\n"
+                         "}");
 }
 
 TEST(semantic, duplicate_function)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int f(void) { return 1; } int f(void) { return 2; }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_BUILD_FAIL("int f(void) {\n"
+                      "    return 1;\n"
+                      "}\n"
+                      "int f(void) {\n"
+                      "    return 2;\n"
+                      "}");
 }
 
 TEST(semantic, undeclared_var)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int main(void) { return x; }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    return x;\n"
+                      "}");
 }
 
 TEST(semantic, redeclaration_local)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int main(void) { int x; int x; return x; }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int x;\n"
+                      "    int x;\n"
+                      "    return x;\n"
+                      "}");
 }
 
 TEST(semantic, undeclared_function_call)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int main(void) { return foo(); }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    return foo();\n"
+                      "}");
 }
 
 TEST(semantic, wrong_arity)
 {
-    Arena *a = arena_new();
-    ASTNode *ast =
-        check_from_source("int foo(int a) { return a; } int main(void) { return foo(); }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_BUILD_FAIL("int foo(int a) {\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return foo();\n"
+                      "}");
 }
 
 TEST(semantic, param_used_ok)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int add(int a, int b) { return a + b; }", a);
-    EXPECT_TRUE(ast != NULL);
-    arena_free(a);
+    EXPECT_BUILD_SUCCEED("int add(int a, int b) {\n"
+                         "    return a + b;\n"
+                         "}");
 }
 
 TEST(semantic, void_return_with_value)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("void f(void) { return 1; }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_BUILD_FAIL("void f(void) {\n"
+                      "    return 1;\n"
+                      "}");
 }
 
 TEST(semantic, nonvoid_return_without_value)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int f(void) { return; }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_BUILD_FAIL("int f(void) {\n"
+                      "    return;\n"
+                      "}");
 }
 
 TEST(semantic, assignment_undeclared)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int main(void) { x = 5; return x; }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    x = 5;\n"
+                      "    return x;\n"
+                      "}");
 }
 
 TEST(semantic, call_across_functions)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source(
-        "int add(int a, int b) { return a + b; } int main(void) { return add(1, 2); }", a);
-    EXPECT_TRUE(ast != NULL);
-    arena_free(a);
+    EXPECT_BUILD_SUCCEED("int add(int a, int b) {\n"
+                         "    return a + b;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return add(1, 2);\n"
+                         "}");
 }
 
 TEST(semantic, if_else_ok)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source(
-        "int main(void) { int x; if (1) { x = 10; } else { x = 20; } return x; }", a);
-    EXPECT_TRUE(ast != NULL);
-    arena_free(a);
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    int x;\n"
+                         "    if (1) {\n"
+                         "        x = 10;\n"
+                         "    } else {\n"
+                         "        x = 20;\n"
+                         "    }\n"
+                         "    return x;\n"
+                         "}");
 }
 
 TEST(semantic, if_undeclared_cond)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int main(void) { if (x) { return 1; } return 0; }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    if (x) {\n"
+                      "        return 1;\n"
+                      "    }\n"
+                      "    return 0;\n"
+                      "}");
 }
 
 TEST(semantic, nested_shadowing_ok)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int main(void) { int x; { int x; return x; } return 0; }", a);
-    EXPECT_TRUE(ast != NULL);
-    arena_free(a);
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    int x;\n"
+                         "    {\n"
+                         "        int x;\n"
+                         "        return x;\n"
+                         "    }\n"
+                         "    return 0;\n"
+                         "}");
 }
 
 TEST(semantic, param_shadow_nested_ok)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source(
-        "int f(int x) { { int x; return x; } return 0; } int main(void) { return f(1); }", a);
-    EXPECT_TRUE(ast != NULL);
-    arena_free(a);
+    EXPECT_BUILD_SUCCEED("int f(int x) {\n"
+                         "    {\n"
+                         "        int x;\n"
+                         "        return x;\n"
+                         "    }\n"
+                         "    return 0;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return f(1);\n"
+                         "}");
 }
 
 TEST(semantic, param_body_redeclaration_error)
 {
-    Arena *a = arena_new();
-    ASTNode *ast = check_from_source("int f(int x) { int x; return 0; }", a);
-    EXPECT_TRUE(ast == NULL);
-    arena_free(a);
+    EXPECT_BUILD_FAIL("int f(int x) {\n"
+                      "    int x;\n"
+                      "    return 0;\n"
+                      "}");
 }

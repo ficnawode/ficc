@@ -6,7 +6,7 @@ TEST(vec, push_and_get)
 {
     Arena *a = arena_new();
     Vec *v = vec_new(a);
-    EXPECT_TRUE(v != NULL);
+    EXPECT_NOTNULL(v);
     EXPECT_EQ(vec_size(v), 0);
     int x = 42;
     vec_push(v, &x);

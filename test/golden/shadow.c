@@ -1,7 +1,7 @@
 int add_one(int n)
 {
     {
-        int n = n + 100; /* shadows the parameter; discarded on scope exit */
+        int n = 100; /* shadows the parameter; discarded on scope exit */
         n = n + 1;
     }
     return n; /* the parameter, unchanged */

@@ -1,15 +1,16 @@
 #include "harness.h"
 #include "util/arena.h"
 #include "util/sbuf.h"
+
 #include <string.h>
 
 TEST(sbuf, empty)
 {
     Arena *a = arena_new();
     Sbuf *sb = sbuf_new(a);
-    EXPECT_TRUE(sb != NULL);
+    EXPECT_NOTNULL(sb);
     EXPECT_EQ(sbuf_len(sb), 0);
-    EXPECT_TRUE(strcmp(sbuf_cstr(sb), "") == 0);
+    EXPECT_STR_EQ(sbuf_cstr(sb), "");
     arena_free(a);
 }
 
@@ -19,10 +20,10 @@ TEST(sbuf, append)
     Sbuf *sb = sbuf_new(a);
     sbuf_append(sb, "hello");
     EXPECT_EQ(sbuf_len(sb), 5);
-    EXPECT_TRUE(strcmp(sbuf_cstr(sb), "hello") == 0);
+    EXPECT_STR_EQ(sbuf_cstr(sb), "hello");
     sbuf_append(sb, " world");
     EXPECT_EQ(sbuf_len(sb), 11);
-    EXPECT_TRUE(strcmp(sbuf_cstr(sb), "hello world") == 0);
+    EXPECT_STR_EQ(sbuf_cstr(sb), "hello world");
     arena_free(a);
 }
 
@@ -31,7 +32,7 @@ TEST(sbuf, appendf_basic)
     Arena *a = arena_new();
     Sbuf *sb = sbuf_new(a);
     sbuf_appendf(sb, "x=%d y=%s", 42, "abc");
-    EXPECT_TRUE(strcmp(sbuf_cstr(sb), "x=42 y=abc") == 0);
+    EXPECT_STR_EQ(sbuf_cstr(sb), "x=42 y=abc");
     arena_free(a);
 }
 
@@ -63,7 +64,7 @@ TEST(sbuf, append_and_appendf_mix)
     sbuf_appendf(sb, "%d", 1);
     sbuf_append(sb, "B");
     sbuf_appendf(sb, "%d", 2);
-    EXPECT_TRUE(strcmp(sbuf_cstr(sb), "A1B2") == 0);
+    EXPECT_STR_EQ(sbuf_cstr(sb), "A1B2");
     arena_free(a);
 }
 
@@ -93,6 +94,6 @@ TEST(sbuf, single_append_larger_than_cap)
     big[299] = '\0';
     sbuf_append(sb, big);
     EXPECT_EQ(sbuf_len(sb), 299);
-    EXPECT_TRUE(strcmp(sbuf_cstr(sb), big) == 0);
+    EXPECT_STR_EQ(sbuf_cstr(sb), big);
     arena_free(a);
 }
