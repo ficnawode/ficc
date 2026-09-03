@@ -11,6 +11,27 @@ struct ParserCtx
     u64 pos;
     Arena *arena;
     StrMap *enum_consts; /* enumerator name -> i64* value, resolved at parse time */
+    Vec *name_scopes;    /* Vec<StrMap*> — ordinary-name bindings (name -> ParserBinding*) */
+};
+
+/* Ordinary identifiers live in one namespace (C11 §6.2.3): variables,
+   functions, and typedef names. The parser tracks a scoped table of bindings
+   (D12.1/D12.2) so it can tell — while parsing — whether an identifier is a
+   type name: cast disambiguation, `sizeof(T)`, and declaration specifiers are
+   all parse-time decisions. Scope discipline mirrors semantic's: one file
+   scope, one per compound statement, one per function (params + body). */
+typedef enum
+{
+    BIND_TYPEDEF,
+    BIND_VAR,
+    BIND_FUNC,
+} ParserBindingKind;
+
+typedef struct ParserBinding ParserBinding;
+struct ParserBinding
+{
+    ParserBindingKind kind;
+    Type *type; /* only meaningful for BIND_TYPEDEF */
 };
 
 static Token *parser_peek(ParserCtx *p)
@@ -56,6 +77,71 @@ static bool parser_expect(ParserCtx *p, TokenKind kind, const char *what)
     return true;
 }
 
+static StrMap *current_name_scope(ParserCtx *p)
+{
+    return (StrMap *) vec_last(p->name_scopes);
+}
+
+static void push_name_scope(ParserCtx *p)
+{
+    vec_push(p->name_scopes, strmap_new(p->arena));
+}
+
+static void pop_name_scope(ParserCtx *p)
+{
+    (void) vec_pop(p->name_scopes);
+}
+
+/* Walk the name-scope stack innermost-first. */
+static ParserBinding *name_lookup(ParserCtx *p, const char *name)
+{
+    size_t n = vec_size(p->name_scopes);
+    for (size_t i = n; i > 0; i--)
+    {
+        ParserBinding *b = strmap_get((StrMap *) vec_get(p->name_scopes, i - 1), name);
+        if (b)
+        {
+            return b;
+        }
+    }
+    return NULL;
+}
+
+/* Declare an ordinary name in the current scope, enforcing the C11 §6.2.3
+   rule that a scope holds one binding per name. A typedef may not redeclare a
+   name that exists in the same scope, and no name may hide a typedef in the
+   same scope; the one legal same-scope repeat is a typedef redefined to the
+   *same* (interned) type (§6.7: "may be redeclared to refer to the same type").
+   Var/var and func/func repeats are left to semantic, which owns the finer
+   merging logic (extern/tentative definitions). */
+static bool name_declare(ParserCtx *p, const char *name, ParserBindingKind kind, Type *type)
+{
+    ParserBinding *existing = strmap_get(current_name_scope(p), name);
+    if (existing)
+    {
+        if (existing->kind == BIND_TYPEDEF && kind == BIND_TYPEDEF)
+        {
+            if (existing->type != type)
+            {
+                parser_error(p, "typedef '%s' redefined with a different type", name);
+                return false;
+            }
+            return true;
+        }
+        if (existing->kind == BIND_TYPEDEF || kind == BIND_TYPEDEF)
+        {
+            parser_error(p, "'%s' redeclared as a different kind of symbol", name);
+            return false;
+        }
+        return true;
+    }
+    ParserBinding *b = arena_alloc(p->arena, sizeof(ParserBinding), sizeof(void *));
+    b->kind = kind;
+    b->type = type;
+    strmap_set(current_name_scope(p), name, b);
+    return true;
+}
+
 static Type *parse_type_specifier(ParserCtx *p);
 static Type *parse_array_suffix(ParserCtx *p, Type *type);
 static ASTNode *parse_expr(ParserCtx *p);
@@ -67,15 +153,54 @@ static ASTNode *parse_default_stmt(ParserCtx *p);
 static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out);
 static bool parser_check_not_enumerator(ParserCtx *p, const char *name);
 static ASTNode *parse_unary(ParserCtx *p);
+static ASTNode *parse_typedef_decl(ParserCtx *p);
 
 /* The token kinds that can begin a type specifier. Used to disambiguate a
-   cast `(type)expr` from a parenthesized expression: with no typedefs yet, a
-   cast must open with one of these (after any leading `const`). */
+   cast `(type)expr` from a parenthesized expression: a cast must open with
+   one of these (after any leading `const`) or a visible typedef identifier
+   (D12.3). `is_typename_start[_at]` is the parser-contextual form that
+   includes typedef names; a plain identifier not bound to a typedef never
+   starts a typename, so `(a)`/`(a+b)`/`f(x)` stay paren expressions/calls. */
 static bool is_type_start(TokenKind k)
 {
     return k == TOK_KW_INT || k == TOK_KW_CHAR || k == TOK_KW_SHORT || k == TOK_KW_LONG ||
            k == TOK_KW_UNSIGNED || k == TOK_KW_VOID || k == TOK_KW_STRUCT || k == TOK_KW_UNION ||
            k == TOK_KW_ENUM;
+}
+
+static bool is_typename_start_at(ParserCtx *p, size_t pos)
+{
+    if (pos >= p->count)
+    {
+        return false;
+    }
+    Token *t = &p->tokens[pos];
+    if (is_type_start(t->kind))
+    {
+        return true;
+    }
+    if (t->kind == TOK_IDENT)
+    {
+        ParserBinding *b = name_lookup(p, t->payload.str);
+        return b && b->kind == BIND_TYPEDEF;
+    }
+    return false;
+}
+
+/* Index of the first non-`const` token at or after `pos` (typedef-qualified
+   type names and casts may open with `const`). */
+static size_t skip_const_ahead(ParserCtx *p, size_t pos)
+{
+    while (pos < p->count && p->tokens[pos].kind == TOK_KW_CONST)
+    {
+        pos++;
+    }
+    return pos;
+}
+
+static bool is_typename_start(ParserCtx *p)
+{
+    return is_typename_start_at(p, p->pos);
 }
 static ASTNode *parse_mul(ParserCtx *p);
 static ASTNode *parse_add(ParserCtx *p);
@@ -198,6 +323,22 @@ static Type *parse_type_specifier(ParserCtx *p)
             ty = type_enum(tag_tok->payload.str);
             break;
         }
+        case TOK_IDENT:
+        {
+            /* A typedef name is a full declaration specifier (D12.3): the
+               interned type it aliases is used as-is, then any `*`/qualifier
+               suffix below applies. A plain (non-typedef) identifier here is
+               the ordinary "expected type specifier" error. */
+            ParserBinding *b = name_lookup(p, t->payload.str);
+            if (b && b->kind == BIND_TYPEDEF)
+            {
+                parser_advance(p);
+                ty = b->type;
+                break;
+            }
+            parser_error(p, "expected type specifier");
+            return NULL;
+        }
         default:
             parser_error(p, "expected type specifier");
             return NULL;
@@ -248,6 +389,10 @@ static ASTNode *parse_param(ParserCtx *p)
     parser_advance(p);
 
     if (!parser_check_not_enumerator(p, name->payload.str))
+    {
+        return NULL;
+    }
+    if (!name_declare(p, name->payload.str, BIND_VAR, NULL))
     {
         return NULL;
     }
@@ -311,6 +456,7 @@ static ASTNode *parse_compound_stmt(ParserCtx *p)
     {
         return NULL;
     }
+    push_name_scope(p);
 
     Vec *stmts = vec_new(p->arena);
     while (parser_peek(p)->kind != TOK_RBRACE)
@@ -326,6 +472,7 @@ static ASTNode *parse_compound_stmt(ParserCtx *p)
     {
         return NULL;
     }
+    pop_name_scope(p);
 
     return ast_compound_stmt(stmts, start->loc, p->arena);
 }
@@ -377,6 +524,43 @@ static Type *parse_array_suffix(ParserCtx *p, Type *type)
 
 static bool resolve_constant_init(ParserCtx *p, ASTVarDecl *vd, ASTNode *expr);
 
+static ASTNode *parse_typedef_decl(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_TYPEDEF);
+    parser_advance(p);
+
+    Type *type = parse_type_specifier(p);
+    if (!type)
+    {
+        return NULL;
+    }
+
+    Token *name = parser_peek(p);
+    if (name->kind != TOK_IDENT)
+    {
+        parser_error(p, "expected typedef name");
+        return NULL;
+    }
+    parser_advance(p);
+
+    if (!parser_check_not_enumerator(p, name->payload.str))
+    {
+        return NULL;
+    }
+    if (!name_declare(p, name->payload.str, BIND_TYPEDEF, type))
+    {
+        return NULL;
+    }
+
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
+        return NULL;
+    }
+
+    return ast_typedef_decl(type, name->payload.str, start->loc, p->arena);
+}
+
 static ASTNode *parse_var_decl(ParserCtx *p, StorageClass storage)
 {
     Token *start = parser_peek(p);
@@ -395,6 +579,10 @@ static ASTNode *parse_var_decl(ParserCtx *p, StorageClass storage)
     parser_advance(p);
 
     if (!parser_check_not_enumerator(p, name->payload.str))
+    {
+        return NULL;
+    }
+    if (!name_declare(p, name->payload.str, BIND_VAR, NULL))
     {
         return NULL;
     }
@@ -579,10 +767,10 @@ static ASTNode *parse_for_stmt(ParserCtx *p)
     ASTNode *init = NULL;
     if (parser_peek(p)->kind != TOK_SEMI)
     {
-        if (parser_peek(p)->kind == TOK_KW_INT || parser_peek(p)->kind == TOK_KW_CHAR ||
-            parser_peek(p)->kind == TOK_KW_SHORT || parser_peek(p)->kind == TOK_KW_LONG ||
-            parser_peek(p)->kind == TOK_KW_UNSIGNED || parser_peek(p)->kind == TOK_KW_STRUCT ||
-            parser_peek(p)->kind == TOK_KW_UNION)
+        /* A for-init may open a declaration with a type keyword, a visible
+           typedef name, or leading `const` (D12.3); anything else is an
+           expression statement. */
+        if (is_typename_start(p) || parser_peek(p)->kind == TOK_KW_CONST)
         {
             init = parse_var_decl(p, SC_NONE);
         }
@@ -806,6 +994,8 @@ static ASTNode *parse_stmt(ParserCtx *p)
         case TOK_KW_UNION:
         case TOK_KW_ENUM:
             return parse_var_decl(p, SC_NONE);
+        case TOK_KW_TYPEDEF:
+            return parse_typedef_decl(p);
         case TOK_KW_STATIC:
             parser_advance(p);
             return parse_var_decl(p, SC_STATIC);
@@ -863,6 +1053,10 @@ static ASTNode *parse_stmt(ParserCtx *p)
             if (p->pos + 1 < p->count && p->tokens[p->pos + 1].kind == TOK_COLON)
             {
                 return parse_label_stmt(p);
+            }
+            if (is_typename_start(p))
+            {
+                return parse_var_decl(p, SC_NONE);
             }
             return parse_expr_stmt(p);
         default:
@@ -967,15 +1161,12 @@ static ASTNode *parse_unary(ParserCtx *p)
     {
         /* Cast: `(type-name) unary`. Disambiguate from a parenthesized
            expression by the token stream after `(` (skipping leading `const`):
-           a cast opens with a type-specifier keyword. With no typedefs in the
-           language yet this is exact — Phase 12 revisits it for user type
-           names. */
-        size_t look = p->pos + 1;
-        while (look < p->count && p->tokens[look].kind == TOK_KW_CONST)
-        {
-            look++;
-        }
-        if (look < p->count && is_type_start(p->tokens[look].kind))
+           a cast opens with a type-specifier keyword or a visible typedef
+           identifier (D12.3 — retires the Phase 11 "exact because no typedefs
+           exist" rule). Everything else (`ident`, `ident +`, `(`, number…) is
+           a parenthesized expression. */
+        size_t look = skip_const_ahead(p, p->pos + 1);
+        if (is_typename_start_at(p, look))
         {
             parser_advance(p); /* consume '(' */
             Type *target = parse_type_specifier(p);
@@ -1022,14 +1213,7 @@ static ASTNode *parse_unary(ParserCtx *p)
         bool is_type = false;
         if (parser_peek(p)->kind == TOK_LPAREN)
         {
-            Token *la = &p->tokens[p->pos + 1];
-            if (la->kind == TOK_KW_INT || la->kind == TOK_KW_CHAR || la->kind == TOK_KW_VOID ||
-                la->kind == TOK_KW_SHORT || la->kind == TOK_KW_LONG ||
-                la->kind == TOK_KW_UNSIGNED || la->kind == TOK_KW_STRUCT ||
-                la->kind == TOK_KW_UNION || la->kind == TOK_KW_ENUM)
-            {
-                is_type = true;
-            }
+            is_type = is_typename_start_at(p, skip_const_ahead(p, p->pos + 1));
         }
         if (is_type)
         {
@@ -1841,6 +2025,11 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
 {
     Token *start = parser_peek(p);
 
+    if (parser_peek(p)->kind == TOK_KW_TYPEDEF)
+    {
+        return parse_typedef_decl(p);
+    }
+
     StorageClass storage = SC_NONE;
     u32 pre_storage_consts = 0; /* consts consumed before static/extern; the
                                    type must still be qualified by them */
@@ -1897,8 +2086,16 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
         {
             return NULL;
         }
+        if (!name_declare(p, name->payload.str, BIND_FUNC, NULL))
+        {
+            return NULL;
+        }
 
         parser_advance(p);
+        /* Parameters live in the function's own scope, pushed here and popped
+           after the body — mirroring semantic's structure. The compound
+           statement pushes/pops its own nested scope. */
+        push_name_scope(p);
         Vec *params = parse_param_list(p);
         if (!params)
         {
@@ -1915,6 +2112,7 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
         {
             return NULL;
         }
+        pop_name_scope(p);
 
         return ast_func_def(ret_type, name->payload.str, params, body, fn_storage, start->loc,
                             p->arena);
@@ -1922,6 +2120,13 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
 
     Type *type = parse_array_suffix(p, ret_type);
     if (!type)
+    {
+        return NULL;
+    }
+
+    /* File-scope variables: register the ordinary name. Same-kind repeats
+       (extern/static/tentative merging) pass through to semantic (D12.2). */
+    if (!name_declare(p, name->payload.str, BIND_VAR, NULL))
     {
         return NULL;
     }
@@ -1955,7 +2160,8 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
 ASTNode *parse(Token *tokens, u64 count, Arena *arena)
 {
     ASSERT(count > 0);
-    ParserCtx p = {tokens, count, 0, arena, strmap_new(arena)};
+    ParserCtx p = {tokens, count, 0, arena, strmap_new(arena), vec_new(arena)};
+    push_name_scope(&p);
 
     Vec *decls = vec_new(arena);
     while (parser_peek(&p)->kind != TOK_EOF)

@@ -39,7 +39,8 @@
     X(AST_STRUCT_DECL)                                                                             \
     X(AST_ENUM_DECL)                                                                               \
     X(AST_MEMBER_ACCESS)                                                                           \
-    X(AST_CAST_EXPR)
+    X(AST_CAST_EXPR)                                                                               \
+    X(AST_TYPEDEF_DECL)
 
 typedef enum
 {
@@ -366,6 +367,19 @@ struct ASTCastExpr
     ASTNode *operand;
 };
 
+/* A typedef declaration `typedef <type> <name>;` (C11 §6.7.7). The name is an
+   ordinary identifier (§6.2.3) that shadows/aliases the interned `type`; the
+   parser registers it in its ordinary-name table at the point of declaration,
+   so it is visible for casts/`sizeof`/specifiers from here on in its scope.
+   Semantic validates the type; the IR builder ignores the node. */
+typedef struct ASTTypedefDecl ASTTypedefDecl;
+struct ASTTypedefDecl
+{
+    ASTNode base;
+    const char *name;
+    Type *type;
+};
+
 ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body,
                       StorageClass storage, Loc loc, Arena *arena);
 ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
@@ -406,6 +420,7 @@ ASTNode *ast_enum_decl(const char *tag, Vec *constants, Loc loc, Arena *arena);
 ASTNode *ast_member_access(ASTNode *object, const char *member, bool is_arrow, Loc loc,
                            Arena *arena);
 ASTNode *ast_cast_expr(Type *target_type, ASTNode *operand, Loc loc, Arena *arena);
+ASTNode *ast_typedef_decl(Type *type, const char *name, Loc loc, Arena *arena);
 
 void ast_dump(ASTNode *node);
 

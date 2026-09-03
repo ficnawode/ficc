@@ -1153,6 +1153,26 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     return true;
 }
 
+/* A typedef names an existing (interned) type — it introduces no new type and
+   no storage (C11 §6.7.7). The parser has already registered the name and
+   resolved every later use through the interned `Type`, so semantic's job here
+   is only to validate the *target*. Everything the language can legally
+   typedef — scalar types, pointers, records (complete or forward), enums,
+   even void (`typedef void V; V *p;`) — is valid; the meaningful checks live
+   at the use site (a `void` variable, an incomplete object, etc.). Nothing
+   else to do yet, but the node must not reach the loud-default error. */
+static bool check_typedef_decl(ASTTypedefDecl *td, SemanticCtx *ctx)
+{
+    if (td->type->kind == TYPE_FUNC)
+    {
+        sem_error(td->base.loc, "typedef of a function type is not supported");
+        ctx->error = true;
+        return false;
+    }
+    (void) ctx;
+    return true;
+}
+
 static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
 {
     switch (node->kind)
@@ -1161,6 +1181,8 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
             return check_return_stmt(ast_as(ASTReturnStmt, node), ctx, ret_type);
         case AST_VAR_DECL:
             return check_variable_declaration(ast_as(ASTVarDecl, node), ctx);
+        case AST_TYPEDEF_DECL:
+            return check_typedef_decl(ast_as(ASTTypedefDecl, node), ctx);
         case AST_EXPR_STMT:
             return check_expression_statement(ast_as(ASTExprStmt, node), ctx);
         case AST_COMPOUND_STMT:
@@ -1486,6 +1508,16 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
         if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL ||
             decl->kind == AST_VAR_DECL)
         {
+            continue;
+        }
+        if (decl->kind == AST_TYPEDEF_DECL)
+        {
+            /* Validate file-scope typedefs (the block-scope form is checked on
+               the statement path). */
+            if (!check_typedef_decl(ast_as(ASTTypedefDecl, decl), ctx))
+            {
+                return false;
+            }
             continue;
         }
         if (decl->kind != AST_FUNC_DEF)

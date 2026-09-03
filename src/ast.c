@@ -292,6 +292,14 @@ ASTNode *ast_cast_expr(Type *target_type, ASTNode *operand, Loc loc, Arena *aren
     return &n->base;
 }
 
+ASTNode *ast_typedef_decl(Type *type, const char *name, Loc loc, Arena *arena)
+{
+    ASTTypedefDecl *n = ast_new_node(sizeof(ASTTypedefDecl), AST_TYPEDEF_DECL, loc, arena);
+    n->type = type;
+    n->name = name;
+    return &n->base;
+}
+
 static const char *bin_op_name(BinOpKind op)
 {
     switch (op)
@@ -626,6 +634,12 @@ static void ast_dump_rec(ASTNode *node, int depth)
             ASTCastExpr *ce = ast_as(ASTCastExpr, node);
             printf("CAST -> %s\n", type_kind_name(ce->target_type->kind));
             ast_dump_rec(ce->operand, depth + 1);
+            break;
+        }
+        case AST_TYPEDEF_DECL:
+        {
+            ASTTypedefDecl *td = ast_as(ASTTypedefDecl, node);
+            printf("TYPEDEF_DECL %s = %s\n", td->name, type_kind_name(td->type->kind));
             break;
         }
         default:

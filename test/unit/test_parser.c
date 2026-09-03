@@ -655,3 +655,166 @@ TEST(parser, cast_folds_unsigned_in_case_label)
     EXPECT_EQ(cs->value, 255);
     arena_free(a);
 }
+
+/* --- Phase 12a: typedef --- */
+
+TEST(parser, typedef_toplevel_decl_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("typedef int Foo;\n"
+                            "Foo g;\n"
+                            "int main(void) { return 0; }\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    EXPECT_EQ(vec_size(prog->decls), 3);
+    EXPECT_EQ(((ASTNode *) vec_get(prog->decls, 0))->kind, AST_TYPEDEF_DECL);
+    ASTTypedefDecl *td = ast_as(ASTTypedefDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_STR_EQ(td->name, "Foo");
+    EXPECT_EQ(td->type, type_int());
+    /* The declared variable uses the aliased (interned) type. */
+    ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 1));
+    EXPECT_EQ(vd->type, type_int());
+    arena_free(a);
+}
+
+TEST(parser, typedef_block_scope_decl)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    typedef int T;\n"
+                            "    T x;\n"
+                            "    return 0;\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    EXPECT_EQ(vec_size(body->stmts), 3);
+    EXPECT_EQ(((ASTNode *) vec_get(body->stmts, 0))->kind, AST_TYPEDEF_DECL);
+    EXPECT_EQ(((ASTNode *) vec_get(body->stmts, 1))->kind, AST_VAR_DECL);
+    EXPECT_EQ(((ASTNode *) vec_get(body->stmts, 2))->kind, AST_RETURN_STMT);
+    arena_free(a);
+}
+
+TEST(parser, typedef_ptr_const_quals)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("typedef int *IP;\n"
+                            "const IP p;\n"
+                            "int main(void) { return 0; }\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 1));
+    /* `const IP` is a const *pointer* to int: top-level bit on the pointer. */
+    EXPECT_TRUE(type_is_const(vd->type));
+    EXPECT_EQ(type_deref(type_unqual(vd->type))->kind, TYPE_INT);
+    arena_free(a);
+}
+
+TEST(parser, typedef_forward_record_cast_and_sizeof)
+{
+    /* The ficc coding style: typedef struct Tag Tag; then complete the tag. */
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("typedef struct Block Block;\n"
+                            "struct Block { int data; Block *next; };\n"
+                            "int main(void) {\n"
+                            "    Block b;\n"
+                            "    Block *p = (Block *)&b;\n"
+                            "    int s = sizeof(Block);\n"
+                            "    return 0;\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    EXPECT_EQ(vec_size(prog->decls), 3);
+    EXPECT_EQ(((ASTNode *) vec_get(prog->decls, 0))->kind, AST_TYPEDEF_DECL);
+    EXPECT_EQ(((ASTNode *) vec_get(prog->decls, 1))->kind, AST_STRUCT_DECL);
+    /* Inside the struct, a field may itself use the typedef (`Block *next`). */
+    ASTStructDecl *sd = ast_as(ASTStructDecl, (ASTNode *) vec_get(prog->decls, 1));
+    ASTVarDecl *next_field = ast_as(ASTVarDecl, (ASTNode *) vec_get(sd->fields, 1));
+    EXPECT_STR_EQ(next_field->name, "next");
+    EXPECT_EQ(type_deref(next_field->type)->kind, TYPE_STRUCT);
+    arena_free(a);
+}
+
+TEST(parser, typedef_paren_not_cast)
+{
+    /* Disambiguation: a plain identifier that merely *shares* a letter with a
+       typedef is still a parenthesized expression, and a non-typedef
+       identifier never starts a cast. */
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int take(int x) { return x; }\n"
+                            "int main(void) {\n"
+                            "    int a = 3;\n"
+                            "    return (a);\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    arena_free(a);
+}
+
+TEST(parser, typedef_cast_target)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("typedef int T;\n"
+                            "int main(void) {\n"
+                            "    return (T)3 + (T *)0 != 0;\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    arena_free(a);
+}
+
+TEST(parser, typedef_disallowed_combinations)
+{
+    EXPECT_PARSE_FAIL("typedef int T;\n"
+                      "int T;\n"
+                      "int main(void) { return 0; }\n");
+    EXPECT_PARSE_FAIL("int main(void) {\n"
+                      "    int T;\n"
+                      "    typedef int T;\n"
+                      "    return 0;\n"
+                      "}\n");
+    EXPECT_PARSE_FAIL("typedef int T;\n"
+                      "typedef long T;\n"
+                      "int main(void) { return 0; }\n");
+}
+
+TEST(parser, typedef_same_type_redecl_ok)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("typedef int T;\n"
+                            "typedef int T;\n"
+                            "int main(void) { return 0; }\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    arena_free(a);
+}
+
+TEST(parser, typedef_shadowed_by_var_not_type)
+{
+    EXPECT_PARSE_FAIL("typedef int T;\n"
+                      "int main(void) {\n"
+                      "    int T;\n"
+                      "    T x;\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(parser, typedef_param_use)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("typedef int T;\n"
+                            "int twice(T v) { return v + v; }\n"
+                            "int main(void) { return twice(3); }\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 1));
+    ASTVarDecl *p = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->params, 0));
+    EXPECT_EQ(p->type, type_int());
+    arena_free(a);
+}

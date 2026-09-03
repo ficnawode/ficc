@@ -206,6 +206,21 @@ TEST(lexer, switch_keywords)
     arena_free(a);
 }
 
+TEST(lexer, typedef_keyword)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "typedef int Foo;", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 5);
+    EXPECT_EQ(t[0].kind, TOK_KW_TYPEDEF);
+    EXPECT_EQ(t[1].kind, TOK_KW_INT);
+    EXPECT_EQ(t[2].kind, TOK_IDENT);
+    EXPECT_EQ(t[3].kind, TOK_SEMI);
+    EXPECT_EQ(t[4].kind, TOK_EOF);
+    arena_free(a);
+}
+
 TEST(lexer, ternary_tokens)
 {
     Arena *a = arena_new();

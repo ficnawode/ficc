@@ -34,6 +34,7 @@
     X(TOK_KW_STATIC)                                                                               \
     X(TOK_KW_EXTERN)                                                                               \
     X(TOK_KW_CONST)                                                                                \
+    X(TOK_KW_TYPEDEF)                                                                              \
     X(TOK_DOT)                                                                                     \
     X(TOK_ARROW)                                                                                   \
     X(TOK_STRING_LIT)                                                                              \

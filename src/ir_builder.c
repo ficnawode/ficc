@@ -1863,6 +1863,10 @@ static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilde
             return build_return_stmt(ast_as(ASTReturnStmt, node), f, bb, ctx);
         case AST_VAR_DECL:
             return build_var_decl_stmt(ast_as(ASTVarDecl, node), f, bb, ctx);
+        case AST_TYPEDEF_DECL:
+            /* Typedefs introduce no runtime object: parse-time only (D12.1).
+               The declaration is a no-op at IR level. */
+            return bb;
         case AST_EXPR_STMT:
             return build_expr_stmt(ast_as(ASTExprStmt, node), f, bb, ctx);
         case AST_COMPOUND_STMT:
@@ -2213,7 +2217,7 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
         if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL ||
-            decl->kind == AST_VAR_DECL)
+            decl->kind == AST_VAR_DECL || decl->kind == AST_TYPEDEF_DECL)
         {
             continue;
         }

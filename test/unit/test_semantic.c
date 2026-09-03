@@ -281,3 +281,56 @@ TEST(semantic, void_ptr_param_wrong_deep_pointer_rejected)
                       "    return dbl(pp) == 0;\n"
                       "}\n");
 }
+
+/* --- Phase 12a: typedef --- */
+
+TEST(semantic, typedef_void_pointer)
+{
+    /* `typedef void V; V *p;` is the legal "opaque handle" idiom; the void
+       check fires only at the point of a V *variable*. */
+    EXPECT_BUILD_SUCCEED("typedef void V;\n"
+                         "int main(void) {\n"
+                         "    V *p = 0;\n"
+                         "    return p == 0;\n"
+                         "}\n");
+}
+
+TEST(semantic, typedef_void_variable_rejected)
+{
+    EXPECT_BUILD_FAIL("typedef void V;\n"
+                      "V v;\n"
+                      "int main(void) { return 0; }\n");
+}
+
+TEST(semantic, typedef_incomplete_record_ok)
+{
+    /* A typedef to a forward-declared record is the ficc coding style. */
+    EXPECT_BUILD_SUCCEED("typedef struct Foo Foo;\n"
+                         "struct Foo { int x; };\n"
+                         "int main(void) {\n"
+                         "    Foo f;\n"
+                         "    f.x = 42;\n"
+                         "    return f.x;\n"
+                         "}\n");
+}
+
+TEST(semantic, typedef_const_ptr_write_rejected)
+{
+    EXPECT_BUILD_FAIL("typedef int *IP;\n"
+                      "int main(void) {\n"
+                      "    int x = 1;\n"
+                      "    const IP p = &x;\n"
+                      "    p = &x;\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(semantic, typedef_const_ptr_read_ok)
+{
+    EXPECT_BUILD_SUCCEED("typedef int *IP;\n"
+                         "int main(void) {\n"
+                         "    int x = 7;\n"
+                         "    const IP p = &x;\n"
+                         "    return *p;\n"
+                         "}\n");
+}
