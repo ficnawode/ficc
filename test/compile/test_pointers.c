@@ -318,3 +318,84 @@ TEST(pointers, negative_incompatible_ptr_assign)
                       "    return 0;\n"
                       "}\n");
 }
+
+/* --- void* parameters (C11 §6.7.6.3p10: only a lone `void` is the empty
+   parameter-list marker) --- */
+
+TEST(pointers, void_ptr_param_deref)
+{
+    EXPECT_INTERP_AND_ELF("int read_int(void *p) {\n"
+                          "    return *(int *)p;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    int x = 42;\n"
+                          "    if (read_int(&x) != 42) return 1;\n"
+                          "    int g = 9;\n"
+                          "    if (read_int(&g) != 9) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(pointers, void_ptr_param_null_constant)
+{
+    EXPECT_INTERP_AND_ELF("int is_null(void *p) {\n"
+                          "    return p == 0 ? 1 : 0;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    if (is_null(0) != 1) return 1;\n"
+                          "    int x = 3;\n"
+                          "    if (is_null(&x) != 0) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(pointers, void_ptr_multi_args)
+{
+    EXPECT_INTERP_AND_ELF("int sum(void *a, void *b) {\n"
+                          "    return *(int *)a + *(int *)b;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    int x = 40;\n"
+                          "    int y = 2;\n"
+                          "    if (sum(&x, &y) != 42) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(pointers, void_ptr_return)
+{
+    EXPECT_INTERP_AND_ELF("void *id(void *p) {\n"
+                          "    return p;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    int x = 7;\n"
+                          "    void *v = id(&x);\n"
+                          "    if (*(int *)v != 7) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(pointers, void_ptr_struct_member)
+{
+    /* `void *` members always worked (record types don't route through
+       parse_param_list); here they interoperate with void* params. */
+    EXPECT_INTERP_AND_ELF("struct box { void *p; int tag; };\n"
+                          "struct box make(int *p) {\n"
+                          "    struct box b;\n"
+                          "    b.p = p;\n"
+                          "    b.tag = 42;\n"
+                          "    return b;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    struct box b = make(&x);\n"
+                          "    if (b.tag != 42) return 1;\n"
+                          "    if (*(int *)b.p != 5) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}

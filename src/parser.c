@@ -268,7 +268,11 @@ static Vec *parse_param_list(ParserCtx *p)
     Vec *params = vec_new(p->arena);
     Token *t = parser_peek(p);
 
-    if (t->kind == TOK_KW_VOID)
+    /* `(void)` is the explicit empty-parameter-list marker (C11 §6.7.6.3p10).
+       `void` followed by anything else (`void *p`, `void *const p`) is an
+       ordinary parameter whose type (pointer to void) is built by
+       parse_param; the lexer never splits a `void *` across tokens. */
+    if (t->kind == TOK_KW_VOID && p->pos + 1 < p->count && p->tokens[p->pos + 1].kind == TOK_RPAREN)
     {
         parser_advance(p);
         return params;

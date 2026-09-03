@@ -253,3 +253,31 @@ TEST(semantic, void_value_in_call_arg)
                       "    return f((void)5);\n"
                       "}\n");
 }
+
+TEST(semantic, void_ptr_param_ok)
+{
+    EXPECT_BUILD_SUCCEED("int f(void *p) {\n"
+                         "    return p == 0;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return f(0);\n"
+                         "}\n");
+}
+
+TEST(semantic, void_named_param_rejected)
+{
+    EXPECT_BUILD_FAIL("void f(void p) {\n"
+                      "}\n");
+}
+
+TEST(semantic, void_ptr_param_wrong_deep_pointer_rejected)
+{
+    /* `int **` is not implicitly convertible to `void **` (only one pointee
+       level converts; §6.5.16.1) — matches gcc. */
+    EXPECT_BUILD_FAIL("void **dbl(void **pp) { return pp; }\n"
+                      "int main(void) {\n"
+                      "    int *p = 0;\n"
+                      "    int **pp = &p;\n"
+                      "    return dbl(pp) == 0;\n"
+                      "}\n");
+}

@@ -43,6 +43,36 @@ TEST(parser, empty_param_list)
     arena_free(a);
 }
 
+TEST(parser, void_ptr_param)
+{
+    /* `(void *p)` is an ordinary pointer-to-void parameter, not the empty
+       list marker: the `void` gate only fires on a following `)`. */
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int use(void *p) {\n"
+                            "    return 0;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(vec_size(fn->params), 1);
+    ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->params, 0));
+    EXPECT_EQ(param->type->kind, TYPE_PTR);
+    EXPECT_EQ(type_deref(param->type)->kind, TYPE_VOID);
+    arena_free(a);
+}
+
+TEST(parser, void_still_empty_param_list)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(void) { return 42; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(vec_size(fn->params), 0);
+    arena_free(a);
+}
+
 TEST(parser, unknown_type)
 {
     EXPECT_PARSE_FAIL("foo main(void) { return 42; }");
