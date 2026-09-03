@@ -61,6 +61,10 @@ static Type *parse_array_suffix(ParserCtx *p, Type *type);
 static ASTNode *parse_expr(ParserCtx *p);
 static ASTNode *parse_stmt(ParserCtx *p);
 static ASTNode *parse_primary(ParserCtx *p);
+static ASTNode *parse_switch_stmt(ParserCtx *p);
+static ASTNode *parse_case_stmt(ParserCtx *p);
+static ASTNode *parse_default_stmt(ParserCtx *p);
+static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out);
 static bool parser_check_not_enumerator(ParserCtx *p, const char *name);
 static ASTNode *parse_unary(ParserCtx *p);
 static ASTNode *parse_mul(ParserCtx *p);
@@ -683,6 +687,96 @@ static ASTNode *parse_label_stmt(ParserCtx *p)
     return ast_label_stmt(label, stmt, start->loc, p->arena);
 }
 
+static ASTNode *parse_switch_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_SWITCH);
+    parser_advance(p);
+
+    if (!parser_expect(p, TOK_LPAREN, "'('"))
+    {
+        return NULL;
+    }
+
+    ASTNode *cond = parse_expr(p);
+    if (!cond)
+    {
+        return NULL;
+    }
+
+    if (!parser_expect(p, TOK_RPAREN, "')'"))
+    {
+        return NULL;
+    }
+
+    ASTNode *body = parse_stmt(p);
+    if (!body)
+    {
+        return NULL;
+    }
+
+    return ast_switch_stmt(cond, body, start->loc, p->arena);
+}
+
+static ASTNode *parse_case_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_CASE);
+    parser_advance(p);
+
+    ASTNode *expr = parse_expr(p);
+    if (!expr)
+    {
+        return NULL;
+    }
+
+    i64 value = 0;
+    /* If the constant expression can't be folded yet (e.g. `case sizeof(x):`
+       where the type of x is only resolved by semantic), defer to semantic,
+       which has the types to evaluate it. */
+    bool value_known = fold_constant_expr(p, expr, &value);
+
+    if (!parser_expect(p, TOK_COLON, "':'"))
+    {
+        return NULL;
+    }
+
+    ASTNode *stmt = parse_stmt(p);
+    if (!stmt)
+    {
+        return NULL;
+    }
+
+    Vec *stmts = vec_new(p->arena);
+    vec_push(stmts, stmt);
+    return ast_case_stmt(expr, value, value_known, stmts, start->loc, p->arena);
+}
+
+static ASTNode *parse_default_stmt(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_DEFAULT);
+    parser_advance(p);
+
+    if (!parser_expect(p, TOK_COLON, "':'"))
+    {
+        return NULL;
+    }
+
+    ASTNode *stmt = parse_stmt(p);
+    if (!stmt)
+    {
+        return NULL;
+    }
+
+    Vec *stmts = vec_new(p->arena);
+    vec_push(stmts, stmt);
+    return ast_default_stmt(stmts, start->loc, p->arena);
+}
+
+/* In C, a `case N:` label applies to every statement that follows it until
+   the next case/default label. */
+
 static ASTNode *parse_stmt(ParserCtx *p)
 {
     Token *t = parser_peek(p);
@@ -743,6 +837,12 @@ static ASTNode *parse_stmt(ParserCtx *p)
             return parse_continue_stmt(p);
         case TOK_KW_GOTO:
             return parse_goto_stmt(p);
+        case TOK_KW_SWITCH:
+            return parse_switch_stmt(p);
+        case TOK_KW_CASE:
+            return parse_case_stmt(p);
+        case TOK_KW_DEFAULT:
+            return parse_default_stmt(p);
         case TOK_LBRACE:
             return parse_compound_stmt(p);
         case TOK_IDENT:
@@ -1407,6 +1507,7 @@ static bool parser_check_not_enumerator(ParserCtx *p, const char *name)
    already reported if the node is not foldable or not constant. */
 static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out)
 {
+    (void) p;
     if (!node)
     {
         return false;
@@ -1462,7 +1563,6 @@ static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out)
                 case BIN_REM:
                     if (r == 0)
                     {
-                        parser_error(p, "division by zero in enumerator value");
                         return false;
                     }
                     *out = b->op == BIN_DIV ? l / r : l % r;
@@ -1471,7 +1571,6 @@ static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out)
                 case BIN_SHR:
                     if (r < 0 || r > 63)
                     {
-                        parser_error(p, "shift count out of range in enumerator value");
                         return false;
                     }
                     *out = b->op == BIN_SHL ? l << r : l >> r;
@@ -1484,6 +1583,12 @@ static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out)
                     return true;
                 case BIN_XOR:
                     *out = l ^ r;
+                    return true;
+                case BIN_LOG_AND:
+                    *out = l && r;
+                    return true;
+                case BIN_LOG_OR:
+                    *out = l || r;
                     return true;
                 case BIN_EQ:
                     *out = l == r;
@@ -1506,6 +1611,27 @@ static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out)
                 default:
                     return false;
             }
+        }
+        case AST_TERNARY_EXPR:
+        {
+            ASTTernaryExpr *te = ast_as(ASTTernaryExpr, node);
+            i64 cond;
+            if (!fold_constant_expr(p, te->cond, &cond))
+            {
+                return false;
+            }
+            if (cond)
+            {
+                return fold_constant_expr(p, te->then_expr, out);
+            }
+            return fold_constant_expr(p, te->else_expr, out);
+        }
+        case AST_SIZEOF_TYPE:
+        {
+            /* sizeof(type) is an integer constant expression (§6.6p6). */
+            ASTSizeofType *st = ast_as(ASTSizeofType, node);
+            *out = (i64) type_sizeof(st->type);
+            return true;
         }
         default:
             return false;

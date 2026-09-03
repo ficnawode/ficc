@@ -28,6 +28,9 @@
     X(AST_CONTINUE_STMT)                                                                           \
     X(AST_GOTO_STMT)                                                                               \
     X(AST_LABEL_STMT)                                                                              \
+    X(AST_SWITCH_STMT)                                                                             \
+    X(AST_CASE_STMT)                                                                               \
+    X(AST_DEFAULT_STMT)                                                                            \
     X(AST_TERNARY_EXPR)                                                                            \
     X(AST_SUBSCRIPT_EXPR)                                                                          \
     X(AST_SIZEOF_EXPR)                                                                             \
@@ -250,6 +253,31 @@ struct ASTLabelStmt
     ASTNode *stmt;
 };
 
+typedef struct ASTSwitchStmt ASTSwitchStmt;
+struct ASTSwitchStmt
+{
+    ASTNode base;
+    ASTNode *cond;
+    ASTNode *body;
+};
+
+typedef struct ASTCaseStmt ASTCaseStmt;
+struct ASTCaseStmt
+{
+    ASTNode base;
+    ASTNode *expr; /* constant expression (folded into `value` by semantic) */
+    i64 value;
+    bool value_known; /* parser failed to fold; semantic must resolve `value` */
+    Vec *stmts;       /* Vec<ASTNode*>: statements under this label */
+};
+
+typedef struct ASTDefaultStmt ASTDefaultStmt;
+struct ASTDefaultStmt
+{
+    ASTNode base;
+    Vec *stmts; /* Vec<ASTNode*>: statements from this label up to the next label */
+};
+
 typedef struct ASTTernaryExpr ASTTernaryExpr;
 struct ASTTernaryExpr
 {
@@ -349,6 +377,10 @@ ASTNode *ast_break_stmt(Loc loc, Arena *arena);
 ASTNode *ast_continue_stmt(Loc loc, Arena *arena);
 ASTNode *ast_goto_stmt(const char *label, Loc loc, Arena *arena);
 ASTNode *ast_label_stmt(const char *label, ASTNode *stmt, Loc loc, Arena *arena);
+ASTNode *ast_switch_stmt(ASTNode *cond, ASTNode *body, Loc loc, Arena *arena);
+ASTNode *ast_case_stmt(ASTNode *expr, i64 value, bool value_known, Vec *stmts, Loc loc,
+                       Arena *arena);
+ASTNode *ast_default_stmt(Vec *stmts, Loc loc, Arena *arena);
 ASTNode *ast_ternary_expr(ASTNode *cond, ASTNode *then_expr, ASTNode *else_expr, Loc loc,
                           Arena *arena);
 

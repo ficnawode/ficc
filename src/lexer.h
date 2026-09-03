@@ -24,6 +24,9 @@
     X(TOK_KW_BREAK)                                                                                \
     X(TOK_KW_CONTINUE)                                                                             \
     X(TOK_KW_GOTO)                                                                                 \
+    X(TOK_KW_SWITCH)                                                                               \
+    X(TOK_KW_CASE)                                                                                 \
+    X(TOK_KW_DEFAULT)                                                                              \
     X(TOK_KW_SIZEOF)                                                                               \
     X(TOK_KW_STRUCT)                                                                               \
     X(TOK_KW_UNION)                                                                                \

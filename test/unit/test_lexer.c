@@ -192,6 +192,20 @@ TEST(lexer, loop_keywords)
     arena_free(a);
 }
 
+TEST(lexer, switch_keywords)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "switch case default", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 4);
+    EXPECT_EQ(t[0].kind, TOK_KW_SWITCH);
+    EXPECT_EQ(t[1].kind, TOK_KW_CASE);
+    EXPECT_EQ(t[2].kind, TOK_KW_DEFAULT);
+    EXPECT_EQ(t[3].kind, TOK_EOF);
+    arena_free(a);
+}
+
 TEST(lexer, ternary_tokens)
 {
     Arena *a = arena_new();

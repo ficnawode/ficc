@@ -74,6 +74,9 @@ static void init_keyword_map(Arena *arena)
     KW("break", TOK_KW_BREAK);
     KW("continue", TOK_KW_CONTINUE);
     KW("goto", TOK_KW_GOTO);
+    KW("switch", TOK_KW_SWITCH);
+    KW("case", TOK_KW_CASE);
+    KW("default", TOK_KW_DEFAULT);
     KW("char", TOK_KW_CHAR);
     KW("short", TOK_KW_SHORT);
     KW("long", TOK_KW_LONG);

@@ -41,12 +41,30 @@ struct LoopContext
     IrBlock *exit;
 };
 
+typedef struct SwitchCtx SwitchCtx;
+struct SwitchCtx
+{
+    U64Map *case_blocks;    /* (u64)case value -> IrBlock* */
+    IrBlock *default_bb;    /* NULL if no `default:` label */
+    Vec *default_stmts;     /* statements following `default:` (NULL if none) */
+    IrBlock *exit_bb;
+};
+
+typedef struct SwitchCase SwitchCase;
+struct SwitchCase
+{
+    i64 value;
+    Vec *stmts; /* Vec<ASTNode*>: statements under this `case N:` label */
+    IrBlock *bb;
+};
+
 typedef struct FuncBuilder FuncBuilder;
 struct FuncBuilder
 {
     IrModule *mod;
     U64Map *block_locals; /* (u64)IrBlock* -> BlockLocals* */
     Vec *loop_stack;      /* Vec<LoopContext*> */
+    Vec *switch_stack;    /* Vec<SwitchCtx*> */
     StrMap *goto_labels;  /* label name -> IrBlock* */
     StrMap *func_types;   /* function name -> Type* (return type) */
     StrMap *global_map;   /* file-scope variable name -> u32* (index into mod->globals) */
@@ -60,6 +78,8 @@ static IrOperand resolve_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb
 static u32 global_index_of(FuncBuilder *ctx, const char *name);
 static u32 block_static_index(FuncBuilder *ctx, ASTVarDecl *var);
 static IrOperand build_phi(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb);
+static IrInstr *emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries);
+static void fill_phi_entries(FuncBuilder *ctx, IrBlock *bb, ASTVarDecl *var, IrInstr *phi);
 static IrBlock *label_block(FuncBuilder *ctx, IrFunction *f, const char *name);
 static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
 static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
@@ -299,6 +319,21 @@ static IrOperand resolve_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb
     {
         /* Sealed non-loop block with multiple predecessors: build a PHI now. */
         val = build_phi(ctx, var, bb);
+    }
+    else if (bb->sealed)
+    {
+        /* Sealed loop header reached after it was sealed (e.g. a value flows
+           out of a switch nested in the loop and resolves up to the header
+           only after the loop finished building). Its predecessors are final,
+           so build the PHI now. Register it in the block's locals before
+           filling so a cycle back through this block terminates (the same
+           strategy the unsealed placeholder path uses). */
+        u32 nentries = (u32) vec_size(bb->preds);
+        u32 dst = alloc_phi_vreg(ctx, var);
+        IrInstr *phi = emit_phi_at_start(bb, dst, nentries);
+        u64map_set(bl->locals, (u64) (uintptr_t) var, box_operand(ctx, ir_operand_vreg(dst)));
+        fill_phi_entries(ctx, bb, var, phi);
+        val = ir_operand_vreg(dst);
     }
     else
     {
@@ -1238,6 +1273,32 @@ static void collect_labels(ASTNode *node, IrFunction *f, FuncBuilder *ctx)
             collect_labels(fs->body, f, ctx);
             break;
         }
+        case AST_SWITCH_STMT:
+        {
+            ASTSwitchStmt *sw = ast_as(ASTSwitchStmt, node);
+            collect_labels(sw->body, f, ctx);
+            break;
+        }
+        case AST_CASE_STMT:
+        {
+            ASTCaseStmt *cs = ast_as(ASTCaseStmt, node);
+            size_t n = vec_size(cs->stmts);
+            for (size_t i = 0; i < n; i++)
+            {
+                collect_labels((ASTNode *) vec_get(cs->stmts, i), f, ctx);
+            }
+            break;
+        }
+        case AST_DEFAULT_STMT:
+        {
+            ASTDefaultStmt *ds = ast_as(ASTDefaultStmt, node);
+            size_t n = vec_size(ds->stmts);
+            for (size_t i = 0; i < n; i++)
+            {
+                collect_labels((ASTNode *) vec_get(ds->stmts, i), f, ctx);
+            }
+            break;
+        }
         default:
             break;
     }
@@ -1468,6 +1529,158 @@ static IrBlock *build_label_stmt(ASTLabelStmt *ls, IrFunction *f, IrBlock *bb, F
     return build_stmt(ls->stmt, f, label_bb, ctx);
 }
 
+/* Walk the switch body collecting case/default labels in source order. Each
+   gets a block created up front so the dispatch chain can branch to it; case
+   blocks are marked as merge points (multiple preds: dispatch + fall-through,
+   the latter added during body lowering). */
+static void collect_switch(ASTNode *node, IrFunction *f, FuncBuilder *ctx, SwitchCtx *sc,
+                           Vec *cases)
+{
+    if (!node)
+    {
+        return;
+    }
+    switch (node->kind)
+    {
+        case AST_CASE_STMT:
+        {
+            ASTCaseStmt *cs = ast_as(ASTCaseStmt, node);
+            SwitchCase *c = arena_alloc(ctx->mod->arena, sizeof(SwitchCase), sizeof(void *));
+            c->value = cs->value;
+            c->stmts = cs->stmts;
+            c->bb = new_block(f, "switch_case");
+            vec_push(cases, c);
+            u64map_set(sc->case_blocks, (u64) cs->value, c->bb);
+            break;
+        }
+        case AST_DEFAULT_STMT:
+        {
+            ASTDefaultStmt *ds = ast_as(ASTDefaultStmt, node);
+            sc->default_bb = new_block(f, "switch_default");
+            sc->default_stmts = ds->stmts;
+            break;
+        }
+        case AST_COMPOUND_STMT:
+        {
+            ASTCompoundStmt *cs = ast_as(ASTCompoundStmt, node);
+            size_t n = vec_size(cs->stmts);
+            for (size_t i = 0; i < n; i++)
+            {
+                collect_switch((ASTNode *) vec_get(cs->stmts, i), f, ctx, sc, cases);
+            }
+            break;
+        }
+        case AST_IF_STMT:
+        {
+            ASTIfStmt *is = ast_as(ASTIfStmt, node);
+            collect_switch(is->then_branch, f, ctx, sc, cases);
+            collect_switch(is->else_branch, f, ctx, sc, cases);
+            break;
+        }
+        case AST_WHILE_STMT:
+            collect_switch(ast_as(ASTWhileStmt, node)->body, f, ctx, sc, cases);
+            break;
+        case AST_DO_WHILE_STMT:
+            collect_switch(ast_as(ASTDoWhileStmt, node)->body, f, ctx, sc, cases);
+            break;
+        case AST_FOR_STMT:
+            collect_switch(ast_as(ASTForStmt, node)->body, f, ctx, sc, cases);
+            break;
+        case AST_LABEL_STMT:
+            collect_switch(ast_as(ASTLabelStmt, node)->stmt, f, ctx, sc, cases);
+            break;
+        case AST_SWITCH_STMT:
+            collect_switch(ast_as(ASTSwitchStmt, node)->body, f, ctx, sc, cases);
+            break;
+        default:
+            break;
+    }
+}
+
+static IrBlock *build_switch_stmt(ASTSwitchStmt *ss, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    ExprResult cond = build_expr(ss->cond, f, bb, ctx);
+    bb = cond.block;
+
+    Type *cond_type = node_type(ss->cond);
+    Type *promoted = type_promote(cond_type);
+    IrOperand cv = promote_to(ctx, bb, cond.value, cond_type, promoted);
+
+    SwitchCtx sc;
+    sc.case_blocks = u64map_new(ctx->mod->arena);
+    sc.default_bb = NULL;
+    sc.default_stmts = NULL;
+    sc.exit_bb = new_block(f, "switch_exit");
+
+    Vec *cases = vec_new(ctx->mod->arena);
+    collect_switch(ss->body, f, ctx, &sc, cases);
+
+    /* Dispatch chain: compare cond against each case value in turn. */
+    size_t n = vec_size(cases);
+    for (size_t i = 0; i < n; i++)
+    {
+        SwitchCase *c = (SwitchCase *) vec_get(cases, i);
+        u32 eq = alloc_vreg_from_type(ctx, type_int());
+        ir_emit_binop(bb, OP_ICMP_EQ, eq, cv, ir_operand_imm(c->value));
+        IrBlock *next = new_block(f, "switch_test");
+        cond_jump(bb, ir_operand_vreg(eq), c->bb, next);
+        bb = next;
+    }
+    IrBlock *no_match = sc.default_bb ? sc.default_bb : sc.exit_bb;
+    jump(bb, no_match);
+
+    /* `break` resolves to the switch exit via the loop stack; `continue`
+       inside a switch nested in a loop must propagate to that loop's latch
+       (continue isn't valid in a bare switch at all — semantic rejects it). */
+    LoopContext *outer_loop = vec_size(ctx->loop_stack) ? (LoopContext *) vec_last(ctx->loop_stack)
+                                                        : NULL;
+    LoopContext lc = {.continue_target = outer_loop ? outer_loop->continue_target : NULL,
+                      .exit = sc.exit_bb};
+    vec_push(ctx->loop_stack, &lc);
+    vec_push(ctx->switch_stack, &sc);
+
+    /* Walk the switch body as ordinary statements; `case`/`default` labels
+       land in their pre-created blocks (like goto labels) and the walk
+       continues from there, giving exact C fall-through semantics no matter
+       how deeply the labels are nested inside blocks/if/loops. */
+    IrBlock *end = build_stmt(ss->body, f, bb, ctx);
+
+    vec_pop(ctx->switch_stack);
+    vec_pop(ctx->loop_stack);
+
+    if (!is_terminated(end))
+    {
+        jump(end, sc.exit_bb);
+    }
+    seal_block(ctx, sc.exit_bb);
+    return sc.exit_bb;
+}
+
+/* Fallback path only for case labels nested inside inner blocks of a switch
+   body (the parser's normalize_case_groups handles the top level). */
+static IrBlock *build_case_stmt(ASTCaseStmt *cs, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    SwitchCtx *sc = (SwitchCtx *) vec_last(ctx->switch_stack);
+    IrBlock *case_bb = u64map_get(sc->case_blocks, (u64) cs->value);
+    ASSERT(case_bb != NULL);
+    if (!is_terminated(bb))
+    {
+        jump(bb, case_bb);
+    }
+    return build_stmt_sequence(cs->stmts, f, case_bb, ctx);
+}
+
+static IrBlock *build_default_stmt(ASTDefaultStmt *ds, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    SwitchCtx *sc = (SwitchCtx *) vec_last(ctx->switch_stack);
+    ASSERT(sc->default_bb != NULL);
+    if (!is_terminated(bb))
+    {
+        jump(bb, sc->default_bb);
+    }
+    return build_stmt_sequence(ds->stmts, f, sc->default_bb, ctx);
+}
+
 static IrBlock *build_return_stmt(ASTReturnStmt *ret, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     if (ret->expr)
@@ -1590,6 +1803,12 @@ static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilde
             return build_goto_stmt(ast_as(ASTGotoStmt, node), f, bb, ctx);
         case AST_LABEL_STMT:
             return build_label_stmt(ast_as(ASTLabelStmt, node), f, bb, ctx);
+        case AST_SWITCH_STMT:
+            return build_switch_stmt(ast_as(ASTSwitchStmt, node), f, bb, ctx);
+        case AST_CASE_STMT:
+            return build_case_stmt(ast_as(ASTCaseStmt, node), f, bb, ctx);
+        case AST_DEFAULT_STMT:
+            return build_default_stmt(ast_as(ASTDefaultStmt, node), f, bb, ctx);
         default:
             ir_error(node, "unsupported statement kind %s", ast_kind_name(node->kind));
             return bb;
@@ -1787,6 +2006,33 @@ static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx)
         case AST_LABEL_STMT:
             mark_addr_taken_stmt(ast_as(ASTLabelStmt, node)->stmt, ctx);
             break;
+        case AST_SWITCH_STMT:
+        {
+            ASTSwitchStmt *sw = ast_as(ASTSwitchStmt, node);
+            mark_addr_taken_expr(sw->cond, ctx);
+            mark_addr_taken_stmt(sw->body, ctx);
+            break;
+        }
+        case AST_CASE_STMT:
+        {
+            ASTCaseStmt *cs2 = ast_as(ASTCaseStmt, node);
+            size_t n2 = vec_size(cs2->stmts);
+            for (size_t i2 = 0; i2 < n2; i2++)
+            {
+                mark_addr_taken_stmt((ASTNode *) vec_get(cs2->stmts, i2), ctx);
+            }
+            break;
+        }
+        case AST_DEFAULT_STMT:
+        {
+            ASTDefaultStmt *ds2 = ast_as(ASTDefaultStmt, node);
+            size_t n2 = vec_size(ds2->stmts);
+            for (size_t i2 = 0; i2 < n2; i2++)
+            {
+                mark_addr_taken_stmt((ASTNode *) vec_get(ds2->stmts, i2), ctx);
+            }
+            break;
+        }
         default:
             break; /* break/continue/goto: no subexpressions */
     }
@@ -1812,7 +2058,8 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
     }
 
     FuncBuilder ctx = {
-        mod,        u64map_new(mod->arena), vec_new(mod->arena), strmap_new(mod->arena), func_types,
+        mod,        u64map_new(mod->arena), vec_new(mod->arena), vec_new(mod->arena),
+        strmap_new(mod->arena), func_types,
         global_map, u64map_new(mod->arena), vec_new(mod->arena), u64map_new(mod->arena), NO_VREG};
 
     /* Pre-create blocks for all labels so gotos can target them. */

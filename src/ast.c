@@ -187,6 +187,32 @@ ASTNode *ast_label_stmt(const char *label, ASTNode *stmt, Loc loc, Arena *arena)
     return &n->base;
 }
 
+ASTNode *ast_switch_stmt(ASTNode *cond, ASTNode *body, Loc loc, Arena *arena)
+{
+    ASTSwitchStmt *n = ast_new_node(sizeof(ASTSwitchStmt), AST_SWITCH_STMT, loc, arena);
+    n->cond = cond;
+    n->body = body;
+    return &n->base;
+}
+
+ASTNode *ast_case_stmt(ASTNode *expr, i64 value, bool value_known, Vec *stmts, Loc loc,
+                       Arena *arena)
+{
+    ASTCaseStmt *n = ast_new_node(sizeof(ASTCaseStmt), AST_CASE_STMT, loc, arena);
+    n->expr = expr;
+    n->value = value;
+    n->value_known = value_known;
+    n->stmts = stmts;
+    return &n->base;
+}
+
+ASTNode *ast_default_stmt(Vec *stmts, Loc loc, Arena *arena)
+{
+    ASTDefaultStmt *n = ast_new_node(sizeof(ASTDefaultStmt), AST_DEFAULT_STMT, loc, arena);
+    n->stmts = stmts;
+    return &n->base;
+}
+
 ASTNode *ast_ternary_expr(ASTNode *cond, ASTNode *then_expr, ASTNode *else_expr, Loc loc,
                           Arena *arena)
 {
@@ -498,6 +524,28 @@ static void ast_dump_rec(ASTNode *node, int depth)
             ASTLabelStmt *label_stmt = ast_as(ASTLabelStmt, node);
             printf("LABEL %s\n", label_stmt->label);
             ast_dump_rec(label_stmt->stmt, depth + 1);
+            break;
+        }
+        case AST_SWITCH_STMT:
+        {
+            ASTSwitchStmt *sw = ast_as(ASTSwitchStmt, node);
+            printf("SWITCH\n");
+            ast_dump_rec(sw->cond, depth + 1);
+            ast_dump_rec(sw->body, depth + 1);
+            break;
+        }
+        case AST_CASE_STMT:
+        {
+            ASTCaseStmt *cs = ast_as(ASTCaseStmt, node);
+            printf("CASE %lld\n", (long long) cs->value);
+            dump_node_list(cs->stmts, depth + 1);
+            break;
+        }
+        case AST_DEFAULT_STMT:
+        {
+            ASTDefaultStmt *ds = ast_as(ASTDefaultStmt, node);
+            printf("DEFAULT\n");
+            dump_node_list(ds->stmts, depth + 1);
             break;
         }
         case AST_TERNARY_EXPR:

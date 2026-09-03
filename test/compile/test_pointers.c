@@ -54,6 +54,18 @@ TEST(pointers, interp_sizeof_char)
               1);
 }
 
+TEST(pointers, interp_sizeof_array_ident)
+{
+    /* Regression: array-to-pointer decay is suppressed for the direct operand
+       of sizeof (§6.3.2.1p3), so `sizeof(a)` is the whole array, not the
+       pointer size. */
+    EXPECT_EQ(tc_run_interp("int main(void) {\n"
+                            "    int a[10];\n"
+                            "    return sizeof(a);\n"
+                            "}\n"),
+              40);
+}
+
 TEST(pointers, interp_string_literal)
 {
     EXPECT_EQ(tc_run_interp("int main(void) {\n"

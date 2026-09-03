@@ -13,8 +13,41 @@ struct SemanticCtx
     Vec *scopes;         /* Vec<StrMap*> — lexical scope stack (name -> ASTVarDecl) */
     StrMap *labels;      /* label name -> ASTLabelStmt (collected per function) */
     int loop_depth;
+    int switch_depth;
+    Vec *switch_sem_stack; /* Vec<SwitchSem*> — per-switch case-value sets */
     bool error;
 };
+
+typedef struct SwitchSem SwitchSem;
+struct SwitchSem
+{
+    U64Map *values;      /* (u64)converted case value -> non-NULL, for duplicate detection */
+    Type *promoted_cond; /* type_promote(controlling expression type) */
+    bool has_default;
+};
+
+/* C11 §6.8.4.2p5: each case constant is converted to the promoted type of the
+   controlling expression. Return the converted value in that type's
+   representation (zero-extended for unsigned, sign-extended for signed), so
+   duplicate detection and the IR comparison both work "after conversion". */
+static i64 convert_to_promoted(i64 value, Type *type)
+{
+    u8 width = type->width; /* bits: 8, 16, 32, 64 */
+    if (width >= 64)
+    {
+        return value;
+    }
+    i64 mask = ((i64) 1 << width) - 1;
+    i64 m = value & mask;
+    if (type_is_signed(type))
+    {
+        if (m & ((i64) 1 << (width - 1)))
+        {
+            m |= ~mask;
+        }
+    }
+    return m;
+}
 
 static Type *check_expr(ASTNode *node, SemanticCtx *ctx);
 static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type);
@@ -434,6 +467,16 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
                 return NULL;
             }
             Type *op_type = se->operand->expr_type;
+            /* §6.3.2.1p3: array-to-pointer decay is suppressed for the direct
+               operand of sizeof, so `sizeof(arr)` is the whole array size. */
+            if (se->operand->kind == AST_IDENT)
+            {
+                ASTVarDecl *decl = ast_as(ASTIdent, se->operand)->decl;
+                if (decl && type_is_array(decl->type))
+                {
+                    op_type = decl->type;
+                }
+            }
             if (op_type->kind == TYPE_VOID)
             {
                 sem_error(node->loc, "sizeof(void) is invalid");
@@ -664,6 +707,19 @@ static bool check_compound_statement(ASTCompoundStmt *compound_stmt, SemanticCtx
     return ok;
 }
 
+static bool check_statement_list(Vec *stmts, SemanticCtx *ctx, Type *ret_type)
+{
+    size_t nstmts = vec_size(stmts);
+    for (size_t i = 0; i < nstmts; i++)
+    {
+        if (!check_stmt((ASTNode *) vec_get(stmts, i), ctx, ret_type))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool check_if_statement(ASTIfStmt *if_stmt, SemanticCtx *ctx, Type *ret_type)
 {
     if (!check_expr(if_stmt->cond, ctx))
@@ -725,12 +781,218 @@ static bool check_for_statement(ASTForStmt *for_stmt, SemanticCtx *ctx, Type *re
     return ok;
 }
 
+static bool fold_integer_constant(ASTNode *node, i64 *out)
+{
+    if (!node)
+    {
+        return false;
+    }
+    switch (node->kind)
+    {
+        case AST_INT_LITERAL:
+            *out = ast_as(ASTIntLiteral, node)->value;
+            return true;
+        case AST_UNARY_EXPR:
+        {
+            ASTUnaryExpr *u = ast_as(ASTUnaryExpr, node);
+            i64 v;
+            if (!fold_integer_constant(u->operand, &v))
+            {
+                return false;
+            }
+            switch (u->op)
+            {
+                case UN_NEG:
+                    *out = -v;
+                    return true;
+                case UN_BIT_NOT:
+                    *out = ~v;
+                    return true;
+                case UN_LOG_NOT:
+                    *out = !v;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        case AST_BINARY_EXPR:
+        {
+            ASTBinaryExpr *b = ast_as(ASTBinaryExpr, node);
+            i64 l, r;
+            if (!fold_integer_constant(b->left, &l) || !fold_integer_constant(b->right, &r))
+            {
+                return false;
+            }
+            switch (b->op)
+            {
+                case BIN_ADD:
+                    *out = l + r;
+                    return true;
+                case BIN_SUB:
+                    *out = l - r;
+                    return true;
+                case BIN_MUL:
+                    *out = l * r;
+                    return true;
+                case BIN_DIV:
+                case BIN_REM:
+                    if (r == 0)
+                    {
+                        return false;
+                    }
+                    *out = b->op == BIN_DIV ? l / r : l % r;
+                    return true;
+                case BIN_SHL:
+                case BIN_SHR:
+                    if (r < 0 || r > 63)
+                    {
+                        return false;
+                    }
+                    *out = b->op == BIN_SHL ? l << r : l >> r;
+                    return true;
+                case BIN_AND:
+                    *out = l & r;
+                    return true;
+                case BIN_OR:
+                    *out = l | r;
+                    return true;
+                case BIN_XOR:
+                    *out = l ^ r;
+                    return true;
+                case BIN_LOG_AND:
+                    *out = l && r;
+                    return true;
+                case BIN_LOG_OR:
+                    *out = l || r;
+                    return true;
+                case BIN_EQ:
+                    *out = l == r;
+                    return true;
+                case BIN_NE:
+                    *out = l != r;
+                    return true;
+                case BIN_LT:
+                    *out = l < r;
+                    return true;
+                case BIN_GT:
+                    *out = l > r;
+                    return true;
+                case BIN_LE:
+                    *out = l <= r;
+                    return true;
+                case BIN_GE:
+                    *out = l >= r;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        case AST_TERNARY_EXPR:
+        {
+            ASTTernaryExpr *te = ast_as(ASTTernaryExpr, node);
+            i64 cond;
+            if (!fold_integer_constant(te->cond, &cond))
+            {
+                return false;
+            }
+            return cond ? fold_integer_constant(te->then_expr, out)
+                        : fold_integer_constant(te->else_expr, out);
+        }
+        case AST_SIZEOF_TYPE:
+            /* check_expr has already computed size_value. */
+            *out = (i64) ast_as(ASTSizeofType, node)->size_value;
+            return true;
+        case AST_SIZEOF_EXPR:
+            /* check_expr has already resolved the operand type and set
+               size_value, so `case sizeof(x):` works here. */
+            *out = (i64) ast_as(ASTSizeofExpr, node)->size_value;
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool check_switch_statement(ASTSwitchStmt *sw, SemanticCtx *ctx, Type *ret_type)
+{
+    if (!check_expr(sw->cond, ctx))
+    {
+        return false;
+    }
+    if (!type_is_integer(type_rvalue(sw->cond->expr_type)))
+    {
+        sem_error(sw->cond->loc, "switch condition must have integer type");
+        ctx->error = true;
+        return false;
+    }
+
+    SwitchSem sem = {.values = u64map_new(ctx->arena),
+                     .promoted_cond = type_promote(type_rvalue(sw->cond->expr_type)),
+                     .has_default = false};
+    vec_push(ctx->switch_sem_stack, &sem);
+    ctx->switch_depth++;
+    bool ok = check_stmt(sw->body, ctx, ret_type);
+    ctx->switch_depth--;
+    vec_pop(ctx->switch_sem_stack);
+    return ok;
+}
+
+static bool check_case_statement(ASTCaseStmt *cs, SemanticCtx *ctx, Type *ret_type)
+{
+    if (ctx->switch_depth == 0)
+    {
+        sem_error(cs->base.loc, "'case' label not within a switch statement");
+        ctx->error = true;
+        return false;
+    }
+    SwitchSem *sem = (SwitchSem *) vec_last(ctx->switch_sem_stack);
+    if (!cs->value_known)
+    {
+        /* The constant expression couldn't be folded at parse time (e.g.
+           `case sizeof(x):`). Resolve types/sizes, then evaluate now. */
+        if (!check_expr(cs->expr, ctx) || !fold_integer_constant(cs->expr, &cs->value))
+        {
+            sem_error(cs->base.loc, "case label is not an integer constant expression");
+            ctx->error = true;
+            return false;
+        }
+        cs->value_known = true;
+    }
+    cs->value = convert_to_promoted(cs->value, sem->promoted_cond);
+    if (u64map_get(sem->values, (u64) cs->value))
+    {
+        sem_error(cs->base.loc, "duplicate case value");
+        ctx->error = true;
+        return false;
+    }
+    u64map_set(sem->values, (u64) cs->value, (void *) 1);
+    return check_statement_list(cs->stmts, ctx, ret_type);
+}
+
+static bool check_default_statement(ASTDefaultStmt *ds, SemanticCtx *ctx, Type *ret_type)
+{
+    if (ctx->switch_depth == 0)
+    {
+        sem_error(ds->base.loc, "'default' label not within a switch statement");
+        ctx->error = true;
+        return false;
+    }
+    SwitchSem *sem = (SwitchSem *) vec_last(ctx->switch_sem_stack);
+    if (sem->has_default)
+    {
+        sem_error(ds->base.loc, "multiple default labels in one switch");
+        ctx->error = true;
+        return false;
+    }
+    sem->has_default = true;
+    return check_statement_list(ds->stmts, ctx, ret_type);
+}
+
 static bool check_break_statement(ASTBreakStmt *break_stmt, SemanticCtx *ctx)
 {
     (void) break_stmt;
-    if (ctx->loop_depth == 0)
+    if (ctx->loop_depth == 0 && ctx->switch_depth == 0)
     {
-        sem_error(break_stmt->base.loc, "'break' outside of loop");
+        sem_error(break_stmt->base.loc, "'break' not within a loop or switch");
         ctx->error = true;
         return false;
     }
@@ -807,6 +1069,12 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
             return check_do_while_statement(ast_as(ASTDoWhileStmt, node), ctx, ret_type);
         case AST_FOR_STMT:
             return check_for_statement(ast_as(ASTForStmt, node), ctx, ret_type);
+        case AST_SWITCH_STMT:
+            return check_switch_statement(ast_as(ASTSwitchStmt, node), ctx, ret_type);
+        case AST_CASE_STMT:
+            return check_case_statement(ast_as(ASTCaseStmt, node), ctx, ret_type);
+        case AST_DEFAULT_STMT:
+            return check_default_statement(ast_as(ASTDefaultStmt, node), ctx, ret_type);
         case AST_BREAK_STMT:
             return check_break_statement(ast_as(ASTBreakStmt, node), ctx);
         case AST_CONTINUE_STMT:
@@ -925,6 +1193,32 @@ static void collect_labels(ASTNode *node, SemanticCtx *ctx)
                 strmap_set(ctx->labels, ls->label, ls);
             }
             collect_labels(ls->stmt, ctx);
+            break;
+        }
+        case AST_SWITCH_STMT:
+        {
+            ASTSwitchStmt *sw = ast_as(ASTSwitchStmt, node);
+            collect_labels(sw->body, ctx);
+            break;
+        }
+        case AST_CASE_STMT:
+        {
+            ASTCaseStmt *cs2 = ast_as(ASTCaseStmt, node);
+            size_t n2 = vec_size(cs2->stmts);
+            for (size_t i2 = 0; i2 < n2; i2++)
+            {
+                collect_labels((ASTNode *) vec_get(cs2->stmts, i2), ctx);
+            }
+            break;
+        }
+        case AST_DEFAULT_STMT:
+        {
+            ASTDefaultStmt *ds2 = ast_as(ASTDefaultStmt, node);
+            size_t n2 = vec_size(ds2->stmts);
+            for (size_t i2 = 0; i2 < n2; i2++)
+            {
+                collect_labels((ASTNode *) vec_get(ds2->stmts, i2), ctx);
+            }
             break;
         }
         default:
@@ -1160,6 +1454,8 @@ ASTNode *semantic_check(ASTNode *ast, Arena *arena)
         .scopes = vec_new(arena),
         .labels = NULL,
         .loop_depth = 0,
+        .switch_depth = 0,
+        .switch_sem_stack = vec_new(arena),
         .error = false,
     };
 
