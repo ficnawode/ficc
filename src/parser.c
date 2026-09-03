@@ -67,6 +67,16 @@ static ASTNode *parse_default_stmt(ParserCtx *p);
 static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out);
 static bool parser_check_not_enumerator(ParserCtx *p, const char *name);
 static ASTNode *parse_unary(ParserCtx *p);
+
+/* The token kinds that can begin a type specifier. Used to disambiguate a
+   cast `(type)expr` from a parenthesized expression: with no typedefs yet, a
+   cast must open with one of these (after any leading `const`). */
+static bool is_type_start(TokenKind k)
+{
+    return k == TOK_KW_INT || k == TOK_KW_CHAR || k == TOK_KW_SHORT || k == TOK_KW_LONG ||
+           k == TOK_KW_UNSIGNED || k == TOK_KW_VOID || k == TOK_KW_STRUCT || k == TOK_KW_UNION ||
+           k == TOK_KW_ENUM;
+}
 static ASTNode *parse_mul(ParserCtx *p);
 static ASTNode *parse_add(ParserCtx *p);
 static ASTNode *parse_shift(ParserCtx *p);
@@ -949,6 +959,38 @@ static ASTNode *parse_primary(ParserCtx *p)
 static ASTNode *parse_unary(ParserCtx *p)
 {
     Token *t = parser_peek(p);
+    if (t->kind == TOK_LPAREN)
+    {
+        /* Cast: `(type-name) unary`. Disambiguate from a parenthesized
+           expression by the token stream after `(` (skipping leading `const`):
+           a cast opens with a type-specifier keyword. With no typedefs in the
+           language yet this is exact — Phase 12 revisits it for user type
+           names. */
+        size_t look = p->pos + 1;
+        while (look < p->count && p->tokens[look].kind == TOK_KW_CONST)
+        {
+            look++;
+        }
+        if (look < p->count && is_type_start(p->tokens[look].kind))
+        {
+            parser_advance(p); /* consume '(' */
+            Type *target = parse_type_specifier(p);
+            if (!target)
+            {
+                return NULL;
+            }
+            if (!parser_expect(p, TOK_RPAREN, "')'"))
+            {
+                return NULL;
+            }
+            ASTNode *operand = parse_unary(p);
+            if (!operand)
+            {
+                return NULL;
+            }
+            return ast_cast_expr(target, operand, t->loc, p->arena);
+        }
+    }
     static const struct
     {
         TokenKind tok;
@@ -1631,6 +1673,21 @@ static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out)
             /* sizeof(type) is an integer constant expression (§6.6p6). */
             ASTSizeofType *st = ast_as(ASTSizeofType, node);
             *out = (i64) type_sizeof(st->type);
+            return true;
+        }
+        case AST_CAST_EXPR:
+        {
+            /* Casts are legal operators inside an integer constant expression
+               (§6.6p3/p6): fold the operand, then convert it into the target
+               type's range. Only integer targets fold (a pointer cast is an
+               address constant, not an integer constant). */
+            ASTCastExpr *ce = ast_as(ASTCastExpr, node);
+            i64 v;
+            if (!fold_constant_expr(p, ce->operand, &v) || !type_is_integer(ce->target_type))
+            {
+                return false;
+            }
+            *out = type_reduce_int(ce->target_type, v);
             return true;
         }
         default:

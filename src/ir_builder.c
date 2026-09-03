@@ -44,9 +44,9 @@ struct LoopContext
 typedef struct SwitchCtx SwitchCtx;
 struct SwitchCtx
 {
-    U64Map *case_blocks;    /* (u64)case value -> IrBlock* */
-    IrBlock *default_bb;    /* NULL if no `default:` label */
-    Vec *default_stmts;     /* statements following `default:` (NULL if none) */
+    U64Map *case_blocks; /* (u64)case value -> IrBlock* */
+    IrBlock *default_bb; /* NULL if no `default:` label */
+    Vec *default_stmts;  /* statements following `default:` (NULL if none) */
     IrBlock *exit_bb;
 };
 
@@ -730,7 +730,27 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
     }
     else if (is_comparison_op(be->op) || is_divrem_op(be->op))
     {
-        Type *promoted = type_common(type_promote(lt), type_promote(rt));
+        /* Pointer comparisons (`p == 0`, `p < q`) never use the integer
+           usual-arithmetic conversion: the non-pointer side is converted to
+           the pointer type (§6.5.9p4 — a null pointer constant), not run
+           through type_common (which would assert on a non-integer). */
+        Type *promoted;
+        if (type_is_ptr(lt) && !type_is_ptr(rt))
+        {
+            promoted = lt;
+        }
+        else if (type_is_ptr(rt) && !type_is_ptr(lt))
+        {
+            promoted = rt;
+        }
+        else if (type_is_ptr(lt) || type_is_ptr(rt))
+        {
+            promoted = lt;
+        }
+        else
+        {
+            promoted = type_common(type_promote(lt), type_promote(rt));
+        }
         lhs = promote_to(ctx, right.block, lhs, lt, promoted);
         lt = promoted;
         rhs = promote_to(ctx, right.block, rhs, rt, promoted);
@@ -828,6 +848,31 @@ static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
     return expr_result(ir_operand_vreg(dst), src.block);
 }
 
+/* C11 §6.5.4 cast expression. Value conversion per the §6.3 matrix:
+   - `(void) expr`: evaluate for effects, discard (like a void call);
+   - integer↔integer / integer↔pointer / pointer↔integer: reuse `promote_to`,
+     the exact conversion the assignment/arg/return paths use, so a cast that
+     coincides with an implicit conversion is bit-identical (widening via
+     SEXT/ZEXT by the source's signedness, narrowing via OP_TRUNC);
+   - pointer→pointer: a pure re-interpretation (§6.3.2.3p1/2/4); both operands
+     are 64-bit, so the value passes through unchanged — no instruction. */
+static ExprResult build_cast_expr(ASTCastExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    ExprResult src = build_expr(ce->operand, f, bb, ctx);
+    bb = src.block;
+    Type *target = ce->target_type;
+    if (target->kind == TYPE_VOID)
+    {
+        return expr_result(ir_operand_imm(0), bb);
+    }
+    Type *src_type = node_type(ce->operand);
+    if (type_is_ptr(target) && type_is_ptr(src_type))
+    {
+        return expr_result(src.value, bb);
+    }
+    return expr_result(promote_to(ctx, bb, src.value, src_type, target), bb);
+}
+
 static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     Type *callee_ret = strmap_get(ctx->func_types, ce->callee);
@@ -916,6 +961,12 @@ static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
         /* Records/arrays are memory: the pointer is the value, no load. */
         return ptr_res;
     }
+    if (result_type->kind == TYPE_VOID)
+    {
+        /* `*p` where p is `void*`: no load, no value. Only reachable as a
+           discarded or `(void)` operand; semantic rejects use as a value. */
+        return expr_result(ir_operand_imm(0), ptr_res.block);
+    }
     u32 dst = alloc_vreg_from_type(ctx, result_type);
     ir_emit_load(ptr_res.block, dst, ptr_res.value);
     return expr_result(ir_operand_vreg(dst), ptr_res.block);
@@ -991,6 +1042,11 @@ static ExprResult build_subscript_expr(ASTSubscriptExpr *se, IrFunction *f, IrBl
     if (type_is_record(elem) || type_is_array(elem))
     {
         /* Record/array elements are memory: the pointer is the value. */
+        return expr_result(ir_operand_vreg(addr), bb);
+    }
+    if (elem->kind == TYPE_VOID)
+    {
+        /* `p[0]` of a `void*`: no load; cf. build_deref_expr. */
         return expr_result(ir_operand_vreg(addr), bb);
     }
     u32 dst = alloc_vreg_from_type(ctx, elem);
@@ -1171,6 +1227,11 @@ static ExprResult build_member_access_expr(ASTMemberAccess *ma, IrFunction *f, I
         /* Record/array members are memory: the pointer is the value. */
         return lv;
     }
+    if (ma->field_type->kind == TYPE_VOID)
+    {
+        /* A `void`-typed field has no loading width; cf. build_deref_expr. */
+        return expr_result(ir_operand_imm(0), lv.block);
+    }
     u32 dst = alloc_vreg_from_type(ctx, ma->field_type);
     ir_emit_load(lv.block, dst, lv.value);
     return expr_result(ir_operand_vreg(dst), lv.block);
@@ -1215,6 +1276,8 @@ static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuil
             return build_string_literal_expr(ast_as(ASTStringLiteral, node), f, bb, ctx);
         case AST_MEMBER_ACCESS:
             return build_member_access_expr(ast_as(ASTMemberAccess, node), f, bb, ctx);
+        case AST_CAST_EXPR:
+            return build_cast_expr(ast_as(ASTCastExpr, node), f, bb, ctx);
         default:
             ir_error(node, "unsupported expression kind %s", ast_kind_name(node->kind));
             return expr_result(ir_operand_imm(0), bb);
@@ -1649,8 +1712,8 @@ static IrBlock *build_switch_stmt(ASTSwitchStmt *ss, IrFunction *f, IrBlock *bb,
     /* `break` resolves to the switch exit via the loop stack; `continue`
        inside a switch nested in a loop must propagate to that loop's latch
        (continue isn't valid in a bare switch at all — semantic rejects it). */
-    LoopContext *outer_loop = vec_size(ctx->loop_stack) ? (LoopContext *) vec_last(ctx->loop_stack)
-                                                        : NULL;
+    LoopContext *outer_loop =
+        vec_size(ctx->loop_stack) ? (LoopContext *) vec_last(ctx->loop_stack) : NULL;
     LoopContext lc = {.continue_target = outer_loop ? outer_loop->continue_target : NULL,
                       .exit = sc.exit_bb};
     vec_push(ctx->loop_stack, &lc);
@@ -1957,6 +2020,9 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
         case AST_MEMBER_ACCESS:
             mark_addr_taken_expr(ast_as(ASTMemberAccess, node)->object, ctx);
             break;
+        case AST_CAST_EXPR:
+            mark_addr_taken_expr(ast_as(ASTCastExpr, node)->operand, ctx);
+            break;
         default:
             break; /* literals, identifiers, sizeof-type: nothing to walk */
     }
@@ -2074,10 +2140,17 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
         return false;
     }
 
-    FuncBuilder ctx = {
-        mod,        u64map_new(mod->arena), vec_new(mod->arena), vec_new(mod->arena),
-        strmap_new(mod->arena), func_types,
-        global_map, u64map_new(mod->arena), vec_new(mod->arena), u64map_new(mod->arena), NO_VREG};
+    FuncBuilder ctx = {mod,
+                       u64map_new(mod->arena),
+                       vec_new(mod->arena),
+                       vec_new(mod->arena),
+                       strmap_new(mod->arena),
+                       func_types,
+                       global_map,
+                       u64map_new(mod->arena),
+                       vec_new(mod->arena),
+                       u64map_new(mod->arena),
+                       NO_VREG};
 
     /* Pre-create blocks for all labels so gotos can target them. */
     collect_labels(func_ast->body, func, &ctx);

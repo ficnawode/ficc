@@ -146,3 +146,110 @@ TEST(semantic, param_body_redeclaration_error)
                       "    return 0;\n"
                       "}");
 }
+
+/* --- Phase 11: cast legality --- */
+
+TEST(semantic, cast_ok)
+{
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    int x = 300;\n"
+                         "    char c = (char)x;\n"
+                         "    unsigned long u = (unsigned long)x;\n"
+                         "    void *v = (void *)u;\n"
+                         "    int *p = (int *)v;\n"
+                         "    return *p + c;\n"
+                         "}\n");
+}
+
+TEST(semantic, void_cast_ok)
+{
+    EXPECT_BUILD_SUCCEED("struct s { int a; };\n"
+                         "int main(void) {\n"
+                         "    int x = 5;\n"
+                         "    struct s v;\n"
+                         "    (void)x;\n"
+                         "    (void)v;\n"
+                         "    return 0;\n"
+                         "}\n");
+}
+
+TEST(semantic, enum_cast_ok)
+{
+    EXPECT_BUILD_SUCCEED("enum E { A, B };\n"
+                         "int main(void) {\n"
+                         "    enum E e = (enum E)1;\n"
+                         "    int i = (int)e;\n"
+                         "    return i;\n"
+                         "}\n");
+}
+
+TEST(semantic, cast_to_struct_rejected)
+{
+    EXPECT_BUILD_FAIL("struct s { int x; };\n"
+                      "int main(void) {\n"
+                      "    int i;\n"
+                      "    return (struct s)i;\n"
+                      "}\n");
+}
+
+TEST(semantic, cast_of_struct_rejected)
+{
+    EXPECT_BUILD_FAIL("struct s { int x; };\n"
+                      "int main(void) {\n"
+                      "    struct s v;\n"
+                      "    (int)v;\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(semantic, cast_target_array_rejected)
+{
+    /* `(int[3])` disambiguates as `(int)` + subscript-to-cast in the parser;
+       the cast's type-name can never name an array. */
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int i;\n"
+                      "    return (int[3])i;\n"
+                      "}\n");
+}
+
+TEST(semantic, cast_not_lvalue)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int i;\n"
+                      "    (int)i = 1;\n"
+                      "    return i;\n"
+                      "}\n");
+}
+
+TEST(semantic, void_value_in_binary)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    return (void)5 + 1;\n"
+                      "}\n");
+}
+
+TEST(semantic, void_value_in_init)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int a = (void)5;\n"
+                      "    return a;\n"
+                      "}\n");
+}
+
+TEST(semantic, void_value_in_condition)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    if ((void)1) {\n"
+                      "        return 1;\n"
+                      "    }\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(semantic, void_value_in_call_arg)
+{
+    EXPECT_BUILD_FAIL("int f(int x) { return x; }\n"
+                      "int main(void) {\n"
+                      "    return f((void)5);\n"
+                      "}\n");
+}

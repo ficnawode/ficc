@@ -26,33 +26,11 @@ struct SwitchSem
     bool has_default;
 };
 
-/* C11 §6.8.4.2p5: each case constant is converted to the promoted type of the
-   controlling expression. Return the converted value in that type's
-   representation (zero-extended for unsigned, sign-extended for signed), so
-   duplicate detection and the IR comparison both work "after conversion". */
-static i64 convert_to_promoted(i64 value, Type *type)
-{
-    u8 width = type->width; /* bits: 8, 16, 32, 64 */
-    if (width >= 64)
-    {
-        return value;
-    }
-    i64 mask = ((i64) 1 << width) - 1;
-    i64 m = value & mask;
-    if (type_is_signed(type))
-    {
-        if (m & ((i64) 1 << (width - 1)))
-        {
-            m |= ~mask;
-        }
-    }
-    return m;
-}
-
 static Type *check_expr(ASTNode *node, SemanticCtx *ctx);
 static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type);
 static bool check_func(ASTNode *node, SemanticCtx *ctx);
 static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx);
+static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx);
 
 static void sem_error(Loc loc, const char *fmt, ...)
 {
@@ -62,6 +40,28 @@ static void sem_error(Loc loc, const char *fmt, ...)
     vfprintf(stderr, fmt, args);
     va_end(args);
     fprintf(stderr, "\n");
+}
+
+/* C11 §6.2.5p21: scalar types are arithmetic and pointer types. Records,
+   arrays, and void are not scalar. */
+static bool is_scalar_type(Type *t)
+{
+    t = type_unqual(t);
+    return t->kind != TYPE_VOID && !type_is_record(t) && !type_is_array(t);
+}
+
+/* A value expression that turned out void (`(void)x`, a void function call, a
+   dereference of a void object) cannot be used where a value is needed;
+   report the classic diagnostic instead of lowering a width-0 vreg. */
+static bool check_value_used(ASTNode *node, SemanticCtx *ctx)
+{
+    if (node->expr_type && node->expr_type->kind == TYPE_VOID)
+    {
+        sem_error(node->loc, "void value not ignored as it ought to be");
+        ctx->error = true;
+        return false;
+    }
+    return true;
 }
 
 static StrMap *current_scope(SemanticCtx *ctx)
@@ -172,6 +172,11 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     Type *lt = binary_expr->left->expr_type;
     Type *rt = binary_expr->right->expr_type;
     Type *result = NULL;
+    if (!check_value_used(binary_expr->left, ctx) || !check_value_used(binary_expr->right, ctx))
+    {
+        /* `(void)x + 1`, `f() = 5` — operand is void, not a value. */
+        return false;
+    }
     if ((type_is_record(lt) || type_is_record(rt)) && binary_expr->op != BIN_ASSIGN)
     {
         sem_error(binary_expr->base.loc, "invalid operands to operator (record type)");
@@ -180,6 +185,16 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     }
     if (binary_expr->op == BIN_ASSIGN)
     {
+        ASTNode *lhs = binary_expr->left;
+        bool is_lvalue = lhs->kind == AST_IDENT || lhs->kind == AST_MEMBER_ACCESS ||
+                         lhs->kind == AST_SUBSCRIPT_EXPR ||
+                         (lhs->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, lhs)->op == UN_DEREF);
+        if (!is_lvalue)
+        {
+            sem_error(binary_expr->base.loc, "lvalue required as left operand of assignment");
+            ctx->error = true;
+            return false;
+        }
         if (type_is_const(lt))
         {
             sem_error(binary_expr->base.loc,
@@ -236,6 +251,10 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
     Type *op_type = unary_expr->operand->expr_type;
     if (unary_expr->op == UN_LOG_NOT)
     {
+        if (!check_value_used(unary_expr->operand, ctx))
+        {
+            return false;
+        }
         unary_expr->base.expr_type = type_int();
         return true;
     }
@@ -290,6 +309,12 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
         ctx->error = true;
         return false;
     }
+    if (op_type->kind == TYPE_VOID)
+    {
+        sem_error(unary_expr->base.loc, "void value not ignored as it ought to be");
+        ctx->error = true;
+        return false;
+    }
     if (type_is_record(op_type))
     {
         sem_error(unary_expr->base.loc, "invalid operand of record type to unary operator");
@@ -328,6 +353,10 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
         {
             return false;
         }
+        if (!check_value_used(arg, ctx))
+        {
+            return false;
+        }
         ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(callee->params, i));
         if (!type_assignable(param->type, arg->expr_type))
         {
@@ -339,6 +368,43 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
     /* The function value is an unqualified rvalue even for a const return
        type (`const int f()`). */
     call_expr->base.expr_type = type_rvalue(callee->ret_type);
+    return true;
+}
+
+static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx)
+{
+    if (!check_expr(ce->operand, ctx))
+    {
+        return false;
+    }
+    Type *target = ce->target_type;
+    Type *op = ce->operand->expr_type;
+    if (target->kind == TYPE_VOID)
+    {
+        /* `(void) expr` discards the operand's value (C11 §6.5.4p2: the
+           non-scalar-target constraint applies only when the type name is not
+           void), so any operand type is legal. */
+        ce->base.expr_type = target;
+        return true;
+    }
+    if (!is_scalar_type(target))
+    {
+        sem_error(ce->base.loc, "conversion to non-scalar type requested");
+        ctx->error = true;
+        return false;
+    }
+    if (!is_scalar_type(op))
+    {
+        sem_error(ce->base.loc, "invalid cast of non-scalar type");
+        ctx->error = true;
+        return false;
+    }
+    /* A cast does not yield an lvalue, and a cast to a qualified type has the
+       same effect as a cast to its unqualified version (C11 §6.5.4p4): the
+       result is the rvalue of the target, so top-level `const` is dropped
+       while pointee qualifiers survive (`(const int *)p` stays
+       pointer-to-const-int). */
+    ce->base.expr_type = type_rvalue(target);
     return true;
 }
 
@@ -524,6 +590,12 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
                 return NULL;
             }
             return node->expr_type;
+        case AST_CAST_EXPR:
+            if (!check_cast_expr(ast_as(ASTCastExpr, node), ctx))
+            {
+                return NULL;
+            }
+            return node->expr_type;
         default:
             sem_error(node->loc, "unsupported expression kind %s", ast_kind_name(node->kind));
             ctx->error = true;
@@ -552,6 +624,10 @@ static bool check_return_stmt(ASTReturnStmt *return_stmt, SemanticCtx *ctx, Type
         }
     }
     if (return_stmt->expr && !check_expr(return_stmt->expr, ctx))
+    {
+        return false;
+    }
+    if (return_stmt->expr && !check_value_used(return_stmt->expr, ctx))
     {
         return false;
     }
@@ -664,6 +740,10 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
     {
         return false;
     }
+    if (var_decl->init && !check_value_used(var_decl->init, ctx))
+    {
+        return false;
+    }
     if (type_is_record(var_decl->type) && var_decl->init &&
         !type_assignable(var_decl->type, var_decl->init->expr_type))
     {
@@ -722,7 +802,7 @@ static bool check_statement_list(Vec *stmts, SemanticCtx *ctx, Type *ret_type)
 
 static bool check_if_statement(ASTIfStmt *if_stmt, SemanticCtx *ctx, Type *ret_type)
 {
-    if (!check_expr(if_stmt->cond, ctx))
+    if (!check_expr(if_stmt->cond, ctx) || !check_value_used(if_stmt->cond, ctx))
     {
         return false;
     }
@@ -739,7 +819,7 @@ static bool check_if_statement(ASTIfStmt *if_stmt, SemanticCtx *ctx, Type *ret_t
 
 static bool check_while_statement(ASTWhileStmt *while_stmt, SemanticCtx *ctx, Type *ret_type)
 {
-    if (!check_expr(while_stmt->cond, ctx))
+    if (!check_expr(while_stmt->cond, ctx) || !check_value_used(while_stmt->cond, ctx))
     {
         return false;
     }
@@ -758,7 +838,11 @@ static bool check_do_while_statement(ASTDoWhileStmt *do_stmt, SemanticCtx *ctx, 
     {
         return false;
     }
-    return check_expr(do_stmt->cond, ctx);
+    if (!check_expr(do_stmt->cond, ctx) || !check_value_used(do_stmt->cond, ctx))
+    {
+        return false;
+    }
+    return true;
 }
 
 static bool check_for_statement(ASTForStmt *for_stmt, SemanticCtx *ctx, Type *ret_type)
@@ -767,7 +851,8 @@ static bool check_for_statement(ASTForStmt *for_stmt, SemanticCtx *ctx, Type *re
     {
         return false;
     }
-    if (for_stmt->cond && !check_expr(for_stmt->cond, ctx))
+    if (for_stmt->cond &&
+        (!check_expr(for_stmt->cond, ctx) || !check_value_used(for_stmt->cond, ctx)))
     {
         return false;
     }
@@ -907,6 +992,20 @@ static bool fold_integer_constant(ASTNode *node, i64 *out)
                size_value, so `case sizeof(x):` works here. */
             *out = (i64) ast_as(ASTSizeofExpr, node)->size_value;
             return true;
+        case AST_CAST_EXPR:
+        {
+            /* Casts are permitted in integer constant expressions (§6.6p6);
+               operand types are known by now, so `case (int)sizeof(x):`
+               folds here. Only integer targets fold to an integer constant. */
+            ASTCastExpr *ce = ast_as(ASTCastExpr, node);
+            i64 v;
+            if (!fold_integer_constant(ce->operand, &v) || !type_is_integer(ce->target_type))
+            {
+                return false;
+            }
+            *out = type_reduce_int(ce->target_type, v);
+            return true;
+        }
         default:
             return false;
     }
@@ -957,7 +1056,7 @@ static bool check_case_statement(ASTCaseStmt *cs, SemanticCtx *ctx, Type *ret_ty
         }
         cs->value_known = true;
     }
-    cs->value = convert_to_promoted(cs->value, sem->promoted_cond);
+    cs->value = type_reduce_int(sem->promoted_cond, cs->value);
     if (u64map_get(sem->values, (u64) cs->value))
     {
         sem_error(cs->base.loc, "duplicate case value");
@@ -1034,6 +1133,11 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
 {
     if (!check_expr(ternary->cond, ctx) || !check_expr(ternary->then_expr, ctx) ||
         !check_expr(ternary->else_expr, ctx))
+    {
+        return false;
+    }
+    if (!check_value_used(ternary->cond, ctx) || !check_value_used(ternary->then_expr, ctx) ||
+        !check_value_used(ternary->else_expr, ctx))
     {
         return false;
     }

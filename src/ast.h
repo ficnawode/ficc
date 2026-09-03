@@ -38,7 +38,8 @@
     X(AST_STRING_LITERAL)                                                                          \
     X(AST_STRUCT_DECL)                                                                             \
     X(AST_ENUM_DECL)                                                                               \
-    X(AST_MEMBER_ACCESS)
+    X(AST_MEMBER_ACCESS)                                                                           \
+    X(AST_CAST_EXPR)
 
 typedef enum
 {
@@ -353,6 +354,18 @@ struct ASTMemberAccess
     Type *field_type; /* filled by semantic */
 };
 
+/* A cast `(type) expr` (C11 §5.5.4). The target type is the *declared* cast
+   target (qualifiers intact: `(const int *)`, `(int * const)`); semantic sets
+   expr_type to type_rvalue(target) — a cast is never an lvalue and a cast to a
+   qualified type equals a cast to the unqualified type (§6.5.4p4). */
+typedef struct ASTCastExpr ASTCastExpr;
+struct ASTCastExpr
+{
+    ASTNode base;
+    Type *target_type;
+    ASTNode *operand;
+};
+
 ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body,
                       StorageClass storage, Loc loc, Arena *arena);
 ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
@@ -392,6 +405,7 @@ ASTNode *ast_struct_decl(const char *tag, bool is_union, Vec *fields, Loc loc, A
 ASTNode *ast_enum_decl(const char *tag, Vec *constants, Loc loc, Arena *arena);
 ASTNode *ast_member_access(ASTNode *object, const char *member, bool is_arrow, Loc loc,
                            Arena *arena);
+ASTNode *ast_cast_expr(Type *target_type, ASTNode *operand, Loc loc, Arena *arena);
 
 void ast_dump(ASTNode *node);
 

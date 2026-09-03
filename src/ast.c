@@ -284,6 +284,14 @@ ASTNode *ast_member_access(ASTNode *object, const char *member, bool is_arrow, L
     return &n->base;
 }
 
+ASTNode *ast_cast_expr(Type *target_type, ASTNode *operand, Loc loc, Arena *arena)
+{
+    ASTCastExpr *n = ast_new_node(sizeof(ASTCastExpr), AST_CAST_EXPR, loc, arena);
+    n->target_type = target_type;
+    n->operand = operand;
+    return &n->base;
+}
+
 static const char *bin_op_name(BinOpKind op)
 {
     switch (op)
@@ -611,6 +619,13 @@ static void ast_dump_rec(ASTNode *node, int depth)
             ASTMemberAccess *ma = ast_as(ASTMemberAccess, node);
             printf("MEMBER_ACCESS %s%s\n", ma->is_arrow ? "->" : ".", ma->member);
             ast_dump_rec(ma->object, depth + 1);
+            break;
+        }
+        case AST_CAST_EXPR:
+        {
+            ASTCastExpr *ce = ast_as(ASTCastExpr, node);
+            printf("CAST -> %s\n", type_kind_name(ce->target_type->kind));
+            ast_dump_rec(ce->operand, depth + 1);
             break;
         }
         default:

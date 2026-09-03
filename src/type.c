@@ -614,6 +614,23 @@ u64 type_sizeof(Type *t)
     return type_base(t)->size;
 }
 
+i64 type_reduce_int(Type *target, i64 value)
+{
+    ASSERT(type_is_integer(target));
+    u8 width = target->width;
+    if (width >= 64)
+    {
+        return value;
+    }
+    u64 mask = ((u64) 1 << width) - 1;
+    i64 m = (i64) ((u64) value & mask);
+    if (type_is_signed(target) && (m & ((i64) 1 << (width - 1))))
+    {
+        m |= ~(i64) mask;
+    }
+    return m;
+}
+
 const char *type_kind_name(TypeKind kind)
 {
     switch (kind)

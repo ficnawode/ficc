@@ -161,6 +161,14 @@ Type *type_int_literal(i64 value, bool is_hex, bool is_unsigned, IntSuffix lengt
    Returns -1 for non-integer types. */
 int type_rank(Type *t);
 
+/* C11 §6.3.1.3: convert a value into a target integer type's range. Narrower
+   targets wrap modulo 2^width; the result is masked to the width and
+   sign-extended if the target is signed (the implementation-defined wrap for
+   out-of-range signed targets, matching design.md §8). Used by constant
+   folding of casts and switch case conversion; runtime casts lower to
+   TRUNC/ZEXT/SEXT in the IR builder instead. */
+i64 type_reduce_int(Type *target, i64 value);
+
 const char *type_kind_name(TypeKind kind);
 
 #endif

@@ -442,3 +442,186 @@ TEST(parser, array_declarator)
     EXPECT_EQ(type_array_len(vd->type), 10);
     arena_free(a);
 }
+
+/* --- Phase 11: cast parsing, disambiguation, and constant folding --- */
+
+TEST(parser, cast_node)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { return (int)5; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(ret->expr->kind, AST_CAST_EXPR);
+    ASTCastExpr *ce = ast_as(ASTCastExpr, ret->expr);
+    EXPECT_TRUE(ce->target_type == type_int());
+    EXPECT_EQ(ce->operand->kind, AST_INT_LITERAL);
+    arena_free(a);
+}
+
+TEST(parser, paren_is_not_cast)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { return (5); }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
+    /* A parenthesized expression is transparent: no cast node is created. */
+    EXPECT_EQ(ret->expr->kind, AST_INT_LITERAL);
+    arena_free(a);
+}
+
+TEST(parser, call_is_not_cast)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(int x) { return x; }\n"
+                            "int main(void) { return f(3); }",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 1));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(ret->expr->kind, AST_CALL_EXPR);
+    ASTCallExpr *call = ast_as(ASTCallExpr, ret->expr);
+    EXPECT_EQ(((ASTNode *) vec_get(call->args, 0))->kind, AST_INT_LITERAL);
+    arena_free(a);
+}
+
+TEST(parser, call_arg_cast)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(int x) { return x; }\n"
+                            "int main(void) { return f((int)3); }",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 1));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
+    ASTCallExpr *call = ast_as(ASTCallExpr, ret->expr);
+    EXPECT_EQ(((ASTNode *) vec_get(call->args, 0))->kind, AST_CAST_EXPR);
+    arena_free(a);
+}
+
+TEST(parser, cast_qualified_target)
+{
+    /* `(const int *)p` — the cast target keeps the pointee qualifier. */
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int x;\n"
+                            "    const int *p = (const int *)&x;\n"
+                            "    return *p;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(body->stmts, 1));
+    EXPECT_EQ(vd->init->kind, AST_CAST_EXPR);
+    ASTCastExpr *ce = ast_as(ASTCastExpr, vd->init);
+    EXPECT_TRUE(type_is_ptr(ce->target_type));
+    EXPECT_TRUE(type_is_const(type_deref(ce->target_type)));
+    arena_free(a);
+}
+
+TEST(parser, cast_enum_target)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("enum color { RED };\n"
+                            "int main(void) { enum color c = (enum color)1;\n"
+                            "    return (int)c;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 1));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(vd->init->kind, AST_CAST_EXPR);
+    ASTCastExpr *ce = ast_as(ASTCastExpr, vd->init);
+    EXPECT_TRUE(ce->target_type->kind == TYPE_ENUM);
+    arena_free(a);
+}
+
+/* The first `case` label of the switch in the program under test. */
+static ASTCaseStmt *first_case_of(const char *src, Arena *a)
+{
+    ASTNode *ast = tc_parse(src, a);
+    if (!ast)
+    {
+        return NULL;
+    }
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTSwitchStmt *sw = ast_as(ASTSwitchStmt, (ASTNode *) vec_get(body->stmts, 0));
+    ASTCompoundStmt *sw_body = ast_as(ASTCompoundStmt, sw->body);
+    ASTNode *first = (ASTNode *) vec_get(sw_body->stmts, 0);
+    if (first->kind != AST_CASE_STMT)
+    {
+        return NULL;
+    }
+    return ast_as(ASTCaseStmt, first);
+}
+
+TEST(parser, cast_folds_in_case_label)
+{
+    Arena *a = arena_new();
+    /* (char)300 folds to 44 at parse time (§6.6: casts are allowed in integer
+       constant expressions). */
+    ASTCaseStmt *cs = first_case_of("int main(void) {\n"
+                                    "    switch (44) {\n"
+                                    "    case (char)300:\n"
+                                    "        return 1;\n"
+                                    "    default:\n"
+                                    "        return 0;\n"
+                                    "    }\n"
+                                    "}",
+                                    a);
+    EXPECT_NOTNULL(cs);
+    EXPECT_TRUE(cs->value_known);
+    EXPECT_EQ(cs->value, 44);
+    arena_free(a);
+}
+
+TEST(parser, cast_folds_sizeof_in_case_label)
+{
+    Arena *a = arena_new();
+    ASTCaseStmt *cs = first_case_of("int main(void) {\n"
+                                    "    switch (4) {\n"
+                                    "    case (int)sizeof(int):\n"
+                                    "        return 1;\n"
+                                    "    default:\n"
+                                    "        return 0;\n"
+                                    "    }\n"
+                                    "}",
+                                    a);
+    EXPECT_NOTNULL(cs);
+    EXPECT_TRUE(cs->value_known);
+    EXPECT_EQ(cs->value, 4);
+    arena_free(a);
+}
+
+TEST(parser, cast_folds_unsigned_in_case_label)
+{
+    Arena *a = arena_new();
+    ASTCaseStmt *cs = first_case_of("int main(void) {\n"
+                                    "    switch (255) {\n"
+                                    "    case (unsigned char)-1:\n"
+                                    "        return 1;\n"
+                                    "    default:\n"
+                                    "        return 0;\n"
+                                    "    }\n"
+                                    "}",
+                                    a);
+    EXPECT_NOTNULL(cs);
+    EXPECT_TRUE(cs->value_known);
+    EXPECT_EQ(cs->value, 255);
+    arena_free(a);
+}

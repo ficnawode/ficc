@@ -418,3 +418,47 @@ TEST(ir_builder, multiple_string_literals)
     EXPECT_EQ(ir_interp_run(m), 'h' + 'w');
     arena_free(a);
 }
+
+/* --- Phase 11: cast lowering shape --- */
+
+TEST(ir_builder, cast_narrowing_emits_trunc)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int v = 300;\n"
+                                  "    return (char)v;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    bool saw_trunc = false;
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    for (size_t bi = 0; bi < vec_size(f->blocks); bi++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
+        for (size_t ii = 0; ii < vec_size(bb->instrs); ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
+            if (in->opcode == OP_TRUNC)
+            {
+                saw_trunc = true;
+            }
+        }
+    }
+    EXPECT_TRUE(saw_trunc);
+    EXPECT_EQ(ir_interp_run(m), 44);
+    arena_free(a);
+}
+
+TEST(ir_builder, cast_pointer_passthrough)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int x = 1;\n"
+                                  "    int *p = (int *)(void *)&x;\n"
+                                  "    return *p;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    EXPECT_EQ(ir_interp_run(m), 1);
+    arena_free(a);
+}

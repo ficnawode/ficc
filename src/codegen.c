@@ -36,9 +36,9 @@ typedef struct
    function bytebuf is known. */
 typedef struct
 {
-    size_t disp_field_off;  /* byte offset of the lea rip+disp32 field */
-    u32 nentries;           /* range + 1 */
-    const char **targets;   /* nentries block labels, index = value − min */
+    size_t disp_field_off; /* byte offset of the lea rip+disp32 field */
+    u32 nentries;          /* range + 1 */
+    const char **targets;  /* nentries block labels, index = value − min */
 } SwitchTableRec;
 
 /* Per-function frame layout. Vreg i lives at slot (i+1)*8 below %rbp. */
@@ -984,12 +984,10 @@ static void lower_switch(IrInstr *in, CodegenCtx *ctx)
             u8 signed_cc = min < 0;
             emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_imm(min));
             emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX); /* cmp rax, rcx */
-            emit_jcc(ctx->buf, below_cc[signed_cc], default_label, ctx->block_patches,
-                     ctx->arena);
+            emit_jcc(ctx->buf, below_cc[signed_cc], default_label, ctx->block_patches, ctx->arena);
             emit_mov(ctx->buf, 8, xop_reg(R_EDX), xop_imm(max));
             emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_EDX); /* cmp rax, rdx */
-            emit_jcc(ctx->buf, above_cc[signed_cc], default_label, ctx->block_patches,
-                     ctx->arena);
+            emit_jcc(ctx->buf, above_cc[signed_cc], default_label, ctx->block_patches, ctx->arena);
             emit_reg_reg(ctx->buf, arith_specs[OP_SUB].mem, R_EAX, R_ECX); /* sub rax, rcx */
 
             /* lea rdx, [rip+disp32]; the table is appended to the function's
@@ -1127,7 +1125,13 @@ static void lower_zext(IrInstr *in, CodegenCtx *ctx)
     {
         u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
         emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
-        emit_movzx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
+        /* A 4-byte source needs no MOVZX: writing EAX already zero-extends to
+           RAX on x86-64, and the 0F B7 form only zero-extends 16 bits — it
+           would (correctly with sw==2, wrongly with sw==4) keep bits 0..15. */
+        if (sw < 4)
+        {
+            emit_movzx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
+        }
     }
     emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
 }
