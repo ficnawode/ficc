@@ -174,6 +174,17 @@ void ir_phi_add_entry(IrInstr *phi, IrOperand val, IrBlock *pred)
     phi->extra.phi.nfilled++;
 }
 
+IrInstr *ir_emit_switch(IrBlock *bb, IrOperand val, u32 ncases, IrSwitchCase *cases,
+                        const char *default_label)
+{
+    IrInstr *ins = instr_new(bb, OP_SWITCH, NO_VREG, 1);
+    ins->ops[0] = val;
+    ins->extra.sw.ncases = ncases;
+    ins->extra.sw.cases = cases;
+    ins->extra.sw.default_label = default_label;
+    return ins;
+}
+
 IrInstr *ir_emit_load(IrBlock *bb, u32 dst, IrOperand ptr)
 {
     IrInstr *ins = instr_new(bb, OP_LOAD, dst, 1);

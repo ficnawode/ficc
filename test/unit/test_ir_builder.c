@@ -325,6 +325,51 @@ TEST(ir_builder, nested_break_continue_preds)
     arena_free(a);
 }
 
+TEST(ir_builder, switch_emits_op_switch)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int x = 2;\n"
+                                  "    switch (x) {\n"
+                                  "    case 1:\n"
+                                  "        return 1;\n"
+                                  "    case 2:\n"
+                                  "        return 42;\n"
+                                  "    default:\n"
+                                  "        return 0;\n"
+                                  "    }\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    IrInstr *sw = NULL;
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t bi = 0; bi < nblocks && !sw; bi++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
+        size_t ninstr = vec_size(bb->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
+            if (in->opcode == OP_SWITCH)
+            {
+                sw = in;
+                break;
+            }
+        }
+    }
+    EXPECT_NOTNULL(sw);
+    EXPECT_EQ(sw->nops, 1);
+    EXPECT_EQ(sw->extra.sw.ncases, 2);
+    EXPECT_EQ(sw->extra.sw.cases[0].val, 1);
+    EXPECT_EQ(sw->extra.sw.cases[1].val, 2);
+    EXPECT_NOTNULL(sw->extra.sw.default_label);
+
+    EXPECT_EQ(ir_interp_run(m), 42);
+    arena_free(a);
+}
+
 TEST(ir_builder, global_string_literal)
 {
     Arena *a = arena_new();

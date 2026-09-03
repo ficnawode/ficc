@@ -167,6 +167,7 @@ static i64 eval_icmp(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_br(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_brcond(IrInstr *in, InterpCtx *ctx, i64 *regs);
+static i64 eval_switch(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_ret(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_phi(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_trunc(IrInstr *in, InterpCtx *ctx, i64 *regs);
@@ -214,6 +215,7 @@ static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *star
     X(OP_CALL, eval_call)                                                                          \
     X(OP_BR, eval_br)                                                                              \
     X(OP_BRCOND, eval_brcond)                                                                      \
+    X(OP_SWITCH, eval_switch)                                                                      \
     X(OP_RET, eval_ret)                                                                            \
     X(OP_PHI, eval_phi)                                                                            \
     X(OP_UNREACHABLE, eval_unreachable)                                                            \
@@ -449,6 +451,25 @@ static i64 eval_brcond(IrInstr *in, InterpCtx *ctx, i64 *regs)
     const char *target_label = cond ? in->extra.brcond.true_label : in->extra.brcond.false_label;
     IrBlock *target = strmap_get(ctx->block_map, target_label);
     ASSERT(target != NULL && "branch target names a block the IR builder created");
+    ctx->next_bb = target;
+    ctx->jumped = true;
+    return 0;
+}
+
+static i64 eval_switch(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    i64 val = operand_val(ctx, in->ops[0], regs);
+    const char *target_label = in->extra.sw.default_label;
+    for (u32 c = 0; c < in->extra.sw.ncases; c++)
+    {
+        if (val == in->extra.sw.cases[c].val)
+        {
+            target_label = in->extra.sw.cases[c].label;
+            break;
+        }
+    }
+    IrBlock *target = strmap_get(ctx->block_map, target_label);
+    ASSERT(target != NULL && "switch target names a block the IR builder created");
     ctx->next_bb = target;
     ctx->jumped = true;
     return 0;

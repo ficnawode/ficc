@@ -164,6 +164,45 @@ TEST(switch, nested_switch)
                           21);
 }
 
+TEST(switch, nested_switch_with_grouped_labels)
+{
+    /* A nested switch inside a case whose values collide with the outer
+       switch's, with grouped labels in the inner body. Regression: the inner
+       switch's labels must bind to the inner switch, never leak into the
+       outer dispatch payload. */
+    EXPECT_INTERP_AND_ELF("int nest(int outer, int inner) {\n"
+                          "    switch (outer) {\n"
+                          "    case 0:\n"
+                          "        return 100;\n"
+                          "    case 1:\n"
+                          "        switch (inner) {\n"
+                          "        case 0:\n"
+                          "            return 1;\n"
+                          "        case 1:\n"
+                          "        case 2:\n"
+                          "            return 2;\n"
+                          "        default:\n"
+                          "            return 3;\n"
+                          "        }\n"
+                          "    case 2:\n"
+                          "        return 200;\n"
+                          "    default:\n"
+                          "        return 999;\n"
+                          "    }\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    if (nest(1, 0) != 1) return 1;\n"
+                          "    if (nest(1, 1) != 2) return 2;\n"
+                          "    if (nest(1, 2) != 2) return 3;\n"
+                          "    if (nest(1, 9) != 3) return 4;\n"
+                          "    if (nest(0, 5) != 100) return 5;\n"
+                          "    if (nest(2, 5) != 200) return 6;\n"
+                          "    if (nest(7, 1) != 999) return 7;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
 TEST(switch, enum_case_values)
 {
     EXPECT_INTERP_AND_ELF("enum Color { RED, GREEN, BLUE };\n"
@@ -554,4 +593,195 @@ TEST(switch, negative_case_value_matches)
                           "    }\n"
                           "}\n",
                           42);
+}
+
+/* The jump-table backend is value-indexed (value − min) with gap entries
+   routed to default: a value that falls between two case constants must not
+   hit either case's handler. */
+TEST(switch, gap_value_routes_to_default)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (2) {\n"
+                          "    case 1:\n"
+                          "        return 10;\n"
+                          "    case 3:\n"
+                          "        return 30;\n"
+                          "    default:\n"
+                          "        return 77;\n"
+                          "    }\n"
+                          "}\n",
+                          77);
+}
+
+TEST(switch, table_cases_out_of_source_order)
+{
+    /* Cases not in ascending source order still map by value in the table. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (8) {\n"
+                          "    case sizeof(long):\n"
+                          "        return 42;\n"
+                          "    case sizeof(short) + 1:\n"
+                          "        return 7;\n"
+                          "    default:\n"
+                          "        return 0;\n"
+                          "    }\n"
+                          "}\n",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (3) {\n"
+                          "    case sizeof(long):\n"
+                          "        return 42;\n"
+                          "    case sizeof(short) + 1:\n"
+                          "        return 7;\n"
+                          "    default:\n"
+                          "        return 0;\n"
+                          "    }\n"
+                          "}\n",
+                          7);
+}
+
+TEST(switch, sparse_range_uses_compare_chain)
+{
+    /* Range far beyond the jump-table cutoff exercises the compare-chain
+       fallback, including against large (non-imm32) case constants. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (1) {\n"
+                          "    case 1:\n"
+                          "        return 11;\n"
+                          "    case 1000000:\n"
+                          "        return 22;\n"
+                          "    default:\n"
+                          "        return 99;\n"
+                          "    }\n"
+                          "}\n",
+                          11);
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (1000000) {\n"
+                          "    case 1:\n"
+                          "        return 11;\n"
+                          "    case 1000000:\n"
+                          "        return 22;\n"
+                          "    default:\n"
+                          "        return 99;\n"
+                          "    }\n"
+                          "}\n",
+                          22);
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long v = 7;\n"
+                          "    switch (v) {\n"
+                          "    case 4000000000L:\n"
+                          "        return 11;\n"
+                          "    case -4000000000L:\n"
+                          "        return 22;\n"
+                          "    default:\n"
+                          "        return 33;\n"
+                          "    }\n"
+                          "}\n",
+                          33);
+}
+
+TEST(switch, grouped_labels_shared_body)
+{
+    /* `case 1: case 2:` with no statement between — consecutive labels
+       sharing one body. The second label parses as a nested ASTCaseStmt
+       inside the first's body and must still be dispatched to. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (1) {\n"
+                          "    case 1:\n"
+                          "    case 2:\n"
+                          "        return 42;\n"
+                          "    case 3:\n"
+                          "        return 0;\n"
+                          "    default:\n"
+                          "        return 99;\n"
+                          "    }\n"
+                          "}\n",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (2) {\n"
+                          "    case 1:\n"
+                          "    case 2:\n"
+                          "        return 42;\n"
+                          "    case 3:\n"
+                          "        return 0;\n"
+                          "    default:\n"
+                          "        return 99;\n"
+                          "    }\n"
+                          "}\n",
+                          42);
+}
+
+TEST(switch, negative_min_table_range)
+{
+    /* A range crossing zero: index = value − min must stay exact under
+       the u64 wrap-around the backend uses. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (-2) {\n"
+                          "    case -2:\n"
+                          "        return 1;\n"
+                          "    case 0:\n"
+                          "        return 2;\n"
+                          "    case 2:\n"
+                          "        return 3;\n"
+                          "    default:\n"
+                          "        return 4;\n"
+                          "    }\n"
+                          "}\n",
+                          1);
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (0) {\n"
+                          "    case -2:\n"
+                          "        return 1;\n"
+                          "    case 0:\n"
+                          "        return 2;\n"
+                          "    case 2:\n"
+                          "        return 3;\n"
+                          "    default:\n"
+                          "        return 4;\n"
+                          "    }\n"
+                          "}\n",
+                          2);
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (5) {\n"
+                          "    case -2:\n"
+                          "        return 1;\n"
+                          "    case 0:\n"
+                          "        return 2;\n"
+                          "    case 2:\n"
+                          "        return 3;\n"
+                          "    default:\n"
+                          "        return 4;\n"
+                          "    }\n"
+                          "}\n",
+                          4);
+}
+
+TEST(switch, unsigned_char_cond_zero_extends)
+{
+    /* unsigned char 255 promotes to unsigned int; the backend must not
+       sign-extend the controlling value before the 64-bit range math. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    unsigned char c = 255;\n"
+                          "    switch (c) {\n"
+                          "    case 128:\n"
+                          "        return 1;\n"
+                          "    case 255:\n"
+                          "        return 42;\n"
+                          "    default:\n"
+                          "        return 0;\n"
+                          "    }\n"
+                          "}\n",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    unsigned char c = 200;\n"
+                          "    switch (c) {\n"
+                          "    case 128:\n"
+                          "        return 1;\n"
+                          "    case 255:\n"
+                          "        return 2;\n"
+                          "    default:\n"
+                          "        return 3;\n"
+                          "    }\n"
+                          "}\n",
+                          3);
 }

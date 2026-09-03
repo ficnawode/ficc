@@ -224,7 +224,7 @@ static bool is_terminated(IrBlock *bb)
     }
     IrInstr *last = (IrInstr *) vec_get(bb->instrs, n - 1);
     return last->opcode == OP_RET || last->opcode == OP_UNREACHABLE || last->opcode == OP_BR ||
-           last->opcode == OP_BRCOND;
+           last->opcode == OP_BRCOND || last->opcode == OP_SWITCH;
 }
 
 static void jump(IrBlock *from, IrBlock *to)
@@ -1530,9 +1530,11 @@ static IrBlock *build_label_stmt(ASTLabelStmt *ls, IrFunction *f, IrBlock *bb, F
 }
 
 /* Walk the switch body collecting case/default labels in source order. Each
-   gets a block created up front so the dispatch chain can branch to it; case
+   gets a block created up front so the dispatch can branch to it; case
    blocks are marked as merge points (multiple preds: dispatch + fall-through,
-   the latter added during body lowering). */
+   the latter added during body lowering). A nested `switch` is deliberately
+   NOT descended into: its labels bind to the innermost switch, which the
+   nested build_switch_stmt collects with its own context. */
 static void collect_switch(ASTNode *node, IrFunction *f, FuncBuilder *ctx, SwitchCtx *sc,
                            Vec *cases)
 {
@@ -1551,6 +1553,14 @@ static void collect_switch(ASTNode *node, IrFunction *f, FuncBuilder *ctx, Switc
             c->bb = new_block(f, "switch_case");
             vec_push(cases, c);
             u64map_set(sc->case_blocks, (u64) cs->value, c->bb);
+            /* Grouped labels (`case 1: case 2: ...`) and labels nested inside
+               another label's body arrive as ASTCaseStmt in this label's
+               statements; register them so the body walk can resolve them. */
+            size_t ns = vec_size(cs->stmts);
+            for (size_t i = 0; i < ns; i++)
+            {
+                collect_switch((ASTNode *) vec_get(cs->stmts, i), f, ctx, sc, cases);
+            }
             break;
         }
         case AST_DEFAULT_STMT:
@@ -1558,6 +1568,11 @@ static void collect_switch(ASTNode *node, IrFunction *f, FuncBuilder *ctx, Switc
             ASTDefaultStmt *ds = ast_as(ASTDefaultStmt, node);
             sc->default_bb = new_block(f, "switch_default");
             sc->default_stmts = ds->stmts;
+            size_t ns = vec_size(ds->stmts);
+            for (size_t i = 0; i < ns; i++)
+            {
+                collect_switch((ASTNode *) vec_get(ds->stmts, i), f, ctx, sc, cases);
+            }
             break;
         }
         case AST_COMPOUND_STMT:
@@ -1589,9 +1604,6 @@ static void collect_switch(ASTNode *node, IrFunction *f, FuncBuilder *ctx, Switc
         case AST_LABEL_STMT:
             collect_switch(ast_as(ASTLabelStmt, node)->stmt, f, ctx, sc, cases);
             break;
-        case AST_SWITCH_STMT:
-            collect_switch(ast_as(ASTSwitchStmt, node)->body, f, ctx, sc, cases);
-            break;
         default:
             break;
     }
@@ -1615,19 +1627,24 @@ static IrBlock *build_switch_stmt(ASTSwitchStmt *ss, IrFunction *f, IrBlock *bb,
     Vec *cases = vec_new(ctx->mod->arena);
     collect_switch(ss->body, f, ctx, &sc, cases);
 
-    /* Dispatch chain: compare cond against each case value in turn. */
+    /* First-class switch dispatch: one OP_SWITCH carrying every case. The
+       backend chooses the lowering per switch (jump table vs compare-chain),
+       so the case structure survives to codegen. The dispatch block is a pred
+       of every case block (plus default/exit) exactly like the old chain's
+       cond_jump edges, keeping merge-point PHI bookkeeping identical. */
     size_t n = vec_size(cases);
+    IrSwitchCase *sw_cases =
+        arena_alloc(ctx->mod->arena, n * sizeof(IrSwitchCase), _Alignof(IrSwitchCase));
     for (size_t i = 0; i < n; i++)
     {
         SwitchCase *c = (SwitchCase *) vec_get(cases, i);
-        u32 eq = alloc_vreg_from_type(ctx, type_int());
-        ir_emit_binop(bb, OP_ICMP_EQ, eq, cv, ir_operand_imm(c->value));
-        IrBlock *next = new_block(f, "switch_test");
-        cond_jump(bb, ir_operand_vreg(eq), c->bb, next);
-        bb = next;
+        sw_cases[i].val = c->value;
+        sw_cases[i].label = c->bb->label;
+        declare_pred(c->bb, bb);
     }
     IrBlock *no_match = sc.default_bb ? sc.default_bb : sc.exit_bb;
-    jump(bb, no_match);
+    declare_pred(no_match, bb);
+    ir_emit_switch(bb, cv, (u32) n, sw_cases, no_match->label);
 
     /* `break` resolves to the switch exit via the loop stack; `continue`
        inside a switch nested in a loop must propagate to that loop's latch

@@ -29,6 +29,18 @@ typedef struct
     u32 dst_vreg;
 } PhiCopy;
 
+/* A switch-lowered jump table pending in-function .text emission. The table is
+   indexed by `val − min` (one entry per value in the case range, gaps filled
+   with the default label, so the correct case block is found directly). The
+   lea RIP-relative displacement is patched once the table's offset inside the
+   function bytebuf is known. */
+typedef struct
+{
+    size_t disp_field_off;  /* byte offset of the lea rip+disp32 field */
+    u32 nentries;           /* range + 1 */
+    const char **targets;   /* nentries block labels, index = value − min */
+} SwitchTableRec;
+
 /* Per-function frame layout. Vreg i lives at slot (i+1)*8 below %rbp. */
 typedef struct
 {
@@ -50,6 +62,7 @@ struct CodegenCtx
     Vec *patches;           /* Vec<CallPatch*> */
     Vec *block_patches;     /* Vec<BranchPatch*> */
     Vec *global_patches;    /* Vec<GlobalPatch*> */
+    Vec *switch_tables;     /* Vec<SwitchTableRec*> */
 };
 
 static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
@@ -131,6 +144,7 @@ typedef enum
 
     X86_CALL_REL32 = 0xE8,
     X86_JMP_REL32 = 0xE9,
+    X86_IND_JMP = 0xFF, /* /4: jmp r/m64 (register operand) */
 
     X86_ADD_RM8_REG8 = 0x02,
     X86_MOV_RM8_REG8 = 0x88,
@@ -477,6 +491,15 @@ static const u8 icmp_cc[OP_ICMP_SGE + 1] = {
     [OP_ICMP_SGT] = CC_G, [OP_ICMP_SGE] = CC_GE,
 };
 
+/* reg64,reg64 form of a `r64, r/m64`-style op (e.g. sub/cmp/add): destination
+   is modrm.reg, source is modrm.rm. REX.W only — caller registers < 8. */
+static void emit_reg_reg(ByteBuf *buf, u8 opcode, u8 dst_reg, u8 src_reg)
+{
+    bytebuf_append(buf, X86_REX_W);
+    bytebuf_append(buf, opcode);
+    bytebuf_append(buf, modrm(3, dst_reg, src_reg));
+}
+
 /* %reg op= rhs */
 static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_reg, X86Operand rhs)
 {
@@ -656,6 +679,14 @@ static void emit_call_placeholder(ByteBuf *buf, const char *target, Vec *patches
     bytebuf_append_i32(buf, 0);
 }
 
+/* FF /4: jmp r/m64 — indirect jump to the absolute address in a register. */
+static void emit_jmp_reg(ByteBuf *buf, u8 reg)
+{
+    bytebuf_append(buf, X86_REX_W);
+    bytebuf_append(buf, X86_IND_JMP);
+    bytebuf_append(buf, modrm(3, 4, reg));
+}
+
 /* ------------------------------------------------------------------ */
 /* IR lowering                                                         */
 /*                                                                      */
@@ -666,6 +697,10 @@ static void emit_call_placeholder(ByteBuf *buf, const char *target, Vec *patches
 
 typedef void (*LowerFn)(IrInstr *in, CodegenCtx *ctx);
 
+static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src);
+static void emit_movsx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src);
+static void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src);
+
 static void lower_binary(IrInstr *in, CodegenCtx *ctx);
 static void lower_unary(IrInstr *in, CodegenCtx *ctx);
 static void lower_shift(IrInstr *in, CodegenCtx *ctx);
@@ -675,6 +710,7 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx);
 static void lower_ret(IrInstr *in, CodegenCtx *ctx);
 static void lower_br(IrInstr *in, CodegenCtx *ctx);
 static void lower_brcond(IrInstr *in, CodegenCtx *ctx);
+static void lower_switch(IrInstr *in, CodegenCtx *ctx);
 static void lower_phi(IrInstr *in, CodegenCtx *ctx);
 static void lower_unreachable(IrInstr *in, CodegenCtx *ctx);
 static void lower_trunc(IrInstr *in, CodegenCtx *ctx);
@@ -718,6 +754,7 @@ static void lower_memcpy(IrInstr *in, CodegenCtx *ctx);
     X(OP_ICMP_SGE, lower_icmp)                                                                     \
     X(OP_BR, lower_br)                                                                             \
     X(OP_BRCOND, lower_brcond)                                                                     \
+    X(OP_SWITCH, lower_switch)                                                                     \
     X(OP_CALL, lower_call)                                                                         \
     X(OP_PHI, lower_phi)                                                                           \
     X(OP_UNREACHABLE, lower_unreachable)                                                           \
@@ -876,6 +913,132 @@ static void lower_brcond(IrInstr *in, CodegenCtx *ctx)
     emit_test_eax_eax(ctx->buf);
     emit_jcc(ctx->buf, CC_E, in->extra.brcond.false_label, ctx->block_patches, ctx->arena);
     emit_jmp_placeholder(ctx->buf, in->extra.brcond.true_label, ctx->block_patches, ctx->arena);
+}
+
+/* Jump-table vs compare-chain cutoff: a table is only built when the case
+   range is tight enough that it stays small (range+1 ≤ JT_MAX_RANGE+1 entries
+   of 8 bytes). Sparse switches fall back to the compare-chain. */
+#define JT_MAX_RANGE 256
+
+static void lower_switch(IrInstr *in, CodegenCtx *ctx)
+{
+    u32 n = in->extra.sw.ncases;
+    IrSwitchCase *cases = in->extra.sw.cases;
+    const char *default_label = in->extra.sw.default_label;
+
+    /* Load the controlling value into %rax as its exact 64-bit semantic value
+       (full width for w=8/imm, sign- or zero-extended otherwise). Both the
+       chain compares and the table's range/index math then run in 64 bits. */
+    IrOperand src = in->ops[0];
+    u8 w = src.is_imm ? 8 : vreg_width(ctx, src.u.vreg);
+    if (src.is_imm)
+    {
+        emit_mov(ctx->buf, 8, xop_reg(R_EAX), xop_imm(src.u.imm));
+    }
+    else
+    {
+        emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, src, R_EAX));
+        if (w < 8)
+        {
+            if (ir_vreg_signed(ctx->mod, src.u.vreg))
+            {
+                emit_movsx(ctx->buf, w, 8, R_EAX, xop_reg(R_EAX));
+            }
+            else if (w < 4)
+            {
+                emit_movzx(ctx->buf, w, 8, R_EAX, xop_reg(R_EAX));
+            }
+            /* w==4 unsigned: mov eax already zero-extends into %rax */
+        }
+    }
+
+    bool use_table = false;
+    if (n >= 2)
+    {
+        i64 min, max;
+        min = max = cases[0].val;
+        for (u32 i = 1; i < n; i++)
+        {
+            if (cases[i].val < min)
+            {
+                min = cases[i].val;
+            }
+            if (cases[i].val > max)
+            {
+                max = cases[i].val;
+            }
+        }
+        /* u64 wrap subtraction gives the true range for |range| < 2^63. */
+        u64 range = (u64) max - (u64) min;
+        use_table = range <= JT_MAX_RANGE;
+
+        if (use_table)
+        {
+            /* Bounds check, then index = val − min. The wrap-around subtraction
+               is exact because the bounds checks guarantee the index ∈
+               [0, range+1) < 2^63. Negative case ranges need signed ordering
+               (an unsigned view of a negative value looks huge); ranges that
+               never go below 0 compare fine as unsigned either way. */
+            static const u8 below_cc[2] = {CC_B, CC_L};
+            static const u8 above_cc[2] = {CC_A, CC_G};
+            u8 signed_cc = min < 0;
+            emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_imm(min));
+            emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX); /* cmp rax, rcx */
+            emit_jcc(ctx->buf, below_cc[signed_cc], default_label, ctx->block_patches,
+                     ctx->arena);
+            emit_mov(ctx->buf, 8, xop_reg(R_EDX), xop_imm(max));
+            emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_EDX); /* cmp rax, rdx */
+            emit_jcc(ctx->buf, above_cc[signed_cc], default_label, ctx->block_patches,
+                     ctx->arena);
+            emit_reg_reg(ctx->buf, arith_specs[OP_SUB].mem, R_EAX, R_ECX); /* sub rax, rcx */
+
+            /* lea rdx, [rip+disp32]; the table is appended to the function's
+               .text bytes, so the displacement is patched once its offset is
+               known. RIP-relative + self-relative entries need no relocations. */
+            emit_lea(ctx->buf, R_EDX,
+                     (X86Mem) {.base = NO_REG, .index = NO_REG, .scale = 1, .disp = 0});
+            size_t disp_field_off = bytebuf_len(ctx->buf) - 4;
+
+            emit_mov(ctx->buf, 8, xop_reg(R_EAX),
+                     xop_mem((X86Mem) {.base = R_EDX, .index = R_EAX, .scale = 8, .disp = 0}));
+            emit_reg_reg(ctx->buf, arith_specs[OP_ADD].mem, R_EAX, R_EDX); /* add rax, rdx */
+            emit_jmp_reg(ctx->buf, R_EAX);
+
+            /* Full-range table: one entry per value, gaps route to default. */
+            size_t nentries = (size_t) range + 1;
+            SwitchTableRec *rec = arena_alloc(ctx->arena, sizeof(SwitchTableRec), sizeof(void *));
+            rec->disp_field_off = disp_field_off;
+            rec->nentries = (u32) nentries;
+            rec->targets = arena_alloc(ctx->arena, nentries * sizeof(const char *), sizeof(void *));
+            for (size_t e = 0; e < nentries; e++)
+            {
+                rec->targets[e] = default_label;
+            }
+            for (u32 i = 0; i < n; i++)
+            {
+                size_t idx = (size_t) ((u64) cases[i].val - (u64) min);
+                rec->targets[idx] = cases[i].label;
+            }
+            vec_push(ctx->switch_tables, rec);
+            return;
+        }
+    }
+
+    /* Compare-chain: test %rax against each case in turn, else default. */
+    for (u32 i = 0; i < n; i++)
+    {
+        if (fits_i32(cases[i].val))
+        {
+            emit_binop_rhs(ctx->buf, 8, &cmp_spec, R_EAX, xop_imm(cases[i].val));
+        }
+        else
+        {
+            emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_imm(cases[i].val));
+            emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX); /* cmp rax, rcx */
+        }
+        emit_jcc(ctx->buf, CC_E, cases[i].label, ctx->block_patches, ctx->arena);
+    }
+    emit_jmp_placeholder(ctx->buf, default_label, ctx->block_patches, ctx->arena);
 }
 
 static void lower_phi(IrInstr *in, CodegenCtx *ctx)
@@ -1246,7 +1409,8 @@ static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod)
 
 static bool is_terminator(IrOpcode op)
 {
-    return op == OP_RET || op == OP_UNREACHABLE || op == OP_BR || op == OP_BRCOND;
+    return op == OP_RET || op == OP_UNREACHABLE || op == OP_BR || op == OP_BRCOND ||
+           op == OP_SWITCH;
 }
 
 /* Each PHI entry becomes a copy in the named predecessor block. */
@@ -1368,6 +1532,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         .patches = patches,
         .block_patches = block_patches,
         .global_patches = global_patches,
+        .switch_tables = vec_new(arena),
     };
 
     for (size_t bi = 0; bi < nblocks; bi++)
@@ -1382,6 +1547,38 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     for (size_t bi = 0; bi < nblocks; bi++)
     {
         emit_block((IrBlock *) vec_get(f->blocks, bi), bi, &ctx);
+    }
+
+    /* Append switch jump tables at the end of the function's .text bytes. Each
+       entry holds `target_block_offset − table_base_offset`, so runtime
+       resolution is `table_base + entry`; combined with the RIP-relative lea
+       the table needs no relocations and relocates with the function. */
+    size_t nst = vec_size(ctx.switch_tables);
+    if (nst > 0)
+    {
+        bytebuf_align(buf, 8);
+    }
+    size_t *table_off = arena_alloc(arena, (nst ? nst : 1) * sizeof(size_t), sizeof(size_t));
+    size_t table_cursor = bytebuf_len(buf);
+    for (size_t t = 0; t < nst; t++)
+    {
+        SwitchTableRec *rec = (SwitchTableRec *) vec_get(ctx.switch_tables, t);
+        table_off[t] = table_cursor;
+        table_cursor += (size_t) rec->nentries * 8;
+    }
+    for (size_t t = 0; t < nst; t++)
+    {
+        SwitchTableRec *rec = (SwitchTableRec *) vec_get(ctx.switch_tables, t);
+        for (u32 i = 0; i < rec->nentries; i++)
+        {
+            IrBlock *target = strmap_get(ctx.label_to_block, rec->targets[i]);
+            ASSERT(target != NULL && "switch case targets a real block");
+            size_t ti = (size_t) u64map_get(ctx.block_to_index, (u64) (uintptr_t) target);
+            i64 entry = (i64) ctx.block_offsets[ti] - (i64) table_off[t];
+            bytebuf_append_u64(buf, (u64) entry);
+        }
+        i32 rel = (i32) ((i64) table_off[t] - (i64) (rec->disp_field_off + 4));
+        bytebuf_poke_u32(buf, rec->disp_field_off, (u32) rel);
     }
 
     resolve_block_patches(&ctx);
