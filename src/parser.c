@@ -147,6 +147,7 @@ static Type *parse_array_suffix(ParserCtx *p, Type *type);
 static ASTNode *parse_expr(ParserCtx *p);
 static ASTNode *parse_stmt(ParserCtx *p);
 static ASTNode *parse_primary(ParserCtx *p);
+static ASTNode *parse_postfix_ops(ParserCtx *p, ASTNode *node);
 static ASTNode *parse_switch_stmt(ParserCtx *p);
 static ASTNode *parse_case_stmt(ParserCtx *p);
 static ASTNode *parse_default_stmt(ParserCtx *p);
@@ -216,6 +217,7 @@ static ASTNode *parse_ternary(ParserCtx *p);
 static ASTNode *parse_assign(ParserCtx *p);
 static ASTNode *parse_postfix(ParserCtx *p);
 static ASTNode *parse_initializer(ParserCtx *p);
+static ASTNode *parse_init_list(ParserCtx *p);
 
 static Type *parse_type_specifier(ParserCtx *p)
 {
@@ -1189,9 +1191,50 @@ static ASTNode *parse_unary(ParserCtx *p)
             {
                 return NULL;
             }
+            if (parser_peek(p)->kind == TOK_LBRACKET)
+            {
+                /* The type name carries an array suffix (`(int[3])`,
+                   `(int[])`) — that is never a cast target, so this must be a
+                   compound literal. The suffix lives inside the parens. */
+                target = parse_array_suffix(p, target);
+                if (!target)
+                {
+                    return NULL;
+                }
+                if (!parser_expect(p, TOK_RPAREN, "')'"))
+                {
+                    return NULL;
+                }
+                if (parser_peek(p)->kind != TOK_LBRACE)
+                {
+                    parser_error(p, "expected '{' after compound literal type name");
+                    return NULL;
+                }
+                ASTNode *init = parse_init_list(p);
+                if (!init)
+                {
+                    return NULL;
+                }
+                return parse_postfix_ops(p, ast_compound_literal(target, init, t->loc, p->arena));
+            }
             if (!parser_expect(p, TOK_RPAREN, "')'"))
             {
                 return NULL;
+            }
+            if (parser_peek(p)->kind == TOK_LBRACE)
+            {
+                /* Compound literal (D12.9): `(type) { ... }`. The `{` after
+                   `)` is the unambiguous discriminator — `{` is never a unary
+                   operand, so this cannot collide with a cast. */
+                ASTNode *init = parse_init_list(p);
+                if (!init)
+                {
+                    return NULL;
+                }
+                ASTNode *cl = ast_compound_literal(target, init, t->loc, p->arena);
+                /* Postfix ops bind tighter than the compound literal's brace
+                   list closes: `(struct S){...}.x`. */
+                return parse_postfix_ops(p, cl);
             }
             ASTNode *operand = parse_unary(p);
             if (!operand)
@@ -1259,13 +1302,12 @@ static ASTNode *parse_unary(ParserCtx *p)
     return parse_postfix(p);
 }
 
-static ASTNode *parse_postfix(ParserCtx *p)
+/* Postfix operator loop over an already-parsed operand: `[i]` subscript and
+   `.field`/`->field` member access. Shared by parse_postfix and the compound
+   literal branch of parse_unary (a compound literal is a postfix expression,
+   so `(T){...}.x` / `(T){...}[i]` keep chaining, C11 §6.5.2.5). */
+static ASTNode *parse_postfix_ops(ParserCtx *p, ASTNode *node)
 {
-    ASTNode *node = parse_primary(p);
-    if (!node)
-    {
-        return NULL;
-    }
     while (true)
     {
         Token *t = parser_peek(p);
@@ -1302,6 +1344,16 @@ static ASTNode *parse_postfix(ParserCtx *p)
         }
     }
     return node;
+}
+
+static ASTNode *parse_postfix(ParserCtx *p)
+{
+    ASTNode *node = parse_primary(p);
+    if (!node)
+    {
+        return NULL;
+    }
+    return parse_postfix_ops(p, node);
 }
 
 static ASTNode *parse_mul(ParserCtx *p)
@@ -2027,11 +2079,13 @@ static bool resolve_constant_init(ParserCtx *p, ASTVarDecl *vd, ASTNode *expr)
     }
     if (expr->kind == AST_UNARY_EXPR)
     {
-        /* Address constant (§6.6p9): `&g` — check the *target* in semantic
-           (it must be an object of static storage duration), and serialize the
-           relocation in the IR builder. */
+        /* Address constant (§6.6p9): `&g` or `&(type){...}` (a compound
+           literal is an address constant; D12.9). The *target* is checked in
+           semantic (it must be an object of static storage duration), and the
+           relocation is serialized in the IR builder. */
         ASTUnaryExpr *u = ast_as(ASTUnaryExpr, expr);
-        if (u->op == UN_ADDR && u->operand->kind == AST_IDENT)
+        if (u->op == UN_ADDR &&
+            (u->operand->kind == AST_IDENT || u->operand->kind == AST_COMPOUND_LITERAL))
         {
             vd->init = expr;
             return true;

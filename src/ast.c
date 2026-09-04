@@ -309,6 +309,20 @@ ASTNode *ast_init_list(Vec *elems, Loc loc, Arena *arena)
     return &n->base;
 }
 
+ASTNode *ast_compound_literal(Type *type, ASTNode *init, Loc loc, Arena *arena)
+{
+    ASTCompoundLiteral *n =
+        ast_new_node(sizeof(ASTCompoundLiteral), AST_COMPOUND_LITERAL, loc, arena);
+    n->type = type;
+    n->init = init;
+    n->plan = NULL;
+    if (init && init->kind != AST_INIT_LIST)
+    {
+        fprintf(stderr, "[ast] error: compound literal init must be an initializer list\n");
+    }
+    return &n->base;
+}
+
 static const char *bin_op_name(BinOpKind op)
 {
     switch (op)
@@ -671,6 +685,13 @@ static void ast_dump_rec(ASTNode *node, int depth)
                 }
                 ast_dump_rec(e->value, depth + 1);
             }
+            break;
+        }
+        case AST_COMPOUND_LITERAL:
+        {
+            ASTCompoundLiteral *cl = ast_as(ASTCompoundLiteral, node);
+            printf("COMPOUND_LITERAL -> %s\n", type_kind_name(cl->type->kind));
+            ast_dump_rec(cl->init, depth + 1);
             break;
         }
         default:

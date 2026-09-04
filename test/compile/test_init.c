@@ -301,6 +301,32 @@ TEST(init, incomplete_array_of_strings)
                           'b' + 'e');
 }
 
+TEST(init, char_array_braced_string)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    char s[5] = {\"hi\"};\n"
+                          "    return s[0] + s[1];\n"
+                          "}\n",
+                          'h' + 'i');
+}
+
+TEST(init, char_array_unsized_braced_string)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    char s[] = {\"ab\"};\n"
+                          "    return sizeof(s);\n"
+                          "}\n",
+                          3);
+}
+
+TEST(init, negative_braced_string_too_long)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    char s[2] = {\"hi\"};\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
 TEST(init, negative_bare_incomplete_array)
 {
     EXPECT_BUILD_FAIL("int main(void) {\n"

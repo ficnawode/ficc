@@ -36,6 +36,7 @@ static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd);
 static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd);
 static bool plan_var_aggregate_init(SemanticCtx *ctx, ASTVarDecl *vd, bool *handled);
 static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type);
+static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx);
 
 static void sem_error(Loc loc, const char *fmt, ...)
 {
@@ -310,6 +311,15 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
             unary_expr->base.expr_type = type_ptr(type_decay(decl->type));
             return true;
         }
+        if (operand->kind == AST_COMPOUND_LITERAL)
+        {
+            /* `&(struct S){...}`: the anonymous object's address (D12.9). The
+               pointee is the declared lvalue type, qualifiers included, so
+               `&(const struct S){...}` is `const struct S *`. */
+            Type *ty = ast_as(ASTCompoundLiteral, operand)->type;
+            unary_expr->base.expr_type = type_ptr(type_decay(ty));
+            return true;
+        }
         sem_error(unary_expr->base.loc, "cannot take address of this expression");
         ctx->error = true;
         return false;
@@ -548,6 +558,13 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
                     op_type = decl->type;
                 }
             }
+            else if (se->operand->kind == AST_COMPOUND_LITERAL &&
+                     type_is_array(ast_as(ASTCompoundLiteral, se->operand)->type))
+            {
+                /* `sizeof((int[]){...})`: a compound literal does not decay
+                   either (§6.5.2.5p4 note) — the array type survives. */
+                op_type = ast_as(ASTCompoundLiteral, se->operand)->type;
+            }
             if (op_type->kind == TYPE_VOID)
             {
                 sem_error(node->loc, "sizeof(void) is invalid");
@@ -597,6 +614,12 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
             return node->expr_type;
         case AST_CAST_EXPR:
             if (!check_cast_expr(ast_as(ASTCastExpr, node), ctx))
+            {
+                return NULL;
+            }
+            return node->expr_type;
+        case AST_COMPOUND_LITERAL:
+            if (!check_compound_literal(ast_as(ASTCompoundLiteral, node), ctx))
             {
                 return NULL;
             }
@@ -1066,6 +1089,43 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
         return true; /* `{}`: zero-init, nothing to write */
     }
 
+    /* §6.7.9p14: a character array may be initialized by a character string
+       literal, braced or not — `char s[5] = "hi"` and `char s[5] = {"hi"}`
+       both fill the whole array (incl. the NUL); an unsized target infers
+       strlen+1 from the string, as in the unbraced path (P6). */
+    if (type_is_array(t) && type_array_elem(t)->kind == TYPE_CHAR && nel == 1)
+    {
+        InitElem *e = (InitElem *) vec_get(list->elems, 0);
+        if (!e->design && e->value->kind == AST_STRING_LITERAL)
+        {
+            ASTStringLiteral *sl = ast_as(ASTStringLiteral, e->value);
+            u64 need = sl->length + 1;
+            if (t->arr.length == 0)
+            {
+                if (!plan->grow_array)
+                {
+                    sem_error(list->base.loc, "array has incomplete type");
+                    ctx->error = true;
+                    return false;
+                }
+                plan->inferred_len = need;
+                /* The write's type is used only for the copy length (strlen+1),
+                   so recording it against the yet-to-be-completed type is safe:
+                   completion in plan_brace_list resizes the object afterwards. */
+                plan_new_write(ctx, plan, base_off, t, e->value, true);
+                return true;
+            }
+            if (need > t->arr.length)
+            {
+                sem_error(e->loc, "initializer-string for array of chars is too long");
+                ctx->error = true;
+                return false;
+            }
+            plan_new_write(ctx, plan, base_off, t, e->value, true);
+            return true;
+        }
+    }
+
     if (is_scalar_type(t))
     {
         if (nel != 1)
@@ -1235,9 +1295,10 @@ static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
     return true;
 }
 
-/* `int *p = &g;` (block static or file scope): a bare address constant in
-   pointer position. The value type-checks against the pointer target; the IR
-   serializer turns it into one 8-byte relocation write (§6.6p9, D12.8). */
+/* `int *p = &g;` or `int *p = &(type){...};` (block static or file scope): a
+   bare address constant in pointer position. The value type-checks against
+   the pointer target; the IR serializer turns it into one 8-byte relocation
+   write (§6.6p9, D12.8/D12.9 — a compound literal is an address constant). */
 static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
 {
     if (vd->init->kind != AST_UNARY_EXPR)
@@ -1245,7 +1306,8 @@ static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
         return false;
     }
     ASTUnaryExpr *u = ast_as(ASTUnaryExpr, vd->init);
-    if (u->op != UN_ADDR || u->operand->kind != AST_IDENT)
+    if (u->op != UN_ADDR ||
+        (u->operand->kind != AST_IDENT && u->operand->kind != AST_COMPOUND_LITERAL))
     {
         return false;
     }
@@ -1262,6 +1324,30 @@ static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
     return true;
 }
 
+/* Run the planner over a brace-list initializer, completing a declared-against
+   `[]` array *through* `type_out` first (D12.7 — the fresh type is built from
+   the planner's inferred length; the interned 0-length type is never mutated,
+   P3). Shared by var declarations and compound literals (D12.9). Returns false
+   on error. */
+static bool plan_brace_list(SemanticCtx *ctx, Type **type_out, ASTNode *init, InitPlan **plan_out)
+{
+    InitPlan *plan = init_plan_new(ctx, *type_out);
+    bool grow = type_is_array(*type_out) && type_array_len(*type_out) == 0;
+    plan->grow_array = grow;
+    if (!plan_list(ctx, plan, *type_out, ast_as(ASTInitList, init), 0))
+    {
+        return false;
+    }
+    if (grow)
+    {
+        Type *elem = type_array_elem(*type_out);
+        *type_out = type_array(elem, plan->inferred_len);
+        plan->total_size = type_sizeof(*type_out);
+    }
+    *plan_out = plan;
+    return true;
+}
+
 /* Build the initializer plan for a brace list or char-array string, completing
    a declared-against `[]` array first (D12.7). `*handled` is set when
    `vd->init` matched one of these forms. Returns false on error. */
@@ -1271,21 +1357,7 @@ static bool plan_var_aggregate_init(SemanticCtx *ctx, ASTVarDecl *vd, bool *hand
     if (vd->init->kind == AST_INIT_LIST)
     {
         *handled = true;
-        InitPlan *plan = init_plan_new(ctx, vd->type);
-        bool grow = type_is_array(vd->type) && type_array_len(vd->type) == 0;
-        plan->grow_array = grow;
-        if (!plan_list(ctx, plan, vd->type, ast_as(ASTInitList, vd->init), 0))
-        {
-            return false;
-        }
-        if (grow)
-        {
-            Type *elem = type_array_elem(vd->type);
-            vd->type = type_array(elem, plan->inferred_len);
-            plan->total_size = type_sizeof(vd->type);
-        }
-        vd->plan = plan;
-        return true;
+        return plan_brace_list(ctx, &vd->type, vd->init, &vd->plan);
     }
     if (vd->init->kind == AST_STRING_LITERAL && type_is_array(vd->type))
     {
@@ -1297,6 +1369,34 @@ static bool plan_var_aggregate_init(SemanticCtx *ctx, ASTVarDecl *vd, bool *hand
         }
         return plan_char_array_from_string(ctx, vd);
     }
+    return true;
+}
+
+/* A compound literal `(type){ ... }` (C11 §6.5.2.5, D12.9). Check the
+   target type, run the planner against the list (completing `[]`), and set the
+   node's lowering plan. The node is an lvalue whose type is the *declared*
+   type (qualifiers intact: `(const struct S){...}` is a const lvalue);
+   initialization itself bypasses the §9 write gate. */
+static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx)
+{
+    Type *ty = type_unqual(cl->type);
+    if (ty->kind == TYPE_VOID)
+    {
+        sem_error(cl->base.loc, "conversion to non-scalar type requested");
+        ctx->error = true;
+        return false;
+    }
+    if (type_is_record(ty) && !type_is_complete(ty))
+    {
+        sem_error(cl->base.loc, "compound literal of incomplete type");
+        ctx->error = true;
+        return false;
+    }
+    if (!plan_brace_list(ctx, &cl->type, cl->init, &cl->plan))
+    {
+        return false;
+    }
+    cl->base.expr_type = type_decay(cl->type);
     return true;
 }
 

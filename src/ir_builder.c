@@ -83,6 +83,10 @@ static IrInstr *emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries);
 static void fill_phi_entries(FuncBuilder *ctx, IrBlock *bb, ASTVarDecl *var, IrInstr *phi);
 static IrBlock *label_block(FuncBuilder *ctx, IrFunction *f, const char *name);
 static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
+static IrBlock *emit_init_plan(IrFunction *f, IrBlock *bb, IrOperand base, InitPlan *plan,
+                               FuncBuilder *ctx);
+static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrMap *global_map,
+                                U64Map *static_map, Arena *arena);
 static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
 static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
 static ExprResult build_subscript_expr(ASTSubscriptExpr *se, IrFunction *f, IrBlock *bb,
@@ -849,6 +853,34 @@ static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
     return expr_result(ir_operand_vreg(dst), src.block);
 }
 
+/* C11 §6.5.2.5 compound literal (D12.9): an anonymous automatic object at
+   block scope. Allocate the slot inline (the same pattern sret/record copies
+   use — no spill pre-pass), zero-fill + apply the plan's writes, and yield the
+   lvalue: the slot *address* for records/arrays (the memory convention), a
+   loaded scalar otherwise. `&(int){5}` short-circuits in build_addr_expr and
+   gets the raw slot pointer without the load. */
+static ExprResult build_compound_literal_expr(ASTCompoundLiteral *cl, IrFunction *f, IrBlock *bb,
+                                              FuncBuilder *ctx)
+{
+    /* The slot vreg holds the object's *address* (w8) regardless of the object
+       type — for a scalar the value is reloaded after construction. */
+    u32 slot = alloc_vreg_from_type(ctx, type_ptr(cl->type));
+    ir_emit_alloca(bb, slot, cl->type->size);
+    bb = emit_init_plan(f, bb, ir_operand_vreg(slot), cl->plan, ctx);
+    Type *ty = type_unqual(cl->type);
+    if (type_is_record(ty) || type_is_array(ty))
+    {
+        return expr_result(ir_operand_vreg(slot), bb);
+    }
+    if (ty->kind == TYPE_VOID)
+    {
+        return expr_result(ir_operand_imm(0), bb);
+    }
+    u32 dst = alloc_vreg_from_type(ctx, ty);
+    ir_emit_load(bb, dst, ir_operand_vreg(slot));
+    return expr_result(ir_operand_vreg(dst), bb);
+}
+
 /* C11 §6.5.4 cast expression. Value conversion per the §6.3 matrix:
    - `(void) expr`: evaluate for effects, discard (like a void call);
    - integer↔integer / integer↔pointer / pointer↔integer: reuse `promote_to`,
@@ -996,6 +1028,16 @@ static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, 
     if (operand->kind == AST_MEMBER_ACCESS)
     {
         return build_member_lvalue(ast_as(ASTMemberAccess, operand), f, bb, ctx);
+    }
+    if (operand->kind == AST_COMPOUND_LITERAL)
+    {
+        /* `&(struct S){...}`: the anonymous object's slot address, built and
+           initialized inline — but not loaded (the point of `&`). */
+        ASTCompoundLiteral *cl = ast_as(ASTCompoundLiteral, operand);
+        u32 slot = alloc_vreg_from_type(ctx, type_ptr(cl->type));
+        ir_emit_alloca(bb, slot, cl->type->size);
+        bb = emit_init_plan(f, bb, ir_operand_vreg(slot), cl->plan, ctx);
+        return expr_result(ir_operand_vreg(slot), bb);
     }
     if (operand->kind == AST_IDENT)
     {
@@ -1252,6 +1294,38 @@ static void ir_global_add_reloc(IrGlobal *g, u32 offset, int target, Arena *aren
    position. `static_map` may be NULL when no block-scope statics are visible.
    Returns the global index, or -1 if the leaf is not an address constant. */
 static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
+                                   U64Map *static_map, Arena *arena);
+
+/* Serialize an anonymous file-scope compound literal (D12.9): `int *p =
+   &(int){5};` at file scope turns the literal into an anonymous IrGlobal whose
+   init bytes come from its plan (which may itself relocate against other
+   globals / string constants). Returns the global index, or NO_VREG on error. */
+static u32 emit_file_scope_compound(ASTCompoundLiteral *cl, IrModule *mod, Arena *arena,
+                                    StrMap *global_map, U64Map *static_map)
+{
+    IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
+    size_t name_len = 32;
+    char *name_buf = arena_alloc(arena, name_len, 1);
+    snprintf(name_buf, name_len, "__anoncl_%u", (unsigned) vec_size(mod->globals));
+    g->name = name_buf;
+    g->type = cl->type;
+    g->align = cl->type->align;
+    g->relocs = NULL;
+    if (!serialize_init_plan(g, cl->plan, mod, global_map, static_map, arena))
+    {
+        return NO_VREG;
+    }
+    /* Const-qualified targets land in .rodata; the anonymous object is
+       internal-linkage (no user-visible name). */
+    bool is_const = type_is_const(cl->type);
+    g->section = is_const ? IR_SECTION_RODATA : IR_SECTION_DATA;
+    g->linkage = IR_LINK_LOCAL;
+    u32 idx = (u32) vec_size(mod->globals);
+    vec_push(mod->globals, g);
+    return idx;
+}
+
+static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
                                    U64Map *static_map, Arena *arena)
 {
     if (value->kind == AST_STRING_LITERAL)
@@ -1261,24 +1335,35 @@ static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global
     if (value->kind == AST_UNARY_EXPR)
     {
         ASTUnaryExpr *u = ast_as(ASTUnaryExpr, value);
-        if (u->op == UN_ADDR && u->operand->kind == AST_IDENT)
+        if (u->op == UN_ADDR)
         {
-            ASTVarDecl *decl = ast_as(ASTIdent, u->operand)->decl;
-            if (!decl)
+            if (u->operand->kind == AST_COMPOUND_LITERAL)
             {
-                return -1;
+                /* `&(type){...}` in an address-constant position: make the
+                   compound literal's anonymous static object (file scope or a
+                   block-scope static initializer) and relocate against it. */
+                return (int) emit_file_scope_compound(ast_as(ASTCompoundLiteral, u->operand), mod,
+                                                      arena, global_map, static_map);
             }
-            if (decl->is_block_scope)
+            if (u->operand->kind == AST_IDENT)
             {
-                if (decl->storage == SC_STATIC && static_map)
+                ASTVarDecl *decl = ast_as(ASTIdent, u->operand)->decl;
+                if (!decl)
                 {
-                    u32 *p = u64map_get(static_map, (u64) (uintptr_t) decl);
-                    return p ? (int) *p : -1;
+                    return -1;
                 }
-                return -1; /* block-scope auto: not an address constant */
+                if (decl->is_block_scope)
+                {
+                    if (decl->storage == SC_STATIC && static_map)
+                    {
+                        u32 *p = u64map_get(static_map, (u64) (uintptr_t) decl);
+                        return p ? (int) *p : -1;
+                    }
+                    return -1; /* block-scope auto: not an address constant */
+                }
+                u32 *p = strmap_get(global_map, decl->name);
+                return p ? (int) *p : -1;
             }
-            u32 *p = strmap_get(global_map, decl->name);
-            return p ? (int) *p : -1;
         }
     }
     return -1;
@@ -1602,6 +1687,8 @@ static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuil
             return build_member_access_expr(ast_as(ASTMemberAccess, node), f, bb, ctx);
         case AST_CAST_EXPR:
             return build_cast_expr(ast_as(ASTCastExpr, node), f, bb, ctx);
+        case AST_COMPOUND_LITERAL:
+            return build_compound_literal_expr(ast_as(ASTCompoundLiteral, node), f, bb, ctx);
         default:
             ir_error(node, "unsupported expression kind %s", ast_kind_name(node->kind));
             return expr_result(ir_operand_imm(0), bb);
@@ -2372,6 +2459,10 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
             break;
         case AST_CAST_EXPR:
             mark_addr_taken_expr(ast_as(ASTCastExpr, node)->operand, ctx);
+            break;
+        case AST_COMPOUND_LITERAL:
+            /* The literal's init list may carry `&x` — those autos must spill. */
+            mark_addr_taken_expr(ast_as(ASTCompoundLiteral, node)->init, ctx);
             break;
         case AST_INIT_LIST:
         {
