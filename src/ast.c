@@ -106,6 +106,15 @@ ASTNode *ast_unary_expr(UnaryOpKind op, ASTNode *operand, Loc loc, Arena *arena)
     return &n->base;
 }
 
+ASTNode *ast_incdec_expr(ASTNode *operand, bool is_inc, bool is_postfix, Loc loc, Arena *arena)
+{
+    ASTIncDecExpr *n = ast_new_node(sizeof(ASTIncDecExpr), AST_INCDEC_EXPR, loc, arena);
+    n->operand = operand;
+    n->is_inc = is_inc;
+    n->is_postfix = is_postfix;
+    return &n->base;
+}
+
 ASTNode *ast_call_expr(const char *callee, Vec *args, Loc loc, Arena *arena)
 {
     ASTCallExpr *n = ast_new_node(sizeof(ASTCallExpr), AST_CALL_EXPR, loc, arena);
@@ -489,6 +498,14 @@ static void ast_dump_rec(ASTNode *node, int depth)
             ASTUnaryExpr *unary_expr = ast_as(ASTUnaryExpr, node);
             printf("UNARY %s\n", unary_op_name(unary_expr->op));
             ast_dump_rec(unary_expr->operand, depth + 1);
+            break;
+        }
+        case AST_INCDEC_EXPR:
+        {
+            ASTIncDecExpr *incdec = ast_as(ASTIncDecExpr, node);
+            printf("INCDEC %s%s\n", incdec->is_postfix ? "POST" : "PRE",
+                   incdec->is_inc ? "++" : "--");
+            ast_dump_rec(incdec->operand, depth + 1);
             break;
         }
         case AST_CALL_EXPR:

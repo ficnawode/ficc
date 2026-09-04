@@ -818,3 +818,109 @@ TEST(parser, typedef_param_use)
     EXPECT_EQ(p->type, type_int());
     arena_free(a);
 }
+
+/* Helper: the first statement of `int main(void) { <body> }`. */
+static ASTNode *first_main_stmt(const char *body, Arena *a)
+{
+    ASTNode *ast = tc_parse(body, a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body_ast = ast_as(ASTCompoundStmt, fn->body);
+    return (ASTNode *) vec_get(body_ast->stmts, 0);
+}
+
+static ASTReturnStmt *first_return(const char *body, Arena *a)
+{
+    return ast_as(ASTReturnStmt, first_main_stmt(body, a));
+}
+
+TEST(parser, incdec_postfix_shape)
+{
+    Arena *a = arena_new();
+    ASTReturnStmt *ret = first_return("int main(void) { return i++; }\n", a);
+    ASTIncDecExpr *ie = ast_as(ASTIncDecExpr, ret->expr);
+    EXPECT_NOTNULL(ie);
+    EXPECT_EQ(ie->base.kind, AST_INCDEC_EXPR);
+    EXPECT_TRUE(ie->is_inc);
+    EXPECT_TRUE(ie->is_postfix);
+    EXPECT_EQ(ie->operand->kind, AST_IDENT);
+    arena_free(a);
+}
+
+TEST(parser, incdec_prefix_shape)
+{
+    Arena *a = arena_new();
+    ASTReturnStmt *ret = first_return("int main(void) { return --x; }\n", a);
+    ASTIncDecExpr *ie = ast_as(ASTIncDecExpr, ret->expr);
+    EXPECT_NOTNULL(ie);
+    EXPECT_FALSE(ie->is_inc);
+    EXPECT_FALSE(ie->is_postfix);
+    EXPECT_EQ(ie->operand->kind, AST_IDENT);
+    arena_free(a);
+}
+
+TEST(parser, postfix_binds_tighter_than_deref)
+{
+    /* `*p++` is `*(p++)`. */
+    Arena *a = arena_new();
+    ASTReturnStmt *ret = first_return("int main(void) { return *p++; }\n", a);
+    ASTUnaryExpr *de = ast_as(ASTUnaryExpr, ret->expr);
+    EXPECT_NOTNULL(de);
+    EXPECT_EQ(de->base.kind, AST_UNARY_EXPR);
+    EXPECT_EQ(de->op, UN_DEREF);
+    ASTIncDecExpr *ie = ast_as(ASTIncDecExpr, de->operand);
+    EXPECT_NOTNULL(ie);
+    EXPECT_TRUE(ie->is_postfix);
+    arena_free(a);
+}
+
+TEST(parser, prefix_binds_looser_than_deref)
+{
+    /* `++*p` is `++(*p)`. */
+    Arena *a = arena_new();
+    ASTReturnStmt *ret = first_return("int main(void) { return ++*p; }\n", a);
+    ASTIncDecExpr *ie = ast_as(ASTIncDecExpr, ret->expr);
+    EXPECT_NOTNULL(ie);
+    EXPECT_FALSE(ie->is_postfix);
+    EXPECT_EQ(ie->operand->kind, AST_UNARY_EXPR);
+    arena_free(a);
+}
+
+TEST(parser, postfix_in_subscript_index)
+{
+    /* `a[i++]` — the postfix increment is part of the index expression. */
+    Arena *a = arena_new();
+    ASTReturnStmt *ret = first_return("int main(void) { void *q = &a[i++]; return 0; }\n", a);
+    ASTVarDecl *vd =
+        ast_as(ASTVarDecl, first_main_stmt("int main(void) { void *q = &a[i++]; return 0; }\n", a));
+    (void) ret;
+    ASTUnaryExpr *addr = ast_as(ASTUnaryExpr, vd->init);
+    EXPECT_NOTNULL(addr);
+    EXPECT_EQ(addr->op, UN_ADDR);
+    ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, addr->operand);
+    EXPECT_NOTNULL(se);
+    ASTIncDecExpr *ie = ast_as(ASTIncDecExpr, se->index);
+    EXPECT_NOTNULL(ie);
+    EXPECT_TRUE(ie->is_postfix);
+    arena_free(a);
+}
+
+TEST(parser, chained_postfix_ops)
+{
+    /* `p++->x` lower in the chain; `(++p).x` needs parens. */
+    Arena *a = arena_new();
+    ASTReturnStmt *ret = first_return("int main(void) { void *q = &p++->x; return 0; }\n", a);
+    ASTVarDecl *vd =
+        ast_as(ASTVarDecl, first_main_stmt("int main(void) { void *q = &p++->x; return 0; }\n", a));
+    (void) ret;
+    ASTUnaryExpr *addr = ast_as(ASTUnaryExpr, vd->init);
+    EXPECT_NOTNULL(addr);
+    ASTMemberAccess *ma = ast_as(ASTMemberAccess, addr->operand);
+    EXPECT_NOTNULL(ma);
+    EXPECT_TRUE(ma->is_arrow);
+    ASTIncDecExpr *ie = ast_as(ASTIncDecExpr, ma->object);
+    EXPECT_NOTNULL(ie);
+    EXPECT_TRUE(ie->is_postfix);
+    arena_free(a);
+}

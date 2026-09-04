@@ -606,12 +606,25 @@ static bool lex_punct(LexerCtx *ctx)
             kind = TOK_COMMA;
             break;
         case '+':
-            kind = TOK_PLUS;
+            if (n == '+')
+            {
+                kind = TOK_PLUS_PLUS;
+                advance = 2;
+            }
+            else
+            {
+                kind = TOK_PLUS;
+            }
             break;
         case '-':
             if (n == '>')
             {
                 kind = TOK_ARROW;
+                advance = 2;
+            }
+            else if (n == '-')
+            {
+                kind = TOK_MINUS_MINUS;
                 advance = 2;
             }
             else

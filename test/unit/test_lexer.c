@@ -453,3 +453,46 @@ TEST(lexer, char_literal_unterminated_is_error)
     EXPECT_NULL(res.tokens);
     arena_free(a);
 }
+
+TEST(lexer, increment_decrement_tokens)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "x++ --y a+-+b ++++c", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 13);
+    EXPECT_EQ(t[0].kind, TOK_IDENT);
+    EXPECT_EQ(t[1].kind, TOK_PLUS_PLUS);
+    EXPECT_EQ(t[2].kind, TOK_MINUS_MINUS);
+    EXPECT_EQ(t[3].kind, TOK_IDENT);
+    EXPECT_EQ(t[4].kind, TOK_IDENT);
+    EXPECT_EQ(t[5].kind, TOK_PLUS);
+    EXPECT_EQ(t[6].kind, TOK_MINUS);
+    EXPECT_EQ(t[7].kind, TOK_PLUS);
+    EXPECT_EQ(t[8].kind, TOK_IDENT);
+    EXPECT_EQ(t[9].kind, TOK_PLUS_PLUS);
+    EXPECT_EQ(t[10].kind, TOK_PLUS_PLUS);
+    EXPECT_EQ(t[11].kind, TOK_IDENT);
+    EXPECT_EQ(t[12].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, arrow_and_decrement_max_munch)
+{
+    /* `p->x` lexes the arrow; `p-->y` is maximal-munched as `p -- > y` (a
+       comparison of a decremented pointer), not `p -- -> y`. */
+    Arena *a = arena_new();
+    LexResult res = lex("t", "p->x p-->y", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 8);
+    EXPECT_EQ(t[0].kind, TOK_IDENT);
+    EXPECT_EQ(t[1].kind, TOK_ARROW);
+    EXPECT_EQ(t[2].kind, TOK_IDENT);
+    EXPECT_EQ(t[3].kind, TOK_IDENT);
+    EXPECT_EQ(t[4].kind, TOK_MINUS_MINUS);
+    EXPECT_EQ(t[5].kind, TOK_GT);
+    EXPECT_EQ(t[6].kind, TOK_IDENT);
+    EXPECT_EQ(t[7].kind, TOK_EOF);
+    arena_free(a);
+}

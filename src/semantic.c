@@ -169,6 +169,60 @@ static bool type_assignable(Type *dst, Type *src)
     return true;
 }
 
+/* The single modifiable-lvalue gate (steering §Phase 9): an lvalue that is
+   not const. Every write-introducing operator — plain assignment, compound
+   assignment (Phase 13c), and `++`/`--` (Phase 13b) — routes through this one
+   check, so the const interplay (incl. typedef'd const pointers, Phase 12)
+   is enforced identically everywhere. */
+/* True when the lvalue expression denotes an array, including the decayed
+   cases: an array identifier's expr_type is a pointer (type_decay), but its
+   declared type is an array, and a member whose field_type is an array. An
+   array is never a modifiable lvalue (§6.3.2.1), so the write gate must see
+   through the decay to reject `a = x`, `a++`, `a += 1`. */
+static bool lvalue_is_array(ASTNode *lhs)
+{
+    if (type_is_array(lhs->expr_type))
+    {
+        return true;
+    }
+    if (lhs->kind == AST_IDENT)
+    {
+        ASTIdent *id = ast_as(ASTIdent, lhs);
+        return id->decl && type_is_array(id->decl->type);
+    }
+    if (lhs->kind == AST_MEMBER_ACCESS)
+    {
+        return type_is_array(ast_as(ASTMemberAccess, lhs)->field_type);
+    }
+    return false;
+}
+
+static bool check_modifiable_lvalue(ASTNode *lhs, SemanticCtx *ctx)
+{
+    bool is_lvalue = lhs->kind == AST_IDENT || lhs->kind == AST_MEMBER_ACCESS ||
+                     lhs->kind == AST_SUBSCRIPT_EXPR ||
+                     (lhs->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, lhs)->op == UN_DEREF);
+    if (!is_lvalue)
+    {
+        sem_error(lhs->loc, "lvalue required as left operand of assignment");
+        ctx->error = true;
+        return false;
+    }
+    if (lvalue_is_array(lhs))
+    {
+        sem_error(lhs->loc, "array type is not a modifiable lvalue");
+        ctx->error = true;
+        return false;
+    }
+    if (type_is_const(lhs->expr_type))
+    {
+        sem_error(lhs->loc, "assignment to const-qualified lvalue (read-only object)");
+        ctx->error = true;
+        return false;
+    }
+    return true;
+}
+
 static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
 {
     if (!check_expr(binary_expr->left, ctx) || !check_expr(binary_expr->right, ctx))
@@ -192,20 +246,8 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     if (binary_expr->op == BIN_ASSIGN)
     {
         ASTNode *lhs = binary_expr->left;
-        bool is_lvalue = lhs->kind == AST_IDENT || lhs->kind == AST_MEMBER_ACCESS ||
-                         lhs->kind == AST_SUBSCRIPT_EXPR ||
-                         (lhs->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, lhs)->op == UN_DEREF);
-        if (!is_lvalue)
+        if (!check_modifiable_lvalue(lhs, ctx))
         {
-            sem_error(binary_expr->base.loc, "lvalue required as left operand of assignment");
-            ctx->error = true;
-            return false;
-        }
-        if (type_is_const(lt))
-        {
-            sem_error(binary_expr->base.loc,
-                      "assignment to const-qualified lvalue (read-only object)");
-            ctx->error = true;
             return false;
         }
         if (type_is_ptr(lt) && type_is_ptr(rt) && !type_assignable(lt, rt))
@@ -337,6 +379,31 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
         return false;
     }
     unary_expr->base.expr_type = type_promote(type_rvalue(op_type));
+    return true;
+}
+
+static bool check_incdec_expr(ASTIncDecExpr *incdec, SemanticCtx *ctx)
+{
+    if (!check_expr(incdec->operand, ctx))
+    {
+        return false;
+    }
+    ASTNode *operand = incdec->operand;
+    if (!check_modifiable_lvalue(operand, ctx))
+    {
+        return false;
+    }
+    Type *t = operand->expr_type;
+    if (!type_is_integer(t) && !type_is_ptr(t))
+    {
+        sem_error(incdec->base.loc, "invalid operand to '%s' (arithmetic or pointer type required)",
+                  incdec->is_inc ? "++" : "--");
+        ctx->error = true;
+        return false;
+    }
+    /* §6.5.2.4p3/p4: the result is an rvalue of the operand's type (never an
+       lvalue). */
+    incdec->base.expr_type = type_rvalue(t);
     return true;
 }
 
@@ -506,6 +573,12 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
             return node->expr_type;
         case AST_UNARY_EXPR:
             if (!check_unary_expr(ast_as(ASTUnaryExpr, node), ctx))
+            {
+                return NULL;
+            }
+            return node->expr_type;
+        case AST_INCDEC_EXPR:
+            if (!check_incdec_expr(ast_as(ASTIncDecExpr, node), ctx))
             {
                 return NULL;
             }

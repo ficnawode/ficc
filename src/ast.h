@@ -17,6 +17,7 @@
     X(AST_VAR_DECL)                                                                                \
     X(AST_EXPR_STMT)                                                                               \
     X(AST_BINARY_EXPR)                                                                             \
+    X(AST_INCDEC_EXPR)                                                                             \
     X(AST_UNARY_EXPR)                                                                              \
     X(AST_CALL_EXPR)                                                                               \
     X(AST_IDENT)                                                                                   \
@@ -180,6 +181,21 @@ struct ASTUnaryExpr
     ASTNode base;
     UnaryOpKind op;
     ASTNode *operand;
+};
+
+/* A prefix (`++x` / `--x`) or postfix (`x++` / `x--`) increment/decrement
+   (C11 §6.5.2.4). The operand is a modifiable lvalue of arithmetic or pointer
+   type; the expression is not an lvalue. Postfix yields the old value, prefix
+   the new value — semantic stamps expr_type as the operand's unqualified
+   type, and the IR builder lowers through load/compute/store (no new
+   opcodes). */
+typedef struct ASTIncDecExpr ASTIncDecExpr;
+struct ASTIncDecExpr
+{
+    ASTNode base;
+    ASTNode *operand;
+    bool is_inc;     /* true: ++ ; false: -- */
+    bool is_postfix; /* true: x++;  false: ++x */
 };
 
 typedef struct ASTCallExpr ASTCallExpr;
@@ -473,6 +489,7 @@ ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, StorageClass 
 ASTNode *ast_expr_stmt(ASTNode *expr, Loc loc, Arena *arena);
 ASTNode *ast_binary_expr(BinOpKind op, ASTNode *left, ASTNode *right, Loc loc, Arena *arena);
 ASTNode *ast_unary_expr(UnaryOpKind op, ASTNode *operand, Loc loc, Arena *arena);
+ASTNode *ast_incdec_expr(ASTNode *operand, bool is_inc, bool is_postfix, Loc loc, Arena *arena);
 ASTNode *ast_call_expr(const char *callee, Vec *args, Loc loc, Arena *arena);
 ASTNode *ast_ident(const char *name, Loc loc, Arena *arena);
 ASTNode *ast_if_stmt(ASTNode *cond, ASTNode *then_branch, ASTNode *else_branch, Loc loc,

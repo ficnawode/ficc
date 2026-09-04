@@ -49,7 +49,9 @@
     X(TOK_COLON)                                                                                   \
     X(TOK_COMMA)                                                                                   \
     X(TOK_PLUS)                                                                                    \
+    X(TOK_PLUS_PLUS)                                                                               \
     X(TOK_MINUS)                                                                                   \
+    X(TOK_MINUS_MINUS)                                                                             \
     X(TOK_STAR)                                                                                    \
     X(TOK_SLASH)                                                                                   \
     X(TOK_PERCENT)                                                                                 \

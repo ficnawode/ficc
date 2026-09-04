@@ -25,6 +25,30 @@ struct ExprResult
     IrBlock *block;
 };
 
+/* A lowered lvalue target (D13.5): the single representation through which
+   plain assignment, compound assignment, and `++`/`--` address storage.
+   - LV_IDENT_SSA: a block-scope auto scalar/pointer, resolved through
+     read_variable/write_variable (the SSA stack if not spilled, the alloca
+     slot store if address-taken).
+   - LV_MEM: an explicit address operand (global, block static, spilled auto's
+     slot, member GEP, deref, subscript GEP, or a record/array SSA pointer). */
+typedef struct LvalueSlot LvalueSlot;
+struct LvalueSlot
+{
+    ASTVarDecl *decl; /* LV_IDENT_SSA */
+    bool is_ssa;      /* true: block-scope auto (SSA or spilled); false: memory */
+    IrOperand addr;   /* memory address (only when !is_ssa) */
+    Type *type;       /* the lvalue's type */
+};
+
+typedef struct LvalueResult LvalueResult;
+struct LvalueResult
+{
+    LvalueSlot slot;
+    IrBlock *block;
+    bool failed;
+};
+
 typedef struct LoopBlocks LoopBlocks;
 struct LoopBlocks
 {
@@ -573,99 +597,88 @@ static ExprResult build_ternary_expr(ASTTernaryExpr *te, IrFunction *f, IrBlock 
     return expr_result(ir_operand_vreg(dst), merge_bb);
 }
 
-static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+/* Lower the target expression of a write into a shared lvalue slot (D13.5).
+   Mirrors the old shape dispatch of build_assign_expr: IDENT (block-scope
+   autos → SSA/spill route; records & arrays are memory, their SSA value is
+   the storage pointer, so they are LV_MEM with that pointer as the address;
+   globals/statics → LV_MEM global operand), MEMBER (GEP by field_offset),
+   UN_DEREF (the pointer value), SUBSCRIPT (GEP by element size). The lvalue
+   address is computed exactly once — the operator layer never re-evaluates
+   it. */
+static LvalueResult build_lvalue_slot(ASTNode *target, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
-    ASTNode *target = be->left;
+    LvalueResult lv;
+    lv.slot.decl = NULL;
+    lv.slot.is_ssa = false;
+    lv.slot.addr = ir_operand_imm(0);
+    lv.slot.type = type_int();
+    lv.block = bb;
+    lv.failed = false;
 
     if (target->kind == AST_IDENT)
     {
         ASTIdent *id = ast_as(ASTIdent, target);
         ASTVarDecl *decl = id->decl;
         ASSERT(decl != NULL);
+        if (decl->is_block_scope && decl->storage != SC_STATIC)
+        {
+            if (type_is_record(decl->type) || type_is_array(decl->type))
+            {
+                /* Records/arrays live in memory; the SSA value is the storage
+                   pointer, which is the address. */
+                lv.slot.is_ssa = false;
+                lv.slot.addr = read_variable(ctx, decl, bb);
+                lv.slot.type = decl->type;
+            }
+            else
+            {
+                lv.slot.is_ssa = true;
+                lv.slot.decl = decl;
+                lv.slot.type = decl->type;
+            }
+            return lv;
+        }
         u32 midx = NO_VREG;
         if (decl->is_block_scope)
         {
-            if (decl->storage == SC_STATIC)
-            {
-                midx = block_static_index(ctx, decl);
-            }
+            midx = block_static_index(ctx, decl);
         }
-        else
+        if (midx == NO_VREG)
         {
             midx = global_index_of(ctx, decl->name);
         }
         if (midx != NO_VREG)
         {
-            IrGlobal *g = (IrGlobal *) vec_get(ctx->mod->globals, midx);
-            ExprResult right = build_expr(be->right, f, bb, ctx);
-            bb = right.block;
-            if (type_is_record(g->type))
-            {
-                ir_emit_memcpy(bb, ir_operand_global(midx), right.value, g->type->size);
-                return expr_result(ir_operand_global(midx), bb);
-            }
-            if (type_is_array(g->type))
-            {
-                ir_error(&be->base, "array '%s' is not assignable", id->name);
-                return expr_result(ir_operand_imm(0), bb);
-            }
-            Type *rhs_type = node_type(be->right);
-            IrOperand val = promote_to(ctx, bb, right.value, rhs_type, g->type);
-            ir_emit_store(bb, val, ir_operand_global(midx), g->type->size);
-            return expr_result(val, bb);
+            lv.slot.is_ssa = false;
+            lv.slot.addr = ir_operand_global(midx);
+            lv.slot.type = ((IrGlobal *) vec_get(ctx->mod->globals, midx))->type;
+            return lv;
         }
-        ExprResult left = build_expr(target, f, bb, ctx);
-        bb = left.block;
-        ExprResult right = build_expr(be->right, f, bb, ctx);
-        bb = right.block;
-        Type *lhs_type = decl->type;
-        if (type_is_record(lhs_type))
-        {
-            ir_emit_memcpy(bb, left.value, right.value, lhs_type->size);
-            return expr_result(left.value, bb);
-        }
-        Type *rhs_type = node_type(be->right);
-        IrOperand val = promote_to(ctx, bb, right.value, rhs_type, lhs_type);
-        write_variable(ctx, decl, bb, val);
-        return expr_result(val, bb);
+        ir_error(target, "unknown variable '%s'", id->name);
+        lv.failed = true;
+        return lv;
     }
 
     if (target->kind == AST_MEMBER_ACCESS)
     {
         ASTMemberAccess *ma = ast_as(ASTMemberAccess, target);
-        ExprResult lv = build_member_lvalue(ma, f, bb, ctx);
-        bb = lv.block;
-        ExprResult right = build_expr(be->right, f, bb, ctx);
-        bb = right.block;
-        Type *field_type = ma->field_type;
-        if (type_is_record(field_type))
-        {
-            ir_emit_memcpy(bb, lv.value, right.value, field_type->size);
-            return expr_result(lv.value, bb);
-        }
-        Type *rhs_type = node_type(be->right);
-        IrOperand val = promote_to(ctx, bb, right.value, rhs_type, field_type);
-        ir_emit_store(bb, val, lv.value, field_type->size);
-        return expr_result(val, bb);
+        ExprResult ma_lv = build_member_lvalue(ma, f, bb, ctx);
+        lv.slot.is_ssa = false;
+        lv.slot.addr = ma_lv.value;
+        lv.slot.type = ma->field_type;
+        lv.block = ma_lv.block;
+        return lv;
     }
 
     if (target->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, target)->op == UN_DEREF)
     {
         ASTUnaryExpr *ue = ast_as(ASTUnaryExpr, target);
-        ExprResult ptr_res = build_expr(ue->operand, f, bb, ctx);
-        bb = ptr_res.block;
-        ExprResult right = build_expr(be->right, f, bb, ctx);
-        bb = right.block;
-        Type *result_type = node_type(target);
-        if (type_is_record(result_type))
-        {
-            ir_emit_memcpy(bb, ptr_res.value, right.value, result_type->size);
-            return expr_result(ptr_res.value, bb);
-        }
-        Type *rhs_type = node_type(be->right);
-        IrOperand val = promote_to(ctx, bb, right.value, rhs_type, result_type);
-        ir_emit_store(bb, val, ptr_res.value, result_type->size);
-        return expr_result(val, bb);
+        ExprResult ptr = build_expr(ue->operand, f, bb, ctx);
+        lv.slot.is_ssa = false;
+        lv.slot.addr = ptr.value;
+        lv.slot.type = node_type(target);
+        lv.block = ptr.block;
+        return lv;
     }
 
     if (target->kind == AST_SUBSCRIPT_EXPR)
@@ -674,26 +687,124 @@ static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
         ExprResult base = build_expr(se->array, f, bb, ctx);
         ExprResult index = build_expr(se->index, f, base.block, ctx);
         bb = index.block;
-        ExprResult right = build_expr(be->right, f, bb, ctx);
-        bb = right.block;
         Type *ptr_type = type_decay(node_type(se->array));
         Type *elem = type_deref(ptr_type);
         IrOperand idx = promote_to(ctx, bb, index.value, node_type(se->index), type_long());
         u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
         ir_emit_gep(bb, addr, base.value, idx, elem->size);
-        if (type_is_record(elem))
-        {
-            ir_emit_memcpy(bb, ir_operand_vreg(addr), right.value, elem->size);
-            return expr_result(ir_operand_vreg(addr), bb);
-        }
-        Type *rhs_type = node_type(be->right);
-        IrOperand val = promote_to(ctx, bb, right.value, rhs_type, elem);
-        ir_emit_store(bb, val, ir_operand_vreg(addr), elem->size);
-        return expr_result(val, bb);
+        lv.slot.is_ssa = false;
+        lv.slot.addr = ir_operand_vreg(addr);
+        lv.slot.type = elem;
+        lv.block = bb;
+        return lv;
     }
 
-    ir_error(&be->base, "assignment target must be a variable, dereference, or subscript");
-    return expr_result(ir_operand_imm(0), bb);
+    ir_error(target, "assignment target must be a variable, dereference, or subscript");
+    lv.failed = true;
+    return lv;
+}
+
+/* Read the current value of a lowered lvalue (D13.5): SSA scalars come from
+   read_variable (the SSA stack, or the spill-slot load when address-taken);
+   memory targets are loaded at the slot's type width. */
+static IrOperand load_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot)
+{
+    if (slot->is_ssa)
+    {
+        return read_variable(ctx, slot->decl, bb);
+    }
+    u32 dst = alloc_vreg_from_type(ctx, slot->type);
+    ir_emit_load(bb, dst, slot->addr);
+    return ir_operand_vreg(dst);
+}
+
+/* Store a value into a lowered lvalue. Records go through OP_MEMCPY (their
+   "value" is a pointer to the source storage); scalars/pointers through
+   OP_STORE; SSA scalars through write_variable (which routes SSA vs spill). */
+static IrBlock *store_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot, IrOperand val)
+{
+    if (slot->is_ssa)
+    {
+        write_variable(ctx, slot->decl, bb, val);
+        return bb;
+    }
+    if (type_is_record(slot->type))
+    {
+        ir_emit_memcpy(bb, slot->addr, val, slot->type->size);
+        return bb;
+    }
+    ir_emit_store(bb, val, slot->addr, slot->type->size);
+    return bb;
+}
+
+static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    LvalueResult lv = build_lvalue_slot(be->left, f, bb, ctx);
+    if (lv.failed)
+    {
+        return expr_result(ir_operand_imm(0), lv.block);
+    }
+    bb = lv.block;
+    ExprResult right = build_expr(be->right, f, bb, ctx);
+    bb = right.block;
+    Type *lhs_type = lv.slot.type;
+    if (type_is_array(lhs_type))
+    {
+        ir_error(&be->base, "array is not assignable");
+        return expr_result(ir_operand_imm(0), bb);
+    }
+    if (type_is_record(lhs_type))
+    {
+        bb = store_lvalue(ctx, bb, &lv.slot, right.value);
+        return expr_result(lv.slot.addr, bb);
+    }
+    Type *rhs_type = node_type(be->right);
+    IrOperand val = promote_to(ctx, bb, right.value, rhs_type, lhs_type);
+    bb = store_lvalue(ctx, bb, &lv.slot, val);
+    return expr_result(val, bb);
+}
+
+/* Prefix/postfix `++`/`--` (D13.5): the slot address is computed exactly
+   once; the old value is loaded (or read from the SSA stack); pointers step
+   by the pointee size through GEP, arithmetic types promote, adjust by +-1,
+   and convert back to the operand's type (char wraps via TRUNC); the new
+   value is stored. Postfix yields the pre-increment value, prefix the
+   converted-back new value. No new opcodes in either backend. */
+static ExprResult build_incdec_expr(ASTIncDecExpr *ie, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    LvalueResult lv = build_lvalue_slot(ie->operand, f, bb, ctx);
+    if (lv.failed)
+    {
+        return expr_result(ir_operand_imm(0), lv.block);
+    }
+    bb = lv.block;
+    Type *t = lv.slot.type;
+    IrOperand old = load_lvalue(ctx, bb, &lv.slot);
+    i64 step = ie->is_inc ? 1 : -1;
+
+    IrOperand newv;
+    if (type_is_ptr(t))
+    {
+        Type *elem = type_deref(t);
+        u32 gep = alloc_vreg_from_type(ctx, t);
+        ir_emit_gep(bb, gep, old, ir_operand_imm(step), elem->size);
+        newv = ir_operand_vreg(gep);
+    }
+    else
+    {
+        Type *prom = type_promote(t);
+        IrOperand pold = promote_to(ctx, bb, old, t, prom);
+        u32 res = alloc_vreg_from_type(ctx, prom);
+        ir_emit_binop(bb, step == 1 ? OP_ADD : OP_SUB, res, pold, ir_operand_imm(1));
+        newv = promote_to(ctx, bb, ir_operand_vreg(res), prom, t);
+    }
+
+    bb = store_lvalue(ctx, bb, &lv.slot, newv);
+    if (ie->is_postfix)
+    {
+        return expr_result(old, bb);
+    }
+    return expr_result(newv, bb);
 }
 
 static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
@@ -1682,6 +1793,8 @@ static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuil
             return build_binary_expr(ast_as(ASTBinaryExpr, node), f, bb, ctx);
         case AST_UNARY_EXPR:
             return build_unary_expr(ast_as(ASTUnaryExpr, node), f, bb, ctx);
+        case AST_INCDEC_EXPR:
+            return build_incdec_expr(ast_as(ASTIncDecExpr, node), f, bb, ctx);
         case AST_CALL_EXPR:
             return build_call_expr(ast_as(ASTCallExpr, node), f, bb, ctx);
         case AST_TERNARY_EXPR:
@@ -2428,6 +2541,13 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
                 }
             }
             mark_addr_taken_expr(ue->operand, ctx);
+            break;
+        }
+        case AST_INCDEC_EXPR:
+        {
+            /* Descend so nested `&x` inside the operand still spills (e.g.
+               `0[&c]`; also `&*(&c)++` chains). */
+            mark_addr_taken_expr(ast_as(ASTIncDecExpr, node)->operand, ctx);
             break;
         }
         case AST_BINARY_EXPR:

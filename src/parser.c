@@ -1260,6 +1260,19 @@ static ASTNode *parse_unary(ParserCtx *p)
         {TOK_MINUS, UN_NEG},  {TOK_NOT, UN_LOG_NOT}, {TOK_TILDE, UN_BIT_NOT},
         {TOK_STAR, UN_DEREF}, {TOK_BW_AND, UN_ADDR},
     };
+    if (t->kind == TOK_PLUS_PLUS || t->kind == TOK_MINUS_MINUS)
+    {
+        /* Prefix `++`/`--`: the operand is a unary-expression, so `++++x`
+           parses `++(++x)` (semantic rejects the inner rvalue). */
+        bool is_inc = t->kind == TOK_PLUS_PLUS;
+        parser_advance(p);
+        ASTNode *operand = parse_unary(p);
+        if (!operand)
+        {
+            return NULL;
+        }
+        return ast_incdec_expr(operand, is_inc, false, t->loc, p->arena);
+    }
     for (size_t i = 0; i < sizeof(unary_ops) / sizeof(unary_ops[0]); i++)
     {
         if (t->kind == unary_ops[i].tok)
@@ -1345,6 +1358,14 @@ static ASTNode *parse_postfix_ops(ParserCtx *p, ASTNode *node)
             }
             parser_advance(p);
             node = ast_member_access(node, member->payload.str, is_arrow, t->loc, p->arena);
+        }
+        else if (t->kind == TOK_PLUS_PLUS || t->kind == TOK_MINUS_MINUS)
+        {
+            /* Postfix `++`/`--`: binds tighter than anything in parse_unary
+               (`*p++` = `*(p++)`); continue chaining so `p++->x`, `a[i++]`
+               keep nesting. */
+            parser_advance(p);
+            node = ast_incdec_expr(node, t->kind == TOK_PLUS_PLUS, true, t->loc, p->arena);
         }
         else
         {

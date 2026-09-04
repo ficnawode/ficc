@@ -334,3 +334,59 @@ TEST(semantic, typedef_const_ptr_read_ok)
                          "    return *p;\n"
                          "}\n");
 }
+
+TEST(semantic, incdec_ok)
+{
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    int x = 1;\n"
+                         "    x++;\n"
+                         "    ++x;\n"
+                         "    x--;\n"
+                         "    --x;\n"
+                         "    return x;\n"
+                         "}\n");
+}
+
+TEST(semantic, incdec_const_rejected)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    const int c = 1;\n"
+                      "    c++;\n"
+                      "    return 0;\n"
+                      "}\n");
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    const int c = 1;\n"
+                      "    --c;\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(semantic, incdec_const_pointee_rejected)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int x = 1;\n"
+                      "    const int *p = &x;\n"
+                      "    (*p)++;\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(semantic, incdec_pointer_ok)
+{
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    int a[3] = {0, 0, 0};\n"
+                         "    int *p = &a[0];\n"
+                         "    p++;\n"
+                         "    p--;\n"
+                         "    return p == &a[0];\n"
+                         "}\n");
+}
+
+TEST(semantic, incdec_array_rejected)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int a[3] = {0, 0, 0};\n"
+                      "    a++;\n"
+                      "    return 0;\n"
+                      "}\n");
+}
