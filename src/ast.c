@@ -374,6 +374,26 @@ static const char *bin_op_name(BinOpKind op)
             return "&&";
         case BIN_LOG_OR:
             return "||";
+        case BIN_ADD_ASSIGN:
+            return "+=";
+        case BIN_SUB_ASSIGN:
+            return "-=";
+        case BIN_MUL_ASSIGN:
+            return "*=";
+        case BIN_DIV_ASSIGN:
+            return "/=";
+        case BIN_REM_ASSIGN:
+            return "%=";
+        case BIN_SHL_ASSIGN:
+            return "<<=";
+        case BIN_SHR_ASSIGN:
+            return ">>=";
+        case BIN_AND_ASSIGN:
+            return "&=";
+        case BIN_OR_ASSIGN:
+            return "|=";
+        case BIN_XOR_ASSIGN:
+            return "^=";
     }
     return "?";
 }

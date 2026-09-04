@@ -129,6 +129,11 @@ static bool is_comparison_op(BinOpKind op)
     return op >= BIN_EQ && op <= BIN_GE;
 }
 
+static bool is_compound_assign_op(BinOpKind op)
+{
+    return op >= BIN_ADD_ASSIGN && op <= BIN_XOR_ASSIGN;
+}
+
 /* C11 §6.5.16.1p1 assignment compatibility, used by `=`, call arguments,
    returns, and initializers. Pointers: the pointee types must match after
    stripping qualifiers, and the left may only *gain* qualifiers at the first
@@ -259,6 +264,36 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
         if ((type_is_record(lt) || type_is_record(rt)) && !type_assignable(lt, rt))
         {
             sem_error(binary_expr->base.loc, "incompatible types in struct/union assignment");
+            ctx->error = true;
+            return false;
+        }
+        result = type_rvalue(lt);
+    }
+    else if (is_compound_assign_op(binary_expr->op))
+    {
+        /* §6.5.16.2: `E1 op= E2` ≡ `E1 = E1 op (E2)` with E1 evaluated once.
+           The lvalue gate is the plain-assignment gate (const, arrays);
+           records are already rejected above; a pointer lhs is legal only for
+           `+=`/`-=` with an integer rhs (`p -= q` is E1 = ptr minus ptr = an
+           integer — not assignable back). */
+        ASTNode *lhs = binary_expr->left;
+        if (!check_modifiable_lvalue(lhs, ctx))
+        {
+            return false;
+        }
+        bool is_ptr_add_sub =
+            binary_expr->op == BIN_ADD_ASSIGN || binary_expr->op == BIN_SUB_ASSIGN;
+        if (type_is_ptr(lt) && (!is_ptr_add_sub || type_is_ptr(rt)))
+        {
+            sem_error(binary_expr->base.loc,
+                      "invalid operands to compound assignment (pointer allowed only with "
+                      "'+=' / '-=' and an integer operand)");
+            ctx->error = true;
+            return false;
+        }
+        if (!type_is_ptr(lt) && !type_is_integer(rt))
+        {
+            sem_error(binary_expr->base.loc, "invalid operands to compound assignment");
             ctx->error = true;
             return false;
         }

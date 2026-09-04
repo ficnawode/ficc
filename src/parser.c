@@ -1701,6 +1701,37 @@ static ASTNode *parse_ternary(ParserCtx *p)
     return ast_ternary_expr(cond, then_expr, else_expr, t->loc, p->arena);
 }
 
+static BinOpKind assignment_op(TokenKind kind)
+{
+    switch (kind)
+    {
+        case TOK_ASSIGN:
+            return BIN_ASSIGN;
+        case TOK_PLUS_ASSIGN:
+            return BIN_ADD_ASSIGN;
+        case TOK_MINUS_ASSIGN:
+            return BIN_SUB_ASSIGN;
+        case TOK_STAR_ASSIGN:
+            return BIN_MUL_ASSIGN;
+        case TOK_SLASH_ASSIGN:
+            return BIN_DIV_ASSIGN;
+        case TOK_PERCENT_ASSIGN:
+            return BIN_REM_ASSIGN;
+        case TOK_SHL_ASSIGN:
+            return BIN_SHL_ASSIGN;
+        case TOK_SHR_ASSIGN:
+            return BIN_SHR_ASSIGN;
+        case TOK_BW_AND_ASSIGN:
+            return BIN_AND_ASSIGN;
+        case TOK_BW_OR_ASSIGN:
+            return BIN_OR_ASSIGN;
+        case TOK_BW_XOR_ASSIGN:
+            return BIN_XOR_ASSIGN;
+        default:
+            return (BinOpKind) -1;
+    }
+}
+
 static ASTNode *parse_assign(ParserCtx *p)
 {
     ASTNode *left = parse_ternary(p);
@@ -1709,7 +1740,8 @@ static ASTNode *parse_assign(ParserCtx *p)
         return NULL;
     }
 
-    if (parser_peek(p)->kind == TOK_ASSIGN)
+    BinOpKind op = assignment_op(parser_peek(p)->kind);
+    if (op != (BinOpKind) -1)
     {
         Token *t = parser_peek(p);
         parser_advance(p);
@@ -1718,7 +1750,7 @@ static ASTNode *parse_assign(ParserCtx *p)
         {
             return NULL;
         }
-        left = ast_binary_expr(BIN_ASSIGN, left, right, t->loc, p->arena);
+        left = ast_binary_expr(op, left, right, t->loc, p->arena);
     }
     return left;
 }

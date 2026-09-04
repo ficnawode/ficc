@@ -56,6 +56,16 @@
     X(TOK_SLASH)                                                                                   \
     X(TOK_PERCENT)                                                                                 \
     X(TOK_ASSIGN)                                                                                  \
+    X(TOK_PLUS_ASSIGN)                                                                             \
+    X(TOK_MINUS_ASSIGN)                                                                            \
+    X(TOK_STAR_ASSIGN)                                                                             \
+    X(TOK_SLASH_ASSIGN)                                                                            \
+    X(TOK_PERCENT_ASSIGN)                                                                          \
+    X(TOK_SHL_ASSIGN)                                                                              \
+    X(TOK_SHR_ASSIGN)                                                                              \
+    X(TOK_BW_AND_ASSIGN)                                                                           \
+    X(TOK_BW_OR_ASSIGN)                                                                            \
+    X(TOK_BW_XOR_ASSIGN)                                                                           \
     X(TOK_EQ)                                                                                      \
     X(TOK_NE)                                                                                      \
     X(TOK_LT)                                                                                      \

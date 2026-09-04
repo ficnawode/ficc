@@ -611,6 +611,11 @@ static bool lex_punct(LexerCtx *ctx)
                 kind = TOK_PLUS_PLUS;
                 advance = 2;
             }
+            else if (n == '=')
+            {
+                kind = TOK_PLUS_ASSIGN;
+                advance = 2;
+            }
             else
             {
                 kind = TOK_PLUS;
@@ -627,6 +632,11 @@ static bool lex_punct(LexerCtx *ctx)
                 kind = TOK_MINUS_MINUS;
                 advance = 2;
             }
+            else if (n == '=')
+            {
+                kind = TOK_MINUS_ASSIGN;
+                advance = 2;
+            }
             else
             {
                 kind = TOK_MINUS;
@@ -636,13 +646,37 @@ static bool lex_punct(LexerCtx *ctx)
             kind = TOK_DOT;
             break;
         case '*':
-            kind = TOK_STAR;
+            if (n == '=')
+            {
+                kind = TOK_STAR_ASSIGN;
+                advance = 2;
+            }
+            else
+            {
+                kind = TOK_STAR;
+            }
             break;
         case '/':
-            kind = TOK_SLASH;
+            if (n == '=')
+            {
+                kind = TOK_SLASH_ASSIGN;
+                advance = 2;
+            }
+            else
+            {
+                kind = TOK_SLASH;
+            }
             break;
         case '%':
-            kind = TOK_PERCENT;
+            if (n == '=')
+            {
+                kind = TOK_PERCENT_ASSIGN;
+                advance = 2;
+            }
+            else
+            {
+                kind = TOK_PERCENT;
+            }
             break;
         case '=':
             if (n == '=')
@@ -677,8 +711,17 @@ static bool lex_punct(LexerCtx *ctx)
             }
             else if (n == '<')
             {
-                kind = TOK_SHL;
-                advance = 2;
+                /* `<<=` — the assignment form needs two-char lookahead. */
+                if (ctx->p[2] == '=')
+                {
+                    kind = TOK_SHL_ASSIGN;
+                    advance = 3;
+                }
+                else
+                {
+                    kind = TOK_SHL;
+                    advance = 2;
+                }
             }
             else
             {
@@ -693,8 +736,17 @@ static bool lex_punct(LexerCtx *ctx)
             }
             else if (n == '>')
             {
-                kind = TOK_SHR;
-                advance = 2;
+                /* `>>=` — the assignment form needs two-char lookahead. */
+                if (ctx->p[2] == '=')
+                {
+                    kind = TOK_SHR_ASSIGN;
+                    advance = 3;
+                }
+                else
+                {
+                    kind = TOK_SHR;
+                    advance = 2;
+                }
             }
             else
             {
@@ -705,6 +757,11 @@ static bool lex_punct(LexerCtx *ctx)
             if (n == '&')
             {
                 kind = TOK_LOG_AND;
+                advance = 2;
+            }
+            else if (n == '=')
+            {
+                kind = TOK_BW_AND_ASSIGN;
                 advance = 2;
             }
             else
@@ -718,13 +775,26 @@ static bool lex_punct(LexerCtx *ctx)
                 kind = TOK_LOG_OR;
                 advance = 2;
             }
+            else if (n == '=')
+            {
+                kind = TOK_BW_OR_ASSIGN;
+                advance = 2;
+            }
             else
             {
                 kind = TOK_BW_OR;
             }
             break;
         case '^':
-            kind = TOK_BW_XOR;
+            if (n == '=')
+            {
+                kind = TOK_BW_XOR_ASSIGN;
+                advance = 2;
+            }
+            else
+            {
+                kind = TOK_BW_XOR;
+            }
             break;
         case '~':
             kind = TOK_TILDE;

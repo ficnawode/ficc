@@ -72,7 +72,17 @@ typedef enum
     BIN_SHL,
     BIN_SHR,
     BIN_LOG_AND,
-    BIN_LOG_OR
+    BIN_LOG_OR,
+    BIN_ADD_ASSIGN,
+    BIN_SUB_ASSIGN,
+    BIN_MUL_ASSIGN,
+    BIN_DIV_ASSIGN,
+    BIN_REM_ASSIGN,
+    BIN_SHL_ASSIGN,
+    BIN_SHR_ASSIGN,
+    BIN_AND_ASSIGN,
+    BIN_OR_ASSIGN,
+    BIN_XOR_ASSIGN,
 } BinOpKind;
 
 typedef enum

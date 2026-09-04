@@ -496,3 +496,46 @@ TEST(lexer, arrow_and_decrement_max_munch)
     EXPECT_EQ(t[7].kind, TOK_EOF);
     arena_free(a);
 }
+
+TEST(lexer, compound_assignment_tokens)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "+= -= *= /= %= <<= >>= &= |= ^= <= >= << >>", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 15);
+    EXPECT_EQ(t[0].kind, TOK_PLUS_ASSIGN);
+    EXPECT_EQ(t[1].kind, TOK_MINUS_ASSIGN);
+    EXPECT_EQ(t[2].kind, TOK_STAR_ASSIGN);
+    EXPECT_EQ(t[3].kind, TOK_SLASH_ASSIGN);
+    EXPECT_EQ(t[4].kind, TOK_PERCENT_ASSIGN);
+    EXPECT_EQ(t[5].kind, TOK_SHL_ASSIGN);
+    EXPECT_EQ(t[6].kind, TOK_SHR_ASSIGN);
+    EXPECT_EQ(t[7].kind, TOK_BW_AND_ASSIGN);
+    EXPECT_EQ(t[8].kind, TOK_BW_OR_ASSIGN);
+    EXPECT_EQ(t[9].kind, TOK_BW_XOR_ASSIGN);
+    EXPECT_EQ(t[10].kind, TOK_LE);
+    EXPECT_EQ(t[11].kind, TOK_GE);
+    EXPECT_EQ(t[12].kind, TOK_SHL);
+    EXPECT_EQ(t[13].kind, TOK_SHR);
+    EXPECT_EQ(t[14].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, compound_assignment_not_single_equals)
+{
+    /* `a>>=3` and `a<<=3` must not fall back to `>`/`<` + `=`. */
+    Arena *a = arena_new();
+    LexResult res = lex("t", "a>>=3 b<<=3", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 7);
+    EXPECT_EQ(t[0].kind, TOK_IDENT);
+    EXPECT_EQ(t[1].kind, TOK_SHR_ASSIGN);
+    EXPECT_EQ(t[2].kind, TOK_INT_LIT);
+    EXPECT_EQ(t[3].kind, TOK_IDENT);
+    EXPECT_EQ(t[4].kind, TOK_SHL_ASSIGN);
+    EXPECT_EQ(t[5].kind, TOK_INT_LIT);
+    EXPECT_EQ(t[6].kind, TOK_EOF);
+    arena_free(a);
+}
