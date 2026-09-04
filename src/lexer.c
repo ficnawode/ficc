@@ -45,6 +45,24 @@ static bool is_digit(char c)
     return c >= '0' && c <= '9';
 }
 
+static bool is_hex_digit(char c)
+{
+    return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static u8 hex_digit_value(char c)
+{
+    if (is_digit(c))
+    {
+        return (u8) (c - '0');
+    }
+    if (c >= 'a')
+    {
+        return (u8) (c - 'a' + 10);
+    }
+    return (u8) (c - 'A' + 10);
+}
+
 static bool is_whitespace(char c)
 {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
@@ -326,6 +344,106 @@ static bool lex_comment(LexerCtx *ctx)
     return true; /* consumed opening, so don't re-error as unknown char */
 }
 
+/* Decode one escape sequence. The caller has already consumed the leading
+   backslash; *ctx->p is the first escape character. Returns the decoded value
+   and leaves the cursor just after the sequence. Simple escapes map per
+   §6.4.4.4p4 (incl. \' \" \?); octal (`\ooo`, one to three octal digits) and
+   hex (`\x…`, one or more hex digits) accumulate greedily with a saturated
+   accumulator (callers only need the >0xFF discriminator); an unknown escape
+   keeps the character itself (existing leniency). */
+static int lex_escape(LexerCtx *ctx)
+{
+    char c = *ctx->p;
+    switch (c)
+    {
+        case 'a':
+            lexer_advance(ctx);
+            return '\a';
+        case 'b':
+            lexer_advance(ctx);
+            return '\b';
+        case 'f':
+            lexer_advance(ctx);
+            return '\f';
+        case 'n':
+            lexer_advance(ctx);
+            return '\n';
+        case 'r':
+            lexer_advance(ctx);
+            return '\r';
+        case 't':
+            lexer_advance(ctx);
+            return '\t';
+        case 'v':
+            lexer_advance(ctx);
+            return '\v';
+        case '\\':
+            lexer_advance(ctx);
+            return '\\';
+        case '\'':
+            lexer_advance(ctx);
+            return '\'';
+        case '"':
+            lexer_advance(ctx);
+            return '"';
+        case '?':
+            lexer_advance(ctx);
+            return '?';
+        default:
+            break;
+    }
+
+    if (c >= '0' && c <= '7')
+    {
+        int val = 0;
+        for (int i = 0; i < 3 && *ctx->p >= '0' && *ctx->p <= '7'; i++)
+        {
+            if (val <= 0xFF)
+            {
+                val = val * 8 + (*ctx->p - '0');
+            }
+            lexer_advance(ctx);
+        }
+        return val;
+    }
+
+    if (c == 'x' || c == 'X')
+    {
+        lexer_advance(ctx); /* consume x/X */
+        if (!is_hex_digit(*ctx->p))
+        {
+            lexer_error(ctx, "hexadecimal escape sequence with no digits");
+            return 0;
+        }
+        int val = 0;
+        while (is_hex_digit(*ctx->p))
+        {
+            if (val <= 0xFF)
+            {
+                val = val * 16 + hex_digit_value(*ctx->p);
+            }
+            lexer_advance(ctx);
+        }
+        return val;
+    }
+
+    /* Unknown escape: keep the character and move past it. */
+    lexer_advance(ctx);
+    return c;
+}
+
+static void lex_buf_append(Arena *arena, char **buf, size_t *len, size_t *cap, char ch)
+{
+    if (*len + 1 >= *cap)
+    {
+        *cap *= 2;
+        char *new_buf = arena_alloc(arena, *cap, 1);
+        memcpy(new_buf, *buf, *len);
+        *buf = new_buf;
+    }
+    (*buf)[(*len)++] = ch;
+}
+
 static bool lex_string(LexerCtx *ctx)
 {
     if (*ctx->p != '"')
@@ -346,38 +464,7 @@ static bool lex_string(LexerCtx *ctx)
         if (*ctx->p == '\\')
         {
             lexer_advance(ctx); /* consume backslash */
-            char esc = *ctx->p;
-            char ch;
-            switch (esc)
-            {
-                case 'n':
-                    ch = '\n';
-                    break;
-                case 't':
-                    ch = '\t';
-                    break;
-                case '\\':
-                    ch = '\\';
-                    break;
-                case '"':
-                    ch = '"';
-                    break;
-                case '0':
-                    ch = '\0';
-                    break;
-                default:
-                    ch = esc; /* unknown escape: keep the character */
-                    break;
-            }
-            if (len + 1 >= cap)
-            {
-                cap *= 2;
-                char *new_buf = arena_alloc(ctx->arena, cap, 1);
-                memcpy(new_buf, buf, len);
-                buf = new_buf;
-            }
-            buf[len++] = ch;
-            lexer_advance(ctx);
+            lex_buf_append(ctx->arena, &buf, &len, &cap, (char) lex_escape(ctx));
         }
         else if (*ctx->p == '\n')
         {
@@ -386,15 +473,7 @@ static bool lex_string(LexerCtx *ctx)
         }
         else
         {
-            if (len + 1 >= cap)
-            {
-                cap *= 2;
-                char *new_buf = arena_alloc(ctx->arena, cap, 1);
-                memcpy(new_buf, buf, len);
-                buf = new_buf;
-            }
-            buf[len] = *ctx->p;
-            len++;
+            lex_buf_append(ctx->arena, &buf, &len, &cap, *ctx->p);
             lexer_advance(ctx);
         }
     }
@@ -418,6 +497,74 @@ static bool lex_string(LexerCtx *ctx)
 
     Token tok = {.kind = TOK_STRING_LIT, .loc = loc, .payload.str = buf, .str_len = (u32) len};
     lexer_push(ctx, tok);
+    return true;
+}
+
+static bool lex_char(LexerCtx *ctx)
+{
+    if (*ctx->p != '\'')
+    {
+        return false;
+    }
+
+    Loc loc = lexer_loc(ctx);
+    lexer_advance(ctx); /* consume opening ' */
+
+    if (*ctx->p == '\'')
+    {
+        lexer_error(ctx, "empty character constant");
+        lexer_advance(ctx); /* consume closing ' so the error doesn't cascade */
+        return true;
+    }
+
+    if (*ctx->p == '\n' || *ctx->p == '\0')
+    {
+        lexer_error(ctx, "unterminated character constant");
+        return true;
+    }
+
+    int val;
+    if (*ctx->p == '\\')
+    {
+        lexer_advance(ctx); /* consume backslash */
+        val = lex_escape(ctx);
+    }
+    else
+    {
+        val = (u8) *ctx->p;
+        lexer_advance(ctx);
+    }
+
+    if (*ctx->p != '\'')
+    {
+        if (*ctx->p && *ctx->p != '\n')
+        {
+            lexer_error(ctx, "multi-character character constant");
+        }
+        else
+        {
+            lexer_error(ctx, "unterminated character constant");
+        }
+        /* Skip to the closing quote / newline / EOF so the error doesn't
+           cascade past the literal. */
+        while (*ctx->p && *ctx->p != '\'' && *ctx->p != '\n')
+        {
+            lexer_advance(ctx);
+        }
+        if (*ctx->p == '\'')
+        {
+            lexer_advance(ctx);
+        }
+        return true;
+    }
+    lexer_advance(ctx); /* consume closing ' */
+
+    if (val > 0xFF)
+    {
+        lexer_error(ctx, "character constant exceeds bounds of type char");
+    }
+
+    lexer_push(ctx, (Token) {.kind = TOK_CHAR_LIT, .loc = loc, .payload.int_val = val});
     return true;
 }
 
@@ -598,6 +745,10 @@ LexResult lex(const char *file, const char *src, Arena *arena)
             continue;
         }
         if (lex_string(&ctx))
+        {
+            continue;
+        }
+        if (lex_char(&ctx))
         {
             continue;
         }

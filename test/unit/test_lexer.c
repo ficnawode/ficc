@@ -308,3 +308,148 @@ TEST(lexer, sizeof_keyword)
     EXPECT_EQ(t[1].kind, TOK_EOF);
     arena_free(a);
 }
+
+TEST(lexer, char_literal_value)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "'a'", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_CHAR_LIT);
+    EXPECT_EQ(t[0].payload.int_val, 'a');
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, char_literal_simple_escapes)
+{
+    Arena *a = arena_new();
+    LexResult res =
+        lex("t", "'\\n' '\\0' '\\t' '\\a' '\\'' '\\\\' '\"' '\\?' '\\v' '\\f' '\\r' '\\b'", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 13);
+    EXPECT_EQ(t[0].kind, TOK_CHAR_LIT);
+    EXPECT_EQ(t[0].payload.int_val, '\n');
+    EXPECT_EQ(t[1].payload.int_val, '\0');
+    EXPECT_EQ(t[2].payload.int_val, '\t');
+    EXPECT_EQ(t[3].payload.int_val, '\a');
+    EXPECT_EQ(t[4].payload.int_val, '\'');
+    EXPECT_EQ(t[5].payload.int_val, '\\');
+    EXPECT_EQ(t[6].payload.int_val, '"');
+    EXPECT_EQ(t[7].payload.int_val, '?');
+    EXPECT_EQ(t[8].payload.int_val, '\v');
+    EXPECT_EQ(t[9].payload.int_val, '\f');
+    EXPECT_EQ(t[10].payload.int_val, '\r');
+    EXPECT_EQ(t[11].payload.int_val, '\b');
+    EXPECT_EQ(t[12].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, char_literal_octal_escapes)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "'\\0' '\\01' '\\007' '\\101' '\\377'", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 6);
+    EXPECT_EQ(t[0].kind, TOK_CHAR_LIT);
+    EXPECT_EQ(t[0].payload.int_val, 0);
+    EXPECT_EQ(t[1].payload.int_val, 1);
+    EXPECT_EQ(t[2].payload.int_val, 7);
+    EXPECT_EQ(t[3].payload.int_val, 65);  /* \101 octal == 'A' */
+    EXPECT_EQ(t[4].payload.int_val, 255); /* \377 octal == 0xFF */
+    EXPECT_EQ(t[5].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, char_literal_hex_escapes)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "'\\x41' '\\x0a' '\\x7f'", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 4);
+    EXPECT_EQ(t[0].kind, TOK_CHAR_LIT);
+    EXPECT_EQ(t[0].payload.int_val, 0x41);
+    EXPECT_EQ(t[1].payload.int_val, 0x0a);
+    EXPECT_EQ(t[2].payload.int_val, 0x7f);
+    EXPECT_EQ(t[3].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, octal_escape_digit_boundary)
+{
+    /* Octal escapes consume at most three octal digits; a following digit in
+       a *string* is a separate byte ("\0123" == {10, '3'}). In a char
+       constant the same sequence is a multi-char constant (rejected). */
+    Arena *a = arena_new();
+    LexResult res = lex("t", "\"\\0123\"", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_STRING_LIT);
+    EXPECT_EQ(t[0].str_len, 2);
+    EXPECT_EQ(t[0].payload.str[0], 10); /* \012 octal == newline */
+    EXPECT_EQ(t[0].payload.str[1], '3');
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, string_literal_octal_and_hex_escapes)
+{
+    /* The shared escape decoder gives strings the full §6.4.4.4 table:
+       "\01" is octal 1 (not NUL then '1'), "\x41" is 'A' (not 'x','4','1'). */
+    Arena *a = arena_new();
+    LexResult res = lex("t", "\"\\01\\x41\"", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_STRING_LIT);
+    EXPECT_EQ(t[0].str_len, 2);
+    EXPECT_EQ(t[0].payload.str[0], 1);
+    EXPECT_EQ(t[0].payload.str[1], 'A');
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, char_literal_empty_is_error)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "''", a);
+    EXPECT_NULL(res.tokens);
+    arena_free(a);
+}
+
+TEST(lexer, char_literal_multi_char_is_error)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "'ab'", a);
+    EXPECT_NULL(res.tokens);
+    arena_free(a);
+}
+
+TEST(lexer, char_literal_hex_no_digits_is_error)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "'\\x'", a);
+    EXPECT_NULL(res.tokens);
+    arena_free(a);
+}
+
+TEST(lexer, char_literal_out_of_range_is_error)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "'\\400'", a);
+    EXPECT_NULL(res.tokens);
+    arena_free(a);
+}
+
+TEST(lexer, char_literal_unterminated_is_error)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "'a", a);
+    EXPECT_NULL(res.tokens);
+    arena_free(a);
+}

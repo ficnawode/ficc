@@ -1134,6 +1134,14 @@ static ASTNode *parse_primary(ParserCtx *p)
             return ast_int_literal(t->payload.int_val, t->int_suffix.is_unsigned,
                                    t->int_suffix.length, t->int_suffix.is_hex, t->loc, p->arena);
         }
+        case TOK_CHAR_LIT:
+        {
+            /* A character constant has type int (§6.4.4.4p10), so it is
+               exactly an integer literal — the whole downstream pipeline
+               (folding, `case 'a':`, initializers) works with no extra code. */
+            parser_advance(p);
+            return ast_int_literal(t->payload.int_val, false, SUFFIX_NONE, false, t->loc, p->arena);
+        }
         case TOK_IDENT:
         {
             i64 *const_val = strmap_get(p->enum_consts, t->payload.str);

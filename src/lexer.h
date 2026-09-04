@@ -9,6 +9,7 @@
     X(TOK_EOF)                                                                                     \
     X(TOK_IDENT)                                                                                   \
     X(TOK_INT_LIT)                                                                                 \
+    X(TOK_CHAR_LIT)                                                                                \
     X(TOK_KW_INT)                                                                                  \
     X(TOK_KW_VOID)                                                                                 \
     X(TOK_KW_CHAR)                                                                                 \
