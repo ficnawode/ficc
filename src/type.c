@@ -693,6 +693,12 @@ u64 type_sizeof(Type *t)
     return type_base(t)->size;
 }
 
+u64 type_alignof(Type *t)
+{
+    ASSERT(t->kind != TYPE_VOID);
+    return type_base(t)->align;
+}
+
 i64 type_reduce_int(Type *target, i64 value)
 {
     ASSERT(type_is_integer(target));

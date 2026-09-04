@@ -720,6 +720,64 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
             node->expr_type = type_ulong();
             return node->expr_type;
         }
+        case AST_ALIGNOF_EXPR:
+        {
+            ASTAlignofExpr *ae = ast_as(ASTAlignofExpr, node);
+            if (!check_expr(ae->operand, ctx))
+            {
+                return NULL;
+            }
+            Type *op_type = ae->operand->expr_type;
+            /* §6.3.2.1p3: array-to-pointer decay is suppressed for the direct
+               operand of _Alignof, so `_Alignof(arr)` is the element
+               alignment (arrays align as their element type). */
+            if (ae->operand->kind == AST_IDENT)
+            {
+                ASTVarDecl *decl = ast_as(ASTIdent, ae->operand)->decl;
+                if (decl && type_is_array(decl->type))
+                {
+                    op_type = decl->type;
+                }
+            }
+            /* §6.5.3.4p2 constraint: the operand type shall not be a function
+               type or an incomplete type. A void or array-of-void lvalue is
+               already caught by check_expr; functions don't exist as rvalues
+               here. */
+            if (op_type->kind == TYPE_VOID)
+            {
+                sem_error(node->loc, "_Alignof(void) is invalid");
+                ctx->error = true;
+                return NULL;
+            }
+            if (!type_is_complete(op_type))
+            {
+                sem_error(node->loc, "_Alignof of incomplete type");
+                ctx->error = true;
+                return NULL;
+            }
+            ae->align_value = type_alignof(op_type);
+            node->expr_type = type_ulong();
+            return node->expr_type;
+        }
+        case AST_ALIGNOF_TYPE:
+        {
+            ASTAlignofType *at = ast_as(ASTAlignofType, node);
+            if (at->type->kind == TYPE_VOID)
+            {
+                sem_error(node->loc, "_Alignof(void) is invalid");
+                ctx->error = true;
+                return NULL;
+            }
+            if (!type_is_complete(at->type))
+            {
+                sem_error(node->loc, "_Alignof of incomplete type");
+                ctx->error = true;
+                return NULL;
+            }
+            at->align_value = type_alignof(at->type);
+            node->expr_type = type_ulong();
+            return node->expr_type;
+        }
         case AST_STRING_LITERAL:
         {
             ASTStringLiteral *sl = ast_as(ASTStringLiteral, node);
@@ -1746,6 +1804,15 @@ static bool fold_integer_constant(ASTNode *node, i64 *out)
             /* check_expr has already resolved the operand type and set
                size_value, so `case sizeof(x):` works here. */
             *out = (i64) ast_as(ASTSizeofExpr, node)->size_value;
+            return true;
+        case AST_ALIGNOF_TYPE:
+            /* check_expr has already computed align_value. */
+            *out = (i64) ast_as(ASTAlignofType, node)->align_value;
+            return true;
+        case AST_ALIGNOF_EXPR:
+            /* check_expr has already resolved the operand type and set
+               align_value, so `case _Alignof(x):` works here. */
+            *out = (i64) ast_as(ASTAlignofExpr, node)->align_value;
             return true;
         case AST_CAST_EXPR:
         {

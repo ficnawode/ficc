@@ -36,6 +36,8 @@
     X(AST_SUBSCRIPT_EXPR)                                                                          \
     X(AST_SIZEOF_EXPR)                                                                             \
     X(AST_SIZEOF_TYPE)                                                                             \
+    X(AST_ALIGNOF_EXPR)                                                                            \
+    X(AST_ALIGNOF_TYPE)                                                                            \
     X(AST_STRING_LITERAL)                                                                          \
     X(AST_STRUCT_DECL)                                                                             \
     X(AST_ENUM_DECL)                                                                               \
@@ -361,6 +363,22 @@ struct ASTSizeofType
     u64 size_value;
 };
 
+typedef struct ASTAlignofExpr ASTAlignofExpr;
+struct ASTAlignofExpr
+{
+    ASTNode base;
+    ASTNode *operand;
+    u64 align_value;
+};
+
+typedef struct ASTAlignofType ASTAlignofType;
+struct ASTAlignofType
+{
+    ASTNode base;
+    Type *type;
+    u64 align_value;
+};
+
 typedef struct ASTStringLiteral ASTStringLiteral;
 struct ASTStringLiteral
 {
@@ -540,6 +558,8 @@ ASTNode *ast_ternary_expr(ASTNode *cond, ASTNode *then_expr, ASTNode *else_expr,
 ASTNode *ast_subscript_expr(ASTNode *array, ASTNode *index, Loc loc, Arena *arena);
 ASTNode *ast_sizeof_expr(ASTNode *operand, u64 size_value, Loc loc, Arena *arena);
 ASTNode *ast_sizeof_type(Type *type, u64 size_value, Loc loc, Arena *arena);
+ASTNode *ast_alignof_expr(ASTNode *operand, u64 align_value, Loc loc, Arena *arena);
+ASTNode *ast_alignof_type(Type *type, u64 align_value, Loc loc, Arena *arena);
 ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena);
 ASTNode *ast_struct_decl(const char *tag, bool is_union, Vec *fields, Loc loc, Arena *arena);
 ASTNode *ast_enum_decl(const char *tag, Vec *constants, Loc loc, Arena *arena);

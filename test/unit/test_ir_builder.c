@@ -462,3 +462,41 @@ TEST(ir_builder, cast_pointer_passthrough)
     EXPECT_EQ(ir_interp_run(m), 1);
     arena_free(a);
 }
+
+TEST(ir_builder, alignof_type_folds_to_imm)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) { return (int) _Alignof(long); }", a);
+    EXPECT_NOTNULL(m);
+    /* _Alignof folds to a compile-time constant: the first instruction is a
+       width conversion of the imm 8 (size_t result converted to int), with no
+       memory access or arithmetic on the way. */
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    IrBlock *bb = (IrBlock *) vec_get(f->blocks, 0);
+    EXPECT_EQ(vec_size(bb->instrs), 3);
+    IrInstr *in = (IrInstr *) vec_get(bb->instrs, 0);
+    EXPECT_TRUE(in->opcode == OP_ZEXT || in->opcode == OP_SEXT);
+    EXPECT_TRUE(in->ops[0].is_imm);
+    EXPECT_EQ(in->ops[0].u.imm, 8);
+    EXPECT_EQ(ir_interp_run(m), 8);
+    arena_free(a);
+}
+
+TEST(ir_builder, alignof_expr_folds_to_imm)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    long x;\n"
+                                  "    return (int) _Alignof(x);\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    IrBlock *bb = (IrBlock *) vec_get(f->blocks, 0);
+    IrInstr *in = (IrInstr *) vec_get(bb->instrs, 0);
+    EXPECT_TRUE(in->opcode == OP_ZEXT || in->opcode == OP_SEXT);
+    EXPECT_TRUE(in->ops[0].is_imm);
+    EXPECT_EQ(in->ops[0].u.imm, 8);
+    EXPECT_EQ(ir_interp_run(m), 8);
+    arena_free(a);
+}

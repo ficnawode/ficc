@@ -264,6 +264,22 @@ ASTNode *ast_sizeof_type(Type *type, u64 size_value, Loc loc, Arena *arena)
     return &n->base;
 }
 
+ASTNode *ast_alignof_expr(ASTNode *operand, u64 align_value, Loc loc, Arena *arena)
+{
+    ASTAlignofExpr *n = ast_new_node(sizeof(ASTAlignofExpr), AST_ALIGNOF_EXPR, loc, arena);
+    n->operand = operand;
+    n->align_value = align_value;
+    return &n->base;
+}
+
+ASTNode *ast_alignof_type(Type *type, u64 align_value, Loc loc, Arena *arena)
+{
+    ASTAlignofType *n = ast_new_node(sizeof(ASTAlignofType), AST_ALIGNOF_TYPE, loc, arena);
+    n->type = type;
+    n->align_value = align_value;
+    return &n->base;
+}
+
 ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena)
 {
     ASTStringLiteral *n = ast_new_node(sizeof(ASTStringLiteral), AST_STRING_LITERAL, loc, arena);
@@ -669,6 +685,20 @@ static void ast_dump_rec(ASTNode *node, int depth)
             ASTSizeofType *st = ast_as(ASTSizeofType, node);
             printf("SIZEOF_TYPE %s %llu\n", type_kind_name(st->type->kind),
                    (unsigned long long) st->size_value);
+            break;
+        }
+        case AST_ALIGNOF_EXPR:
+        {
+            ASTAlignofExpr *ae = ast_as(ASTAlignofExpr, node);
+            printf("ALIGNOF_EXPR %llu\n", (unsigned long long) ae->align_value);
+            ast_dump_rec(ae->operand, depth + 1);
+            break;
+        }
+        case AST_ALIGNOF_TYPE:
+        {
+            ASTAlignofType *at = ast_as(ASTAlignofType, node);
+            printf("ALIGNOF_TYPE %s %llu\n", type_kind_name(at->type->kind),
+                   (unsigned long long) at->align_value);
             break;
         }
         case AST_STRING_LITERAL:

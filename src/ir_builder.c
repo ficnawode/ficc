@@ -1328,6 +1328,22 @@ static ExprResult build_sizeof_type(ASTSizeofType *st, IrFunction *f, IrBlock *b
     return expr_result(ir_operand_imm((i64) st->size_value), bb);
 }
 
+static ExprResult build_alignof_expr(ASTAlignofExpr *ae, IrFunction *f, IrBlock *bb,
+                                     FuncBuilder *ctx)
+{
+    (void) f;
+    (void) ctx;
+    return expr_result(ir_operand_imm((i64) ae->align_value), bb);
+}
+
+static ExprResult build_alignof_type(ASTAlignofType *at, IrFunction *f, IrBlock *bb,
+                                     FuncBuilder *ctx)
+{
+    (void) f;
+    (void) ctx;
+    return expr_result(ir_operand_imm((i64) at->align_value), bb);
+}
+
 static u32 global_index_of(FuncBuilder *ctx, const char *name)
 {
     u32 *idx = strmap_get(ctx->global_map, name);
@@ -1475,6 +1491,12 @@ static bool fold_constant_ir(ASTNode *node, i64 *out)
             return true;
         case AST_SIZEOF_EXPR:
             *out = (i64) ast_as(ASTSizeofExpr, node)->size_value;
+            return true;
+        case AST_ALIGNOF_TYPE:
+            *out = (i64) ast_as(ASTAlignofType, node)->align_value;
+            return true;
+        case AST_ALIGNOF_EXPR:
+            *out = (i64) ast_as(ASTAlignofExpr, node)->align_value;
             return true;
         case AST_CAST_EXPR:
         {
@@ -1923,6 +1945,10 @@ static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuil
             return build_sizeof_expr(ast_as(ASTSizeofExpr, node), f, bb, ctx);
         case AST_SIZEOF_TYPE:
             return build_sizeof_type(ast_as(ASTSizeofType, node), f, bb, ctx);
+        case AST_ALIGNOF_EXPR:
+            return build_alignof_expr(ast_as(ASTAlignofExpr, node), f, bb, ctx);
+        case AST_ALIGNOF_TYPE:
+            return build_alignof_type(ast_as(ASTAlignofType, node), f, bb, ctx);
         case AST_STRING_LITERAL:
             return build_string_literal_expr(ast_as(ASTStringLiteral, node), f, bb, ctx);
         case AST_MEMBER_ACCESS:
@@ -2724,6 +2750,11 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
             break;
         case AST_CAST_EXPR:
             mark_addr_taken_expr(ast_as(ASTCastExpr, node)->operand, ctx);
+            break;
+        case AST_ALIGNOF_EXPR:
+        case AST_ALIGNOF_TYPE:
+            /* _Alignof does not evaluate its operand (§6.5.3.4p2): nothing
+               inside it is address-taken. */
             break;
         case AST_COMPOUND_LITERAL:
             /* The literal's init list may carry `&x` — those autos must spill. */

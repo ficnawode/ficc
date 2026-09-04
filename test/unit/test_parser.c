@@ -379,6 +379,39 @@ TEST(parser, sizeof_var_expr)
     arena_free(a);
 }
 
+TEST(parser, alignof_expr)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { return _Alignof(long); }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(ret->expr->kind, AST_ALIGNOF_TYPE);
+    EXPECT_EQ(ast_as(ASTAlignofType, ret->expr)->type->kind, TYPE_LONG);
+    arena_free(a);
+}
+
+TEST(parser, alignof_var_expr)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int x;\n"
+                            "    return _Alignof(x);\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 1));
+    EXPECT_EQ(ret->expr->kind, AST_ALIGNOF_EXPR);
+    ASTAlignofExpr *ae = ast_as(ASTAlignofExpr, ret->expr);
+    EXPECT_EQ(ae->operand->kind, AST_IDENT);
+    arena_free(a);
+}
+
 TEST(parser, deref_expr)
 {
     Arena *a = arena_new();

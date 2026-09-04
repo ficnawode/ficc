@@ -1787,6 +1787,46 @@ static ASTNode *parse_unary(ParserCtx *p)
             return ast_sizeof_expr(operand, 0, t->loc, p->arena);
         }
     }
+    if (t->kind == TOK_KW_ALIGNOF)
+    {
+        parser_advance(p);
+        /* C11 §6.5.3.4 takes a type-name; the expression form is a ficc/gcc
+           extension (D14.4). Both are integer constant expressions and fold
+           to the operand's alignment. */
+        if (parser_peek(p)->kind == TOK_LPAREN)
+        {
+            if (is_typename_start_at(p, skip_const_ahead(p, p->pos + 1)))
+            {
+                parser_advance(p);
+                Type *ty = parse_type_specifier(p);
+                if (!ty)
+                {
+                    return NULL;
+                }
+                ty = parse_abstract_declarator(p, ty);
+                if (!ty)
+                {
+                    return NULL;
+                }
+                ty = parse_array_suffix(p, ty);
+                if (!ty)
+                {
+                    return NULL;
+                }
+                if (!parser_expect(p, TOK_RPAREN, ")"))
+                {
+                    return NULL;
+                }
+                return ast_alignof_type(ty, 0, t->loc, p->arena);
+            }
+        }
+        ASTNode *operand = parse_unary(p);
+        if (!operand)
+        {
+            return NULL;
+        }
+        return ast_alignof_expr(operand, 0, t->loc, p->arena);
+    }
     return parse_postfix(p);
 }
 
@@ -2479,6 +2519,14 @@ static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out)
             /* sizeof(type) is an integer constant expression (§6.6p6). */
             ASTSizeofType *st = ast_as(ASTSizeofType, node);
             *out = (i64) type_sizeof(st->type);
+            return true;
+        }
+        case AST_ALIGNOF_TYPE:
+        {
+            /* _Alignof(type) is an integer constant expression (§6.6p6);
+               the type is complete at parse time, so fold here. */
+            ASTAlignofType *at = ast_as(ASTAlignofType, node);
+            *out = (i64) type_alignof(at->type);
             return true;
         }
         case AST_CAST_EXPR:

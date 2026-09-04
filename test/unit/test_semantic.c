@@ -418,3 +418,37 @@ TEST(semantic, comma_not_lvalue_rejected)
                       "    return 0;\n"
                       "}\n");
 }
+
+TEST(semantic, alignof_folds_to_size_t)
+{
+    EXPECT_BUILD_SUCCEED("int g = _Alignof(long);\n"
+                         "int main(void) {\n"
+                         "    return g == 8 ? 0 : 1;\n"
+                         "}\n");
+}
+
+TEST(semantic, alignof_expr_form)
+{
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    long x;\n"
+                         "    if (_Alignof(x) != 8) {\n"
+                         "        return 1;\n"
+                         "    }\n"
+                         "    return 0;\n"
+                         "}\n");
+}
+
+TEST(semantic, alignof_void_invalid)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    return (int) _Alignof(void);\n"
+                      "}\n");
+}
+
+TEST(semantic, alignof_incomplete_type_invalid)
+{
+    EXPECT_BUILD_FAIL("struct S;\n"
+                      "int main(void) {\n"
+                      "    return (int) _Alignof(struct S);\n"
+                      "}\n");
+}
