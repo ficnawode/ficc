@@ -1995,6 +1995,34 @@ static bool check_typedef_decl(ASTTypedefDecl *td, SemanticCtx *ctx)
     return true;
 }
 
+/* `_Static_assert(expr, "msg")` (§6.7.4): expr must be an integer constant
+   expression; the value is checked at compile time and the message reported on
+   failure. check_expr runs first so type-dependent subexpressions
+   (`sizeof(x)`, `_Alignof(x)`) resolve, then fold_integer_constant evaluates. */
+static bool check_static_assert(ASTStaticAssert *sa, SemanticCtx *ctx)
+{
+    if (!check_expr(sa->expr, ctx))
+    {
+        ctx->error = true;
+        return false;
+    }
+    i64 value;
+    if (!fold_integer_constant(sa->expr, &value))
+    {
+        sem_error(sa->base.loc,
+                  "static assertion expression is not an integer constant expression");
+        ctx->error = true;
+        return false;
+    }
+    if (value == 0)
+    {
+        sem_error(sa->base.loc, "static assertion failed: %s", sa->msg);
+        ctx->error = true;
+        return false;
+    }
+    return true;
+}
+
 static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
 {
     switch (node->kind)
@@ -2026,6 +2054,8 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
             return true;
         case AST_TYPEDEF_DECL:
             return check_typedef_decl(ast_as(ASTTypedefDecl, node), ctx);
+        case AST_STATIC_ASSERT:
+            return check_static_assert(ast_as(ASTStaticAssert, node), ctx);
         case AST_EXPR_STMT:
             return check_expression_statement(ast_as(ASTExprStmt, node), ctx);
         case AST_COMPOUND_STMT:
@@ -2383,6 +2413,25 @@ static bool collect_global_variables(ASTProgram *prog, SemanticCtx *ctx)
     return true;
 }
 
+/* Pass 0: check file-scope `_Static_assert`s before anything else. */
+static bool check_file_scope_asserts(ASTProgram *prog, SemanticCtx *ctx)
+{
+    size_t ndecls = vec_size(prog->decls);
+    for (size_t i = 0; i < ndecls; i++)
+    {
+        ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
+        if (decl->kind != AST_STATIC_ASSERT)
+        {
+            continue;
+        }
+        if (!check_static_assert(ast_as(ASTStaticAssert, decl), ctx))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* Pass 2: Collect all function definitions */
 static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
 {
@@ -2391,7 +2440,8 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
         if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL ||
-            decl->kind == AST_VAR_DECL || decl->kind == AST_DECL_LIST)
+            decl->kind == AST_VAR_DECL || decl->kind == AST_DECL_LIST ||
+            decl->kind == AST_STATIC_ASSERT)
         {
             continue;
         }
@@ -2479,6 +2529,11 @@ ASTNode *semantic_check(ASTNode *ast, Arena *arena)
         .switch_sem_stack = vec_new(arena),
         .error = false,
     };
+
+    if (!check_file_scope_asserts(prog, &ctx))
+    {
+        return NULL;
+    }
 
     if (!collect_global_variables(prog, &ctx))
     {

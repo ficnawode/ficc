@@ -2584,6 +2584,10 @@ static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilde
             /* Typedefs introduce no runtime object: parse-time only (D12.1).
                The declaration is a no-op at IR level. */
             return bb;
+        case AST_STATIC_ASSERT:
+            /* Checked in the semantic pass; checked at compile time, emits
+               nothing. */
+            return bb;
         case AST_EXPR_STMT:
             return build_expr_stmt(ast_as(ASTExprStmt, node), f, bb, ctx);
         case AST_COMPOUND_STMT:
@@ -2875,6 +2879,10 @@ static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx)
             }
             break;
         }
+        case AST_STATIC_ASSERT:
+            /* Compile-time check (§6.7.4): the expression is not evaluated at
+               runtime, so nothing inside it is address-taken. */
+            break;
         default:
             break; /* break/continue/goto: no subexpressions */
     }
@@ -2986,7 +2994,7 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
         if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL ||
             decl->kind == AST_VAR_DECL || decl->kind == AST_TYPEDEF_DECL ||
-            decl->kind == AST_DECL_LIST)
+            decl->kind == AST_DECL_LIST || decl->kind == AST_STATIC_ASSERT)
         {
             continue;
         }

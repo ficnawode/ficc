@@ -280,6 +280,14 @@ ASTNode *ast_alignof_type(Type *type, u64 align_value, Loc loc, Arena *arena)
     return &n->base;
 }
 
+ASTNode *ast_static_assert(ASTNode *expr, const char *msg, Loc loc, Arena *arena)
+{
+    ASTStaticAssert *n = ast_new_node(sizeof(ASTStaticAssert), AST_STATIC_ASSERT, loc, arena);
+    n->expr = expr;
+    n->msg = msg;
+    return &n->base;
+}
+
 ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena)
 {
     ASTStringLiteral *n = ast_new_node(sizeof(ASTStringLiteral), AST_STRING_LITERAL, loc, arena);
@@ -699,6 +707,13 @@ static void ast_dump_rec(ASTNode *node, int depth)
             ASTAlignofType *at = ast_as(ASTAlignofType, node);
             printf("ALIGNOF_TYPE %s %llu\n", type_kind_name(at->type->kind),
                    (unsigned long long) at->align_value);
+            break;
+        }
+        case AST_STATIC_ASSERT:
+        {
+            ASTStaticAssert *sa = ast_as(ASTStaticAssert, node);
+            printf("STATIC_ASSERT \"%s\"\n", sa->msg);
+            ast_dump_rec(sa->expr, depth + 1);
             break;
         }
         case AST_STRING_LITERAL:

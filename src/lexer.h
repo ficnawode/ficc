@@ -38,6 +38,7 @@
     X(TOK_KW_CONST)                                                                                \
     X(TOK_KW_TYPEDEF)                                                                              \
     X(TOK_KW_ALIGNOF)                                                                              \
+    X(TOK_KW_STATIC_ASSERT)                                                                        \
     X(TOK_DOT)                                                                                     \
     X(TOK_ARROW)                                                                                   \
     X(TOK_STRING_LIT)                                                                              \

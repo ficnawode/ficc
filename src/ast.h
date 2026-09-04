@@ -46,7 +46,8 @@
     X(AST_TYPEDEF_DECL)                                                                            \
     X(AST_INIT_LIST)                                                                               \
     X(AST_COMPOUND_LITERAL)                                                                        \
-    X(AST_DECL_LIST)
+    X(AST_DECL_LIST)                                                                               \
+    X(AST_STATIC_ASSERT)
 
 typedef enum
 {
@@ -379,6 +380,14 @@ struct ASTAlignofType
     u64 align_value;
 };
 
+typedef struct ASTStaticAssert ASTStaticAssert;
+struct ASTStaticAssert
+{
+    ASTNode base;
+    ASTNode *expr;
+    const char *msg;
+};
+
 typedef struct ASTStringLiteral ASTStringLiteral;
 struct ASTStringLiteral
 {
@@ -560,6 +569,7 @@ ASTNode *ast_sizeof_expr(ASTNode *operand, u64 size_value, Loc loc, Arena *arena
 ASTNode *ast_sizeof_type(Type *type, u64 size_value, Loc loc, Arena *arena);
 ASTNode *ast_alignof_expr(ASTNode *operand, u64 align_value, Loc loc, Arena *arena);
 ASTNode *ast_alignof_type(Type *type, u64 align_value, Loc loc, Arena *arena);
+ASTNode *ast_static_assert(ASTNode *expr, const char *msg, Loc loc, Arena *arena);
 ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena);
 ASTNode *ast_struct_decl(const char *tag, bool is_union, Vec *fields, Loc loc, Arena *arena);
 ASTNode *ast_enum_decl(const char *tag, Vec *constants, Loc loc, Arena *arena);

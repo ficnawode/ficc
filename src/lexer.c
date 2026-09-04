@@ -102,6 +102,7 @@ static void init_keyword_map(Arena *arena)
     KW("signed", TOK_KW_SIGNED);
     KW("sizeof", TOK_KW_SIZEOF);
     KW("_Alignof", TOK_KW_ALIGNOF);
+    KW("_Static_assert", TOK_KW_STATIC_ASSERT);
     KW("struct", TOK_KW_STRUCT);
     KW("union", TOK_KW_UNION);
     KW("enum", TOK_KW_ENUM);

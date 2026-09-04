@@ -321,6 +321,18 @@ TEST(lexer, alignof_keyword)
     arena_free(a);
 }
 
+TEST(lexer, static_assert_keyword)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "_Static_assert", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_KW_STATIC_ASSERT);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
 TEST(lexer, char_literal_value)
 {
     Arena *a = arena_new();

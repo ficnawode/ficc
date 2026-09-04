@@ -412,6 +412,55 @@ TEST(parser, alignof_var_expr)
     arena_free(a);
 }
 
+TEST(parser, static_assert_file_scope_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("_Static_assert(sizeof(int) == 4, \"msg\");\n"
+                            "int main(void) {\n"
+                            "    return 0;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    EXPECT_EQ(vec_size(prog->decls), 2);
+    ASTStaticAssert *sa = ast_as(ASTStaticAssert, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(sa->base.kind, AST_STATIC_ASSERT);
+    EXPECT_STR_EQ(sa->msg, "msg");
+    EXPECT_STR_EQ(ast_kind_name(sa->expr->kind), "AST_BINARY_EXPR");
+    arena_free(a);
+}
+
+TEST(parser, static_assert_block_scope_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    _Static_assert(1, \"block\");\n"
+                            "    return 0;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTStaticAssert *sa = ast_as(ASTStaticAssert, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(sa->base.kind, AST_STATIC_ASSERT);
+    EXPECT_STR_EQ(sa->msg, "block");
+    EXPECT_EQ(sa->expr->kind, AST_INT_LITERAL);
+    arena_free(a);
+}
+
+TEST(parser, static_assert_non_string_message_rejected)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("_Static_assert(1, 42);\n"
+                            "int main(void) {\n"
+                            "    return 0;\n"
+                            "}",
+                            a);
+    EXPECT_NULL(ast);
+    arena_free(a);
+}
+
 TEST(parser, deref_expr)
 {
     Arena *a = arena_new();

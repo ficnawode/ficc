@@ -1423,6 +1423,54 @@ static ASTNode *parse_default_stmt(ParserCtx *p)
     return ast_default_stmt(stmts, start->loc, p->arena);
 }
 
+/* `_Static_assert( constant-expression , string-literal ) ;` (§6.7.4). The
+   constant expression is a full *constant-expression* (comma is the
+   separator, not the comma operator, so the argument parses at the assignment
+   level). The message must be a string literal. Folding and checking happen in
+   the semantic pass (types like `sizeof(x)` are unknown here); this function
+   only builds the node. */
+static ASTNode *parse_static_assert(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_STATIC_ASSERT);
+    parser_advance(p);
+
+    if (!parser_expect(p, TOK_LPAREN, "'('"))
+    {
+        return NULL;
+    }
+
+    ASTNode *expr = parse_assign(p);
+    if (!expr)
+    {
+        return NULL;
+    }
+
+    if (!parser_expect(p, TOK_COMMA, "','"))
+    {
+        return NULL;
+    }
+
+    Token *msg = parser_peek(p);
+    if (msg->kind != TOK_STRING_LIT)
+    {
+        parser_error(p, "expected string literal in _Static_assert");
+        return NULL;
+    }
+    parser_advance(p);
+
+    if (!parser_expect(p, TOK_RPAREN, "')'"))
+    {
+        return NULL;
+    }
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
+        return NULL;
+    }
+
+    return ast_static_assert(expr, msg->payload.str, start->loc, p->arena);
+}
+
 /* In C, a `case N:` label applies to every statement that follows it until
    the next case/default label. */
 
@@ -1473,6 +1521,8 @@ static ASTNode *parse_stmt(ParserCtx *p)
             }
             return parse_var_decl(p, SC_NONE);
         }
+        case TOK_KW_STATIC_ASSERT:
+            return parse_static_assert(p);
         case TOK_KW_RETURN:
             return parse_return_stmt(p);
         case TOK_KW_IF:
@@ -2597,6 +2647,11 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
     if (parser_peek(p)->kind == TOK_KW_TYPEDEF)
     {
         return parse_typedef_decl(p);
+    }
+
+    if (parser_peek(p)->kind == TOK_KW_STATIC_ASSERT)
+    {
+        return parse_static_assert(p);
     }
 
     StorageClass storage = SC_NONE;

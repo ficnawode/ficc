@@ -452,3 +452,44 @@ TEST(semantic, alignof_incomplete_type_invalid)
                       "    return (int) _Alignof(struct S);\n"
                       "}\n");
 }
+
+TEST(semantic, static_assert_pass_file_scope)
+{
+    EXPECT_BUILD_SUCCEED("_Static_assert(1, \"ok\");\n"
+                         "int main(void) {\n"
+                         "    return 0;\n"
+                         "}\n");
+}
+
+TEST(semantic, static_assert_pass_with_sizeof)
+{
+    EXPECT_BUILD_SUCCEED("_Static_assert(sizeof(long) == 8, \"long\");\n"
+                         "int main(void) {\n"
+                         "    return 0;\n"
+                         "}\n");
+}
+
+TEST(semantic, static_assert_fail_reported)
+{
+    EXPECT_BUILD_FAIL("_Static_assert(0, \"boom\");\n"
+                      "int main(void) {\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(semantic, static_assert_fail_block_scope)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    _Static_assert(2 == 3, \"nope\");\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(semantic, static_assert_non_ice_rejected)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int x = 1;\n"
+                      "    _Static_assert(x, \"not frozen\");\n"
+                      "    return 0;\n"
+                      "}\n");
+}
