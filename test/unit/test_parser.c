@@ -1307,3 +1307,50 @@ TEST(parser, anon_enum_typedef)
     EXPECT_TRUE(type_is_enum(td->type));
     arena_free(a);
 }
+
+TEST(parser, variadic_param_list)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(int a, ...) { return a; }\n", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(vec_size(fn->params), 1);
+    EXPECT_TRUE(fn->is_variadic);
+    arena_free(a);
+}
+
+TEST(parser, variadic_multi_named)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(char a, int b, ...) { return b; }\n", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(vec_size(fn->params), 2);
+    EXPECT_TRUE(fn->is_variadic);
+    arena_free(a);
+}
+
+TEST(parser, variadic_empty_params_rejected)
+{
+    /* C11 §6.7.6.3p8: `...` must follow at least one named parameter. */
+    EXPECT_PARSE_FAIL("int f(...) { return 0; }");
+}
+
+TEST(parser, variadic_not_last_rejected)
+{
+    EXPECT_PARSE_FAIL("int f(int a, ..., int b) { return a; }");
+}
+
+TEST(parser, fixed_param_list_not_variadic)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(void) { return 0; }\n", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(vec_size(fn->params), 0);
+    EXPECT_FALSE(fn->is_variadic);
+    arena_free(a);
+}

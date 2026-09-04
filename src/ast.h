@@ -125,6 +125,8 @@ struct ASTFuncDef
     Vec *params; /* Vec<ASTNode*> (parameter declarations; empty for void) */
     ASTNode *body;
     StorageClass storage; /* SC_STATIC = internal linkage */
+    bool is_variadic;     /* trailing unnamed args (C11 §6.7.6.3p8) */
+    Type *func_type;      /* interned function type (filled by semantic; NULL at parse time) */
 };
 
 typedef struct ASTCompoundStmt ASTCompoundStmt;
@@ -534,7 +536,7 @@ struct ASTCompoundLiteral
 };
 
 ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body,
-                      StorageClass storage, Loc loc, Arena *arena);
+                      StorageClass storage, bool is_variadic, Loc loc, Arena *arena);
 ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
 ASTNode *ast_return_stmt(ASTNode *expr, Loc loc, Arena *arena);
 ASTNode *ast_int_literal(i64 value, bool is_unsigned, IntSuffix length, bool is_hex, Loc loc,

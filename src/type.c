@@ -24,6 +24,7 @@ static const Type the_ullong = {.kind = TYPE_ULLONG, .width = 64, .align = 8, .s
 static Arena *type_arena;
 static U64Map *ptr_cache;
 static U64Map *array_cache;
+static U64Map *func_cache;
 
 /* MurmurHash3 finalizer (same avalanche as hash_u64): mixes the key so
    `elem`-pointer alignment and `length` low bits cannot alias. The naive
@@ -312,6 +313,7 @@ static void type_init_pool(void)
     type_arena = arena_new();
     ptr_cache = u64map_new(type_arena);
     array_cache = u64map_new(type_arena);
+    func_cache = u64map_new(type_arena);
     qual_cache = u64map_new(type_arena);
 }
 
@@ -356,6 +358,68 @@ Type *type_array(Type *elem, u64 length)
     t->arr.length = length;
     u64map_set(array_cache, key, t);
     return t;
+}
+
+/* Structural key for an interned function type: mixes the (interned, so
+   collision-free) ret/param pointers and the variadic bit. Uses the same
+   avalanche as the array cache so no low-bit aliasing survives. */
+static u64 func_key_mix(Type *ret, Vec *params, bool is_variadic)
+{
+    u64 key = type_key_mix((u64) (uintptr_t) ret);
+    key ^= type_key_mix(is_variadic ? 1 : 0);
+    size_t n = vec_size(params);
+    for (size_t i = 0; i < n; i++)
+    {
+        Type *pt = (Type *) vec_get(params, i);
+        key = type_key_mix(key ^ type_key_mix((u64) (uintptr_t) pt));
+    }
+    return key;
+}
+
+/* Best-effort interning (same pattern as ptr_cache/array_cache): on a hash
+   collision the stored candidate is verified structurally and a fresh type is
+   allocated on mismatch, so equal signature → pointer-equal, never wrong. */
+Type *type_func(Type *ret, Vec *params, bool is_variadic)
+{
+    type_init_pool();
+    u64 key = func_key_mix(ret, params, is_variadic);
+    Type *cached = u64map_get(func_cache, key);
+    if (cached && cached->kind == TYPE_FUNC && cached->func.ret == ret &&
+        cached->func.is_variadic == is_variadic &&
+        vec_size(cached->func.params) == vec_size(params))
+    {
+        bool match = true;
+        size_t n = vec_size(params);
+        for (size_t i = 0; i < n; i++)
+        {
+            if ((Type *) vec_get(cached->func.params, i) != (Type *) vec_get(params, i))
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+        {
+            return cached;
+        }
+    }
+    Type *t = arena_alloc(type_arena, sizeof(Type), _Alignof(Type));
+    t->kind = TYPE_FUNC;
+    t->width = 0;
+    t->align = 8;
+    t->size = 8;
+    t->qualifiers = 0;
+    t->unqual_base = NULL;
+    t->func.ret = ret;
+    t->func.params = params;
+    t->func.is_variadic = is_variadic;
+    u64map_set(func_cache, key, t);
+    return t;
+}
+
+bool type_is_variadic(Type *t)
+{
+    return t && t->kind == TYPE_FUNC && t->func.is_variadic;
 }
 
 Type *type_const(Type *t)

@@ -967,8 +967,12 @@ static ASTNode *parse_param(ParserCtx *p)
     return decl;
 }
 
-static Vec *parse_param_list(ParserCtx *p)
+static Vec *parse_param_list(ParserCtx *p, bool *out_is_variadic)
 {
+    if (out_is_variadic)
+    {
+        *out_is_variadic = false;
+    }
     Vec *params = vec_new(p->arena);
     Token *t = parser_peek(p);
 
@@ -987,6 +991,13 @@ static Vec *parse_param_list(ParserCtx *p)
         return params;
     }
 
+    /* `...` must follow at least one named parameter (C11 §6.7.6.3p8). */
+    if (t->kind == TOK_ELLIPSIS)
+    {
+        parser_error(p, "'...' must follow at least one named parameter");
+        return NULL;
+    }
+
     ASTNode *first = parse_param(p);
     if (!first)
     {
@@ -997,6 +1008,21 @@ static Vec *parse_param_list(ParserCtx *p)
     while (parser_peek(p)->kind == TOK_COMMA)
     {
         parser_advance(p);
+        if (parser_peek(p)->kind == TOK_ELLIPSIS)
+        {
+            /* `...` must be the final element of the parameter list. */
+            if (!(p->pos + 1 < p->count && p->tokens[p->pos + 1].kind == TOK_RPAREN))
+            {
+                parser_error(p, "expected ')' after '...'");
+                return NULL;
+            }
+            parser_advance(p);
+            if (out_is_variadic)
+            {
+                *out_is_variadic = true;
+            }
+            return params;
+        }
         ASTNode *next = parse_param(p);
         if (!next)
         {
@@ -2865,7 +2891,8 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
            after the body — mirroring semantic's structure. The compound
            statement pushes/pops its own nested scope. */
         push_name_scope(p);
-        Vec *params = parse_param_list(p);
+        bool is_variadic = false;
+        Vec *params = parse_param_list(p, &is_variadic);
         if (!params)
         {
             return NULL;
@@ -2883,7 +2910,8 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
         }
         pop_name_scope(p);
 
-        return ast_func_def(dtype, name, params, body, fn_storage, start->loc, p->arena);
+        return ast_func_def(dtype, name, params, body, fn_storage, is_variadic, start->loc,
+                            p->arena);
     }
 
     /* File-scope objects: an init-declarator list (multi-declarators share

@@ -24,7 +24,7 @@ static void *ast_new_node(size_t size, ASTKind kind, Loc loc, Arena *arena)
 }
 
 ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body,
-                      StorageClass storage, Loc loc, Arena *arena)
+                      StorageClass storage, bool is_variadic, Loc loc, Arena *arena)
 {
     ASTFuncDef *n = ast_new_node(sizeof(ASTFuncDef), AST_FUNC_DEF, loc, arena);
     n->ret_type = ret_type;
@@ -32,6 +32,8 @@ ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *bo
     n->params = params;
     n->body = body;
     n->storage = storage;
+    n->is_variadic = is_variadic;
+    n->func_type = NULL;
     return &n->base;
 }
 
@@ -488,7 +490,8 @@ static void ast_dump_rec(ASTNode *node, int depth)
         case AST_FUNC_DEF:
         {
             ASTFuncDef *func_def = ast_as(ASTFuncDef, node);
-            printf("FUNC_DEF %s -> %s\n", func_def->name, type_kind_name(func_def->ret_type->kind));
+            printf("FUNC_DEF %s -> %s%s\n", func_def->name,
+                   type_kind_name(func_def->ret_type->kind), func_def->is_variadic ? " ..." : "");
             ast_dump_rec(func_def->body, depth + 1);
             break;
         }

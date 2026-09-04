@@ -648,7 +648,17 @@ static bool lex_punct(LexerCtx *ctx)
             }
             break;
         case '.':
-            kind = TOK_DOT;
+            /* `...` is the variadic-parameter-list ellipsis (C11 §6.7.6.3p8);
+               `..` stays two TOK_DOTs and `.` is member access. */
+            if (n == '.' && ctx->p[2] == '.')
+            {
+                kind = TOK_ELLIPSIS;
+                advance = 3;
+            }
+            else
+            {
+                kind = TOK_DOT;
+            }
             break;
         case '*':
             if (n == '=')

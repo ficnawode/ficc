@@ -42,6 +42,7 @@
     X(TOK_KW_BOOL)                                                                                 \
     X(TOK_KW_ALIGNAS)                                                                              \
     X(TOK_DOT)                                                                                     \
+    X(TOK_ELLIPSIS)                                                                                \
     X(TOK_ARROW)                                                                                   \
     X(TOK_STRING_LIT)                                                                              \
     X(TOK_LPAREN)                                                                                  \

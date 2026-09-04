@@ -466,7 +466,19 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
 
     size_t expected = vec_size(callee->params);
     size_t got = vec_size(call_expr->args);
-    if (expected != got)
+    if (callee->is_variadic)
+    {
+        /* §6.5.2.2p6: the fixed (named) part is enforced; extra args are
+           legal. */
+        if (got < expected)
+        {
+            sem_error(call_expr->base.loc, "function '%s' expects at least %zu arguments, got %zu",
+                      call_expr->callee, expected, got);
+            ctx->error = true;
+            return false;
+        }
+    }
+    else if (expected != got)
     {
         sem_error(call_expr->base.loc, "function '%s' expects %zu arguments, got %zu",
                   call_expr->callee, expected, got);
@@ -485,6 +497,13 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
         if (!check_value_used(arg, ctx))
         {
             return false;
+        }
+        /* Only the named parameters have a declared type to check against;
+           the variadic tail is assignability-free here (default promotions
+           land in the IR builder). */
+        if (i >= expected)
+        {
+            continue;
         }
         ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(callee->params, i));
         if (!type_assignable(param->type, arg->expr_type))
@@ -2225,6 +2244,21 @@ static void collect_labels(ASTNode *node, SemanticCtx *ctx)
     }
 }
 
+/* The interned function type of a definition (D15.1): the return type and the
+   parameter types unqualified — top-level qualifiers are ignored for
+   function-type compatibility (§6.7.6.3p15) — plus the variadic bit. */
+static Type *build_func_type(ASTFuncDef *fn, SemanticCtx *ctx)
+{
+    Vec *param_types = vec_new(ctx->arena);
+    size_t nparams = vec_size(fn->params);
+    for (size_t i = 0; i < nparams; i++)
+    {
+        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->params, i));
+        vec_push(param_types, type_unqual(param->type));
+    }
+    return type_func(type_unqual(fn->ret_type), param_types, fn->is_variadic);
+}
+
 static bool check_func(ASTNode *node, SemanticCtx *ctx)
 {
     ASSERT(node->kind == AST_FUNC_DEF);
@@ -2243,6 +2277,7 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
         ctx->labels = saved_labels;
         return false;
     }
+    fn->func_type = build_func_type(fn, ctx);
 
     /* Labels may be referenced before they are defined (goto can jump forward),
        so collect them before checking the function body. */

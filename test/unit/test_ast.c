@@ -9,7 +9,8 @@ TEST(ast, func_def_constructor)
     Arena *a = arena_new();
     Vec *params = vec_new(a);
     ASTNode *body = ast_compound_stmt(vec_new(a), (Loc) {"t", 1, 1}, a);
-    ASTNode *node = ast_func_def(type_int(), "foo", params, body, SC_NONE, (Loc) {"t", 1, 1}, a);
+    ASTNode *node =
+        ast_func_def(type_int(), "foo", params, body, SC_NONE, false, (Loc) {"t", 1, 1}, a);
 
     EXPECT_NOTNULL(node);
     EXPECT_EQ(node->kind, AST_FUNC_DEF);
@@ -86,7 +87,8 @@ TEST(ast, dump_does_not_crash)
     Vec *params = vec_new(a);
     Vec *stmts = vec_new(a);
     ASTNode *body = ast_compound_stmt(stmts, (Loc) {"t", 1, 1}, a);
-    ASTNode *fn = ast_func_def(type_int(), "bar", params, body, SC_NONE, (Loc) {"t", 1, 1}, a);
+    ASTNode *fn =
+        ast_func_def(type_int(), "bar", params, body, SC_NONE, false, (Loc) {"t", 1, 1}, a);
     ast_dump(fn);
     arena_free(a);
 }

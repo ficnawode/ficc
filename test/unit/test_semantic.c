@@ -545,3 +545,69 @@ TEST(semantic, alignas_non_power_of_two_rejected)
                       "    return 0;\n"
                       "}\n");
 }
+
+TEST(semantic, variadic_call_named_only)
+{
+    EXPECT_BUILD_SUCCEED("int f(int a, ...) {\n"
+                         "    return a;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return f(1);\n"
+                         "}\n");
+}
+
+TEST(semantic, variadic_call_extra_args)
+{
+    /* Extra trailing args are legal (C11 §6.5.2.2p6) and flow through the
+       fixed-arg path in the IR builder, which guards callee param indexing. */
+    EXPECT_BUILD_SUCCEED("int f(int a, ...) {\n"
+                         "    return a;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return f(1, 2, 3);\n"
+                         "}\n");
+}
+
+TEST(semantic, variadic_call_too_few_args)
+{
+    EXPECT_BUILD_FAIL("int f(int a, ...) {\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f();\n"
+                      "}\n");
+}
+
+TEST(semantic, variadic_multi_named_call)
+{
+    EXPECT_BUILD_SUCCEED("int f(int a, int b, ...) {\n"
+                         "    return a + b;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return f(20, 22, 1, 2, 3);\n"
+                         "}\n");
+}
+
+TEST(semantic, variadic_only_named_args_matched)
+{
+    /* The named parameters must still be assignability-checked; the trailing
+       arg is not (it has no declared type yet — default promotions land in
+       the IR builder). */
+    EXPECT_BUILD_SUCCEED("int f(int a, ...) {\n"
+                         "    return a;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    char c = 5;\n"
+                         "    return f(7, c);\n"
+                         "}\n");
+}
+
+TEST(semantic, nonvariadic_arity_unchanged)
+{
+    EXPECT_BUILD_FAIL("int f(int a) {\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1, 2);\n"
+                      "}\n");
+}

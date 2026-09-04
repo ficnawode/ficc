@@ -400,8 +400,16 @@ static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
     Frame *callee_fr = frame_new(ctx->frame_arena, callee, ctx->nregs);
     vec_push(ctx->stack, callee_fr);
+    size_t nparams = vec_size(callee->params);
     for (u32 a = 0; a < in->extra.call.nargs; a++)
     {
+        /* Extra trailing args (variadic calls, Phase 15a) have no declared
+           parameter: only the named part is bound into the callee frame here.
+           The varargs save-area materialization is a later sub-phase. */
+        if (a >= nparams)
+        {
+            continue;
+        }
         IrParam *p = (IrParam *) vec_get(callee->params, a);
         callee_fr->regs[p->vreg] = operand_val(ctx, in->extra.call.args[a], regs);
         u8 pw = ctx->mod->widths[p->vreg];

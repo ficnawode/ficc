@@ -92,6 +92,14 @@ struct Type
             const char *tag; /* identity + diagnostics */
             bool complete;   /* set by the enum definition */
         } enumm;             /* TYPE_ENUM: underlying int, no members */
+        struct
+        {
+            /* top-level qualifiers stripped (C11 §6.7.6.3p15) */
+            Type *ret;
+            /* Vec<Type*>, already type_unqual'd; empty for (void) */
+            Vec *params;
+            bool is_variadic;
+        } func; /* TYPE_FUNC */
     };
 };
 
@@ -122,6 +130,8 @@ bool type_is_const(Type *t);
 
 Type *type_ptr(Type *pointee);
 Type *type_array(Type *elem, u64 length);
+Type *type_func(Type *ret, Vec *params, bool is_variadic);
+bool type_is_variadic(Type *t);
 Type *type_record(TypeKind kind, const char *tag);
 Type *type_record_anon(TypeKind kind);
 void type_record_complete(Type *t, Vec *fields);

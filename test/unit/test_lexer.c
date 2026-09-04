@@ -136,6 +136,45 @@ TEST(lexer, operators)
     arena_free(a);
 }
 
+TEST(lexer, ellipsis)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "...", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_ELLIPSIS);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, dot_is_not_ellipsis)
+{
+    /* A lone `.` and a `..` pair stay TOK_DOT (member access / GNU ranges
+       stay lexable); only three consecutive dots are TOK_ELLIPSIS. */
+    Arena *a = arena_new();
+    LexResult res = lex("t", "..", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 3);
+    EXPECT_EQ(t[0].kind, TOK_DOT);
+    EXPECT_EQ(t[1].kind, TOK_DOT);
+    EXPECT_EQ(t[2].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, member_dot_unchanged)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", ".", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_DOT);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
 TEST(lexer, block_comment)
 {
     Arena *a = arena_new();
