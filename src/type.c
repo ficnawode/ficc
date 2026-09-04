@@ -474,6 +474,29 @@ Type *type_record(TypeKind kind, const char *tag)
     return t;
 }
 
+/* An anonymous record definition (`typedef struct { ... } Name;`,
+   `struct { ... } v;`): a *fresh* tagless type, never interened by tag, never
+   in tag_table. C11 §6.7.2.1p7: each such definition is a distinct type. The
+   caller parses the member list and completes it with type_record_complete. */
+Type *type_record_anon(TypeKind kind)
+{
+    ASSERT(kind == TYPE_STRUCT || kind == TYPE_UNION);
+    type_init_tags();
+
+    Type *t = arena_alloc(tag_arena, sizeof(Type), _Alignof(Type));
+    t->kind = kind;
+    t->width = 0;
+    t->align = 1;
+    t->size = 0;
+    t->qualifiers = 0;
+    t->unqual_base = NULL;
+    t->record.tag = NULL;
+    t->record.fields = NULL;
+    t->record.complete = false;
+    t->record.qual_variants = NULL;
+    return t;
+}
+
 static u32 align_up(u32 n, u32 align)
 {
     return (n + align - 1) / align * align;
@@ -564,6 +587,25 @@ Type *type_enum(const char *tag)
     t->enumm.tag = tag_intern(tag);
     t->enumm.complete = false;
     strmap_set(tag_table, t->enumm.tag, t);
+    return t;
+}
+
+Type *type_enum_anon(void)
+{
+    type_init_tags();
+
+    /* Anonymous enum definition (`enum { A, B } v;`, `typedef enum { ... }
+       E;`): a fresh type, never interned by tag (C11: distinct type per
+       definition). */
+    Type *t = arena_alloc(tag_arena, sizeof(Type), _Alignof(Type));
+    t->kind = TYPE_ENUM;
+    t->width = type_int()->width;
+    t->align = type_int()->align;
+    t->size = type_int()->size;
+    t->qualifiers = 0;
+    t->unqual_base = NULL;
+    t->enumm.tag = NULL;
+    t->enumm.complete = true;
     return t;
 }
 

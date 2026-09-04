@@ -992,3 +992,166 @@ TEST(parser, comma_not_in_case)
 {
     EXPECT_PARSE_FAIL("int main(void) { int x = 1; switch (x) { case 1, 2: return 0; } }\n");
 }
+
+TEST(parser, llong_specifier_types)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("long long ll;\n"
+                            "unsigned long long ull;\n"
+                            "signed char sc;\n"
+                            "signed s;\n"
+                            "long int li;\n"
+                            "signed long long int slli;\n"
+                            "int main(void) { return 0; }\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    EXPECT_EQ(vec_size(prog->decls), 7);
+    ASTVarDecl *d0 = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(d0->type->kind, TYPE_LLONG);
+    ASTVarDecl *d1 = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 1));
+    EXPECT_EQ(d1->type->kind, TYPE_ULLONG);
+    ASTVarDecl *d2 = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 2));
+    EXPECT_EQ(d2->type->kind, TYPE_CHAR);
+    EXPECT_TRUE(type_is_signed(d2->type));
+    ASTVarDecl *d3 = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 3));
+    EXPECT_EQ(d3->type->kind, TYPE_INT);
+    ASTVarDecl *d4 = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 4));
+    EXPECT_EQ(d4->type->kind, TYPE_LONG);
+    ASTVarDecl *d5 = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 5));
+    EXPECT_EQ(d5->type->kind, TYPE_LLONG);
+    arena_free(a);
+}
+
+TEST(parser, multi_declarator_shape)
+{
+    /* Two or more declarators wrap in AST_DECL_LIST; the specifier type is
+       shared and each declarator's decorators are independent. */
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int a = 1, b = 2;\n"
+                            "int main(void) { return 0; }\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTDeclList *dl = ast_as(ASTDeclList, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_NOTNULL(dl);
+    EXPECT_EQ(vec_size(dl->decls), 2);
+    ASTVarDecl *a0 = ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, 0));
+    EXPECT_STR_EQ(a0->name, "a");
+    EXPECT_EQ(a0->type->kind, TYPE_INT);
+    ASTVarDecl *a1 = ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, 1));
+    EXPECT_STR_EQ(a1->name, "b");
+    EXPECT_EQ(a1->type->kind, TYPE_INT);
+    arena_free(a);
+}
+
+TEST(parser, declarator_star_split)
+{
+    /* `int *a, b;` — a is a pointer, b stays int. */
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int *a, b;\n"
+                            "int main(void) { return 0; }\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTDeclList *dl = ast_as(ASTDeclList, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_NOTNULL(dl);
+    ASTVarDecl *a0 = ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, 0));
+    EXPECT_EQ(a0->type->kind, TYPE_PTR);
+    EXPECT_EQ(type_deref(a0->type)->kind, TYPE_INT);
+    ASTVarDecl *a1 = ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, 1));
+    EXPECT_STR_EQ(a1->name, "b");
+    EXPECT_EQ(a1->type->kind, TYPE_INT);
+    arena_free(a);
+}
+
+TEST(parser, single_declarator_no_list)
+{
+    /* One declarator stays a bare AST_VAR_DECL (no wrapper node). */
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int a;\n"
+                            "int main(void) { return 0; }\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    EXPECT_EQ(((ASTNode *) vec_get(prog->decls, 0))->kind, AST_VAR_DECL);
+    arena_free(a);
+}
+
+TEST(parser, anon_struct_typedef)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("typedef struct { int x; int y; } Point;\n"
+                            "int main(void) {\n"
+                            "    Point p;\n"
+                            "    p.x = 1;\n"
+                            "    return 0;\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTTypedefDecl *td = ast_as(ASTTypedefDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_NOTNULL(td);
+    EXPECT_STR_EQ(td->name, "Point");
+    EXPECT_TRUE(type_is_record(td->type));
+    EXPECT_TRUE(type_is_complete(td->type));
+    arena_free(a);
+}
+
+TEST(parser, block_scope_tag_definition_statement)
+{
+    /* `struct S { ... };` inside a function is a no-op statement whose type
+       is complete and usable afterwards. */
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    struct S { int v; };\n"
+                            "    struct S s;\n"
+                            "    s.v = 42;\n"
+                            "    return s.v;\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    EXPECT_EQ(vec_size(body->stmts), 4);
+    EXPECT_EQ(((ASTNode *) vec_get(body->stmts, 0))->kind, AST_STRUCT_DECL);
+    arena_free(a);
+}
+
+TEST(parser, combined_definition_declarator)
+{
+    /* `struct S { int lo; } v;` — one declaration, complete type plus the
+       variable. */
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    struct P { int lo; } pr;\n"
+                            "    pr.lo = 42;\n"
+                            "    return pr.lo;\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    EXPECT_EQ(vec_size(body->stmts), 3);
+    ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_NOTNULL(vd);
+    EXPECT_TRUE(type_is_record(vd->type));
+    EXPECT_TRUE(type_is_complete(vd->type));
+    arena_free(a);
+}
+
+TEST(parser, anon_enum_typedef)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("typedef enum { A, B } Kind;\n"
+                            "int main(void) { return B; }\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTTypedefDecl *td = ast_as(ASTTypedefDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_NOTNULL(td);
+    EXPECT_TRUE(type_is_enum(td->type));
+    arena_free(a);
+}

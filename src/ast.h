@@ -43,7 +43,8 @@
     X(AST_CAST_EXPR)                                                                               \
     X(AST_TYPEDEF_DECL)                                                                            \
     X(AST_INIT_LIST)                                                                               \
-    X(AST_COMPOUND_LITERAL)
+    X(AST_COMPOUND_LITERAL)                                                                        \
+    X(AST_DECL_LIST)
 
 typedef enum
 {
@@ -168,6 +169,21 @@ struct ASTVarDecl
     bool is_block_scope;   /* declared inside a function body (vs file scope) */
     struct InitPlan *plan; /* flattening plan for aggregate/string initializers
                               (filled by semantic; NULL otherwise) */
+};
+
+/* An init-declarator list `int a = 1, b = 2;` (C11 §6.7.6) — several
+   declarators sharing one declaration-specifier sequence. The parser returns
+   a bare AST_VAR_DECL for a single declarator and wraps the list in this node
+   only when there are two or more; every declarator shares the declared
+   type, and each pointer/array decorator applies per-declarator (`int *a, b;`
+   makes a a pointer and b an int). Finger, the AST's comma sits at the
+   assignment-expression level, so this node mirrors Phase 13d's separator
+   boundary: the list comma is a separator, never a BIN_COMMA. */
+typedef struct ASTDeclList ASTDeclList;
+struct ASTDeclList
+{
+    ASTNode base;
+    Vec *decls; /* Vec<ASTVarDecl*> */
 };
 
 typedef struct ASTExprStmt ASTExprStmt;
@@ -497,6 +513,7 @@ ASTNode *ast_int_literal(i64 value, bool is_unsigned, IntSuffix length, bool is_
 ASTNode *ast_program(Vec *decls, Loc loc, Arena *arena);
 ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, StorageClass storage, Loc loc,
                       Arena *arena);
+ASTNode *ast_decl_list(Vec *decls, Loc loc, Arena *arena);
 ASTNode *ast_expr_stmt(ASTNode *expr, Loc loc, Arena *arena);
 ASTNode *ast_binary_expr(BinOpKind op, ASTNode *left, ASTNode *right, Loc loc, Arena *arena);
 ASTNode *ast_unary_expr(UnaryOpKind op, ASTNode *operand, Loc loc, Arena *arena);

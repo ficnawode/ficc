@@ -82,6 +82,13 @@ ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, StorageClass 
     return &n->base;
 }
 
+ASTNode *ast_decl_list(Vec *decls, Loc loc, Arena *arena)
+{
+    ASTDeclList *n = ast_new_node(sizeof(ASTDeclList), AST_DECL_LIST, loc, arena);
+    n->decls = decls;
+    return &n->base;
+}
+
 ASTNode *ast_expr_stmt(ASTNode *expr, Loc loc, Arena *arena)
 {
     ASTExprStmt *n = ast_new_node(sizeof(ASTExprStmt), AST_EXPR_STMT, loc, arena);
@@ -498,6 +505,13 @@ static void ast_dump_rec(ASTNode *node, int depth)
             {
                 ast_dump_rec(var_decl->init, depth + 1);
             }
+            break;
+        }
+        case AST_DECL_LIST:
+        {
+            ASTDeclList *dl = ast_as(ASTDeclList, node);
+            printf("DECL_LIST\n");
+            dump_node_list(dl->decls, depth + 1);
             break;
         }
         case AST_EXPR_STMT:

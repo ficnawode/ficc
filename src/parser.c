@@ -144,6 +144,22 @@ static bool name_declare(ParserCtx *p, const char *name, ParserBindingKind kind,
 
 static Type *parse_type_specifier(ParserCtx *p);
 static Type *parse_array_suffix(ParserCtx *p, Type *type);
+
+/* Declaration specifiers: the base type of a declaration plus the tag-
+   definition node produced by an inline *tagged* struct/union/enum
+   definition (`struct S { ... }` / `enum E { ... }`), or NULL. A caller
+   emits `tag_def` only for a declaration with zero declarators
+   (`struct S { ... };`); a combined `struct S { ... } v;` drops it — the
+   type is complete the moment the specifier returns, so the declarator
+   carries it. Anonymous definitions never produce a node (the declarator or
+   typedef name is the only witness). */
+typedef struct DeclSpecifiers
+{
+    Type *type;
+    ASTNode *tag_def;
+} DeclSpecifiers;
+
+static DeclSpecifiers parse_decl_specifiers(ParserCtx *p);
 static ASTNode *parse_expr(ParserCtx *p);
 static ASTNode *parse_expression(ParserCtx *p);
 static ASTNode *parse_stmt(ParserCtx *p);
@@ -156,6 +172,10 @@ static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out);
 static bool parser_check_not_enumerator(ParserCtx *p, const char *name);
 static ASTNode *parse_unary(ParserCtx *p);
 static ASTNode *parse_typedef_decl(ParserCtx *p);
+static Vec *parse_record_body(ParserCtx *p, Type *rec);
+static bool parse_enumerator_body(ParserCtx *p, Vec *constants, i64 *next_value);
+static bool parse_declarator(ParserCtx *p, Type *base, Type **out_type, const char **out_name);
+static bool resolve_constant_init(ParserCtx *p, ASTVarDecl *vd, ASTNode *expr);
 
 /* The token kinds that can begin a type specifier. Used to disambiguate a
    cast `(type)expr` from a parenthesized expression: a cast must open with
@@ -166,8 +186,8 @@ static ASTNode *parse_typedef_decl(ParserCtx *p);
 static bool is_type_start(TokenKind k)
 {
     return k == TOK_KW_INT || k == TOK_KW_CHAR || k == TOK_KW_SHORT || k == TOK_KW_LONG ||
-           k == TOK_KW_UNSIGNED || k == TOK_KW_VOID || k == TOK_KW_STRUCT || k == TOK_KW_UNION ||
-           k == TOK_KW_ENUM;
+           k == TOK_KW_UNSIGNED || k == TOK_KW_SIGNED || k == TOK_KW_VOID || k == TOK_KW_STRUCT ||
+           k == TOK_KW_UNION || k == TOK_KW_ENUM;
 }
 
 static bool is_typename_start_at(ParserCtx *p, size_t pos)
@@ -220,8 +240,408 @@ static ASTNode *parse_postfix(ParserCtx *p);
 static ASTNode *parse_initializer(ParserCtx *p);
 static ASTNode *parse_init_list(ParserCtx *p);
 
-static Type *parse_type_specifier(ParserCtx *p)
+/* A struct/union member `type-specifier declarator-list ;` — the field-
+   declarator list (§6.7.6, field-declaration in §6.7.2.1p8). Supports
+   multi-declarators (`int a, b;`) and inline/definitions of nested records.
+   Returns a single ASTVarDecl or an AST_DECL_LIST. */
+static ASTNode *parse_member_decl_body(ParserCtx *p, Type *base, Token *start)
 {
+    if (parser_peek(p)->kind == TOK_SEMI)
+    {
+        parser_error(p, "member declaration must declare a member");
+        return NULL;
+    }
+
+    Vec *decls = vec_new(p->arena);
+    while (true)
+    {
+        Type *dtype;
+        const char *name;
+        if (!parse_declarator(p, base, &dtype, &name))
+        {
+            return NULL;
+        }
+        if (!parser_check_not_enumerator(p, name))
+        {
+            return NULL;
+        }
+        vec_push(decls, ast_var_decl(dtype, name, NULL, SC_NONE, start->loc, p->arena));
+        if (parser_peek(p)->kind != TOK_COMMA)
+        {
+            break;
+        }
+        parser_advance(p);
+    }
+    if (!parser_expect(p, TOK_SEMI, "';'"))
+    {
+        return NULL;
+    }
+    if (vec_size(decls) == 1)
+    {
+        return (ASTNode *) vec_get(decls, 0);
+    }
+    return ast_decl_list(decls, start->loc, p->arena);
+}
+
+/* Unfolds a member ASTNode (VARDECL or DECL_LIST) into the record's
+   field-layout table. */
+static void push_member_fields(Arena *arena, Vec *record_fields, ASTNode *member)
+{
+    if (member->kind == AST_DECL_LIST)
+    {
+        ASTDeclList *dl = ast_as(ASTDeclList, member);
+        size_t n = vec_size(dl->decls);
+        for (size_t i = 0; i < n; i++)
+        {
+            ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, i));
+            RecordField *rf = arena_alloc(arena, sizeof(RecordField), _Alignof(RecordField));
+            rf->name = vd->name;
+            rf->type = vd->type;
+            rf->offset = 0;
+            vec_push(record_fields, rf);
+        }
+        return;
+    }
+    ASTVarDecl *vd = ast_as(ASTVarDecl, member);
+    RecordField *rf = arena_alloc(arena, sizeof(RecordField), _Alignof(RecordField));
+    rf->name = vd->name;
+    rf->type = vd->type;
+    rf->offset = 0;
+    vec_push(record_fields, rf);
+}
+
+/* A struct/union definition `{ member-or-declarator-list }`. Members are
+   parsed from the shared declaration machinery (multi-declarator lists are
+   legal: `struct S { int a, b; };`). The record is completed here, at parse
+   time, exactly like file-scope definitions always were — the type registry
+   is downstream's only witness. Returns the flattened member list (for the
+   tag-def AST node's dump). */
+static Vec *parse_record_body(ParserCtx *p, Type *rec)
+{
+    if (!parser_expect(p, TOK_LBRACE, "'{'"))
+    {
+        return NULL;
+    }
+
+    Vec *field_decls = vec_new(p->arena);   /* Vec<ASTNode*>: VAR_DECL or DECL_LIST */
+    Vec *record_fields = vec_new(p->arena); /* Vec<RecordField*> */
+    while (parser_peek(p)->kind != TOK_RBRACE)
+    {
+        Token *mstart = parser_peek(p);
+        DeclSpecifiers mspecs = parse_decl_specifiers(p);
+        if (!mspecs.type)
+        {
+            return NULL;
+        }
+
+        ASTNode *member = parse_member_decl_body(p, mspecs.type, mstart);
+        if (!member)
+        {
+            return NULL;
+        }
+        vec_push(field_decls, member);
+        push_member_fields(p->arena, record_fields, member);
+    }
+    if (!parser_expect(p, TOK_RBRACE, "'}'"))
+    {
+        return NULL;
+    }
+    type_record_complete(rec, record_fields);
+    return field_decls;
+}
+
+/* `{ enumerator = const, ... }` of an enum definition: registers every
+   enumerator in the parser's enum-constant table (visible in expressions
+   from here on, parse time) and fills `constants`. */
+static bool parse_enumerator_body(ParserCtx *p, Vec *constants, i64 *next_value)
+{
+    if (!parser_expect(p, TOK_LBRACE, "'{'"))
+    {
+        return false;
+    }
+
+    while (parser_peek(p)->kind != TOK_RBRACE)
+    {
+        Token *name_tok = parser_peek(p);
+        if (name_tok->kind != TOK_IDENT)
+        {
+            parser_error(p, "expected enumerator name");
+            return false;
+        }
+        parser_advance(p);
+        const char *name = name_tok->payload.str;
+
+        if (strmap_get(p->enum_consts, name))
+        {
+            parser_error(p, "redefinition of enumerator '%s'", name);
+            return false;
+        }
+
+        i64 value = *next_value; /* auto-increment (C11 §6.7.2.2p3) */
+        if (parser_peek(p)->kind == TOK_ASSIGN)
+        {
+            parser_advance(p);
+            ASTNode *init = parse_assign(p);
+            if (!init)
+            {
+                return false;
+            }
+            if (!fold_constant_expr(p, init, &value))
+            {
+                parser_error(p, "enumerator value is not an integer constant expression");
+                return false;
+            }
+        }
+
+        if (value < INT32_MIN || value > INT32_MAX)
+        {
+            parser_error(p, "enumerator value out of range (must fit in int)");
+            return false;
+        }
+
+        i64 *slot = arena_alloc(p->arena, sizeof(i64), _Alignof(i64));
+        *slot = value;
+        strmap_set(p->enum_consts, name, slot);
+
+        EnumConstant *c = arena_alloc(p->arena, sizeof(EnumConstant), _Alignof(EnumConstant));
+        c->name = name;
+        c->value = value;
+        vec_push(constants, c);
+
+        *next_value = value + 1;
+
+        TokenKind sep = parser_peek(p)->kind;
+        if (sep == TOK_COMMA)
+        {
+            parser_advance(p);
+        }
+        else if (sep != TOK_RBRACE)
+        {
+            parser_error(p, "expected ',' or '}' in enum declaration");
+            return false;
+        }
+    }
+    return parser_expect(p, TOK_RBRACE, "'}'");
+}
+
+/* `struct`/`union` type specifier: optionl tag, optional inline definition
+   (completes the type immediately), or a reference. Anonymous definitions
+   create a fresh interned type (C11: each is distinct). */
+static Type *parse_record_specifier(ParserCtx *p, bool is_union, ASTNode **tag_def)
+{
+    Token *kw = parser_peek(p);
+    ASSERT(kw->kind == TOK_KW_STRUCT || kw->kind == TOK_KW_UNION);
+    parser_advance(p);
+    TypeKind kind = is_union ? TYPE_UNION : TYPE_STRUCT;
+
+    const char *tag = NULL;
+    Type *ty = NULL;
+    Token *nt = parser_peek(p);
+    if (nt->kind == TOK_IDENT)
+    {
+        tag = nt->payload.str;
+        parser_advance(p);
+        Type *existing = type_record_lookup(tag);
+        if (existing && existing->kind != kind)
+        {
+            parser_error(p, "tag '%s' redeclared with a different kind", tag);
+            return NULL;
+        }
+        ty = type_record(kind, tag); /* register incomplete before members (self-ref) */
+        nt = parser_peek(p);
+    }
+
+    if (nt->kind == TOK_LBRACE)
+    {
+        if (ty && ty->record.complete)
+        {
+            parser_error(p, "redefinition of '%s'", tag);
+            return NULL;
+        }
+        if (!ty)
+        {
+            ty = type_record_anon(kind);
+        }
+        Vec *fields = parse_record_body(p, ty);
+        if (!fields)
+        {
+            return NULL;
+        }
+        if (tag)
+        {
+            *tag_def = ast_struct_decl(tag, is_union, fields, kw->loc, p->arena);
+        }
+        return ty;
+    }
+
+    if (tag)
+    {
+        /* A reference to an existing or forward-declared record. When a bare
+           `struct TAG;` follows, the top-level/statement `;` path emits the
+           (empty-fields) tag-def node for the declaration. */
+        *tag_def = ast_struct_decl(tag, is_union, vec_new(p->arena), kw->loc, p->arena);
+        return ty;
+    }
+    parser_error(p, "expected tag name or '{' after '%s'", is_union ? "union" : "struct");
+    return NULL;
+}
+
+/* `enum` type specifier: optional tag, optional inline definition (registers
+   the enumerators, completes the type), or a reference to a defined enum. */
+static Type *parse_enum_specifier(ParserCtx *p, ASTNode **tag_def)
+{
+    Token *kw = parser_peek(p);
+    ASSERT(kw->kind == TOK_KW_ENUM);
+    parser_advance(p);
+
+    const char *tag = NULL;
+    Type *ty = NULL;
+    Token *nt = parser_peek(p);
+    if (nt->kind == TOK_IDENT)
+    {
+        tag = nt->payload.str;
+        parser_advance(p);
+        Type *existing = type_record_lookup(tag);
+        if (existing && existing->kind != TYPE_ENUM)
+        {
+            parser_error(p, "tag '%s' redeclared with a different kind", tag);
+            return NULL;
+        }
+        ty = type_enum(tag);
+        nt = parser_peek(p);
+    }
+
+    if (nt->kind == TOK_LBRACE)
+    {
+        if (ty && ty->enumm.complete)
+        {
+            parser_error(p, "redefinition of '%s'", tag);
+            return NULL;
+        }
+        Vec *constants = vec_new(p->arena);
+        i64 next_value = 0;
+        if (!parse_enumerator_body(p, constants, &next_value))
+        {
+            return NULL;
+        }
+        if (!ty)
+        {
+            ty = type_enum_anon();
+        }
+        else
+        {
+            ty->enumm.complete = true;
+        }
+        /* Definitions always produce a node so a bare `enum { ... };`
+           declaration has something to return; anonymous tags go out as a
+           tag-less AST_ENUM_DECL (downstream no-op). */
+        *tag_def = ast_enum_decl(tag, constants, kw->loc, p->arena);
+        return ty;
+    }
+
+    if (tag)
+    {
+        return ty; /* reference to a defined enum */
+    }
+    parser_error(p, "expected '{' after enum tag; enum types cannot be incomplete");
+    return NULL;
+}
+
+/* Maps a sequence of integer type-specifier keywords to a Type (C11 §6.7.2
+   int/char/signed/unsigned/short/long combinations). Ficc's plain `char` is a
+   signed 8-bit type, so `signed char` is the same Type as `char`. */
+static Type *parse_integer_specifiers(ParserCtx *p)
+{
+    int n_signed = 0;
+    int n_unsigned = 0;
+    int n_char = 0;
+    int n_short = 0;
+    int n_int = 0;
+    int n_long = 0;
+
+    Token *t = parser_peek(p);
+    while (t->kind == TOK_KW_SIGNED || t->kind == TOK_KW_UNSIGNED || t->kind == TOK_KW_CHAR ||
+           t->kind == TOK_KW_SHORT || t->kind == TOK_KW_INT || t->kind == TOK_KW_LONG)
+    {
+        switch (t->kind)
+        {
+            case TOK_KW_SIGNED:
+                n_signed++;
+                break;
+            case TOK_KW_UNSIGNED:
+                n_unsigned++;
+                break;
+            case TOK_KW_CHAR:
+                n_char++;
+                break;
+            case TOK_KW_SHORT:
+                n_short++;
+                break;
+            case TOK_KW_INT:
+                n_int++;
+                break;
+            case TOK_KW_LONG:
+                n_long++;
+                break;
+            default:
+                break; /* while-condition filters to exactly these kinds */
+        }
+        parser_advance(p);
+        t = parser_peek(p);
+    }
+
+    /* §6.7.2p2 constraint checks. */
+    if (n_signed && n_unsigned)
+    {
+        parser_error(p, "cannot combine 'signed' and 'unsigned'");
+        return NULL;
+    }
+    if (n_signed > 1 || n_unsigned > 1 || n_int > 1)
+    {
+        parser_error(p, "duplicate type specifier");
+        return NULL;
+    }
+    if (n_char && (n_short || n_int || n_long))
+    {
+        parser_error(p, "cannot combine 'char' with short/int/long");
+        return NULL;
+    }
+    if (n_short && n_long)
+    {
+        parser_error(p, "cannot combine 'short' and 'long'");
+        return NULL;
+    }
+    if (n_long > 2)
+    {
+        parser_error(p, "too many 'long' type specifiers");
+        return NULL;
+    }
+
+    if (n_char)
+    {
+        return n_unsigned ? type_uchar() : type_char();
+    }
+    if (n_short)
+    {
+        return n_unsigned ? type_ushort() : type_short();
+    }
+    if (n_long)
+    {
+        if (n_unsigned)
+        {
+            return n_long >= 2 ? type_ullong() : type_ulong();
+        }
+        return n_long >= 2 ? type_llong() : type_long();
+    }
+    return n_unsigned ? type_uint() : type_int();
+}
+
+/* Full declaration-specifier list: leading + trailing qualifiers around a
+   specifier. Does NOT consume declarator decorators (`*`, `[dims]`) — those
+   belong to the per-declarator layer, so `int *a, b;` splits correctly. */
+static DeclSpecifiers parse_decl_specifiers(ParserCtx *p)
+{
+    DeclSpecifiers out = {NULL, NULL};
     Token *t = parser_peek(p);
     Type *ty = NULL;
 
@@ -237,96 +657,24 @@ static Type *parse_type_specifier(ParserCtx *p)
     switch (t->kind)
     {
         case TOK_KW_INT:
-            parser_advance(p);
-            ty = type_int();
+        case TOK_KW_CHAR:
+        case TOK_KW_SHORT:
+        case TOK_KW_LONG:
+        case TOK_KW_UNSIGNED:
+        case TOK_KW_SIGNED:
+            ty = parse_integer_specifiers(p);
             break;
         case TOK_KW_VOID:
             parser_advance(p);
             ty = type_void();
             break;
-        case TOK_KW_CHAR:
-            parser_advance(p);
-            ty = type_char();
-            break;
-        case TOK_KW_SHORT:
-            parser_advance(p);
-            ty = type_short();
-            break;
-        case TOK_KW_LONG:
-            parser_advance(p);
-            ty = type_long();
-            break;
-        case TOK_KW_UNSIGNED:
-        {
-            parser_advance(p);
-            Token *next = parser_peek(p);
-            if (next->kind == TOK_KW_INT)
-            {
-                parser_advance(p);
-                ty = type_uint();
-            }
-            else if (next->kind == TOK_KW_CHAR)
-            {
-                parser_advance(p);
-                ty = type_uchar();
-            }
-            else if (next->kind == TOK_KW_SHORT)
-            {
-                parser_advance(p);
-                ty = type_ushort();
-            }
-            else if (next->kind == TOK_KW_LONG)
-            {
-                parser_advance(p);
-                ty = type_ulong();
-            }
-            else
-            {
-                ty = type_uint();
-            }
-            break;
-        }
         case TOK_KW_STRUCT:
         case TOK_KW_UNION:
-        {
-            bool is_union = t->kind == TOK_KW_UNION;
-            parser_advance(p);
-            Token *tag_tok = parser_peek(p);
-            if (tag_tok->kind != TOK_IDENT)
-            {
-                parser_error(p, "expected tag name after '%s'", is_union ? "union" : "struct");
-                return NULL;
-            }
-            parser_advance(p);
-            TypeKind kind = is_union ? TYPE_UNION : TYPE_STRUCT;
-            Type *existing = type_record_lookup(tag_tok->payload.str);
-            if (existing && existing->kind != kind)
-            {
-                parser_error(p, "tag '%s' redeclared with a different kind", tag_tok->payload.str);
-                return NULL;
-            }
-            ty = type_record(kind, tag_tok->payload.str);
+            ty = parse_record_specifier(p, t->kind == TOK_KW_UNION, &out.tag_def);
             break;
-        }
         case TOK_KW_ENUM:
-        {
-            parser_advance(p);
-            Token *tag_tok = parser_peek(p);
-            if (tag_tok->kind != TOK_IDENT)
-            {
-                parser_error(p, "expected tag name after 'enum'");
-                return NULL;
-            }
-            parser_advance(p);
-            Type *existing = type_record_lookup(tag_tok->payload.str);
-            if (existing && existing->kind != TYPE_ENUM)
-            {
-                parser_error(p, "tag '%s' redeclared with a different kind", tag_tok->payload.str);
-                return NULL;
-            }
-            ty = type_enum(tag_tok->payload.str);
+            ty = parse_enum_specifier(p, &out.tag_def);
             break;
-        }
         case TOK_IDENT:
         {
             /* A typedef name is a full declaration specifier (D12.3): the
@@ -341,11 +689,15 @@ static Type *parse_type_specifier(ParserCtx *p)
                 break;
             }
             parser_error(p, "expected type specifier");
-            return NULL;
+            return out;
         }
         default:
             parser_error(p, "expected type specifier");
-            return NULL;
+            return out;
+    }
+    if (!ty)
+    {
+        return out;
     }
 
     /* Trailing qualifiers apply to the type itself: `int const x`. */
@@ -359,57 +711,149 @@ static Type *parse_type_specifier(ParserCtx *p)
         ty = type_const(ty);
     }
 
-    /* Postfix type operators: * only ([] is part of declarator). A qualifier
-       after a `*` applies to the pointer being formed: `int * const p`. */
+    out.type = ty;
+    return out;
+}
+
+static Type *parse_type_specifier(ParserCtx *p)
+{
+    return parse_decl_specifiers(p).type;
+}
+
+/* The abstract-declarator version of the pointer decorators
+   (`{* const}*`): a type-name in cast/sizeof position, which cannot carry a
+   name. Array suffixes remain the caller's (casts/sizeof route them through
+   parse_array_suffix). */
+static Type *parse_abstract_declarator(ParserCtx *p, Type *base)
+{
     while (parser_peek(p)->kind == TOK_STAR)
     {
         parser_advance(p);
-        ty = type_ptr(ty);
+        base = type_ptr(base);
         while (parser_peek(p)->kind == TOK_KW_CONST)
         {
             parser_advance(p);
-            ty = type_const(ty);
+            base = type_const(base);
         }
     }
-
-    return ty;
+    return base;
 }
 
-static ASTNode *parse_param(ParserCtx *p)
+/* A concrete declarator `{* const}* name [dims]` attached to a specifier's
+   base type. `int *a, b;` gives a and b the same base with independent
+   decorators (`b` stays `int`). */
+static bool parse_declarator(ParserCtx *p, Type *base, Type **out_type, const char **out_name)
 {
-    Token *start = parser_peek(p);
-    Type *type = parse_type_specifier(p);
-    if (!type)
+    *out_type = base;
+    *out_name = NULL;
+
+    while (parser_peek(p)->kind == TOK_STAR)
     {
-        return NULL;
+        parser_advance(p);
+        *out_type = type_ptr(*out_type);
+        while (parser_peek(p)->kind == TOK_KW_CONST)
+        {
+            parser_advance(p);
+            *out_type = type_const(*out_type);
+        }
     }
 
     Token *name = parser_peek(p);
     if (name->kind != TOK_IDENT)
     {
-        parser_error(p, "expected parameter name");
-        return NULL;
+        parser_error(p, "expected declarator name");
+        return false;
     }
     parser_advance(p);
+    *out_name = name->payload.str;
 
-    if (!parser_check_not_enumerator(p, name->payload.str))
+    Type *with_dims = parse_array_suffix(p, *out_type);
+    if (!with_dims)
     {
-        return NULL;
+        return false;
     }
-    if (!name_declare(p, name->payload.str, BIND_VAR, NULL))
+    *out_type = with_dims;
+    return true;
+}
+
+/* The `name (= init)?` run of an init-declarator list, minus specifiers. */
+static bool parse_one_declarator(ParserCtx *p, Type *base, StorageClass storage, Vec *decls_out)
+{
+    Token *decl_start = parser_peek(p);
+    Type *dtype;
+    const char *name;
+    if (!parse_declarator(p, base, &dtype, &name))
+    {
+        return false;
+    }
+
+    if (!parser_check_not_enumerator(p, name))
+    {
+        return false;
+    }
+    if (!name_declare(p, name, BIND_VAR, NULL))
+    {
+        return false;
+    }
+
+    ASTNode *decl = ast_var_decl(dtype, name, NULL, storage, decl_start->loc, p->arena);
+    ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
+    if (parser_peek(p)->kind == TOK_ASSIGN)
+    {
+        parser_advance(p);
+        ASTNode *expr = parse_initializer(p);
+        if (!expr)
+        {
+            return false;
+        }
+        if (storage == SC_STATIC)
+        {
+            if (!resolve_constant_init(p, vd, expr))
+            {
+                parser_error(p, "initializer for static variable must be a constant "
+                                "expression");
+                return false;
+            }
+        }
+        else
+        {
+            vd->init = expr;
+        }
+    }
+    vec_push(decls_out, decl);
+    return true;
+}
+
+static ASTNode *parse_param(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    DeclSpecifiers specs = parse_decl_specifiers(p);
+    if (!specs.type)
     {
         return NULL;
     }
 
-    /* Array parameters decay to pointer (C11 §6.7.6.3p7). */
-    type = parse_array_suffix(p, type);
-    if (!type)
+    Type *type;
+    const char *name;
+    if (!parse_declarator(p, specs.type, &type, &name))
     {
         return NULL;
     }
+
+    if (!parser_check_not_enumerator(p, name))
+    {
+        return NULL;
+    }
+    if (!name_declare(p, name, BIND_VAR, NULL))
+    {
+        return NULL;
+    }
+
+    /* Array parameters decay to pointer (C11 §6.7.6.3p7); the declarator
+       already applied the array suffixes. */
     type = type_decay(type);
 
-    return ast_var_decl(type, name->payload.str, NULL, SC_NONE, start->loc, p->arena);
+    return ast_var_decl(type, name, NULL, SC_NONE, start->loc, p->arena);
 }
 
 static Vec *parse_param_list(ParserCtx *p)
@@ -540,100 +984,82 @@ static Type *parse_array_suffix(ParserCtx *p, Type *type)
     return type;
 }
 
-static bool resolve_constant_init(ParserCtx *p, ASTVarDecl *vd, ASTNode *expr);
-
 static ASTNode *parse_typedef_decl(ParserCtx *p)
 {
     Token *start = parser_peek(p);
     ASSERT(start->kind == TOK_KW_TYPEDEF);
     parser_advance(p);
 
-    Type *type = parse_type_specifier(p);
-    if (!type)
+    DeclSpecifiers specs = parse_decl_specifiers(p);
+    if (!specs.type)
     {
         return NULL;
     }
 
-    Token *name = parser_peek(p);
-    if (name->kind != TOK_IDENT)
+    Type *dtype;
+    const char *name;
+    if (!parse_declarator(p, specs.type, &dtype, &name))
     {
-        parser_error(p, "expected typedef name");
+        return NULL;
+    }
+
+    if (!parser_check_not_enumerator(p, name))
+    {
+        return NULL;
+    }
+    if (!name_declare(p, name, BIND_TYPEDEF, dtype))
+    {
+        return NULL;
+    }
+
+    if (parser_peek(p)->kind != TOK_SEMI)
+    {
+        parser_error(p, "expected ';' after typedef declaration");
         return NULL;
     }
     parser_advance(p);
 
-    if (!parser_check_not_enumerator(p, name->payload.str))
-    {
-        return NULL;
-    }
-    if (!name_declare(p, name->payload.str, BIND_TYPEDEF, type))
-    {
-        return NULL;
-    }
-
-    if (!parser_expect(p, TOK_SEMI, "';'"))
-    {
-        return NULL;
-    }
-
-    return ast_typedef_decl(type, name->payload.str, start->loc, p->arena);
+    return ast_typedef_decl(dtype, name, start->loc, p->arena);
 }
 
+/* A block-scope declaration: specifiers plus an init-declarator list
+   (§6.7.6). A single declarator returns a bare AST_VAR_DECL; two or more
+   wrap in AST_DECL_LIST. With zero declarators the declaration must be a
+   tagged struct/union/enum *definition* (`struct S { ... };`) and returns
+   that AST node (downstream treats it as a no-op — the type is complete at
+   parse time). */
 static ASTNode *parse_var_decl(ParserCtx *p, StorageClass storage)
 {
     Token *start = parser_peek(p);
-    Type *type = parse_type_specifier(p);
-    if (!type)
+    DeclSpecifiers specs = parse_decl_specifiers(p);
+    if (!specs.type)
     {
         return NULL;
     }
 
-    Token *name = parser_peek(p);
-    if (name->kind != TOK_IDENT)
-    {
-        parser_error(p, "expected variable name");
-        return NULL;
-    }
-    parser_advance(p);
-
-    if (!parser_check_not_enumerator(p, name->payload.str))
-    {
-        return NULL;
-    }
-    if (!name_declare(p, name->payload.str, BIND_VAR, NULL))
-    {
-        return NULL;
-    }
-
-    type = parse_array_suffix(p, type);
-    if (!type)
-    {
-        return NULL;
-    }
-
-    ASTNode *decl = ast_var_decl(type, name->payload.str, NULL, storage, start->loc, p->arena);
-    ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
-    if (parser_peek(p)->kind == TOK_ASSIGN)
+    if (parser_peek(p)->kind == TOK_SEMI)
     {
         parser_advance(p);
-        ASTNode *expr = parse_initializer(p);
-        if (!expr)
+        if (specs.tag_def)
+        {
+            return specs.tag_def;
+        }
+        parser_error(p, "declaration declares nothing");
+        return NULL;
+    }
+
+    Vec *decls = vec_new(p->arena);
+    while (true)
+    {
+        if (!parse_one_declarator(p, specs.type, storage, decls))
         {
             return NULL;
         }
-        if (storage == SC_STATIC)
+        if (parser_peek(p)->kind != TOK_COMMA)
         {
-            if (!resolve_constant_init(p, vd, expr))
-            {
-                parser_error(p, "initializer for static variable must be a constant "
-                                "expression");
-                return NULL;
-            }
+            break;
         }
-        else
-        {
-            vd->init = expr;
-        }
+        parser_advance(p);
     }
 
     if (!parser_expect(p, TOK_SEMI, "';'"))
@@ -641,7 +1067,11 @@ static ASTNode *parse_var_decl(ParserCtx *p, StorageClass storage)
         return NULL;
     }
 
-    return decl;
+    if (vec_size(decls) == 1)
+    {
+        return (ASTNode *) vec_get(decls, 0);
+    }
+    return ast_decl_list(decls, start->loc, p->arena);
 }
 
 static ASTNode *parse_expr_stmt(ParserCtx *p)
@@ -1007,6 +1437,7 @@ static ASTNode *parse_stmt(ParserCtx *p)
         case TOK_KW_SHORT:
         case TOK_KW_LONG:
         case TOK_KW_UNSIGNED:
+        case TOK_KW_SIGNED:
         case TOK_KW_VOID:
         case TOK_KW_STRUCT:
         case TOK_KW_UNION:
@@ -1024,7 +1455,7 @@ static ASTNode *parse_stmt(ParserCtx *p)
         {
             /* const may either precede the storage class (`const static int x`)
                or the type (`const int x`); the latter is consumed by
-               parse_type_specifier. */
+               parse_decl_specifiers. */
             size_t nconst = 0;
             while (p->pos + nconst < p->count && p->tokens[p->pos + nconst].kind == TOK_KW_CONST)
             {
@@ -1230,6 +1661,11 @@ static ASTNode *parse_unary(ParserCtx *p)
             {
                 return NULL;
             }
+            target = parse_abstract_declarator(p, target);
+            if (!target)
+            {
+                return NULL;
+            }
             if (parser_peek(p)->kind == TOK_LBRACKET)
             {
                 /* The type name carries an array suffix (`(int[3])`,
@@ -1329,6 +1765,11 @@ static ASTNode *parse_unary(ParserCtx *p)
         {
             parser_advance(p);
             Type *ty = parse_type_specifier(p);
+            if (!ty)
+            {
+                return NULL;
+            }
+            ty = parse_abstract_declarator(p, ty);
             if (!ty)
             {
                 return NULL;
@@ -1905,102 +2346,6 @@ static ASTNode *parse_initializer(ParserCtx *p)
     return parse_assign(p);
 }
 
-static ASTNode *parse_record_decl(ParserCtx *p, bool is_union)
-{
-    Token *start = parser_peek(p);
-    parser_advance(p);
-
-    Token *tag_tok = parser_peek(p);
-    if (tag_tok->kind != TOK_IDENT)
-    {
-        parser_error(p, "expected tag name");
-        return NULL;
-    }
-    parser_advance(p);
-    const char *tag = tag_tok->payload.str;
-
-    TypeKind kind = is_union ? TYPE_UNION : TYPE_STRUCT;
-    Type *existing = type_record_lookup(tag);
-    if (existing && existing->kind != kind)
-    {
-        parser_error(p, "tag '%s' redeclared with a different kind", tag);
-        return NULL;
-    }
-    Type *rec = type_record(kind, tag); /* register incomplete before members (self-ref) */
-
-    /* Forward declaration: "struct tag;" */
-    if (parser_peek(p)->kind == TOK_SEMI)
-    {
-        parser_advance(p);
-        return ast_struct_decl(tag, is_union, vec_new(p->arena), start->loc, p->arena);
-    }
-
-    if (rec->record.complete)
-    {
-        parser_error(p, "redefinition of '%s'", tag);
-        return NULL;
-    }
-
-    if (!parser_expect(p, TOK_LBRACE, "'{'"))
-    {
-        return NULL;
-    }
-
-    Vec *field_decls = vec_new(p->arena);   /* Vec<ASTVarDecl*>, kept for the AST dump */
-    Vec *record_fields = vec_new(p->arena); /* Vec<RecordField*>, completes the type */
-    while (parser_peek(p)->kind != TOK_RBRACE)
-    {
-        Token *fstart = parser_peek(p);
-        Type *ftype = parse_type_specifier(p);
-        if (!ftype)
-        {
-            return NULL;
-        }
-
-        Token *fname = parser_peek(p);
-        if (fname->kind != TOK_IDENT)
-        {
-            parser_error(p, "expected field name");
-            return NULL;
-        }
-        parser_advance(p);
-
-        ftype = parse_array_suffix(p, ftype);
-        if (!ftype)
-        {
-            return NULL;
-        }
-
-        if (!parser_expect(p, TOK_SEMI, "';'"))
-        {
-            return NULL;
-        }
-        ASTNode *field_decl =
-            ast_var_decl(ftype, fname->payload.str, NULL, SC_NONE, fstart->loc, p->arena);
-        vec_push(field_decls, field_decl);
-
-        RecordField *rf = arena_alloc(p->arena, sizeof(RecordField), _Alignof(RecordField));
-        rf->name = fname->payload.str;
-        rf->type = ftype;
-        rf->offset = 0;
-        vec_push(record_fields, rf);
-    }
-    if (!parser_expect(p, TOK_RBRACE, "'}'"))
-    {
-        return NULL;
-    }
-    if (!parser_expect(p, TOK_SEMI, "';'"))
-    {
-        return NULL;
-    }
-
-    /* Complete the type now so array/pointer types formed later (and the
-       type's size/alignment) see the finished layout. */
-    type_record_complete(rec, record_fields);
-
-    return ast_struct_decl(tag, is_union, field_decls, start->loc, p->arena);
-}
-
 static bool parser_check_not_enumerator(ParserCtx *p, const char *name)
 {
     if (strmap_get(p->enum_consts, name))
@@ -2202,124 +2547,6 @@ static bool resolve_constant_init(ParserCtx *p, ASTVarDecl *vd, ASTNode *expr)
     return false;
 }
 
-static ASTNode *parse_enum_decl(ParserCtx *p)
-{
-    Token *start = parser_peek(p);
-    parser_advance(p);
-
-    const char *tag = NULL;
-    if (parser_peek(p)->kind == TOK_IDENT)
-    {
-        Token *tag_tok = parser_peek(p);
-        parser_advance(p);
-        tag = tag_tok->payload.str;
-
-        Type *existing = type_record_lookup(tag);
-        if (existing && existing->kind != TYPE_ENUM)
-        {
-            parser_error(p, "tag '%s' redeclared with a different kind", tag);
-            return NULL;
-        }
-        if (existing && existing->enumm.complete)
-        {
-            parser_error(p, "redefinition of '%s'", tag);
-            return NULL;
-        }
-    }
-
-    if (parser_peek(p)->kind == TOK_SEMI)
-    {
-        parser_error(p, "expected '{' after enum tag; enum types cannot be incomplete");
-        return NULL;
-    }
-    if (!parser_expect(p, TOK_LBRACE, "'{'"))
-    {
-        return NULL;
-    }
-
-    Vec *constants = vec_new(p->arena);
-    i64 next_value = 0;
-    while (parser_peek(p)->kind != TOK_RBRACE)
-    {
-        Token *name_tok = parser_peek(p);
-        if (name_tok->kind != TOK_IDENT)
-        {
-            parser_error(p, "expected enumerator name");
-            return NULL;
-        }
-        parser_advance(p);
-        const char *name = name_tok->payload.str;
-
-        if (strmap_get(p->enum_consts, name))
-        {
-            parser_error(p, "redefinition of enumerator '%s'", name);
-            return NULL;
-        }
-
-        i64 value = next_value; /* auto-increment (C11 §6.7.2.2p3) */
-        if (parser_peek(p)->kind == TOK_ASSIGN)
-        {
-            parser_advance(p);
-            ASTNode *init = parse_assign(p);
-            if (!init)
-            {
-                return NULL;
-            }
-            if (!fold_constant_expr(p, init, &value))
-            {
-                parser_error(p, "enumerator value is not an integer constant expression");
-                return NULL;
-            }
-        }
-
-        if (value < INT32_MIN || value > INT32_MAX)
-        {
-            parser_error(p, "enumerator value out of range (must fit in int)");
-            return NULL;
-        }
-
-        i64 *slot = arena_alloc(p->arena, sizeof(i64), _Alignof(i64));
-        *slot = value;
-        strmap_set(p->enum_consts, name, slot);
-
-        EnumConstant *c = arena_alloc(p->arena, sizeof(EnumConstant), _Alignof(EnumConstant));
-        c->name = name;
-        c->value = value;
-        vec_push(constants, c);
-
-        next_value = value + 1;
-
-        TokenKind sep = parser_peek(p)->kind;
-        if (sep == TOK_COMMA)
-        {
-            parser_advance(p);
-        }
-        else if (sep != TOK_RBRACE)
-        {
-            parser_error(p, "expected ',' or '}' in enum declaration");
-            return NULL;
-        }
-    }
-    if (!parser_expect(p, TOK_RBRACE, "'}'"))
-    {
-        return NULL;
-    }
-    if (!parser_expect(p, TOK_SEMI, "';'"))
-    {
-        return NULL;
-    }
-
-    if (tag)
-    {
-        Type *et = type_enum(tag); /* completes the type registered by `enum tag` */
-        et->enumm.complete = true;
-    }
-
-    return ast_enum_decl(tag, constants, start->loc, p->arena);
-}
-
-/* Storage class + type + name; a '(' after the name means a function
-   definition, otherwise a file-scope variable. */
 static ASTNode *parse_top_level_decl(ParserCtx *p)
 {
     Token *start = parser_peek(p);
@@ -2358,34 +2585,47 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
         }
     }
 
-    Type *ret_type = parse_type_specifier(p);
-    if (!ret_type)
+    DeclSpecifiers specs = parse_decl_specifiers(p);
+    if (!specs.type)
     {
         return NULL;
     }
     for (u32 i = 0; i < pre_storage_consts; i++)
     {
-        ret_type = type_const(ret_type);
+        specs.type = type_const(specs.type);
     }
 
-    Token *name = parser_peek(p);
-    if (name->kind != TOK_IDENT)
+    /* Bare tagged definition: `struct S { ... };` / `enum E { ... };`. The
+       specifier consumed and completed the type; the tag-def AST node is
+       returned so the translation unit records it (downstream no-op). */
+    if (parser_peek(p)->kind == TOK_SEMI)
     {
-        parser_error(p, "expected name after type");
+        parser_advance(p);
+        if (specs.tag_def)
+        {
+            return specs.tag_def;
+        }
+        parser_error(p, "declaration declares nothing");
         return NULL;
     }
-    parser_advance(p);
+
+    Type *dtype;
+    const char *name;
+    if (!parse_declarator(p, specs.type, &dtype, &name))
+    {
+        return NULL;
+    }
 
     if (parser_peek(p)->kind == TOK_LPAREN)
     {
         /* extern on a function definition is an ordinary definition (C11
            §6.9.1); prototypes (no body) are not supported yet. */
         StorageClass fn_storage = storage == SC_STATIC ? SC_STATIC : SC_NONE;
-        if (!parser_check_not_enumerator(p, name->payload.str))
+        if (!parser_check_not_enumerator(p, name))
         {
             return NULL;
         }
-        if (!name_declare(p, name->payload.str, BIND_FUNC, NULL))
+        if (!name_declare(p, name, BIND_FUNC, NULL))
         {
             return NULL;
         }
@@ -2413,37 +2653,57 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
         }
         pop_name_scope(p);
 
-        return ast_func_def(ret_type, name->payload.str, params, body, fn_storage, start->loc,
-                            p->arena);
+        return ast_func_def(dtype, name, params, body, fn_storage, start->loc, p->arena);
     }
 
-    Type *type = parse_array_suffix(p, ret_type);
-    if (!type)
+    /* File-scope objects: an init-declarator list (multi-declarators share
+       the specifier; each declarator's decorators apply independently). */
+    Vec *decls = vec_new(p->arena);
+    while (true)
     {
-        return NULL;
-    }
-
-    /* File-scope variables: register the ordinary name. Same-kind repeats
-       (extern/static/tentative merging) pass through to semantic (D12.2). */
-    if (!name_declare(p, name->payload.str, BIND_VAR, NULL))
-    {
-        return NULL;
-    }
-
-    ASTNode *decl = ast_var_decl(type, name->payload.str, NULL, storage, start->loc, p->arena);
-    ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
-    if (parser_peek(p)->kind == TOK_ASSIGN)
-    {
-        parser_advance(p);
-        ASTNode *expr = parse_initializer(p);
-        if (!expr)
+        if (!parser_check_not_enumerator(p, name))
         {
             return NULL;
         }
-        if (!resolve_constant_init(p, vd, expr))
+        /* File-scope variables: register the ordinary name. Same-kind repeats
+           (extern/static/tentative merging) pass through to semantic (D12.2). */
+        if (!name_declare(p, name, BIND_VAR, NULL))
         {
-            parser_error(p, "initializer for file-scope variable must be a constant "
-                            "expression");
+            return NULL;
+        }
+
+        ASTNode *decl = ast_var_decl(dtype, name, NULL, storage, start->loc, p->arena);
+        ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
+        if (parser_peek(p)->kind == TOK_ASSIGN)
+        {
+            parser_advance(p);
+            ASTNode *expr = parse_initializer(p);
+            if (!expr)
+            {
+                return NULL;
+            }
+            if (!resolve_constant_init(p, vd, expr))
+            {
+                parser_error(p, "initializer for file-scope variable must be a constant "
+                                "expression");
+                return NULL;
+            }
+        }
+        vec_push(decls, decl);
+
+        if (parser_peek(p)->kind != TOK_COMMA)
+        {
+            break;
+        }
+        parser_advance(p);
+        if (!parse_declarator(p, specs.type, &dtype, &name))
+        {
+            return NULL;
+        }
+        if (parser_peek(p)->kind == TOK_LPAREN)
+        {
+            parser_error(p, "a function definition must be the only declarator in its "
+                            "declaration");
             return NULL;
         }
     }
@@ -2453,7 +2713,11 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
         return NULL;
     }
 
-    return decl;
+    if (vec_size(decls) == 1)
+    {
+        return (ASTNode *) vec_get(decls, 0);
+    }
+    return ast_decl_list(decls, start->loc, p->arena);
 }
 
 ASTNode *parse(Token *tokens, u64 count, Arena *arena)
@@ -2465,56 +2729,11 @@ ASTNode *parse(Token *tokens, u64 count, Arena *arena)
     Vec *decls = vec_new(arena);
     while (parser_peek(&p)->kind != TOK_EOF)
     {
-        TokenKind k = parser_peek(&p)->kind;
-        ASTNode *node;
-        if (k == TOK_KW_STRUCT || k == TOK_KW_UNION)
-        {
-            /* A record declaration is `struct Tag { ... }` or `struct Tag;`.
-               Anything else starting with `struct` (e.g. `struct Tag f(...)`)
-               is a function definition whose return type is that record. */
-            bool is_record_decl = false;
-            if (p.pos + 1 < p.count && p.tokens[p.pos + 1].kind == TOK_IDENT)
-            {
-                TokenKind after_tag = (p.pos + 2 < p.count) ? p.tokens[p.pos + 2].kind : TOK_EOF;
-                is_record_decl = (after_tag == TOK_LBRACE || after_tag == TOK_SEMI);
-            }
-            if (is_record_decl)
-            {
-                node = parse_record_decl(&p, /* is_union */ k == TOK_KW_UNION);
-            }
-            else
-            {
-                node = parse_top_level_decl(&p);
-            }
-        }
-        else if (k == TOK_KW_ENUM)
-        {
-            /* `enum Tag { ... }` (or anonymous `enum { ... }`) is an enum
-               declaration; anything else (e.g. `enum E f(...)`) is a function
-               definition whose return type is that enum. */
-            bool is_enum_decl = false;
-            if (p.pos + 1 < p.count && p.tokens[p.pos + 1].kind == TOK_LBRACE)
-            {
-                is_enum_decl = true; /* anonymous enum */
-            }
-            else if (p.pos + 1 < p.count && p.tokens[p.pos + 1].kind == TOK_IDENT)
-            {
-                TokenKind after_tag = (p.pos + 2 < p.count) ? p.tokens[p.pos + 2].kind : TOK_EOF;
-                is_enum_decl = (after_tag == TOK_LBRACE || after_tag == TOK_SEMI);
-            }
-            if (is_enum_decl)
-            {
-                node = parse_enum_decl(&p);
-            }
-            else
-            {
-                node = parse_top_level_decl(&p);
-            }
-        }
-        else
-        {
-            node = parse_top_level_decl(&p);
-        }
+        /* Every translation-unit item — functions, file-scope variables,
+           typedefs, and bare/full struct/union/enum *definitions* (the
+           specifier consumes and completes inline `{ ... }`) — routes
+           through the one declaration parser. */
+        ASTNode *node = parse_top_level_decl(&p);
         if (!node)
         {
             return NULL;

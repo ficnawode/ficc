@@ -2538,6 +2538,22 @@ static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilde
             return build_return_stmt(ast_as(ASTReturnStmt, node), f, bb, ctx);
         case AST_VAR_DECL:
             return build_var_decl_stmt(ast_as(ASTVarDecl, node), f, bb, ctx);
+        case AST_DECL_LIST:
+        {
+            ASTDeclList *dl = ast_as(ASTDeclList, node);
+            size_t n = vec_size(dl->decls);
+            for (size_t i = 0; i < n; i++)
+            {
+                bb = build_var_decl_stmt(ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, i)), f,
+                                         bb, ctx);
+            }
+            return bb;
+        }
+        case AST_STRUCT_DECL:
+        case AST_ENUM_DECL:
+            /* A block-scope tag definition introduces no runtime object; the
+               parser completed the type at parse time. */
+            return bb;
         case AST_TYPEDEF_DECL:
             /* Typedefs introduce no runtime object: parse-time only (D12.1).
                The declaration is a no-op at IR level. */
@@ -2746,6 +2762,17 @@ static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx)
         case AST_EXPR_STMT:
             mark_addr_taken_expr(ast_as(ASTExprStmt, node)->expr, ctx);
             break;
+        case AST_DECL_LIST:
+        {
+            ASTDeclList *dl = ast_as(ASTDeclList, node);
+            size_t n = vec_size(dl->decls);
+            for (size_t i = 0; i < n; i++)
+            {
+                mark_addr_taken_expr(ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, i))->init,
+                                     ctx);
+            }
+            break;
+        }
         case AST_COMPOUND_STMT:
         {
             ASTCompoundStmt *cs = ast_as(ASTCompoundStmt, node);
@@ -2907,12 +2934,28 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
                 return NULL;
             }
         }
+        else if (decl->kind == AST_DECL_LIST)
+        {
+            /* An init-declarator list at file scope: one global per
+               declarator. */
+            ASTDeclList *dl = ast_as(ASTDeclList, decl);
+            size_t n = vec_size(dl->decls);
+            for (size_t j = 0; j < n; j++)
+            {
+                ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, j));
+                if (emit_global_decl(vd, mod, arena, global_map, NULL) == NO_VREG)
+                {
+                    return NULL;
+                }
+            }
+        }
     }
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
         if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL ||
-            decl->kind == AST_VAR_DECL || decl->kind == AST_TYPEDEF_DECL)
+            decl->kind == AST_VAR_DECL || decl->kind == AST_TYPEDEF_DECL ||
+            decl->kind == AST_DECL_LIST)
         {
             continue;
         }

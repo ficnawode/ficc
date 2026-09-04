@@ -16,6 +16,7 @@
     X(TOK_KW_SHORT)                                                                                \
     X(TOK_KW_LONG)                                                                                 \
     X(TOK_KW_UNSIGNED)                                                                             \
+    X(TOK_KW_SIGNED)                                                                               \
     X(TOK_KW_RETURN)                                                                               \
     X(TOK_KW_IF)                                                                                   \
     X(TOK_KW_ELSE)                                                                                 \

@@ -539,3 +539,18 @@ TEST(lexer, compound_assignment_not_single_equals)
     EXPECT_EQ(t[6].kind, TOK_EOF);
     arena_free(a);
 }
+
+TEST(lexer, signed_keyword)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "signed long long unsigned", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 5);
+    EXPECT_EQ(t[0].kind, TOK_KW_SIGNED);
+    EXPECT_EQ(t[1].kind, TOK_KW_LONG);
+    EXPECT_EQ(t[2].kind, TOK_KW_LONG);
+    EXPECT_EQ(t[3].kind, TOK_KW_UNSIGNED);
+    EXPECT_EQ(t[4].kind, TOK_EOF);
+    arena_free(a);
+}

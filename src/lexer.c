@@ -99,6 +99,7 @@ static void init_keyword_map(Arena *arena)
     KW("short", TOK_KW_SHORT);
     KW("long", TOK_KW_LONG);
     KW("unsigned", TOK_KW_UNSIGNED);
+    KW("signed", TOK_KW_SIGNED);
     KW("sizeof", TOK_KW_SIZEOF);
     KW("struct", TOK_KW_STRUCT);
     KW("union", TOK_KW_UNION);

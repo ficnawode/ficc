@@ -1936,6 +1936,27 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
             return check_return_stmt(ast_as(ASTReturnStmt, node), ctx, ret_type);
         case AST_VAR_DECL:
             return check_variable_declaration(ast_as(ASTVarDecl, node), ctx);
+        case AST_DECL_LIST:
+        {
+            /* An init-declarator list: each declarator is an independent
+               declaration sharing the specifier's type. */
+            ASTDeclList *dl = ast_as(ASTDeclList, node);
+            size_t n = vec_size(dl->decls);
+            for (size_t i = 0; i < n; i++)
+            {
+                if (!check_variable_declaration(
+                        ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, i)), ctx))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        case AST_STRUCT_DECL:
+        case AST_ENUM_DECL:
+            /* A block-scope tag definition: the parser completed the type at
+               parse time; nothing to check or emit. */
+            return true;
         case AST_TYPEDEF_DECL:
             return check_typedef_decl(ast_as(ASTTypedefDecl, node), ctx);
         case AST_EXPR_STMT:
@@ -2147,132 +2168,149 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
 /* Pass 1: Collect all file-scope variables, enforcing linkage rules (D8.3):
    repeated tentative/extern declarations merge; two definitions with a
    constant initializer collide. */
+/* Validate and register one file-scope variable declaration. The most-
+   defined declaration wins: a definition replaces an extern-only
+   declaration; an initialized definition replaces a tentative one. */
+static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
+{
+    if (strmap_get(ctx->globals, vd->name))
+    {
+        sem_error(vd->base.loc, "redefinition of '%s' as a global variable", vd->name);
+        ctx->error = true;
+        return false;
+    }
+    if (vd->type->kind == TYPE_VOID)
+    {
+        sem_error(vd->base.loc, "variable '%s' has void type", vd->name);
+        ctx->error = true;
+        return false;
+    }
+    if (type_is_record(vd->type) && !type_is_complete(vd->type))
+    {
+        sem_error(vd->base.loc, "variable '%s' has incomplete type", vd->name);
+        ctx->error = true;
+        return false;
+    }
+    if (vd->init)
+    {
+        /* Initializer lists are flattened by the planner (completing a
+           `[]` array per D12.7); char arrays take a string literal
+           byte-fill; bare `char *` pointers keep the .data string-address
+           relocation (D12.6/D12.8). */
+        bool handled;
+        if (!plan_var_aggregate_init(ctx, vd, &handled))
+        {
+            return false;
+        }
+        if (!handled)
+        {
+            if (vd->init->kind == AST_UNARY_EXPR)
+            {
+                if (!plan_ptr_initializer(ctx, vd))
+                {
+                    return false;
+                }
+            }
+            else if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_CHAR)
+            {
+                sem_error(vd->base.loc, "string-literal initializer requires a 'char *' variable");
+                ctx->error = true;
+                return false;
+            }
+        }
+    }
+    if (vd->has_const_init && (vd->type->kind == TYPE_ARRAY || type_is_record(vd->type)))
+    {
+        sem_error(vd->base.loc, "aggregate '%s' must be initialized with a brace-enclosed list",
+                  vd->name);
+        ctx->error = true;
+        return false;
+    }
+    /* D12.7: a file-scope `[]` array left without an initializer stays
+       incomplete. `extern int a[];` declares (not defines) an incomplete
+       array and is legal. */
+    if (vd->storage != SC_EXTERN && type_is_array(vd->type) && !type_is_complete(vd->type))
+    {
+        sem_error(vd->base.loc, "variable '%s' has incomplete type", vd->name);
+        ctx->error = true;
+        return false;
+    }
+
+    /* C11 §6.9.2p2: a declaration with an initializer is a definition even
+       with `extern`, so normalize it to a plain external definition. */
+    if (vd->storage == SC_EXTERN && (vd->has_const_init || vd->init))
+    {
+        vd->storage = SC_NONE;
+    }
+
+    ASTVarDecl *existing = strmap_get(ctx->global_vars, vd->name);
+    if (existing)
+    {
+        if ((existing->storage == SC_STATIC) != (vd->storage == SC_STATIC))
+        {
+            sem_error(vd->base.loc, "%s declaration of '%s' follows %s declaration",
+                      vd->storage == SC_STATIC ? "static" : "non-static", vd->name,
+                      existing->storage == SC_STATIC ? "static" : "non-static");
+            ctx->error = true;
+            return false;
+        }
+        /* C11 §6.7.3p8-10: compatible types must have identical qualifiers;
+           `int x;` followed by `const int x;` is incompatible. */
+        if (type_unqual(existing->type) == type_unqual(vd->type) &&
+            type_is_const(existing->type) != type_is_const(vd->type))
+        {
+            sem_error(vd->base.loc, "conflicting type qualifiers in declaration of '%s'", vd->name);
+            ctx->error = true;
+            return false;
+        }
+        if (existing->has_const_init && vd->has_const_init)
+        {
+            sem_error(vd->base.loc, "redefinition of '%s'", vd->name);
+            ctx->error = true;
+            return false;
+        }
+    }
+    bool replace = existing == NULL;
+    if (existing && existing->storage == SC_EXTERN && vd->storage != SC_EXTERN)
+    {
+        replace = true;
+    }
+    if (existing && vd->has_const_init && !existing->has_const_init)
+    {
+        replace = true;
+    }
+    if (replace)
+    {
+        strmap_set(ctx->global_vars, vd->name, vd);
+    }
+    return true;
+}
+
 static bool collect_global_variables(ASTProgram *prog, SemanticCtx *ctx)
 {
     size_t ndecls = vec_size(prog->decls);
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
-        if (decl->kind != AST_VAR_DECL)
+        if (decl->kind == AST_VAR_DECL)
         {
-            continue;
-        }
-        ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
-
-        if (strmap_get(ctx->globals, vd->name))
-        {
-            sem_error(vd->base.loc, "redefinition of '%s' as a global variable", vd->name);
-            ctx->error = true;
-            return false;
-        }
-        if (vd->type->kind == TYPE_VOID)
-        {
-            sem_error(vd->base.loc, "variable '%s' has void type", vd->name);
-            ctx->error = true;
-            return false;
-        }
-        if (type_is_record(vd->type) && !type_is_complete(vd->type))
-        {
-            sem_error(vd->base.loc, "variable '%s' has incomplete type", vd->name);
-            ctx->error = true;
-            return false;
-        }
-        if (vd->init)
-        {
-            /* Initializer lists are flattened by the planner (completing a
-               `[]` array per D12.7); char arrays take a string literal
-               byte-fill; bare `char *` pointers keep the .data string-address
-               relocation (D12.6/D12.8). */
-            bool handled;
-            if (!plan_var_aggregate_init(ctx, vd, &handled))
+            if (!collect_one_global_var(ast_as(ASTVarDecl, decl), ctx))
             {
                 return false;
             }
-            if (!handled)
+        }
+        else if (decl->kind == AST_DECL_LIST)
+        {
+            ASTDeclList *dl = ast_as(ASTDeclList, decl);
+            size_t n = vec_size(dl->decls);
+            for (size_t j = 0; j < n; j++)
             {
-                if (vd->init->kind == AST_UNARY_EXPR)
+                if (!collect_one_global_var(ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, j)),
+                                            ctx))
                 {
-                    if (!plan_ptr_initializer(ctx, vd))
-                    {
-                        return false;
-                    }
-                }
-                else if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_CHAR)
-                {
-                    sem_error(vd->base.loc,
-                              "string-literal initializer requires a 'char *' variable");
-                    ctx->error = true;
                     return false;
                 }
             }
-        }
-        if (vd->has_const_init && (vd->type->kind == TYPE_ARRAY || type_is_record(vd->type)))
-        {
-            sem_error(vd->base.loc, "aggregate '%s' must be initialized with a brace-enclosed list",
-                      vd->name);
-            ctx->error = true;
-            return false;
-        }
-        /* D12.7: a file-scope `[]` array left without an initializer stays
-           incomplete. `extern int a[];` declares (not defines) an incomplete
-           array and is legal. */
-        if (vd->storage != SC_EXTERN && type_is_array(vd->type) && !type_is_complete(vd->type))
-        {
-            sem_error(vd->base.loc, "variable '%s' has incomplete type", vd->name);
-            ctx->error = true;
-            return false;
-        }
-
-        /* C11 §6.9.2p2: a declaration with an initializer is a definition even
-           with `extern`, so normalize it to a plain external definition. */
-        if (vd->storage == SC_EXTERN && (vd->has_const_init || vd->init))
-        {
-            vd->storage = SC_NONE;
-        }
-
-        ASTVarDecl *existing = strmap_get(ctx->global_vars, vd->name);
-        if (existing)
-        {
-            if ((existing->storage == SC_STATIC) != (vd->storage == SC_STATIC))
-            {
-                sem_error(vd->base.loc, "%s declaration of '%s' follows %s declaration",
-                          vd->storage == SC_STATIC ? "static" : "non-static", vd->name,
-                          existing->storage == SC_STATIC ? "static" : "non-static");
-                ctx->error = true;
-                return false;
-            }
-            /* C11 §6.7.3p8-10: compatible types must have identical qualifiers;
-               `int x;` followed by `const int x;` is incompatible. */
-            if (type_unqual(existing->type) == type_unqual(vd->type) &&
-                type_is_const(existing->type) != type_is_const(vd->type))
-            {
-                sem_error(vd->base.loc, "conflicting type qualifiers in declaration of '%s'",
-                          vd->name);
-                ctx->error = true;
-                return false;
-            }
-            if (existing->has_const_init && vd->has_const_init)
-            {
-                sem_error(vd->base.loc, "redefinition of '%s'", vd->name);
-                ctx->error = true;
-                return false;
-            }
-        }
-        /* The most-defined declaration wins: a definition replaces an
-           extern-only declaration; an initialized definition replaces a
-           tentative one. */
-        bool replace = existing == NULL;
-        if (existing && existing->storage == SC_EXTERN && vd->storage != SC_EXTERN)
-        {
-            replace = true;
-        }
-        if (existing && vd->has_const_init && !existing->has_const_init)
-        {
-            replace = true;
-        }
-        if (replace)
-        {
-            strmap_set(ctx->global_vars, vd->name, vd);
         }
     }
     return true;
@@ -2286,7 +2324,7 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
         if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL ||
-            decl->kind == AST_VAR_DECL)
+            decl->kind == AST_VAR_DECL || decl->kind == AST_DECL_LIST)
         {
             continue;
         }
