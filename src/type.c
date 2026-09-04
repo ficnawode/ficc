@@ -422,6 +422,50 @@ bool type_is_variadic(Type *t)
     return t && t->kind == TYPE_FUNC && t->func.is_variadic;
 }
 
+/* The builtin `va_list` (D15.2): glibc's x86-64 tag, a 24-byte struct used as
+   an array of 1 (decays to a pointer on use, so passing it to a fixed
+   `va_list` libc parameter is a plain pointer — vsnprintf interop). The record
+   is anonymous and minted fresh on type_reset (the tagless record pattern from
+   Phase 12), then cached as the array-of-1 interned type. */
+static Type *the_va_list;
+
+Type *type_va_list(void)
+{
+    if (the_va_list)
+    {
+        return the_va_list;
+    }
+    if (!type_arena)
+    {
+        type_init_pool();
+    }
+    Type *rec = type_record_anon(TYPE_STRUCT);
+    Vec *fields = vec_new(type_arena);
+    RecordField *gp = arena_alloc(type_arena, sizeof(RecordField), sizeof(void *));
+    gp->name = "gp_offset";
+    gp->type = type_uint();
+    gp->offset = 0;
+    vec_push(fields, gp);
+    RecordField *fp = arena_alloc(type_arena, sizeof(RecordField), sizeof(void *));
+    fp->name = "fp_offset";
+    fp->type = type_uint();
+    fp->offset = 0;
+    vec_push(fields, fp);
+    RecordField *ovf = arena_alloc(type_arena, sizeof(RecordField), sizeof(void *));
+    ovf->name = "overflow_arg_area";
+    ovf->type = type_ptr(type_void());
+    ovf->offset = 0;
+    vec_push(fields, ovf);
+    RecordField *regs = arena_alloc(type_arena, sizeof(RecordField), sizeof(void *));
+    regs->name = "reg_save_area";
+    regs->type = type_ptr(type_void());
+    regs->offset = 0;
+    vec_push(fields, regs);
+    type_record_complete(rec, fields);
+    the_va_list = type_array(rec, 1);
+    return the_va_list;
+}
+
 Type *type_const(Type *t)
 {
     if (t->qualifiers & Q_CONST)

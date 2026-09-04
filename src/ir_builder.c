@@ -1141,10 +1141,46 @@ static ExprResult build_cast_expr(ASTCastExpr *ce, IrFunction *f, IrBlock *bb, F
     return expr_result(promote_to(ctx, bb, src.value, src_type, target), bb);
 }
 
+/* Compiler builtins __builtin_va_start/__builtin_va_end (D15.3, D15.4).
+   __builtin_va_start(ap, last): gp_offset/stack_skip are pure compile-time
+   functions of the enclosing function's named-parameter count (f->params
+   includes the __sret pseudo-param, which consumes rdi like any arg, so the
+   register-save math is exact). The register spill itself lives in the
+   backends (prologue / eval_call); this instruction only records ap + the two
+   offsets. */
+static ExprResult build_va_builtin(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    if (strcmp(ce->callee, "__builtin_va_start") == 0)
+    {
+        ExprResult ap = build_expr((ASTNode *) vec_get(ce->args, 0), f, bb, ctx);
+        (void) build_expr((ASTNode *) vec_get(ce->args, 1), f, ap.block, ctx);
+        i64 n_params = (i64) vec_size(f->params);
+        i64 gp = n_params * 8 < 48 ? n_params * 8 : 48;
+        i64 skip = n_params > 6 ? (n_params - 6) * 8 : 0;
+        ir_emit_va_start(ap.block, ap.value, skip, gp);
+        return expr_result(ir_operand_imm(0), ap.block);
+    }
+    if (strcmp(ce->callee, "__builtin_va_end") == 0)
+    {
+        return build_expr((ASTNode *) vec_get(ce->args, 0), f, bb, ctx);
+    }
+    ir_error((ASTNode *) ce, "unknown builtin '%s'", ce->callee);
+    ctx->failed = true;
+    return expr_result(ir_operand_imm(0), bb);
+}
+
 static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     Type *callee_type = strmap_get(ctx->func_types, ce->callee);
-    ASSERT(callee_type != NULL && callee_type->kind == TYPE_FUNC);
+    if (!callee_type)
+    {
+        /* Compiler builtins (__builtin_va_start/__builtin_va_end): never in
+           func_types. A user
+           definition with the same name wins (semantic resolves it there and
+           this branch is unreachable for it), so the name is ours to lower. */
+        return build_va_builtin(ce, f, bb, ctx);
+    }
+    ASSERT(callee_type->kind == TYPE_FUNC);
     Type *callee_ret = callee_type->func.ret;
     bool is_variadic = callee_type->func.is_variadic;
     IrFunction *callee_ir = NULL;
@@ -2662,6 +2698,7 @@ static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilde
 
 static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlock *entry)
 {
+    f->is_variadic = ast->is_variadic;
     ctx->sret_vreg = NO_VREG;
     if (type_is_record(ast->ret_type))
     {

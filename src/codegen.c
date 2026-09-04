@@ -41,11 +41,15 @@ typedef struct
     const char **targets;  /* nentries block labels, index = value − min */
 } SwitchTableRec;
 
-/* Per-function frame layout. Vreg i lives at slot (i+1)*8 below %rbp. */
+/* Per-function frame layout. Vreg i lives at slot (i+1)*8 below %rbp. For a
+   variadic function, a fixed 176-byte register save area (48 GP + 128-byte xmm
+   reservation, SysV §9.2) is reserved immediately below the vreg slots;
+   save_area_off is its offset below %rbp (0 for non-variadic functions). */
 typedef struct
 {
     u32 n_vregs;
-    u32 frame_size; /* rounded up to 16 (ABI) */
+    u32 frame_size;    /* rounded up to 16 (ABI) */
+    u32 save_area_off; /* the save area below the vreg slots, 0 if not variadic */
 } FrameInfo;
 
 typedef struct CodegenCtx CodegenCtx;
@@ -63,6 +67,7 @@ struct CodegenCtx
     Vec *block_patches;     /* Vec<BranchPatch*> */
     Vec *global_patches;    /* Vec<GlobalPatch*> */
     Vec *switch_tables;     /* Vec<SwitchTableRec*> */
+    u32 save_area_off;      /* register save area offset below %rbp (variadic fns) */
 };
 
 static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
@@ -255,6 +260,16 @@ static X86Mem x86_mem_rsp(i32 disp)
 {
     X86Mem m;
     m.base = R_ESP;
+    m.index = NO_REG;
+    m.scale = 1;
+    m.disp = disp;
+    return m;
+}
+
+static X86Mem x86_mem_rax(i32 disp)
+{
+    X86Mem m;
+    m.base = R_EAX;
     m.index = NO_REG;
     m.scale = 1;
     m.disp = disp;
@@ -735,6 +750,8 @@ static void lower_store(IrInstr *in, CodegenCtx *ctx);
 static void lower_gep(IrInstr *in, CodegenCtx *ctx);
 static void lower_alloca(IrInstr *in, CodegenCtx *ctx);
 static void lower_memcpy(IrInstr *in, CodegenCtx *ctx);
+static void lower_va_start(IrInstr *in, CodegenCtx *ctx);
+static X86Mem load_ptr(CodegenCtx *ctx, IrOperand ptr);
 
 #define LOWER_ENTRIES(X)                                                                           \
     X(OP_RET, lower_ret)                                                                           \
@@ -776,7 +793,8 @@ static void lower_memcpy(IrInstr *in, CodegenCtx *ctx);
     X(OP_STORE, lower_store)                                                                       \
     X(OP_GEP, lower_gep)                                                                           \
     X(OP_ALLOCA, lower_alloca)                                                                     \
-    X(OP_MEMCPY, lower_memcpy)
+    X(OP_MEMCPY, lower_memcpy)                                                                     \
+    X(OP_VA_START, lower_va_start)
 
 /* Dispatch table indexed by opcode; unlisted opcodes are NULL and diagnosed
    in lower_instr rather than silently miscompiled. */
@@ -906,6 +924,29 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
     {
         emit_binop_rhs(ctx->buf, 8, &arith_specs[OP_ADD], R_ESP, xop_imm(total_stack));
     }
+}
+
+/* va_start(ap, last): materialize the four va_list fields for the current
+   function's frame. ops[0] = ap (loaded into %rax), ops[1] = imm stack_skip
+   (bytes of named stack args before the first unnamed one), ops[2] = imm
+   gp_offset. The GP registers were already spilled into the save area by
+   emit_prologue, so this only records addresses and constants — the overflow
+   area is the caller's first stack arg (rbp + 16) advanced past any named
+   stack args, and reg_save_area is the reserved frame region. */
+static void lower_va_start(IrInstr *in, CodegenCtx *ctx)
+{
+    (void) load_ptr(ctx, in->ops[0]);                                 /* ap -> %rax */
+    emit_mov(ctx->buf, 4, xop_reg(R_EDX), xop_imm(in->ops[2].u.imm)); /* gp_offset */
+    emit_mov(ctx->buf, 4, xop_mem(x86_mem_rax(0)), xop_reg(R_EDX));
+    emit_mov(ctx->buf, 4, xop_reg(R_EDX), xop_imm(48)); /* fp_offset: no xmm use */
+    emit_mov(ctx->buf, 4, xop_mem(x86_mem_rax(4)), xop_reg(R_EDX));
+
+    u32 skip = (u32) in->ops[1].u.imm;
+    emit_lea(ctx->buf, R_EDX, x86_mem_rbp(16 + (i32) skip)); /* overflow_arg_area */
+    emit_mov(ctx->buf, 8, xop_mem(x86_mem_rax(8)), xop_reg(R_EDX));
+
+    emit_lea(ctx->buf, R_EDX, x86_mem_rbp(-(i32) ctx->save_area_off)); /* reg_save_area */
+    emit_mov(ctx->buf, 8, xop_mem(x86_mem_rax(16)), xop_reg(R_EDX));
 }
 
 static void lower_ret(IrInstr *in, CodegenCtx *ctx)
@@ -1395,9 +1436,18 @@ static FrameInfo frame_plan(IrFunction *f)
         scan_vreg(&max_vreg, ((IrParam *) vec_get(f->params, i))->vreg);
     }
 
-    FrameInfo fr;
+    FrameInfo fr = {0};
     fr.n_vregs = max_vreg + 1;
-    fr.frame_size = (fr.n_vregs * 8 + 15) & ~15u;
+    u32 total = fr.n_vregs * 8;
+    if (f->is_variadic)
+    {
+        /* The SysV register save area below the vreg slots: 48 GP + 128-byte
+           xmm reservation. The prologue spills into it; va_start points
+           reg_save_area at it. */
+        fr.save_area_off = total + 176;
+        total = fr.save_area_off;
+    }
+    fr.frame_size = (total + 15) & ~15u;
     return fr;
 }
 
@@ -1422,13 +1472,26 @@ static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod)
     }
 }
 
-static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod)
+static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, FrameInfo *fr)
 {
     bytebuf_append(buf, X86_PUSH_RBP);
     emit_mov(buf, 8, xop_reg(R_EBP), xop_reg(R_ESP));
 
     /* n_vregs >= 1, so the frame is always at least 16 bytes. */
-    emit_binop_rhs(buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(frame_plan(f).frame_size));
+    emit_binop_rhs(buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(fr->frame_size));
+
+    /* Variadic functions immediately capture the six GP argument registers
+       into the register save area — before emit_param_shuffle's %eax scratch
+       for stack args can reuse them (the arg regs themselves are read-only
+       here: mov reg -> [mem] never clobbers the source). */
+    if (f->is_variadic)
+    {
+        for (size_t i = 0; i < 6; i++)
+        {
+            emit_mov(buf, 8, xop_mem(x86_mem_rbp(-(i32) fr->save_area_off + (i32) i * 8)),
+                     xop_reg(abi_arg_regs[i]));
+        }
+    }
 
     emit_param_shuffle(buf, f, mod);
 }
@@ -1537,7 +1600,8 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     Vec *block_patches = vec_new(arena);
     Vec *global_patches = vec_new(arena);
 
-    emit_prologue(buf, f, mod);
+    FrameInfo fr = frame_plan(f);
+    emit_prologue(buf, f, mod, &fr);
 
     size_t nblocks = vec_size(f->blocks);
     Vec **phi_copies = arena_alloc(arena, nblocks * sizeof(Vec *), sizeof(void *));
@@ -1559,6 +1623,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         .block_patches = block_patches,
         .global_patches = global_patches,
         .switch_tables = vec_new(arena),
+        .save_area_off = fr.save_area_off,
     };
 
     for (size_t bi = 0; bi < nblocks; bi++)

@@ -2985,6 +2985,17 @@ ASTNode *parse(Token *tokens, u64 count, Arena *arena)
     ParserCtx p = {tokens, count, 0, arena, strmap_new(arena), vec_new(arena)};
     push_name_scope(&p);
 
+    /* Builtin typedef: `__builtin_va_list` is ficc's own type (D15.2), so the
+       __builtin_va_* compiler builtins work without any include. The raw
+       `va_list`/`va_start` names are NOT reserved in Phase 15 — they arrive as
+       ordinary names via the ficc <stdarg.h> shim + preprocessor in Phase 17.
+       A user redefinition to the same type passes the typedef check; a
+       redeclaration to a different type is an error (as in gcc). */
+    if (!name_declare(&p, "__builtin_va_list", BIND_TYPEDEF, type_va_list()))
+    {
+        return NULL;
+    }
+
     Vec *decls = vec_new(arena);
     while (parser_peek(&p)->kind != TOK_EOF)
     {

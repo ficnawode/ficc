@@ -617,3 +617,82 @@ TEST(ir_builder, fixed_call_untagged)
     }
     arena_free(a);
 }
+
+TEST(ir_builder, va_start_emits_op_and_offsets)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int f(int a, ...) {\n"
+                                  "    __builtin_va_list ap;\n"
+                                  "    __builtin_va_start(ap, a);\n"
+                                  "    return a;\n"
+                                  "}\n"
+                                  "int main(void) {\n"
+                                  "    return 0;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    EXPECT_STR_EQ(f->name, "f");
+    EXPECT_TRUE(f->is_variadic);
+
+    bool saw_start = false;
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t bi = 0; bi < nblocks && !saw_start; bi++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
+        size_t ninstr = vec_size(bb->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
+            if (in->opcode == OP_VA_START)
+            {
+                /* One named param (`int a`): gp_offset = 8, no stack skip. */
+                EXPECT_EQ(in->ops[1].u.imm, 0);
+                EXPECT_EQ(in->ops[2].u.imm, 8);
+                saw_start = true;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(saw_start);
+    arena_free(a);
+}
+
+TEST(ir_builder, va_start_six_named_params_full_gp)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int f(int a, int b, int c, int d, int e, int g, ...) {\n"
+                                  "    __builtin_va_list ap;\n"
+                                  "    __builtin_va_start(ap, g);\n"
+                                  "    return g;\n"
+                                  "}\n"
+                                  "int main(void) {\n"
+                                  "    return 0;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    EXPECT_TRUE(f->is_variadic);
+    bool saw_start = false;
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t bi = 0; bi < nblocks && !saw_start; bi++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
+        size_t ninstr = vec_size(bb->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
+            if (in->opcode == OP_VA_START)
+            {
+                /* Six named params consume all six GP regs: gp_offset = 48,
+                   the first unnamed arg lands at overflow+0. */
+                EXPECT_EQ(in->ops[1].u.imm, 0);
+                EXPECT_EQ(in->ops[2].u.imm, 48);
+                saw_start = true;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(saw_start);
+    arena_free(a);
+}

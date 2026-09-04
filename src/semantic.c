@@ -15,6 +15,8 @@ struct SemanticCtx
     int loop_depth;
     int switch_depth;
     Vec *switch_sem_stack; /* Vec<SwitchSem*> — per-switch case-value sets */
+    Vec *func_params;      /* enclosing function's ASTVarDecl* list (for builtin
+                              va_start validation), NULL outside function bodies */
     bool error;
 };
 
@@ -454,11 +456,104 @@ static bool check_incdec_expr(ASTIncDecExpr *incdec, SemanticCtx *ctx)
     return true;
 }
 
+/* A __builtin_va_start/__builtin_va_end argument must be a `va_list` after
+   decay: a pointer to the builtin va_list element type (D15.2; array-of-1
+   decays to the 24-byte struct). Pointer-equality on the interned element. */
+static bool builtin_check_va_list_arg(ASTNode *arg, SemanticCtx *ctx)
+{
+    if (!check_expr(arg, ctx))
+    {
+        return false;
+    }
+    Type *t = type_decay(arg->expr_type);
+    if (!type_is_ptr(t) || type_deref(t) != type_array_elem(type_va_list()))
+    {
+        sem_error(arg->loc, "argument must be a __builtin_va_list");
+        ctx->error = true;
+        return false;
+    }
+    return true;
+}
+
+/* Compiler-builtin va_start/va_end (D15.3): fixed signatures over the va_list
+   object. `__builtin_va_start(ap, last)` requires `last` to be an identifier
+   naming a parameter of the enclosing function (its value is unused — the
+   offsets are compile-time, D15.4; any named parameter is accepted). */
+static bool check_va_builtin(ASTCallExpr *call_expr, SemanticCtx *ctx)
+{
+    size_t got = vec_size(call_expr->args);
+    if (strcmp(call_expr->callee, "__builtin_va_start") == 0)
+    {
+        if (got != 2)
+        {
+            sem_error(call_expr->base.loc, "'__builtin_va_start' expects 2 arguments, got %zu", got);
+            ctx->error = true;
+            return false;
+        }
+        if (!builtin_check_va_list_arg((ASTNode *) vec_get(call_expr->args, 0), ctx))
+        {
+            return false;
+        }
+        ASTNode *last = (ASTNode *) vec_get(call_expr->args, 1);
+        if (!check_expr(last, ctx))
+        {
+            return false;
+        }
+        bool is_param = false;
+        if (last->kind == AST_IDENT && ctx->func_params)
+        {
+            ASTVarDecl *decl = ast_as(ASTIdent, last)->decl;
+            size_t n = vec_size(ctx->func_params);
+            for (size_t i = 0; i < n; i++)
+            {
+                if ((ASTVarDecl *) vec_get(ctx->func_params, i) == decl)
+                {
+                    is_param = true;
+                    break;
+                }
+            }
+        }
+        if (!is_param)
+        {
+            sem_error(last->loc,
+                      "'__builtin_va_start' second argument must be a parameter of the function");
+            ctx->error = true;
+            return false;
+        }
+    }
+    else
+    {
+        if (got != 1)
+        {
+            sem_error(call_expr->base.loc, "'__builtin_va_end' expects 1 argument, got %zu", got);
+            ctx->error = true;
+            return false;
+        }
+        if (!builtin_check_va_list_arg((ASTNode *) vec_get(call_expr->args, 0), ctx))
+        {
+            return false;
+        }
+    }
+    call_expr->base.expr_type = type_void();
+    return true;
+}
+
 static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
 {
     ASTFuncDef *callee = strmap_get(ctx->globals, call_expr->callee);
     if (!callee)
     {
+        /* __builtin_va_start/__builtin_va_end are compiler builtins, never
+           ASTFuncDefs; semantic validates their fixed signatures, the IR
+           builder recognizes the names and emits OP_VA_START. A user
+           definition of the same name is shadowed by the globals lookup above
+           (user declaration wins). The raw va_start/va_end names are NOT
+           builtins in Phase 15 — they arrive via the Phase 17 stdarg.h shim. */
+        if (strcmp(call_expr->callee, "__builtin_va_start") == 0 ||
+            strcmp(call_expr->callee, "__builtin_va_end") == 0)
+        {
+            return check_va_builtin(call_expr, ctx);
+        }
         sem_error(call_expr->base.loc, "undeclared function '%s'", call_expr->callee);
         ctx->error = true;
         return false;
@@ -2270,9 +2365,11 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
     ctx->labels = strmap_new(ctx->arena);
 
     push_scope(ctx);
+    ctx->func_params = fn->params;
     if (!setup_function_params(fn, ctx))
     {
         pop_scope(ctx);
+        ctx->func_params = NULL;
         ctx->loop_depth = saved_loop_depth;
         ctx->labels = saved_labels;
         return false;
@@ -2292,6 +2389,7 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
     }
 
     pop_scope(ctx);
+    ctx->func_params = NULL;
     ctx->loop_depth = saved_loop_depth;
     ctx->labels = saved_labels;
     return result;

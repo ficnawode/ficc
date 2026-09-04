@@ -135,6 +135,12 @@ bool type_is_variadic(Type *t);
 Type *type_record(TypeKind kind, const char *tag);
 Type *type_record_anon(TypeKind kind);
 void type_record_complete(Type *t, Vec *fields);
+
+/* The builtin `va_list` (D15.2): glibc's x86-64 shape, a 24-byte struct
+   `{u32 gp_offset; u32 fp_offset; void *overflow_arg_area; void
+   *reg_save_area;}` used as an array of 1 so it decays to a pointer on use.
+   Interned singleton; reconstructed per compilation unit by type_reset. */
+Type *type_va_list(void);
 Type *type_enum(const char *tag);
 Type *type_enum_anon(void);
 Type *type_record_lookup(const char *tag);

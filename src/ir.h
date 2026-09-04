@@ -48,7 +48,8 @@
     X(OP_CALL)                                                                                     \
     X(OP_PHI)                                                                                      \
     X(OP_SELECT)                                                                                   \
-    X(OP_UNREACHABLE)
+    X(OP_UNREACHABLE)                                                                              \
+    X(OP_VA_START)
 
 typedef enum
 {
@@ -168,9 +169,10 @@ struct IrFunction
     const char *name;
     Type *ret_type;
     Arena *arena;
-    Vec *params;    /* Vec<IrParam*> */
-    Vec *blocks;    /* Vec<IrBlock*> */
-    bool is_static; /* internal linkage (stays local in the object file) */
+    Vec *params;      /* Vec<IrParam*> */
+    Vec *blocks;      /* Vec<IrBlock*> */
+    bool is_static;   /* internal linkage (stays local in the object file) */
+    bool is_variadic; /* trailing unnamed args beyond the named params (C11 §6.7.6.3p8) */
 };
 
 /* IrGlobal variable / data record.
@@ -253,6 +255,7 @@ IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOpera
 IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src);
 IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOperand *args);
 void ir_call_set_variadic(IrInstr *call, bool is_variadic);
+IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offset);
 IrInstr *ir_emit_br(IrBlock *bb, const char *target_label);
 IrInstr *ir_emit_brcond(IrBlock *bb, IrOperand cond, const char *true_label,
                         const char *false_label);

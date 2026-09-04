@@ -1354,3 +1354,32 @@ TEST(parser, fixed_param_list_not_variadic)
     EXPECT_FALSE(fn->is_variadic);
     arena_free(a);
 }
+
+TEST(parser, builtin_va_list_is_builtin_typedef)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(void) {\n"
+                            "    __builtin_va_list ap;\n"
+                            "    return 0;\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_TRUE(vd->type->kind == TYPE_ARRAY);
+    EXPECT_TRUE(type_array_elem(vd->type) == type_array_elem(type_va_list()));
+    arena_free(a);
+}
+
+TEST(parser, raw_va_list_not_a_type_before_shim)
+{
+    /* Phase 15 does not make `va_list` a builtin — the raw name only becomes
+       a type through the Phase 17 <stdarg.h> shim. Until then it is just an
+       undeclared identifier in a type position. */
+    EXPECT_PARSE_FAIL("int main(void) {\n"
+                      "    va_list ap;\n"
+                      "    return 0;\n"
+                      "}\n");
+}

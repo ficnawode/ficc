@@ -72,3 +72,34 @@ TEST(type, func_type_layout)
     EXPECT_EQ(f->size, 8);
     arena_free(a);
 }
+
+TEST(type, va_list_shape)
+{
+    /* D15.2: `va_list` is glibc's x86-64 shape — an array of one 24-byte
+       struct `{u32 gp_offset; u32 fp_offset; void *overflow; void *regs}`,
+       decaying to a plain pointer on use. */
+    Type *vl = type_va_list();
+    EXPECT_EQ(vl->kind, TYPE_ARRAY);
+    EXPECT_EQ(type_array_len(vl), 1);
+    Type *e = type_array_elem(vl);
+    EXPECT_TRUE(type_is_record(e));
+    EXPECT_EQ(e->size, 24);
+    EXPECT_EQ(e->align, 8);
+
+    EXPECT_EQ(vec_size(e->record.fields), 4);
+    RecordField *gp = (RecordField *) vec_get(e->record.fields, 0);
+    EXPECT_EQ(gp->offset, 0);
+    EXPECT_EQ(gp->type->size, 4);
+    RecordField *fp = (RecordField *) vec_get(e->record.fields, 1);
+    EXPECT_EQ(fp->offset, 4);
+    RecordField *ovf = (RecordField *) vec_get(e->record.fields, 2);
+    EXPECT_EQ(ovf->offset, 8);
+    EXPECT_TRUE(type_is_ptr(ovf->type));
+    RecordField *regs = (RecordField *) vec_get(e->record.fields, 3);
+    EXPECT_EQ(regs->offset, 16);
+    EXPECT_TRUE(type_is_ptr(regs->type));
+
+    /* An identifier of type va_list decays to a pointer to the struct. */
+    EXPECT_TRUE(type_decay(vl)->kind == TYPE_PTR);
+    EXPECT_TRUE(type_deref(type_decay(vl)) == e);
+}

@@ -611,3 +611,105 @@ TEST(semantic, nonvariadic_arity_unchanged)
                       "    return f(1, 2);\n"
                       "}\n");
 }
+
+TEST(semantic, va_start_valid)
+{
+    EXPECT_BUILD_SUCCEED("int f(int a, ...) {\n"
+                         "    __builtin_va_list ap;\n"
+                         "    __builtin_va_start(ap, a);\n"
+                         "    __builtin_va_end(ap);\n"
+                         "    return a;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return f(1);\n"
+                         "}\n");
+}
+
+TEST(semantic, va_start_bad_arity)
+{
+    EXPECT_BUILD_FAIL("int f(int a, ...) {\n"
+                      "    __builtin_va_list ap;\n"
+                      "    __builtin_va_start(ap);\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}\n");
+}
+
+TEST(semantic, va_start_second_arg_not_parameter)
+{
+    EXPECT_BUILD_FAIL("int f(int a, ...) {\n"
+                      "    __builtin_va_list ap;\n"
+                      "    int x = 0;\n"
+                      "    __builtin_va_start(ap, x);\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}\n");
+}
+
+TEST(semantic, va_start_second_arg_not_identifier)
+{
+    EXPECT_BUILD_FAIL("int f(int a, ...) {\n"
+                      "    __builtin_va_list ap;\n"
+                      "    __builtin_va_start(ap, 42);\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}\n");
+}
+
+TEST(semantic, va_start_first_arg_not_va_list)
+{
+    EXPECT_BUILD_FAIL("int f(int a, ...) {\n"
+                      "    int x = 0;\n"
+                      "    __builtin_va_start(x, a);\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}\n");
+}
+
+TEST(semantic, va_end_bad_arity)
+{
+    EXPECT_BUILD_FAIL("int f(int a, ...) {\n"
+                      "    __builtin_va_list ap;\n"
+                      "    __builtin_va_end(ap, ap);\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}\n");
+}
+
+TEST(semantic, raw_names_are_free_identifiers)
+{
+    /* Phase 15 does not reserve the raw names: `va_start` is a plain
+       identifier until the Phase 17 <stdarg.h> shim provides it. A user
+       function called va_start is ordinary code, not a builtin. */
+    EXPECT_BUILD_SUCCEED("int va_start(int a) {\n"
+                         "    return a;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return va_start(42);\n"
+                         "}\n");
+}
+
+TEST(semantic, raw_va_start_call_is_undeclared)
+{
+    /* Without the shim (Phase 17), a call to the raw name is just an
+       undeclared function — the diagnostic a user relies on when they forget
+       <stdarg.h>. */
+    EXPECT_BUILD_FAIL("int f(int a, ...) {\n"
+                      "    __builtin_va_list ap;\n"
+                      "    va_start(ap, a);\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}\n");
+}

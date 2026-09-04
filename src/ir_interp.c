@@ -58,11 +58,16 @@ struct InterpCtx
     u32 nglobals;
 };
 
-/* Frame: call-stack entry with register file */
+/* Frame: call-stack entry with register file. For a variadic callee, the
+   SysV register save area (48 GP + 128-byte xmm reservation) and the overflow
+   (stack-arg) scratch region are materialized here at call time, mirroring the
+   codegen prologue spill: va_start points its fields at them. */
 typedef struct
 {
     IrFunction *func;
     i64 *regs;
+    u8 *va_save;     /* 176-byte register save area (GP first 48), or NULL */
+    u8 *va_overflow; /* stacked (arg-index >= 6) values, one 8-byte slot each */
 } Frame;
 
 /* ------------------------------------------------------------------ */
@@ -107,7 +112,24 @@ static Frame *frame_new(Arena *arena, IrFunction *func, u32 nregs)
     f->func = func;
     f->regs = arena_alloc(arena, nregs * sizeof(i64), sizeof(i64));
     memset(f->regs, 0, nregs * sizeof(i64));
+    f->va_save = NULL;
+    f->va_overflow = NULL;
     return f;
+}
+
+/* Raw bump from the interpreter's alloca region (same arena eval_alloca uses),
+   carrying the overflow guard. */
+static u8 *interp_alloc(InterpCtx *ctx, u64 size)
+{
+    u64 aligned = (size + 7) & ~7ULL;
+    if (ctx->alloca_top + aligned > ctx->alloca_limit)
+    {
+        interp_error("stack overflow");
+        return NULL;
+    }
+    u8 *p = ctx->alloca_base + ctx->alloca_top;
+    ctx->alloca_top += aligned;
+    return p;
 }
 
 /* ------------------------------------------------------------------ */
@@ -174,6 +196,7 @@ static i64 eval_trunc(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_zext(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_sext(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_unreachable(IrInstr *in, InterpCtx *ctx, i64 *regs);
+static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_store(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_gep(IrInstr *in, InterpCtx *ctx, i64 *regs);
@@ -219,6 +242,7 @@ static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *star
     X(OP_RET, eval_ret)                                                                            \
     X(OP_PHI, eval_phi)                                                                            \
     X(OP_UNREACHABLE, eval_unreachable)                                                            \
+    X(OP_VA_START, eval_va_start)                                                                  \
     X(OP_LOAD, eval_load)                                                                          \
     X(OP_STORE, eval_store)                                                                        \
     X(OP_GEP, eval_gep)                                                                            \
@@ -418,6 +442,39 @@ static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
                                        : trunc_result(callee_fr->regs[p->vreg], pw);
     }
 
+    /* Same register-save materialization as the codegen prologue spill: a
+       variadic callee's save area captures the raw incoming register args
+       (first six) and the stacked args (index >= 6), so va_start/va_arg walk
+       identical memory in both backends. */
+    if (callee->is_variadic)
+    {
+        u8 *save = interp_alloc(ctx, 176);
+        if (!save)
+        {
+            return 1;
+        }
+        for (u32 i = 0; i < 6; i++)
+        {
+            i64 v = i < in->extra.call.nargs ? operand_val(ctx, in->extra.call.args[i], regs) : 0;
+            memcpy(save + i * 8, &v, 8);
+        }
+        size_t nstack = in->extra.call.nargs > 6 ? in->extra.call.nargs - 6 : 0;
+        /* Always allocate the overflow region (even with no stacked args,
+           matching the real ABI where overflow_arg_area is never NULL). */
+        u8 *ovf = interp_alloc(ctx, (u64) (nstack > 0 ? nstack : 1) * 8);
+        if (!ovf)
+        {
+            return 1;
+        }
+        for (size_t j = 0; j < nstack; j++)
+        {
+            i64 v = operand_val(ctx, in->extra.call.args[6 + j], regs);
+            memcpy(ovf + j * 8, &v, 8);
+        }
+        callee_fr->va_overflow = ovf;
+        callee_fr->va_save = save;
+    }
+
     /* Build callee's block map */
     ctx->block_map = strmap_new(ctx->frame_arena);
     size_t nblocks = vec_size(callee->blocks);
@@ -440,6 +497,30 @@ static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
         regs[in->result] = ret;
         mask_vreg(ctx, regs, in->result);
     }
+    return 0;
+}
+
+/* va_start(ap, last): write the four va_list fields (D15.4/D15.5). The save
+   area and the stacked-arg region were materialized by eval_call; gp_offset/
+   stack_skip come from the instruction imm operands (compile-time functions of
+   the named-parameter count), fp_offset is the constant 48 (no xmm use). */
+static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    Frame *fr = (Frame *) vec_get(ctx->stack, vec_size(ctx->stack) - 1);
+    u8 *ap = resolve_ptr(ctx, in->ops[0], regs);
+    if (!ap)
+    {
+        return 1;
+    }
+    u32 gp = (u32) in->ops[2].u.imm;
+    u32 skip = (u32) in->ops[1].u.imm;
+    u32 fp = 48;
+    memcpy(ap + 0, &gp, 4);
+    memcpy(ap + 4, &fp, 4);
+    u64 ovf = fr->va_overflow ? (u64) (uintptr_t) (fr->va_overflow + skip) : 0;
+    memcpy(ap + 8, &ovf, 8);
+    u64 save = (u64) (uintptr_t) fr->va_save;
+    memcpy(ap + 16, &save, 8);
     return 0;
 }
 
@@ -595,14 +676,12 @@ static i64 eval_gep(IrInstr *in, InterpCtx *ctx, i64 *regs)
 static i64 eval_alloca(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     i64 size = operand_val(ctx, in->ops[0], regs);
-    u64 aligned = ((u64) size + 7) & ~7ULL;
-    if (ctx->alloca_top + aligned > ctx->alloca_limit)
+    u8 *p = interp_alloc(ctx, (u64) size);
+    if (!p)
     {
-        interp_error("stack overflow");
         return 1;
     }
-    regs[in->result] = (i64) (uintptr_t) (ctx->alloca_base + ctx->alloca_top);
-    ctx->alloca_top += aligned;
+    regs[in->result] = (i64) (uintptr_t) p;
     mask_vreg(ctx, regs, in->result);
     return 0;
 }
