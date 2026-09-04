@@ -528,3 +528,20 @@ TEST(semantic, const_bool_write_rejected)
                       "    return 0;\n"
                       "}\n");
 }
+
+TEST(semantic, alignas_accepted)
+{
+    EXPECT_BUILD_SUCCEED("_Alignas(32) int g;\n"
+                         "int main(void) {\n"
+                         "    _Alignas(16) int x = 1;\n"
+                         "    return x;\n"
+                         "}\n");
+}
+
+TEST(semantic, alignas_non_power_of_two_rejected)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    _Alignas(6) int x;\n"
+                      "    return 0;\n"
+                      "}\n");
+}

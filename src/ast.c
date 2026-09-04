@@ -79,6 +79,7 @@ ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, StorageClass 
     n->has_const_init = false;
     n->is_block_scope = false;
     n->plan = NULL;
+    n->alignas = 0;
     return &n->base;
 }
 

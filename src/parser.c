@@ -143,6 +143,7 @@ static bool name_declare(ParserCtx *p, const char *name, ParserBindingKind kind,
 }
 
 static Type *parse_type_specifier(ParserCtx *p);
+static Type *parse_abstract_declarator(ParserCtx *p, Type *base);
 static Type *parse_array_suffix(ParserCtx *p, Type *type);
 
 /* Declaration specifiers: the base type of a declaration plus the tag-
@@ -157,6 +158,9 @@ typedef struct DeclSpecifiers
 {
     Type *type;
     ASTNode *tag_def;
+    u32 alignas; /* requested alignment from `_Alignas(...)`, 0 = natural
+                    (D14.6: accepted and validated; honored up to the object's
+                    natural alignment only) */
 } DeclSpecifiers;
 
 static DeclSpecifiers parse_decl_specifiers(ParserCtx *p);
@@ -243,7 +247,7 @@ static ASTNode *parse_init_list(ParserCtx *p);
    declarator list (§6.7.6, field-declaration in §6.7.2.1p8). Supports
    multi-declarators (`int a, b;`) and inline/definitions of nested records.
    Returns a single ASTVarDecl or an AST_DECL_LIST. */
-static ASTNode *parse_member_decl_body(ParserCtx *p, Type *base, Token *start)
+static ASTNode *parse_member_decl_body(ParserCtx *p, Type *base, u32 alignas, Token *start)
 {
     if (parser_peek(p)->kind == TOK_SEMI)
     {
@@ -264,7 +268,9 @@ static ASTNode *parse_member_decl_body(ParserCtx *p, Type *base, Token *start)
         {
             return NULL;
         }
-        vec_push(decls, ast_var_decl(dtype, name, NULL, SC_NONE, start->loc, p->arena));
+        ASTNode *decl = ast_var_decl(dtype, name, NULL, SC_NONE, start->loc, p->arena);
+        ast_as(ASTVarDecl, decl)->alignas = alignas;
+        vec_push(decls, decl);
         if (parser_peek(p)->kind != TOK_COMMA)
         {
             break;
@@ -333,7 +339,7 @@ static Vec *parse_record_body(ParserCtx *p, Type *rec)
             return NULL;
         }
 
-        ASTNode *member = parse_member_decl_body(p, mspecs.type, mstart);
+        ASTNode *member = parse_member_decl_body(p, mspecs.type, mspecs.alignas, mstart);
         if (!member)
         {
             return NULL;
@@ -635,21 +641,101 @@ static Type *parse_integer_specifiers(ParserCtx *p)
     return n_unsigned ? type_uint() : type_int();
 }
 
+/* `_Alignas ( type-name )` / `_Alignas ( constant-expression )` (§6.7.5). The
+   folded value must be a valid alignment: a nonzero power of two. Multiple
+   `_Alignas` on one declaration combine to the strictest (D14.6: the result is
+   recorded on the AST and honored up to the object's natural alignment only). */
+static u32 parse_alignas_specifier(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_KW_ALIGNAS);
+    parser_advance(p);
+
+    if (!parser_expect(p, TOK_LPAREN, "'('"))
+    {
+        return 0;
+    }
+
+    i64 align = 0;
+    bool ok;
+    /* The `(` is consumed; the type-name/expression token sits at p->pos. */
+    if (is_typename_start_at(p, skip_const_ahead(p, p->pos)))
+    {
+        Type *ty = parse_type_specifier(p);
+        if (ty)
+        {
+            ty = parse_abstract_declarator(p, ty);
+            if (ty)
+            {
+                ty = parse_array_suffix(p, ty);
+            }
+        }
+        if (!ty)
+        {
+            return 0;
+        }
+        align = (i64) type_alignof(ty);
+        ok = true;
+    }
+    else
+    {
+        ASTNode *expr = parse_assign(p);
+        if (!expr)
+        {
+            return 0;
+        }
+        ok = fold_constant_expr(p, expr, &align);
+    }
+    if (!ok)
+    {
+        parser_error(p, "alignment is not a constant expression");
+        return 0;
+    }
+    if (!parser_expect(p, TOK_RPAREN, "')'"))
+    {
+        return 0;
+    }
+
+    if (align <= 0 || (align & (align - 1)) != 0)
+    {
+        parser_error(p, "invalid alignment (must be a nonzero power of two)");
+        return 0;
+    }
+    return (u32) align;
+}
+
 /* Full declaration-specifier list: leading + trailing qualifiers around a
    specifier. Does NOT consume declarator decorators (`*`, `[dims]`) — those
    belong to the per-declarator layer, so `int *a, b;` splits correctly. */
 static DeclSpecifiers parse_decl_specifiers(ParserCtx *p)
 {
-    DeclSpecifiers out = {NULL, NULL};
+    DeclSpecifiers out = {NULL, NULL, 0};
     Token *t = parser_peek(p);
     Type *ty = NULL;
 
-    /* Leading qualifiers: `const int`, `const struct point`. */
+    /* Leading qualifiers and alignment specifiers: `const int`,
+       `_Alignas(16) int`, `const _Alignas(8) long`. */
     bool lead_const = false;
-    while (t->kind == TOK_KW_CONST)
+    for (;;)
     {
-        lead_const = true;
-        parser_advance(p);
+        if (t->kind == TOK_KW_CONST)
+        {
+            lead_const = true;
+            parser_advance(p);
+        }
+        else if (t->kind == TOK_KW_ALIGNAS)
+        {
+            u32 a = parse_alignas_specifier(p);
+            if (a == 0)
+            {
+                return out;
+            }
+            out.alignas = a > out.alignas ? a : out.alignas;
+        }
+        else
+        {
+            break;
+        }
         t = parser_peek(p);
     }
 
@@ -703,15 +789,33 @@ static DeclSpecifiers parse_decl_specifiers(ParserCtx *p)
         return out;
     }
 
-    /* Trailing qualifiers apply to the type itself: `int const x`. */
+    /* Trailing qualifiers and alignment specifiers apply to the type itself:
+       `int const x`, `int _Alignas(16) x`, in any order. */
     if (lead_const)
     {
         ty = type_const(ty);
     }
-    while (parser_peek(p)->kind == TOK_KW_CONST)
+    for (;;)
     {
-        parser_advance(p);
-        ty = type_const(ty);
+        Token *nt = parser_peek(p);
+        if (nt->kind == TOK_KW_CONST)
+        {
+            parser_advance(p);
+            ty = type_const(ty);
+        }
+        else if (nt->kind == TOK_KW_ALIGNAS)
+        {
+            u32 a = parse_alignas_specifier(p);
+            if (a == 0)
+            {
+                return out;
+            }
+            out.alignas = a > out.alignas ? a : out.alignas;
+        }
+        else
+        {
+            break;
+        }
     }
 
     out.type = ty;
@@ -780,7 +884,8 @@ static bool parse_declarator(ParserCtx *p, Type *base, Type **out_type, const ch
 }
 
 /* The `name (= init)?` run of an init-declarator list, minus specifiers. */
-static bool parse_one_declarator(ParserCtx *p, Type *base, StorageClass storage, Vec *decls_out)
+static bool parse_one_declarator(ParserCtx *p, Type *base, StorageClass storage, u32 alignas,
+                                 Vec *decls_out)
 {
     Token *decl_start = parser_peek(p);
     Type *dtype;
@@ -801,6 +906,7 @@ static bool parse_one_declarator(ParserCtx *p, Type *base, StorageClass storage,
 
     ASTNode *decl = ast_var_decl(dtype, name, NULL, storage, decl_start->loc, p->arena);
     ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
+    vd->alignas = alignas;
     if (parser_peek(p)->kind == TOK_ASSIGN)
     {
         parser_advance(p);
@@ -853,10 +959,12 @@ static ASTNode *parse_param(ParserCtx *p)
     }
 
     /* Array parameters decay to pointer (C11 §6.7.6.3p7); the declarator
-       already applied the array suffixes. */
+            already applied the array suffixes. */
     type = type_decay(type);
 
-    return ast_var_decl(type, name, NULL, SC_NONE, start->loc, p->arena);
+    ASTNode *decl = ast_var_decl(type, name, NULL, SC_NONE, start->loc, p->arena);
+    ast_as(ASTVarDecl, decl)->alignas = specs.alignas;
+    return decl;
 }
 
 static Vec *parse_param_list(ParserCtx *p)
@@ -999,6 +1107,13 @@ static ASTNode *parse_typedef_decl(ParserCtx *p)
         return NULL;
     }
 
+    /* §6.7.5p3: an alignment specifier shall not be used in a typedef. */
+    if (specs.alignas)
+    {
+        parser_error(p, "_Alignas is not permitted in a typedef");
+        return NULL;
+    }
+
     Type *dtype;
     const char *name;
     if (!parse_declarator(p, specs.type, &dtype, &name))
@@ -1054,7 +1169,7 @@ static ASTNode *parse_var_decl(ParserCtx *p, StorageClass storage)
     Vec *decls = vec_new(p->arena);
     while (true)
     {
-        if (!parse_one_declarator(p, specs.type, storage, decls))
+        if (!parse_one_declarator(p, specs.type, storage, specs.alignas, decls))
         {
             return NULL;
         }
@@ -1526,6 +1641,11 @@ static ASTNode *parse_stmt(ParserCtx *p)
             }
             return parse_var_decl(p, SC_NONE);
         }
+        case TOK_KW_ALIGNAS:
+            /* `_Alignas(16) int x;` at block scope (an alignment specifier is
+               a declaration specifier; storage class before it is handled by
+               the above storage-class cases). */
+            return parse_var_decl(p, SC_NONE);
         case TOK_KW_STATIC_ASSERT:
             return parse_static_assert(p);
         case TOK_KW_RETURN:
@@ -2721,6 +2841,13 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
 
     if (parser_peek(p)->kind == TOK_LPAREN)
     {
+        /* §6.7.5p2: an alignment specifier applies to objects and members
+           only — never to a function. */
+        if (specs.alignas)
+        {
+            parser_error(p, "_Alignas is not permitted on a function");
+            return NULL;
+        }
         /* extern on a function definition is an ordinary definition (C11
            §6.9.1); prototypes (no body) are not supported yet. */
         StorageClass fn_storage = storage == SC_STATIC ? SC_STATIC : SC_NONE;
@@ -2777,6 +2904,7 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
 
         ASTNode *decl = ast_var_decl(dtype, name, NULL, storage, start->loc, p->arena);
         ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
+        vd->alignas = specs.alignas;
         if (parser_peek(p)->kind == TOK_ASSIGN)
         {
             parser_advance(p);

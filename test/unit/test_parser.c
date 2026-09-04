@@ -499,6 +499,38 @@ TEST(parser, bool_cast_target)
     arena_free(a);
 }
 
+TEST(parser, alignas_records_requested_alignment)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("_Alignas(16) int g;\n"
+                            "int main(void) {\n"
+                            "    _Alignas(8) int x;\n"
+                            "    return 0;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTVarDecl *g = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(g->alignas, 16);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 1));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTVarDecl *x = ast_as(ASTVarDecl, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(x->alignas, 8);
+    arena_free(a);
+}
+
+TEST(parser, alignas_typedef_rejected)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("typedef _Alignas(16) int T;\n"
+                            "int main(void) {\n"
+                            "    return 0;\n"
+                            "}",
+                            a);
+    EXPECT_NULL(ast);
+    arena_free(a);
+}
+
 TEST(parser, deref_expr)
 {
     Arena *a = arena_new();

@@ -172,6 +172,8 @@ struct ASTVarDecl
     bool is_block_scope;   /* declared inside a function body (vs file scope) */
     struct InitPlan *plan; /* flattening plan for aggregate/string initializers
                               (filled by semantic; NULL otherwise) */
+    u32 alignas;           /* requested alignment (_Alignas), 0 = natural (D14.6:
+                              recorded but applied only up to the natural alignment) */
 };
 
 /* An init-declarator list `int a = 1, b = 2;` (C11 §6.7.6) — several

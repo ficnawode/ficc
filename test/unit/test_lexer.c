@@ -358,6 +358,18 @@ TEST(lexer, bool_keyword_is_exact)
     arena_free(a);
 }
 
+TEST(lexer, alignas_keyword)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "_Alignas", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_KW_ALIGNAS);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
 TEST(lexer, char_literal_value)
 {
     Arena *a = arena_new();
