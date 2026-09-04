@@ -1876,6 +1876,14 @@ static ExprResult build_member_access_expr(ASTMemberAccess *ma, IrFunction *f, I
 
 static ExprResult build_binary_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
+    if (be->op == BIN_COMMA)
+    {
+        /* §6.5.17: evaluate the left operand and discard it, then return the
+           right operand's value. The left gets no result vreg, so it cannot
+           alias into a later SSA use. */
+        ExprResult left = build_expr(be->left, f, bb, ctx);
+        return build_expr(be->right, f, left.block, ctx);
+    }
     if (be->op == BIN_LOG_AND || be->op == BIN_LOG_OR)
     {
         return build_short_circuit(be, f, bb, ctx);

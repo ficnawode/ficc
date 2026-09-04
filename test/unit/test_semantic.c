@@ -390,3 +390,31 @@ TEST(semantic, incdec_array_rejected)
                       "    return 0;\n"
                       "}\n");
 }
+
+TEST(semantic, comma_ok)
+{
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    int a = 1;\n"
+                         "    int b = 2;\n"
+                         "    int v = (a, b);\n"
+                         "    return v;\n"
+                         "}\n");
+}
+
+TEST(semantic, comma_void_left_ok)
+{
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    int v = ((void)0, 42);\n"
+                         "    return v;\n"
+                         "}\n");
+}
+
+TEST(semantic, comma_not_lvalue_rejected)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int a = 1;\n"
+                      "    int b = 2;\n"
+                      "    (a, b) = 5;\n"
+                      "    return 0;\n"
+                      "}\n");
+}

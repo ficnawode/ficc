@@ -924,3 +924,71 @@ TEST(parser, chained_postfix_ops)
     EXPECT_TRUE(ie->is_postfix);
     arena_free(a);
 }
+
+TEST(parser, comma_expression_shape)
+{
+    Arena *a = arena_new();
+    ASTReturnStmt *ret = first_return("int main(void) { return (x, y); }\n", a);
+    ASTBinaryExpr *be = ast_as(ASTBinaryExpr, ret->expr);
+    EXPECT_NOTNULL(be);
+    EXPECT_EQ(be->base.kind, AST_BINARY_EXPR);
+    EXPECT_EQ(be->op, BIN_COMMA);
+    EXPECT_EQ(be->left->kind, AST_IDENT);
+    EXPECT_EQ(be->right->kind, AST_IDENT);
+    arena_free(a);
+}
+
+TEST(parser, comma_left_associative)
+{
+    Arena *a = arena_new();
+    ASTReturnStmt *ret = first_return("int main(void) { return (a, b, c); }\n", a);
+    ASTBinaryExpr *outer = ast_as(ASTBinaryExpr, ret->expr);
+    EXPECT_NOTNULL(outer);
+    EXPECT_EQ(outer->op, BIN_COMMA);
+    ASTBinaryExpr *inner = ast_as(ASTBinaryExpr, outer->left);
+    EXPECT_NOTNULL(inner);
+    EXPECT_EQ(inner->op, BIN_COMMA);
+    EXPECT_EQ(inner->left->kind, AST_IDENT);
+    EXPECT_EQ(inner->right->kind, AST_IDENT);
+    EXPECT_EQ(outer->right->kind, AST_IDENT);
+    arena_free(a);
+}
+
+TEST(parser, comma_in_args_is_separator)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(int a, int b) { return 0; }\n"
+                            "int main(void) { return f((1, 2), 3); }\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 1));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
+    ASTCallExpr *call = ast_as(ASTCallExpr, ret->expr);
+    EXPECT_NOTNULL(call);
+    EXPECT_EQ(vec_size(call->args), 2);
+    ASTBinaryExpr *first = ast_as(ASTBinaryExpr, (ASTNode *) vec_get(call->args, 0));
+    EXPECT_NOTNULL(first);
+    EXPECT_EQ(first->op, BIN_COMMA);
+    ASTNode *second = (ASTNode *) vec_get(call->args, 1);
+    EXPECT_EQ(second->kind, AST_INT_LITERAL);
+    arena_free(a);
+}
+
+TEST(parser, comma_in_subscript_index)
+{
+    Arena *a = arena_new();
+    ASTReturnStmt *ret = first_return("int main(void) { return a[x, y]; }\n", a);
+    ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, ret->expr);
+    EXPECT_NOTNULL(se);
+    ASTBinaryExpr *idx = ast_as(ASTBinaryExpr, se->index);
+    EXPECT_NOTNULL(idx);
+    EXPECT_EQ(idx->op, BIN_COMMA);
+    arena_free(a);
+}
+
+TEST(parser, comma_not_in_case)
+{
+    EXPECT_PARSE_FAIL("int main(void) { int x = 1; switch (x) { case 1, 2: return 0; } }\n");
+}

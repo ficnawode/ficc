@@ -73,6 +73,7 @@ typedef enum
     BIN_SHR,
     BIN_LOG_AND,
     BIN_LOG_OR,
+    BIN_COMMA,
     BIN_ADD_ASSIGN,
     BIN_SUB_ASSIGN,
     BIN_MUL_ASSIGN,

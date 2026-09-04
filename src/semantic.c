@@ -237,7 +237,10 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     Type *lt = binary_expr->left->expr_type;
     Type *rt = binary_expr->right->expr_type;
     Type *result = NULL;
-    if (!check_value_used(binary_expr->left, ctx) || !check_value_used(binary_expr->right, ctx))
+    bool left_void_ok = binary_expr->op == BIN_COMMA; /* §6.5.17p2: the comma's
+                                left operand is evaluated as a void expression */
+    if ((!left_void_ok && !check_value_used(binary_expr->left, ctx)) ||
+        !check_value_used(binary_expr->right, ctx))
     {
         /* `(void)x + 1`, `f() = 5` — operand is void, not a value. */
         return false;
@@ -298,6 +301,15 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
             return false;
         }
         result = type_rvalue(lt);
+    }
+    else if (binary_expr->op == BIN_COMMA)
+    {
+        /* §6.5.17: the left operand is evaluated and discarded; the value and
+           type of the expression are the right operand's. The result is not
+           an lvalue (an lvalue on the left is fine — it is simply evaluated).
+           A record right operand was already rejected by the record check
+           above (records are not values). */
+        result = type_rvalue(rt);
     }
     else
     {

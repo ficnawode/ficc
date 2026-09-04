@@ -145,6 +145,7 @@ static bool name_declare(ParserCtx *p, const char *name, ParserBindingKind kind,
 static Type *parse_type_specifier(ParserCtx *p);
 static Type *parse_array_suffix(ParserCtx *p, Type *type);
 static ASTNode *parse_expr(ParserCtx *p);
+static ASTNode *parse_expression(ParserCtx *p);
 static ASTNode *parse_stmt(ParserCtx *p);
 static ASTNode *parse_primary(ParserCtx *p);
 static ASTNode *parse_postfix_ops(ParserCtx *p, ASTNode *node);
@@ -489,7 +490,7 @@ static ASTNode *parse_return_stmt(ParserCtx *p)
     ASTNode *expr = NULL;
     if (parser_peek(p)->kind != TOK_SEMI)
     {
-        expr = parse_expr(p);
+        expr = parse_expression(p);
         if (!expr)
         {
             return NULL;
@@ -646,7 +647,7 @@ static ASTNode *parse_var_decl(ParserCtx *p, StorageClass storage)
 static ASTNode *parse_expr_stmt(ParserCtx *p)
 {
     Token *start = parser_peek(p);
-    ASTNode *expr = parse_expr(p);
+    ASTNode *expr = parse_expression(p);
     if (!expr)
     {
         return NULL;
@@ -669,7 +670,7 @@ static ASTNode *parse_if_stmt(ParserCtx *p)
         return NULL;
     }
 
-    ASTNode *cond = parse_expr(p);
+    ASTNode *cond = parse_expression(p);
     if (!cond)
     {
         return NULL;
@@ -711,7 +712,7 @@ static ASTNode *parse_while_stmt(ParserCtx *p)
         return NULL;
     }
 
-    ASTNode *cond = parse_expr(p);
+    ASTNode *cond = parse_expression(p);
     if (!cond)
     {
         return NULL;
@@ -752,7 +753,7 @@ static ASTNode *parse_do_while_stmt(ParserCtx *p)
         return NULL;
     }
 
-    ASTNode *cond = parse_expr(p);
+    ASTNode *cond = parse_expression(p);
     if (!cond)
     {
         return NULL;
@@ -809,7 +810,7 @@ static ASTNode *parse_for_stmt(ParserCtx *p)
     ASTNode *cond = NULL;
     if (parser_peek(p)->kind != TOK_SEMI)
     {
-        cond = parse_expr(p);
+        cond = parse_expression(p);
         if (!cond)
         {
             return NULL;
@@ -823,7 +824,7 @@ static ASTNode *parse_for_stmt(ParserCtx *p)
     ASTNode *post = NULL;
     if (parser_peek(p)->kind != TOK_RPAREN)
     {
-        post = parse_expr(p);
+        post = parse_expression(p);
         if (!post)
         {
             return NULL;
@@ -917,7 +918,7 @@ static ASTNode *parse_switch_stmt(ParserCtx *p)
         return NULL;
     }
 
-    ASTNode *cond = parse_expr(p);
+    ASTNode *cond = parse_expression(p);
     if (!cond)
     {
         return NULL;
@@ -1086,6 +1087,34 @@ static ASTNode *parse_expr(ParserCtx *p)
     return parse_assign(p);
 }
 
+/* The C11 *expression* level (§6.5.17): comma-separated, left-associative,
+   value of the rightmost operand. This is DIFFERENT from parse_expr (the
+   assignment-expression level) — commas in argument lists, init-list
+   elements, and designator indexes are separators, not the operator, so those
+   sites call parse_expr. Only C11's expression positions (expression
+   statements, `return`, conditions, for-clauses, subscript indexes, ternary
+   middle, parenthesized primaries) route here. */
+static ASTNode *parse_expression(ParserCtx *p)
+{
+    ASTNode *left = parse_assign(p);
+    if (!left)
+    {
+        return NULL;
+    }
+    while (parser_peek(p)->kind == TOK_COMMA)
+    {
+        Token *t = parser_peek(p);
+        parser_advance(p);
+        ASTNode *right = parse_assign(p);
+        if (!right)
+        {
+            return NULL;
+        }
+        left = ast_binary_expr(BIN_COMMA, left, right, t->loc, p->arena);
+    }
+    return left;
+}
+
 static ASTNode *parse_identifier_expr(ParserCtx *p, Token *t)
 {
     parser_advance(p);
@@ -1160,7 +1189,9 @@ static ASTNode *parse_primary(ParserCtx *p)
         case TOK_LPAREN:
         {
             parser_advance(p);
-            ASTNode *inner = parse_expr(p);
+            /* A parenthesized expression is a primary expression (§6.5.1p5)
+               — it takes the full expression level, so `(a, b)` works. */
+            ASTNode *inner = parse_expression(p);
             if (!inner)
             {
                 return NULL;
@@ -1335,7 +1366,9 @@ static ASTNode *parse_postfix_ops(ParserCtx *p, ASTNode *node)
         if (t->kind == TOK_LBRACKET)
         {
             parser_advance(p);
-            ASTNode *index = parse_expr(p);
+            /* Subscript takes a full expression (§6.5.2.1), so the comma
+               operator is legal in the index: `a[i, j]`. */
+            ASTNode *index = parse_expression(p);
             if (!index)
             {
                 return NULL;
@@ -1684,7 +1717,9 @@ static ASTNode *parse_ternary(ParserCtx *p)
 
     Token *t = parser_peek(p);
     parser_advance(p);
-    ASTNode *then_expr = parse_expr(p);
+    /* The middle operand of `?:` is a full expression (§6.5.15), so commas
+       are legal there: `c ? (a, b) : d` and even `c ? a, b : d`. */
+    ASTNode *then_expr = parse_expression(p);
     if (!then_expr)
     {
         return NULL;
