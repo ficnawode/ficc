@@ -117,7 +117,7 @@ bool type_is_record(Type *t);
 bool type_is_struct(Type *t);
 bool type_is_union(Type *t);
 bool type_is_enum(Type *t);
-bool type_is_complete(Type *t); /* records only */
+bool type_is_complete(Type *t); /* records + arrays (len-0 = `[]` unspecified, D12.7) */
 bool type_is_const(Type *t);
 
 Type *type_ptr(Type *pointee);

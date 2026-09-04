@@ -438,6 +438,11 @@ struct InitPlan
 {
     Vec *writes;    /* Vec<InitWrite*> sorted by offset */
     u64 total_size; /* byte size of the object being initialized */
+    /* D12.7: the declared-against `[]` array (outermost rank) is resized from
+       its initializer. Only the root plan call may grow; semantic rewrites
+       vd->type to a fresh type_array(elem, inferred_len) afterwards. */
+    bool grow_array;  /* outermost array is `[]` — cursor is unbounded */
+    u64 inferred_len; /* largest element index+1 reached while grow_array */
 };
 
 ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body,

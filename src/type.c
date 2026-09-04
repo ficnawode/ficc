@@ -140,6 +140,17 @@ bool type_is_enum(Type *t)
 
 bool type_is_complete(Type *t)
 {
+    if (type_is_array(t))
+    {
+        /* §6.7.6.2p4: a length-0 array is the `[]` "as unspecified" sentinel
+           until an initializer completes it (D12.7) — incomplete. An array of
+           incomplete elements is likewise incomplete. */
+        if (t->arr.length == 0)
+        {
+            return false;
+        }
+        return type_is_complete(t->arr.elem);
+    }
     if (!type_is_record(t))
     {
         return true;

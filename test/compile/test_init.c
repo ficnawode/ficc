@@ -246,10 +246,73 @@ TEST(init, negative_string_too_long)
                       "}\n");
 }
 
-TEST(init, negative_incomplete_array)
+TEST(init, incomplete_array_infers_length)
+{
+    /* Phase 12d: `[]` is completed from its initializer. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a[] = {1, 2, 3};\n"
+                          "    return a[0] + a[1] + a[2];\n"
+                          "}\n",
+                          6);
+}
+
+TEST(init, incomplete_array_infers_designator)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a[] = {[3] = 7};\n"
+                          "    return a[0] + a[1] + a[2] + a[3];\n"
+                          "}\n",
+                          7);
+}
+
+TEST(init, incomplete_array_infers_two_d)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int m[][2] = {{1}, {2, 3}};\n"
+                          "    return sizeof(m);\n"
+                          "}\n",
+                          16);
+}
+
+TEST(init, incomplete_array_infers_elided_rows)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int m[][2] = {1, 2, 3, 4};\n"
+                          "    return m[0][0] + m[0][1] + m[1][0] + m[1][1];\n"
+                          "}\n",
+                          10);
+}
+
+TEST(init, incomplete_char_array_from_string)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    char s[] = \"hi\";\n"
+                          "    return sizeof(s);\n"
+                          "}\n",
+                          3);
+}
+
+TEST(init, incomplete_array_of_strings)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    char s[][4] = {\"ab\", \"cde\"};\n"
+                          "    return s[0][1] + s[1][2];\n"
+                          "}\n",
+                          'b' + 'e');
+}
+
+TEST(init, negative_bare_incomplete_array)
 {
     EXPECT_BUILD_FAIL("int main(void) {\n"
-                      "    int a[] = {1, 2, 3};\n"
+                      "    int a[];\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(init, negative_inner_empty_brackets)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int a[2][] = {0, 1};\n"
                       "    return 0;\n"
                       "}\n");
 }

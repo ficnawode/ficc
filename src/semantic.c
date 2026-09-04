@@ -34,6 +34,7 @@ static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx);
 static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *list, u32 base_off);
 static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd);
 static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd);
+static bool plan_var_aggregate_init(SemanticCtx *ctx, ASTVarDecl *vd, bool *handled);
 static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type);
 
 static void sem_error(Loc loc, const char *fmt, ...)
@@ -674,46 +675,34 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
     if (var_decl->storage == SC_STATIC)
     {
         /* Block-scope statics are file-backed objects: the parser folded a
-           constant initializer into const_init, routed a brace list or a
-           `char *` string literal into init; everything else is rejected.
-           Lists and char arrays get a plan; the serializer emits the bytes. */
-        if (type_is_record(var_decl->type) && !type_is_complete(var_decl->type))
-        {
-            sem_error(var_decl->base.loc, "variable '%s' has incomplete type", var_decl->name);
-            ctx->error = true;
-            return false;
-        }
+           constant initializer into const_init, routed a brace list, a string
+           literal, or an address constant into init; everything else is
+           rejected. Lists / char arrays get a plan; the serializer emits the
+           bytes. */
         if (var_decl->init)
         {
-            if (var_decl->init->kind == AST_INIT_LIST)
+            bool handled;
+            if (!plan_var_aggregate_init(ctx, var_decl, &handled))
             {
-                InitPlan *plan = init_plan_new(ctx, var_decl->type);
-                if (!plan_list(ctx, plan, var_decl->type, ast_as(ASTInitList, var_decl->init), 0))
-                {
-                    return false;
-                }
-                var_decl->plan = plan;
-            }
-            else if (var_decl->init->kind == AST_STRING_LITERAL && type_is_array(var_decl->type))
-            {
-                if (!plan_char_array_from_string(ctx, var_decl))
-                {
-                    return false;
-                }
-            }
-            else if (var_decl->init->kind == AST_UNARY_EXPR)
-            {
-                if (!plan_ptr_initializer(ctx, var_decl))
-                {
-                    return false;
-                }
-            }
-            else if (!type_is_ptr(var_decl->type) || type_deref(var_decl->type)->kind != TYPE_CHAR)
-            {
-                sem_error(var_decl->base.loc,
-                          "string-literal initializer requires a 'char *' variable");
-                ctx->error = true;
                 return false;
+            }
+            if (!handled)
+            {
+                if (var_decl->init->kind == AST_UNARY_EXPR)
+                {
+                    if (!plan_ptr_initializer(ctx, var_decl))
+                    {
+                        return false;
+                    }
+                }
+                else if (!type_is_ptr(var_decl->type) ||
+                         type_deref(var_decl->type)->kind != TYPE_CHAR)
+                {
+                    sem_error(var_decl->base.loc,
+                              "string-literal initializer requires a 'char *' variable");
+                    ctx->error = true;
+                    return false;
+                }
             }
         }
         if (var_decl->has_const_init &&
@@ -765,19 +754,14 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
     strmap_set(current_scope(ctx), var_decl->name, var_decl);
     if (var_decl->init)
     {
-        if (var_decl->init->kind == AST_INIT_LIST)
+        bool handled;
+        if (!plan_var_aggregate_init(ctx, var_decl, &handled))
         {
-            InitPlan *plan = init_plan_new(ctx, var_decl->type);
-            if (!plan_list(ctx, plan, var_decl->type, ast_as(ASTInitList, var_decl->init), 0))
-            {
-                return false;
-            }
-            var_decl->plan = plan;
-            return true;
+            return false;
         }
-        if (var_decl->init->kind == AST_STRING_LITERAL && type_is_array(var_decl->type))
+        if (handled)
         {
-            return plan_char_array_from_string(ctx, var_decl);
+            return true;
         }
         if (!check_expr(var_decl->init, ctx))
         {
@@ -804,6 +788,14 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
             return false;
         }
     }
+    /* D12.7: a `[]` array with no initializer (or an incomplete record/array
+       element) stays incomplete — rejected after completion would have run. */
+    if (!type_is_complete(var_decl->type))
+    {
+        sem_error(var_decl->base.loc, "variable '%s' has incomplete type", var_decl->name);
+        ctx->error = true;
+        return false;
+    }
     return true;
 }
 
@@ -826,6 +818,7 @@ typedef struct
     Type *agg; /* array / struct / union type this frame iterates */
     u32 next;  /* next child index to consume within `agg` */
     u32 base;  /* absolute byte offset of this aggregate in the object */
+    bool grow; /* root `[]` array: unbounded cursor, tracked (D12.7) */
 } PlanFrame;
 
 static bool is_aggregate_type(Type *t)
@@ -834,22 +827,29 @@ static bool is_aggregate_type(Type *t)
     return type_is_array(t) || type_is_record(t);
 }
 
-static u32 aggr_nchildren(Type *agg)
+static u32 aggr_nchildren(const PlanFrame *fr)
 {
-    agg = type_unqual(agg);
+    Type *agg = type_unqual(fr->agg);
     if (type_is_array(agg))
     {
+        if (fr->grow)
+        {
+            /* Declared-against `[]` array: never pops by exhaustion. */
+            return UINT32_MAX;
+        }
         return (u32) agg->arr.length;
     }
     return (u32) vec_size(agg->record.fields);
 }
 
-static bool aggr_child(Type *agg, u32 idx, u32 base, Type **cty, u32 *coff)
+static bool aggr_child(const PlanFrame *fr, Type **cty, u32 *coff)
 {
-    agg = type_unqual(agg);
+    Type *agg = type_unqual(fr->agg);
+    u32 idx = fr->next;
+    u32 base = fr->base;
     if (type_is_array(agg))
     {
-        if (idx >= agg->arr.length)
+        if (!fr->grow && idx >= agg->arr.length)
         {
             return false;
         }
@@ -892,7 +892,7 @@ static void cursor_advance(Vec *stack)
     {
         PlanFrame *top = (PlanFrame *) vec_last(stack);
         top->next++;
-        if (top->next < aggr_nchildren(top->agg))
+        if (top->next < aggr_nchildren(top))
         {
             return;
         }
@@ -917,6 +917,8 @@ static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type)
     InitPlan *plan = arena_alloc(ctx->arena, sizeof(InitPlan), _Alignof(InitPlan));
     plan->writes = vec_new(ctx->arena);
     plan->total_size = type_sizeof(obj_type);
+    plan->grow_array = false;
+    plan->inferred_len = 0;
     return plan;
 }
 
@@ -943,8 +945,8 @@ static bool plan_scalar_write(SemanticCtx *ctx, InitPlan *plan, Type *target, u3
     return true;
 }
 
-static bool resolve_designator_path(SemanticCtx *ctx, Type *t, u32 base_off, Designator *d,
-                                    Vec *path, Type **out_ty, u32 *out_off, Loc loc)
+static bool resolve_designator_path(SemanticCtx *ctx, InitPlan *plan, Type *t, u32 base_off,
+                                    Designator *d, Vec *path, Type **out_ty, u32 *out_off, Loc loc)
 {
     Type *cur_ty = type_unqual(t);
     u32 cur_off = base_off;
@@ -958,7 +960,11 @@ static bool resolve_designator_path(SemanticCtx *ctx, Type *t, u32 base_off, Des
                 ctx->error = true;
                 return false;
             }
-            if (dd->index < 0 || (u64) dd->index >= cur_ty->arr.length)
+            /* Only the outermost declared-against `[]` array may take an
+               out-of-range designator (it sizes the array, D12.7). Inner
+               brackets stay bounded. */
+            bool grow = plan->grow_array && cur_ty->arr.length == 0;
+            if (dd->index < 0 || (!grow && (u64) dd->index >= cur_ty->arr.length))
             {
                 sem_error(loc, "array designator index %lld is out of bounds",
                           (long long) dd->index);
@@ -969,6 +975,7 @@ static bool resolve_designator_path(SemanticCtx *ctx, Type *t, u32 base_off, Des
             fr->agg = cur_ty;
             fr->base = cur_off;
             fr->next = (u32) dd->index;
+            fr->grow = grow;
             vec_push(path, fr);
             Type *elem = type_unqual(type_array_elem(cur_ty));
             cur_off = cur_off + (u32) (dd->index * cur_ty->arr.elem->size);
@@ -990,6 +997,7 @@ static bool resolve_designator_path(SemanticCtx *ctx, Type *t, u32 base_off, Des
                 fr->agg = cur_ty;
                 fr->base = cur_off;
                 fr->next = fidx;
+                fr->grow = false;
                 vec_push(path, fr);
                 cur_off = cur_off + f->offset;
                 cur_ty = type_unqual(f->type);
@@ -1078,9 +1086,14 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
 
     if (type_is_array(t) && t->arr.length == 0)
     {
-        sem_error(list->base.loc, "array has incomplete type");
-        ctx->error = true;
-        return false;
+        /* A `[]` rank may only be the outermost, declared-against target:
+           it grows from its initializer (D12.7). Inner empty brackets error. */
+        if (!plan->grow_array)
+        {
+            sem_error(list->base.loc, "array has incomplete type");
+            ctx->error = true;
+            return false;
+        }
     }
 
     Vec *stack = vec_new(ctx->arena);
@@ -1088,6 +1101,7 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
     root->agg = t;
     root->next = 0;
     root->base = base_off;
+    root->grow = plan->grow_array && type_is_array(t) && t->arr.length == 0;
     vec_push(stack, root);
 
     for (size_t i = 0; i < nel; i++)
@@ -1099,7 +1113,8 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
             Vec *path = vec_new(ctx->arena);
             Type *dt;
             u32 doff;
-            if (!resolve_designator_path(ctx, t, base_off, e->design, path, &dt, &doff, e->loc))
+            if (!resolve_designator_path(ctx, plan, t, base_off, e->design, path, &dt, &doff,
+                                         e->loc))
             {
                 return false;
             }
@@ -1117,7 +1132,7 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
         PlanFrame *top = (PlanFrame *) vec_last(stack);
         Type *cty;
         u32 coff;
-        if (!aggr_child(top->agg, top->next, top->base, &cty, &coff))
+        if (!aggr_child(top, &cty, &coff))
         {
             sem_error(e->loc, "excess elements in %s initializer",
                       type_is_array(t) ? "array" : "struct/union");
@@ -1150,9 +1165,10 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
                 fr->agg = cty;
                 fr->base = coff;
                 fr->next = 0;
+                fr->grow = false;
                 vec_push(stack, fr);
                 top = (PlanFrame *) vec_last(stack);
-                if (!aggr_child(top->agg, top->next, top->base, &cty, &coff))
+                if (!aggr_child(top, &cty, &coff))
                 {
                     sem_error(e->loc, "excess elements in %s initializer",
                               type_is_array(t) ? "array" : "struct/union");
@@ -1165,6 +1181,24 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
                 return false;
             }
             cursor_advance(stack);
+        }
+
+        /* The growable root's cursor (after the clause) is the inferred length: a
+           boundary position (`root.next`) counts fully-consumed elements; a
+           cursor still inside the current element — a deeper frame remains on
+           the stack — counts `root.next + 1` (a partially-filled row is one
+           element, §6.7.9p22 / D12.7). */
+        if (plan->grow_array && vec_size(stack) > 0)
+        {
+            PlanFrame *rf = (PlanFrame *) vec_get(stack, 0);
+            if (rf->grow)
+            {
+                u64 count = rf->next + (vec_size(stack) > 1 ? 1 : 0);
+                if (count > plan->inferred_len)
+                {
+                    plan->inferred_len = count;
+                }
+            }
         }
     }
     return true;
@@ -1225,6 +1259,44 @@ static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
         return false;
     }
     vd->plan = plan;
+    return true;
+}
+
+/* Build the initializer plan for a brace list or char-array string, completing
+   a declared-against `[]` array first (D12.7). `*handled` is set when
+   `vd->init` matched one of these forms. Returns false on error. */
+static bool plan_var_aggregate_init(SemanticCtx *ctx, ASTVarDecl *vd, bool *handled)
+{
+    *handled = false;
+    if (vd->init->kind == AST_INIT_LIST)
+    {
+        *handled = true;
+        InitPlan *plan = init_plan_new(ctx, vd->type);
+        bool grow = type_is_array(vd->type) && type_array_len(vd->type) == 0;
+        plan->grow_array = grow;
+        if (!plan_list(ctx, plan, vd->type, ast_as(ASTInitList, vd->init), 0))
+        {
+            return false;
+        }
+        if (grow)
+        {
+            Type *elem = type_array_elem(vd->type);
+            vd->type = type_array(elem, plan->inferred_len);
+            plan->total_size = type_sizeof(vd->type);
+        }
+        vd->plan = plan;
+        return true;
+    }
+    if (vd->init->kind == AST_STRING_LITERAL && type_is_array(vd->type))
+    {
+        *handled = true;
+        if (type_array_len(vd->type) == 0)
+        {
+            ASTStringLiteral *sl = ast_as(ASTStringLiteral, vd->init);
+            vd->type = type_array(type_array_elem(vd->type), sl->length + 1);
+        }
+        return plan_char_array_from_string(ctx, vd);
+    }
     return true;
 }
 
@@ -1884,43 +1956,46 @@ static bool collect_global_variables(ASTProgram *prog, SemanticCtx *ctx)
         }
         if (vd->init)
         {
-            /* Initializer lists are flattened by the planner; char arrays take
-               a string literal byte-fill; bare `char *` pointers keep the
-               .data string-address relocation (D12.6/D12.8). */
-            if (vd->init->kind == AST_INIT_LIST)
+            /* Initializer lists are flattened by the planner (completing a
+               `[]` array per D12.7); char arrays take a string literal
+               byte-fill; bare `char *` pointers keep the .data string-address
+               relocation (D12.6/D12.8). */
+            bool handled;
+            if (!plan_var_aggregate_init(ctx, vd, &handled))
             {
-                InitPlan *plan = init_plan_new(ctx, vd->type);
-                if (!plan_list(ctx, plan, vd->type, ast_as(ASTInitList, vd->init), 0))
-                {
-                    return false;
-                }
-                vd->plan = plan;
-            }
-            else if (vd->init->kind == AST_STRING_LITERAL && type_is_array(vd->type))
-            {
-                if (!plan_char_array_from_string(ctx, vd))
-                {
-                    return false;
-                }
-            }
-            else if (vd->init->kind == AST_UNARY_EXPR)
-            {
-                if (!plan_ptr_initializer(ctx, vd))
-                {
-                    return false;
-                }
-            }
-            else if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_CHAR)
-            {
-                sem_error(vd->base.loc, "string-literal initializer requires a 'char *' variable");
-                ctx->error = true;
                 return false;
+            }
+            if (!handled)
+            {
+                if (vd->init->kind == AST_UNARY_EXPR)
+                {
+                    if (!plan_ptr_initializer(ctx, vd))
+                    {
+                        return false;
+                    }
+                }
+                else if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_CHAR)
+                {
+                    sem_error(vd->base.loc,
+                              "string-literal initializer requires a 'char *' variable");
+                    ctx->error = true;
+                    return false;
+                }
             }
         }
         if (vd->has_const_init && (vd->type->kind == TYPE_ARRAY || type_is_record(vd->type)))
         {
             sem_error(vd->base.loc, "aggregate '%s' must be initialized with a brace-enclosed list",
                       vd->name);
+            ctx->error = true;
+            return false;
+        }
+        /* D12.7: a file-scope `[]` array left without an initializer stays
+           incomplete. `extern int a[];` declares (not defines) an incomplete
+           array and is legal. */
+        if (vd->storage != SC_EXTERN && type_is_array(vd->type) && !type_is_complete(vd->type))
+        {
+            sem_error(vd->base.loc, "variable '%s' has incomplete type", vd->name);
             ctx->error = true;
             return false;
         }

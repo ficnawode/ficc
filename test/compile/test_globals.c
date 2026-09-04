@@ -686,10 +686,49 @@ TEST(globals, negative_file_scope_overlong_list)
                       "}\n");
 }
 
-TEST(globals, negative_file_scope_incomplete_array_list)
+TEST(globals, file_scope_incomplete_array_infers)
 {
-    /* 12b hard-rejects `[]` lists; 12d lifts it. Pins the regression floor. */
-    EXPECT_BUILD_FAIL("int g[] = {1, 2, 3};\n"
+    /* Phase 12d: file-scope `[]` is completed from its initializer. */
+    EXPECT_INTERP_AND_ELF("int g[] = {1, 2, 3};\n"
+                          "int main(void) {\n"
+                          "    return g[0] + g[1] + g[2];\n"
+                          "}\n",
+                          6);
+}
+
+TEST(globals, file_scope_incomplete_two_d_infers)
+{
+    EXPECT_INTERP_AND_ELF("int m[][3] = {{1, 2}, {3, 4, 5}};\n"
+                          "int main(void) {\n"
+                          "    return sizeof(m);\n"
+                          "}\n",
+                          24);
+}
+
+TEST(globals, file_scope_incomplete_char_array_from_string)
+{
+    EXPECT_INTERP_AND_ELF("char s[] = \"hi\";\n"
+                          "int main(void) {\n"
+                          "    return s[1];\n"
+                          "}\n",
+                          'i');
+}
+
+TEST(globals, block_static_incomplete_array_infers)
+{
+    EXPECT_INTERP_AND_ELF("int f(void) {\n"
+                          "    static int a[] = {5, 6};\n"
+                          "    return a[0] + a[1];\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f();\n"
+                          "}\n",
+                          11);
+}
+
+TEST(globals, negative_file_scope_bare_incomplete_array)
+{
+    EXPECT_BUILD_FAIL("int g[];\n"
                       "int main(void) {\n"
                       "    return 0;\n"
                       "}\n");
