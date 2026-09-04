@@ -547,3 +547,73 @@ TEST(ir_builder, bool_casts_wrap_to_zero_one)
               1);
     arena_free(a);
 }
+
+TEST(ir_builder, variadic_call_is_tagged)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int f(int a, ...) {\n"
+                                  "    return a;\n"
+                                  "}\n"
+                                  "int main(void) {\n"
+                                  "    return f(1, 2, 3);\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    IrFunction *main_fn = NULL;
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, i);
+        if (strcmp(f->name, "main") == 0)
+        {
+            main_fn = f;
+            break;
+        }
+    }
+    EXPECT_NOTNULL(main_fn);
+    bool found = false;
+    size_t nblocks = vec_size(main_fn->blocks);
+    for (size_t bi = 0; bi < nblocks && !found; bi++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(main_fn->blocks, bi);
+        size_t ninstr = vec_size(bb->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
+            if (in->opcode == OP_CALL)
+            {
+                EXPECT_TRUE(in->extra.call.is_variadic);
+                found = true;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(found);
+    arena_free(a);
+}
+
+TEST(ir_builder, fixed_call_untagged)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int f(int a) {\n"
+                                  "    return a;\n"
+                                  "}\n"
+                                  "int main(void) {\n"
+                                  "    return f(1);\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    IrFunction *main_fn = (IrFunction *) vec_get(m->funcs, 1);
+    EXPECT_STR_EQ(main_fn->name, "main");
+    IrBlock *bb = (IrBlock *) vec_get(main_fn->blocks, 0);
+    size_t ninstr = vec_size(bb->instrs);
+    for (size_t ii = 0; ii < ninstr; ii++)
+    {
+        IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
+        if (in->opcode == OP_CALL)
+        {
+            EXPECT_FALSE(in->extra.call.is_variadic);
+        }
+    }
+    arena_free(a);
+}

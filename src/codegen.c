@@ -886,6 +886,14 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
         emit_mov(ctx->buf, w, xop_reg(abi_arg_regs[i]), xop_reg(R_EAX));
     }
 
+    /* SysV: for a variadic callee, %al holds the count of vector registers
+       used in arguments. ficc has no floats yet, so always zero — and it must
+       be emitted here, after the argument loads clobber %eax. */
+    if (in->extra.call.is_variadic)
+    {
+        emit_xor_eax_eax(ctx->buf);
+    }
+
     emit_call_placeholder(ctx->buf, in->extra.call.name, ctx->patches, ctx->arena);
 
     if (in->result != NO_VREG)

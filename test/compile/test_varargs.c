@@ -37,3 +37,34 @@ TEST(varargs, variadic_only_named_args)
                           "}\n",
                           42);
 }
+
+TEST(varargs, variadic_call_overflows_reg_area)
+{
+    /* Seven trailing args: the first five ride in GP regs, the rest go to the
+       caller's stack; a variadic call site must still work with the %al
+       zeroing in between (interp == ELF). */
+    EXPECT_INTERP_AND_ELF("int f(int a, ...) {\n"
+                          "    return a;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f(1, 2, 3, 4, 5, 6, 7);\n"
+                          "}\n",
+                          1);
+}
+
+TEST(varargs, variadic_tail_small_types_promote)
+{
+    /* Default argument promotions (§6.5.2.2p7) run on the variadic tail in
+       the IR builder; char/_Bool/unsigned char re-rank to int before the
+       call. Not yet readable on the callee side, so interp == ELF is the
+       floor. */
+    EXPECT_INTERP_AND_ELF("int f(int a, ...) {\n"
+                          "    return a;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    char c = 3;\n"
+                          "    _Bool b = 1;\n"
+                          "    return f(1, c, b);\n"
+                          "}\n",
+                          1);
+}

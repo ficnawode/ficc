@@ -108,6 +108,7 @@ typedef struct
     u32 nargs;
     IrOperand *args;
     const char *name;
+    bool is_variadic; /* callee is a variadic function (SysV %al at the call) */
 } IrCallPayload;
 
 typedef struct
@@ -251,6 +252,7 @@ IrInstr *ir_emit_ret_void(IrBlock *bb);
 IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOperand rhs);
 IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src);
 IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOperand *args);
+void ir_call_set_variadic(IrInstr *call, bool is_variadic);
 IrInstr *ir_emit_br(IrBlock *bb, const char *target_label);
 IrInstr *ir_emit_brcond(IrBlock *bb, IrOperand cond, const char *true_label,
                         const char *false_label);

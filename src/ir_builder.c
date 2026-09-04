@@ -110,7 +110,7 @@ struct FuncBuilder
     Vec *loop_stack;      /* Vec<LoopContext*> */
     Vec *switch_stack;    /* Vec<SwitchCtx*> */
     StrMap *goto_labels;  /* label name -> IrBlock* */
-    StrMap *func_types;   /* function name -> Type* (return type) */
+    StrMap *func_types;   /* function name -> Type* (interned function type) */
     StrMap *global_map;   /* file-scope variable name -> u32* (index into mod->globals) */
     U64Map *static_map;   /* (u64)ASTVarDecl* -> u32* (index into mod->globals) */
     Vec *spilled;         /* Vec<ASTVarDecl*>: block-scope autos whose address is taken */
@@ -1143,8 +1143,10 @@ static ExprResult build_cast_expr(ASTCastExpr *ce, IrFunction *f, IrBlock *bb, F
 
 static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
-    Type *callee_ret = strmap_get(ctx->func_types, ce->callee);
-    ASSERT(callee_ret != NULL);
+    Type *callee_type = strmap_get(ctx->func_types, ce->callee);
+    ASSERT(callee_type != NULL && callee_type->kind == TYPE_FUNC);
+    Type *callee_ret = callee_type->func.ret;
+    bool is_variadic = callee_type->func.is_variadic;
     IrFunction *callee_ir = NULL;
     size_t nfuncs = vec_size(ctx->mod->funcs);
     for (size_t fi = 0; fi < nfuncs; fi++)
@@ -1195,6 +1197,13 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
             IrParam *p = (IrParam *) vec_get(callee_ir->params, slot);
             param_type = p->type;
         }
+        else if (is_variadic)
+        {
+            /* Default argument promotions on the variadic tail (§6.5.2.2p7):
+               char/short/_Bool re-rank to int; float would go to double (no
+               floats yet). */
+            param_type = type_promote(arg_type);
+        }
         else
         {
             param_type = arg_type;
@@ -1212,7 +1221,8 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
     {
         dst = callee_ret->kind == TYPE_VOID ? NO_VREG : alloc_vreg_from_type(ctx, callee_ret);
     }
-    ir_emit_call(bb, dst, ce->callee, total_args, args);
+    IrInstr *call = ir_emit_call(bb, dst, ce->callee, total_args, args);
+    ir_call_set_variadic(call, is_variadic);
     if (sret)
     {
         return expr_result(ir_operand_vreg(sret_vreg), bb);
@@ -2986,7 +2996,7 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
         if (decl->kind == AST_FUNC_DEF)
         {
             ASTFuncDef *fn = ast_as(ASTFuncDef, decl);
-            strmap_set(func_types, fn->name, fn->ret_type);
+            strmap_set(func_types, fn->name, fn->func_type);
         }
     }
 

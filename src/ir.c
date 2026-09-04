@@ -135,7 +135,14 @@ IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOpera
     ins->extra.call.nargs = nargs;
     ins->extra.call.args = args;
     ins->extra.call.name = name;
+    ins->extra.call.is_variadic = false;
     return ins;
+}
+
+void ir_call_set_variadic(IrInstr *call, bool is_variadic)
+{
+    ASSERT(call->opcode == OP_CALL);
+    call->extra.call.is_variadic = is_variadic;
 }
 
 IrInstr *ir_emit_br(IrBlock *bb, const char *target_label)
@@ -286,6 +293,10 @@ static void dump_call_args(IrInstr *ins)
     {
         printf(", ");
         dump_operand(ins->extra.call.args[i]);
+    }
+    if (ins->extra.call.is_variadic)
+    {
+        printf(" [variadic]");
     }
 }
 
