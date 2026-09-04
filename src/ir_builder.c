@@ -194,6 +194,24 @@ static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *
 {
     u8 src_w = src_type->width / 8;
     u8 tgt_w = target_type->width / 8;
+    if (target_type->kind == TYPE_BOOL && src_type->kind != TYPE_BOOL)
+    {
+        /* §6.3.1.2: conversion to _Bool turns any nonzero value into 1. Emit
+           (val != 0) at the source width — the same ICMP_NE shape lower_icmp
+           and eval_icmp already lower for comparisons, so this is correct in
+           both backends by construction — then TRUNC to the 1-byte _Bool
+           storage width (the (char)x cast shape). A width-1 source needs no
+           trunc; its icmp result is already 0/1. */
+        u32 cmp = alloc_vreg_from_type(ctx, src_type);
+        ir_emit_binop(bb, OP_ICMP_NE, cmp, val, ir_operand_imm(0));
+        if (src_w == 1)
+        {
+            return ir_operand_vreg(cmp);
+        }
+        u32 dst = alloc_vreg_from_type(ctx, target_type);
+        ir_emit_unary(bb, OP_TRUNC, dst, ir_operand_vreg(cmp));
+        return ir_operand_vreg(dst);
+    }
     if (src_type->kind == target_type->kind || src_w == tgt_w)
     {
         return val;
@@ -1366,6 +1384,18 @@ static const u8 *encode_const_bytes(Arena *arena, i64 value, u32 size)
     return buf;
 }
 
+/* Encode a folded constant into an object of `type`'s width. `_Bool` objects
+   hold only 0/1 (§6.3.1.2): a file-scope initializer like `_Bool g = 5;` must
+   serialize byte 0x01, agreeing with the runtime store normalization. */
+static const u8 *encode_object_bytes(Arena *arena, i64 value, Type *type)
+{
+    if (type->kind == TYPE_BOOL)
+    {
+        value = value != 0 ? 1 : 0;
+    }
+    return encode_const_bytes(arena, value, (u32) type->size);
+}
+
 /* Fold an integer constant expression (C11 §6.6). Semantic has already run, so
    `sizeof` nodes carry their resolved size_value. Returns false when the node
    is not foldable or not constant. */
@@ -1653,7 +1683,7 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
             ir_error(w->value, "initializer element is not a constant");
             return false;
         }
-        const u8 *bytes = encode_const_bytes(arena, value, w->type->size);
+        const u8 *bytes = encode_object_bytes(arena, value, w->type);
         memcpy(buf + w->offset, bytes, w->type->size);
     }
     return true;
@@ -1704,7 +1734,7 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
     }
     else if (vd->has_const_init && vd->const_init != 0)
     {
-        g->init_data = encode_const_bytes(arena, vd->const_init, (u32) vd->type->size);
+        g->init_data = encode_object_bytes(arena, vd->const_init, vd->type);
         g->init_len = (size_t) vd->type->size;
         g->section = is_const ? IR_SECTION_RODATA : IR_SECTION_DATA;
         g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;

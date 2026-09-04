@@ -333,6 +333,31 @@ TEST(lexer, static_assert_keyword)
     arena_free(a);
 }
 
+TEST(lexer, bool_keyword)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "_Bool", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_KW_BOOL);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, bool_keyword_is_exact)
+{
+    /* `bool` (without the underscore prefix) is not yet a keyword — it arrives
+       via <stdbool.h> in Phase 17. */
+    Arena *a = arena_new();
+    LexResult res = lex("t", "bool", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_IDENT);
+    arena_free(a);
+}
+
 TEST(lexer, char_literal_value)
 {
     Arena *a = arena_new();

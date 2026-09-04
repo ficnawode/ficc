@@ -493,3 +493,38 @@ TEST(semantic, static_assert_non_ice_rejected)
                       "    return 0;\n"
                       "}\n");
 }
+
+TEST(semantic, bool_assign_normalizes)
+{
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    _Bool b = 9;\n"
+                         "    b = 7;\n"
+                         "    if (b != 1) return 1;\n"
+                         "    return 0;\n"
+                         "}\n");
+}
+
+TEST(semantic, bool_cast_is_ice)
+{
+    EXPECT_BUILD_SUCCEED("_Static_assert((_Bool)5 == 1, \"bool cast\");\n"
+                         "int main(void) {\n"
+                         "    return 0;\n"
+                         "}\n");
+}
+
+TEST(semantic, bool_name_not_keyword)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    bool b = 1;\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(semantic, const_bool_write_rejected)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    const _Bool cb = 1;\n"
+                      "    cb = 0;\n"
+                      "    return 0;\n"
+                      "}\n");
+}

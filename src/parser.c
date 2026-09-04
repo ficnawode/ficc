@@ -184,9 +184,9 @@ static bool resolve_constant_init(ParserCtx *p, ASTVarDecl *vd, ASTNode *expr);
    starts a typename, so `(a)`/`(a+b)`/`f(x)` stay paren expressions/calls. */
 static bool is_type_start(TokenKind k)
 {
-    return k == TOK_KW_INT || k == TOK_KW_CHAR || k == TOK_KW_SHORT || k == TOK_KW_LONG ||
-           k == TOK_KW_UNSIGNED || k == TOK_KW_SIGNED || k == TOK_KW_VOID || k == TOK_KW_STRUCT ||
-           k == TOK_KW_UNION || k == TOK_KW_ENUM;
+    return k == TOK_KW_INT || k == TOK_KW_BOOL || k == TOK_KW_CHAR || k == TOK_KW_SHORT ||
+           k == TOK_KW_LONG || k == TOK_KW_UNSIGNED || k == TOK_KW_SIGNED || k == TOK_KW_VOID ||
+           k == TOK_KW_STRUCT || k == TOK_KW_UNION || k == TOK_KW_ENUM;
 }
 
 static bool is_typename_start_at(ParserCtx *p, size_t pos)
@@ -662,6 +662,10 @@ static DeclSpecifiers parse_decl_specifiers(ParserCtx *p)
         case TOK_KW_UNSIGNED:
         case TOK_KW_SIGNED:
             ty = parse_integer_specifiers(p);
+            break;
+        case TOK_KW_BOOL:
+            parser_advance(p);
+            ty = type_cbool();
             break;
         case TOK_KW_VOID:
             parser_advance(p);
@@ -1480,6 +1484,7 @@ static ASTNode *parse_stmt(ParserCtx *p)
     switch (t->kind)
     {
         case TOK_KW_INT:
+        case TOK_KW_BOOL:
         case TOK_KW_CHAR:
         case TOK_KW_SHORT:
         case TOK_KW_LONG:

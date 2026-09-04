@@ -102,15 +102,17 @@ Type *type_ullong(void)
 
 bool type_is_signed(Type *t)
 {
-    return t->kind == TYPE_BOOL || t->kind == TYPE_CHAR || t->kind == TYPE_SHORT ||
-           t->kind == TYPE_INT || t->kind == TYPE_LONG || t->kind == TYPE_LLONG ||
-           t->kind == TYPE_ENUM;
+    return t->kind == TYPE_CHAR || t->kind == TYPE_SHORT || t->kind == TYPE_INT ||
+           t->kind == TYPE_LONG || t->kind == TYPE_LLONG || t->kind == TYPE_ENUM;
 }
 
 bool type_is_unsigned(Type *t)
 {
-    return t->kind == TYPE_UCHAR || t->kind == TYPE_USHORT || t->kind == TYPE_UINT ||
-           t->kind == TYPE_ULONG || t->kind == TYPE_ULLONG;
+    /* `_Bool` is an unsigned integer type (C11 §6.2.5p6) — grouped with the
+       unsigned width types so `type_is_integer(_Bool)` holds and its value
+       loads zero-extend / compares unsigned. */
+    return t->kind == TYPE_BOOL || t->kind == TYPE_UCHAR || t->kind == TYPE_USHORT ||
+           t->kind == TYPE_UINT || t->kind == TYPE_ULONG || t->kind == TYPE_ULLONG;
 }
 
 bool type_is_integer(Type *t)
@@ -702,6 +704,12 @@ u64 type_alignof(Type *t)
 i64 type_reduce_int(Type *target, i64 value)
 {
     ASSERT(type_is_integer(target));
+    /* §6.3.1.2: conversion to _Bool maps any nonzero value to 1. This must run
+       before the width masking — `(_Bool)5` folds to 1 here and at runtime. */
+    if (target->kind == TYPE_BOOL)
+    {
+        return value != 0 ? 1 : 0;
+    }
     u8 width = target->width;
     if (width >= 64)
     {

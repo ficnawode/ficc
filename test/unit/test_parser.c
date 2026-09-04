@@ -461,6 +461,44 @@ TEST(parser, static_assert_non_string_message_rejected)
     arena_free(a);
 }
 
+TEST(parser, bool_decl_specifier)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("_Bool g;\n"
+                            "int main(void) {\n"
+                            "    _Bool b;\n"
+                            "    return 0;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTVarDecl *g = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(g->type->kind, TYPE_BOOL);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 1));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTVarDecl *b = ast_as(ASTVarDecl, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(b->type->kind, TYPE_BOOL);
+    arena_free(a);
+}
+
+TEST(parser, bool_cast_target)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    int x = 5;\n"
+                            "    return (_Bool)x;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 1));
+    EXPECT_EQ(ret->expr->kind, AST_CAST_EXPR);
+    EXPECT_EQ(ast_as(ASTCastExpr, ret->expr)->target_type->kind, TYPE_BOOL);
+    arena_free(a);
+}
+
 TEST(parser, deref_expr)
 {
     Arena *a = arena_new();
