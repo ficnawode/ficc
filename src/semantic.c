@@ -33,6 +33,7 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx);
 static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx);
 static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *list, u32 base_off);
 static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd);
+static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd);
 static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type);
 
 static void sem_error(Loc loc, const char *fmt, ...)
@@ -672,9 +673,10 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
     }
     if (var_decl->storage == SC_STATIC)
     {
-        /* Block-scope statics are file-backed objects: the parser already
-           folded a constant initializer into const_init (or a char* string
-           literal into init); everything else is rejected. */
+        /* Block-scope statics are file-backed objects: the parser folded a
+           constant initializer into const_init, routed a brace list or a
+           `char *` string literal into init; everything else is rejected.
+           Lists and char arrays get a plan; the serializer emits the bytes. */
         if (type_is_record(var_decl->type) && !type_is_complete(var_decl->type))
         {
             sem_error(var_decl->base.loc, "variable '%s' has incomplete type", var_decl->name);
@@ -683,7 +685,30 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
         }
         if (var_decl->init)
         {
-            if (!type_is_ptr(var_decl->type) || type_deref(var_decl->type)->kind != TYPE_CHAR)
+            if (var_decl->init->kind == AST_INIT_LIST)
+            {
+                InitPlan *plan = init_plan_new(ctx, var_decl->type);
+                if (!plan_list(ctx, plan, var_decl->type, ast_as(ASTInitList, var_decl->init), 0))
+                {
+                    return false;
+                }
+                var_decl->plan = plan;
+            }
+            else if (var_decl->init->kind == AST_STRING_LITERAL && type_is_array(var_decl->type))
+            {
+                if (!plan_char_array_from_string(ctx, var_decl))
+                {
+                    return false;
+                }
+            }
+            else if (var_decl->init->kind == AST_UNARY_EXPR)
+            {
+                if (!plan_ptr_initializer(ctx, var_decl))
+                {
+                    return false;
+                }
+            }
+            else if (!type_is_ptr(var_decl->type) || type_deref(var_decl->type)->kind != TYPE_CHAR)
             {
                 sem_error(var_decl->base.loc,
                           "string-literal initializer requires a 'char *' variable");
@@ -691,12 +716,11 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
                 return false;
             }
         }
-        else if ((var_decl->type->kind == TYPE_ARRAY || type_is_record(var_decl->type)) &&
-                 var_decl->has_const_init)
+        if (var_decl->has_const_init &&
+            (var_decl->type->kind == TYPE_ARRAY || type_is_record(var_decl->type)))
         {
             sem_error(var_decl->base.loc,
-                      "'%s' is an aggregate and must be "
-                      "zero-initialized",
+                      "aggregate '%s' must be initialized with a brace-enclosed list",
                       var_decl->name);
             ctx->error = true;
             return false;
@@ -1173,6 +1197,33 @@ static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
     }
     InitPlan *plan = init_plan_new(ctx, arr);
     plan_new_write(ctx, plan, 0, arr, vd->init, true);
+    vd->plan = plan;
+    return true;
+}
+
+/* `int *p = &g;` (block static or file scope): a bare address constant in
+   pointer position. The value type-checks against the pointer target; the IR
+   serializer turns it into one 8-byte relocation write (§6.6p9, D12.8). */
+static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
+{
+    if (vd->init->kind != AST_UNARY_EXPR)
+    {
+        return false;
+    }
+    ASTUnaryExpr *u = ast_as(ASTUnaryExpr, vd->init);
+    if (u->op != UN_ADDR || u->operand->kind != AST_IDENT)
+    {
+        return false;
+    }
+    if (!type_is_ptr(vd->type))
+    {
+        return false;
+    }
+    InitPlan *plan = init_plan_new(ctx, vd->type);
+    if (!plan_scalar_write(ctx, plan, type_unqual(vd->type), 0, vd->init, vd->base.loc))
+    {
+        return false;
+    }
     vd->plan = plan;
     return true;
 }
@@ -1831,25 +1882,47 @@ static bool collect_global_variables(ASTProgram *prog, SemanticCtx *ctx)
             ctx->error = true;
             return false;
         }
-        if ((vd->type->kind == TYPE_ARRAY || type_is_record(vd->type)) &&
-            (vd->init || vd->has_const_init))
-        {
-            sem_error(vd->base.loc,
-                      "file-scope '%s' cannot have an initializer yet "
-                      "(aggregates are zero-initialized)",
-                      vd->name);
-            ctx->error = true;
-            return false;
-        }
         if (vd->init)
         {
-            /* Only string-literal pointer initializers survive the parser. */
-            if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_CHAR)
+            /* Initializer lists are flattened by the planner; char arrays take
+               a string literal byte-fill; bare `char *` pointers keep the
+               .data string-address relocation (D12.6/D12.8). */
+            if (vd->init->kind == AST_INIT_LIST)
+            {
+                InitPlan *plan = init_plan_new(ctx, vd->type);
+                if (!plan_list(ctx, plan, vd->type, ast_as(ASTInitList, vd->init), 0))
+                {
+                    return false;
+                }
+                vd->plan = plan;
+            }
+            else if (vd->init->kind == AST_STRING_LITERAL && type_is_array(vd->type))
+            {
+                if (!plan_char_array_from_string(ctx, vd))
+                {
+                    return false;
+                }
+            }
+            else if (vd->init->kind == AST_UNARY_EXPR)
+            {
+                if (!plan_ptr_initializer(ctx, vd))
+                {
+                    return false;
+                }
+            }
+            else if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_CHAR)
             {
                 sem_error(vd->base.loc, "string-literal initializer requires a 'char *' variable");
                 ctx->error = true;
                 return false;
             }
+        }
+        if (vd->has_const_init && (vd->type->kind == TYPE_ARRAY || type_is_record(vd->type)))
+        {
+            sem_error(vd->base.loc, "aggregate '%s' must be initialized with a brace-enclosed list",
+                      vd->name);
+            ctx->error = true;
+            return false;
         }
 
         /* C11 §6.9.2p2: a declaration with an initializer is a definition even

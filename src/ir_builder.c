@@ -72,6 +72,7 @@ struct FuncBuilder
     Vec *spilled;         /* Vec<ASTVarDecl*>: block-scope autos whose address is taken */
     U64Map *spill_slots;  /* (u64)ASTVarDecl* -> IrOperand* (function-entry slot addr) */
     u32 sret_vreg;        /* hidden sret pointer vreg for record-returning funcs */
+    bool failed;          /* an error was reported while building this function */
 };
 
 static IrOperand resolve_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb);
@@ -1090,11 +1091,252 @@ static const u8 *encode_const_bytes(Arena *arena, i64 value, u32 size)
     return buf;
 }
 
-static void fill_global(IrGlobal *g, ASTVarDecl *vd, int init_str_idx, Arena *arena)
+/* Fold an integer constant expression (C11 §6.6). Semantic has already run, so
+   `sizeof` nodes carry their resolved size_value. Returns false when the node
+   is not foldable or not constant. */
+static bool fold_constant_ir(ASTNode *node, i64 *out)
+{
+    if (!node)
+    {
+        return false;
+    }
+    switch (node->kind)
+    {
+        case AST_INT_LITERAL:
+            *out = ast_as(ASTIntLiteral, node)->value;
+            return true;
+        case AST_UNARY_EXPR:
+        {
+            ASTUnaryExpr *u = ast_as(ASTUnaryExpr, node);
+            i64 v;
+            if (!fold_constant_ir(u->operand, &v))
+            {
+                return false;
+            }
+            switch (u->op)
+            {
+                case UN_NEG:
+                    *out = -v;
+                    return true;
+                case UN_BIT_NOT:
+                    *out = ~v;
+                    return true;
+                case UN_LOG_NOT:
+                    *out = !v;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        case AST_BINARY_EXPR:
+        {
+            ASTBinaryExpr *b = ast_as(ASTBinaryExpr, node);
+            i64 l, r;
+            if (!fold_constant_ir(b->left, &l) || !fold_constant_ir(b->right, &r))
+            {
+                return false;
+            }
+            switch (b->op)
+            {
+                case BIN_ADD:
+                    *out = l + r;
+                    return true;
+                case BIN_SUB:
+                    *out = l - r;
+                    return true;
+                case BIN_MUL:
+                    *out = l * r;
+                    return true;
+                case BIN_DIV:
+                case BIN_REM:
+                    if (r == 0)
+                    {
+                        return false;
+                    }
+                    *out = b->op == BIN_DIV ? l / r : l % r;
+                    return true;
+                case BIN_SHL:
+                case BIN_SHR:
+                    if (r < 0 || r > 63)
+                    {
+                        return false;
+                    }
+                    *out = b->op == BIN_SHL ? l << r : l >> r;
+                    return true;
+                case BIN_AND:
+                    *out = l & r;
+                    return true;
+                case BIN_OR:
+                    *out = l | r;
+                    return true;
+                case BIN_XOR:
+                    *out = l ^ r;
+                    return true;
+                case BIN_LOG_AND:
+                    *out = l && r;
+                    return true;
+                case BIN_LOG_OR:
+                    *out = l || r;
+                    return true;
+                case BIN_EQ:
+                    *out = l == r;
+                    return true;
+                case BIN_NE:
+                    *out = l != r;
+                    return true;
+                case BIN_LT:
+                    *out = l < r;
+                    return true;
+                case BIN_GT:
+                    *out = l > r;
+                    return true;
+                case BIN_LE:
+                    *out = l <= r;
+                    return true;
+                case BIN_GE:
+                    *out = l >= r;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        case AST_TERNARY_EXPR:
+        {
+            ASTTernaryExpr *te = ast_as(ASTTernaryExpr, node);
+            i64 cond;
+            if (!fold_constant_ir(te->cond, &cond))
+            {
+                return false;
+            }
+            return cond ? fold_constant_ir(te->then_expr, out)
+                        : fold_constant_ir(te->else_expr, out);
+        }
+        case AST_SIZEOF_TYPE:
+            *out = (i64) ast_as(ASTSizeofType, node)->size_value;
+            return true;
+        case AST_SIZEOF_EXPR:
+            *out = (i64) ast_as(ASTSizeofExpr, node)->size_value;
+            return true;
+        case AST_CAST_EXPR:
+        {
+            ASTCastExpr *ce = ast_as(ASTCastExpr, node);
+            i64 v;
+            if (!fold_constant_ir(ce->operand, &v) || !type_is_integer(ce->target_type))
+            {
+                return false;
+            }
+            *out = type_reduce_int(ce->target_type, v);
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *arena);
+
+static void ir_global_add_reloc(IrGlobal *g, u32 offset, int target, Arena *arena)
+{
+    if (!g->relocs)
+    {
+        g->relocs = vec_new(arena);
+    }
+    GlobalReloc *r = arena_alloc(arena, sizeof(GlobalReloc), _Alignof(GlobalReloc));
+    r->offset = offset;
+    r->target = target;
+    vec_push(g->relocs, r);
+}
+
+/* Resolve an initializer leaf to the global whose address it names (an address
+   constant, §6.6p9): `&global`, `&static`, or a string literal in pointer
+   position. `static_map` may be NULL when no block-scope statics are visible.
+   Returns the global index, or -1 if the leaf is not an address constant. */
+static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
+                                   U64Map *static_map, Arena *arena)
+{
+    if (value->kind == AST_STRING_LITERAL)
+    {
+        return (int) ir_add_string_global(ast_as(ASTStringLiteral, value), mod, arena);
+    }
+    if (value->kind == AST_UNARY_EXPR)
+    {
+        ASTUnaryExpr *u = ast_as(ASTUnaryExpr, value);
+        if (u->op == UN_ADDR && u->operand->kind == AST_IDENT)
+        {
+            ASTVarDecl *decl = ast_as(ASTIdent, u->operand)->decl;
+            if (!decl)
+            {
+                return -1;
+            }
+            if (decl->is_block_scope)
+            {
+                if (decl->storage == SC_STATIC && static_map)
+                {
+                    u32 *p = u64map_get(static_map, (u64) (uintptr_t) decl);
+                    return p ? (int) *p : -1;
+                }
+                return -1; /* block-scope auto: not an address constant */
+            }
+            u32 *p = strmap_get(global_map, decl->name);
+            return p ? (int) *p : -1;
+        }
+    }
+    return -1;
+}
+
+/* Serialize an InitPlan into `g`'s init bytes (D12.6 file half / D12.8): the
+   buffer starts zeroed (so missing subobjects are free); scalar leaves fold to
+   their bytes; char-array-from-string copies the bytes; address leaves write 8
+   zero bytes plus a GlobalReloc. Returns false (error reported) if a leaf is
+   neither a constant nor an address constant. */
+static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrMap *global_map,
+                                U64Map *static_map, Arena *arena)
+{
+    u8 *buf = arena_alloc(arena, plan->total_size, 1);
+    memset(buf, 0, (size_t) plan->total_size);
+    g->init_data = buf;
+    g->init_len = (size_t) plan->total_size;
+
+    if (!plan->writes)
+    {
+        return true;
+    }
+    size_t n = vec_size(plan->writes);
+    for (size_t i = 0; i < n; i++)
+    {
+        InitWrite *w = (InitWrite *) vec_get(plan->writes, i);
+        if (w->is_string_fill)
+        {
+            ASTStringLiteral *sl = ast_as(ASTStringLiteral, w->value);
+            memcpy(buf + w->offset, sl->data, sl->length + 1);
+            continue;
+        }
+        int target = serializer_reloc_target(w->value, mod, global_map, static_map, arena);
+        if (target >= 0)
+        {
+            ir_global_add_reloc(g, w->offset, target, arena);
+            continue;
+        }
+        i64 value;
+        if (!fold_constant_ir(w->value, &value))
+        {
+            ir_error(w->value, "initializer element is not a constant");
+            return false;
+        }
+        const u8 *bytes = encode_const_bytes(arena, value, w->type->size);
+        memcpy(buf + w->offset, bytes, w->type->size);
+    }
+    return true;
+}
+
+/* Fill `g` from a variable declaration. Returns false (error reported) when an
+   initializer leaf cannot be serialized. */
+static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *global_map,
+                        U64Map *static_map, Arena *arena)
 {
     g->type = vd->type;
     g->align = vd->type->align;
-    g->init_reloc_target = -1;
+    g->relocs = NULL;
 
     /* Const-qualified objects (top-level) are read-only: they land in
        `.rodata` (no SHF_WRITE) even when zero-initialized — never `.bss`. */
@@ -1107,16 +1349,28 @@ static void fill_global(IrGlobal *g, ASTVarDecl *vd, int init_str_idx, Arena *ar
         g->section = IR_SECTION_BSS;
         g->linkage = IR_LINK_EXTERN;
     }
+    else if (vd->plan)
+    {
+        /* Aggregate lists and char-array strings carry a plan: serialize it
+           into the init bytes (D12.6 file half). */
+        if (!serialize_init_plan(g, vd->plan, mod, global_map, static_map, arena))
+        {
+            return false;
+        }
+        g->section = is_const ? IR_SECTION_RODATA : IR_SECTION_DATA;
+        g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;
+    }
     else if (vd->init && vd->init->kind == AST_STRING_LITERAL)
     {
         /* char *p = "..." → 8-byte address, patched by a relocation against
            the string symbol. Read-only pointer (`char * const p`) in
            .rodata, plain pointer in .data. */
+        int str_idx = serializer_reloc_target(vd->init, mod, global_map, static_map, arena);
         g->init_data = encode_const_bytes(arena, 0, 8);
         g->init_len = 8;
         g->section = is_const ? IR_SECTION_RODATA : IR_SECTION_DATA;
         g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;
-        g->init_reloc_target = init_str_idx;
+        ir_global_add_reloc(g, 0, str_idx, arena);
     }
     else if (vd->has_const_init && vd->const_init != 0)
     {
@@ -1142,15 +1396,21 @@ static void fill_global(IrGlobal *g, ASTVarDecl *vd, int init_str_idx, Arena *ar
         g->section = IR_SECTION_BSS;
         g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;
     }
+    return true;
 }
 
 static u32 emit_global_decl(ASTVarDecl *vd, IrModule *mod, Arena *arena, StrMap *global_map,
-                            int init_str_idx)
+                            U64Map *static_map)
 {
-    u32 idx = (u32) vec_size(mod->globals);
     IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
     g->name = vd->name;
-    fill_global(g, vd, init_str_idx, arena);
+    if (!fill_global(g, vd, mod, global_map, static_map, arena))
+    {
+        return NO_VREG;
+    }
+    /* fill_global may append string globals for address-constant leaves, so the
+       index must be taken after it runs. */
+    u32 idx = (u32) vec_size(mod->globals);
     vec_push(mod->globals, g);
 
     u32 *slot = arena_alloc(arena, sizeof(u32), sizeof(u32));
@@ -1160,15 +1420,18 @@ static u32 emit_global_decl(ASTVarDecl *vd, IrModule *mod, Arena *arena, StrMap 
 }
 
 static u32 emit_block_static(ASTVarDecl *vd, IrModule *mod, Arena *arena, U64Map *static_map,
-                             int init_str_idx)
+                             StrMap *global_map)
 {
-    u32 idx = (u32) vec_size(mod->globals);
     IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
     size_t name_len = 32;
     char *name_buf = arena_alloc(arena, name_len, 1);
-    snprintf(name_buf, name_len, "__static_%u", idx);
+    snprintf(name_buf, name_len, "__static_%u", (unsigned) vec_size(mod->globals));
     g->name = name_buf;
-    fill_global(g, vd, init_str_idx, arena);
+    if (!fill_global(g, vd, mod, global_map, static_map, arena))
+    {
+        return NO_VREG;
+    }
+    u32 idx = (u32) vec_size(mod->globals);
     vec_push(mod->globals, g);
 
     u32 *slot = arena_alloc(arena, sizeof(u32), sizeof(u32));
@@ -1191,7 +1454,7 @@ static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *aren
     g->align = 1;
     g->section = IR_SECTION_RODATA;
     g->linkage = IR_LINK_LOCAL;
-    g->init_reloc_target = -1;
+    g->relocs = NULL;
     vec_push(mod->globals, g);
     return idx;
 }
@@ -1213,7 +1476,7 @@ static u32 ir_add_zero_blob(IrModule *mod, Arena *arena, u32 size)
     g->align = 1;
     g->section = IR_SECTION_RODATA;
     g->linkage = IR_LINK_LOCAL;
-    g->init_reloc_target = -1;
+    g->relocs = NULL;
     vec_push(mod->globals, g);
     return idx;
 }
@@ -1851,13 +2114,11 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
            declaration is a no-op at runtime. */
         if (block_static_index(ctx, vd) == NO_VREG)
         {
-            int init_str_idx = -1;
-            if (vd->init && vd->init->kind == AST_STRING_LITERAL)
+            if (emit_block_static(vd, ctx->mod, ctx->mod->arena, ctx->static_map,
+                                  ctx->global_map) == NO_VREG)
             {
-                init_str_idx = (int) ir_add_string_global(ast_as(ASTStringLiteral, vd->init),
-                                                          ctx->mod, ctx->mod->arena);
+                ctx->failed = true;
             }
-            emit_block_static(vd, ctx->mod, ctx->mod->arena, ctx->static_map, init_str_idx);
         }
         return bb;
     }
@@ -1867,7 +2128,11 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
            global once (module-wide) if no file-scope declaration preceded it. */
         if (global_index_of(ctx, vd->name) == NO_VREG)
         {
-            emit_global_decl(vd, ctx->mod, ctx->mod->arena, ctx->global_map, -1);
+            if (emit_global_decl(vd, ctx->mod, ctx->mod->arena, ctx->global_map, ctx->static_map) ==
+                NO_VREG)
+            {
+                ctx->failed = true;
+            }
         }
         return bb;
     }
@@ -2246,7 +2511,8 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
                        u64map_new(mod->arena),
                        vec_new(mod->arena),
                        u64map_new(mod->arena),
-                       NO_VREG};
+                       NO_VREG,
+                       false};
 
     /* Pre-create blocks for all labels so gotos can target them. */
     collect_labels(func_ast->body, func, &ctx);
@@ -2264,7 +2530,7 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
 
     finish_func(func, entry, &ctx);
 
-    return true;
+    return !ctx.failed;
 }
 
 IrModule *ir_build_module(ASTNode *ast, Arena *arena)
@@ -2296,13 +2562,10 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
         if (decl->kind == AST_VAR_DECL)
         {
             ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
-            int init_str_idx = -1;
-            if (vd->init && vd->init->kind == AST_STRING_LITERAL)
+            if (emit_global_decl(vd, mod, arena, global_map, NULL) == NO_VREG)
             {
-                init_str_idx =
-                    (int) ir_add_string_global(ast_as(ASTStringLiteral, vd->init), mod, arena);
+                return NULL;
             }
-            emit_global_decl(vd, mod, arena, global_map, init_str_idx);
         }
     }
     for (size_t i = 0; i < ndecls; i++)

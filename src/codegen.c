@@ -537,6 +537,20 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
         }
         return;
     }
+    if (rhs.kind == XOP_REG)
+    {
+        /* `%reg op= reg` form (modrm mod=3): reached when the RHS is a global
+           address constant lowered into a register (cf. lowered_operand). */
+        emit_os16(buf, width);
+        bytebuf_append(buf, rex(width == 8, dst_reg >= 8, false, rhs.u.reg >= 8));
+        if (s->mem_0f)
+        {
+            bytebuf_append(buf, X86_TWO_BYTE_ESC);
+        }
+        bytebuf_append(buf, s->mem);
+        bytebuf_append(buf, modrm(3, dst_reg, rhs.u.reg));
+        return;
+    }
     emit_os16(buf, width);
     bytebuf_append(buf, rex(width == 8, dst_reg >= 8, reg_is_extended(rhs.u.mem.index),
                             reg_is_extended(rhs.u.mem.base)));

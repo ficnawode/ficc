@@ -2014,10 +2014,29 @@ static bool fold_constant_expr(ParserCtx *p, ASTNode *node, i64 *out)
 }
 
 /* Fold a file-scope/static initializer: a constant expression is stored as
-   const_init; a string literal (char * target) survives as init for the .data
-   relocation path. */
+   const_init; a string literal (char * target) or address constant (`&g`)
+   survives as init for the .data relocation path; a brace-enclosed list is
+   routed to semantic's planner and the IR serializer (D12.6), so it survives
+   as init too. */
 static bool resolve_constant_init(ParserCtx *p, ASTVarDecl *vd, ASTNode *expr)
 {
+    if (expr->kind == AST_INIT_LIST)
+    {
+        vd->init = expr;
+        return true;
+    }
+    if (expr->kind == AST_UNARY_EXPR)
+    {
+        /* Address constant (§6.6p9): `&g` — check the *target* in semantic
+           (it must be an object of static storage duration), and serialize the
+           relocation in the IR builder. */
+        ASTUnaryExpr *u = ast_as(ASTUnaryExpr, expr);
+        if (u->op == UN_ADDR && u->operand->kind == AST_IDENT)
+        {
+            vd->init = expr;
+            return true;
+        }
+    }
     i64 value;
     if (fold_constant_expr(p, expr, &value))
     {

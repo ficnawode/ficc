@@ -356,10 +356,17 @@ void elf_write(CodegenModule *cm, const char *path)
     for (size_t i = 0; i < nglobals; i++)
     {
         IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
-        if (g->init_reloc_target >= 0)
+        if (!g->relocs)
         {
+            continue;
+        }
+        size_t nrelocs = vec_size(g->relocs);
+        for (size_t r = 0; r < nrelocs; r++)
+        {
+            GlobalReloc *gr = (GlobalReloc *) vec_get(g->relocs, r);
             ByteBuf *target = g->section == IR_SECTION_RODATA ? &rela_rodata : &rela_data;
-            rela_emit(target, global_off[i], FIRST_GLOBAL_SYM + g->init_reloc_target, R_X86_64_64);
+            rela_emit(target, global_off[i] + gr->offset, FIRST_GLOBAL_SYM + gr->target,
+                      R_X86_64_64);
         }
     }
 

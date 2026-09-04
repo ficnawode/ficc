@@ -429,3 +429,268 @@ TEST(globals, elf_shadow_in_loop)
 {
     EXPECT_EQ(tc_run_elf(shadow_in_loop_src), 0);
 }
+
+/* --- Phase 12c: file-scope & block-static initializer lists + relocs --- */
+
+TEST(globals, file_scope_array_list)
+{
+    EXPECT_INTERP_AND_ELF("int g[3] = {10, 20, 30};\n"
+                          "int main(void) {\n"
+                          "    return g[0] + g[1] + g[2];\n"
+                          "}\n",
+                          60);
+}
+
+TEST(globals, file_scope_short_list_zero_fills)
+{
+    EXPECT_INTERP_AND_ELF("int g[5] = {1, 2};\n"
+                          "int main(void) {\n"
+                          "    return g[0] + g[1] + g[2] + g[3] + g[4];\n"
+                          "}\n",
+                          3);
+}
+
+TEST(globals, file_scope_designated_array)
+{
+    EXPECT_INTERP_AND_ELF("int g[5] = {1, 2, [4] = 9};\n"
+                          "int main(void) {\n"
+                          "    return g[0] + g[1] + g[2] + g[3] + g[4];\n"
+                          "}\n",
+                          12);
+}
+
+TEST(globals, file_scope_scalar_braced)
+{
+    EXPECT_INTERP_AND_ELF("int g = {9};\n"
+                          "int main(void) {\n"
+                          "    return g;\n"
+                          "}\n",
+                          9);
+}
+
+TEST(globals, file_scope_struct_list)
+{
+    EXPECT_INTERP_AND_ELF("struct S { int x; int y; };\n"
+                          "struct S s = {10, 20};\n"
+                          "int main(void) {\n"
+                          "    return s.x + s.y;\n"
+                          "}\n",
+                          30);
+}
+
+TEST(globals, file_scope_struct_designated)
+{
+    EXPECT_INTERP_AND_ELF("struct S { int x; int y; };\n"
+                          "struct S s = {.y = 20, .x = 10};\n"
+                          "int main(void) {\n"
+                          "    return s.x + s.y;\n"
+                          "}\n",
+                          30);
+}
+
+TEST(globals, file_scope_nested_aggregate)
+{
+    EXPECT_INTERP_AND_ELF("struct S { int a[2]; int x; };\n"
+                          "struct S g = {{1, 2}, 3};\n"
+                          "int main(void) {\n"
+                          "    return g.a[0] + g.a[1] + g.x;\n"
+                          "}\n",
+                          6);
+}
+
+TEST(globals, file_scope_char_array_from_string)
+{
+    EXPECT_INTERP_AND_ELF("char s[4] = \"hi\";\n"
+                          "int main(void) {\n"
+                          "    return s[0] + s[1];\n"
+                          "}\n",
+                          'h' + 'i');
+}
+
+TEST(globals, file_scope_const_aggregate_rodata)
+{
+    EXPECT_INTERP_AND_ELF("const int ca[2] = {3, 4};\n"
+                          "int main(void) {\n"
+                          "    return ca[0] + ca[1];\n"
+                          "}\n",
+                          7);
+}
+
+TEST(globals, file_scope_ptr_member_reloc)
+{
+    /* `int a` then `int *g[2] = {&a, 0}` — reloc at offset 0, zero at 8. */
+    EXPECT_INTERP_AND_ELF("int a = 1;\n"
+                          "int *g[2] = {&a, 0};\n"
+                          "int main(void) {\n"
+                          "    if (g[0] == &a) { } else { return 1; }\n"
+                          "    if (g[1] != 0) { return 2; }\n"
+                          "    return *g[0];\n"
+                          "}\n",
+                          1);
+}
+
+TEST(globals, file_scope_string_ptr_array_relocs)
+{
+    EXPECT_INTERP_AND_ELF("char *gs[2] = {\"ab\", \"cde\"};\n"
+                          "int main(void) {\n"
+                          "    if (gs[1][2] != 101) { return 1; }\n"
+                          "    return gs[0][0] + gs[0][1];\n"
+                          "}\n",
+                          195);
+}
+
+TEST(globals, file_scope_struct_ptr_member)
+{
+    EXPECT_INTERP_AND_ELF("struct S { int *p; int x; };\n"
+                          "int a = 1;\n"
+                          "struct S s = {.p = &a, .x = 7};\n"
+                          "int main(void) {\n"
+                          "    if (*s.p != 1) { return 1; }\n"
+                          "    return s.x;\n"
+                          "}\n",
+                          7);
+}
+
+TEST(globals, block_static_list)
+{
+    EXPECT_INTERP_AND_ELF("int f(void) {\n"
+                          "    static int a[2] = {5, 6};\n"
+                          "    a[0] = a[0] + 1;\n"
+                          "    return a[0] + a[1];\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f() + f();\n"
+                          "}\n",
+                          25);
+}
+
+TEST(globals, block_static_struct_list)
+{
+    EXPECT_INTERP_AND_ELF("struct S { int a[2]; int x; };\n"
+                          "int f(void) {\n"
+                          "    static struct S s = {.x = 11, .a = {7, 8}};\n"
+                          "    s.a[0] = s.a[0] + 1;\n"
+                          "    return s.a[0] + s.a[1] + s.x;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f() + f();\n"
+                          "}\n",
+                          55);
+}
+
+TEST(globals, block_static_ptr_member_reloc)
+{
+    EXPECT_INTERP_AND_ELF("int a = 1;\n"
+                          "struct S { int *p; };\n"
+                          "int f(void) {\n"
+                          "    static struct S s = {.p = &a};\n"
+                          "    return *s.p;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f() + f();\n"
+                          "}\n",
+                          2);
+}
+
+TEST(globals, block_static_char_array_from_string)
+{
+    /* Static char array byte-filled from a string incl. NUL; the value
+       mutates across calls, and the trailing NUL stays zero. */
+    EXPECT_INTERP_AND_ELF("int f(void) {\n"
+                          "    static char s[4] = \"hi\";\n"
+                          "    s[0] = s[0] + 1;\n"
+                          "    return s[0] + s[2];\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f() + f();\n"
+                          "}\n",
+                          211);
+}
+
+TEST(globals, block_static_string_ptr)
+{
+    EXPECT_INTERP_AND_ELF("int f(void) {\n"
+                          "    static char *p = \"xy\";\n"
+                          "    return p[0] + p[1];\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f();\n"
+                          "}\n",
+                          'x' + 'y');
+}
+
+TEST(globals, file_scope_ptr_initializer_reloc)
+{
+    EXPECT_INTERP_AND_ELF("int a = 1;\n"
+                          "int *p = &a;\n"
+                          "int main(void) {\n"
+                          "    if (p == &a) { } else { return 1; }\n"
+                          "    return *p;\n"
+                          "}\n",
+                          1);
+}
+
+TEST(globals, file_scope_struct_ptr_initializer_reloc)
+{
+    EXPECT_INTERP_AND_ELF("struct S { int x; };\n"
+                          "struct S s = {.x = 1};\n"
+                          "struct S *sp = &s;\n"
+                          "int main(void) {\n"
+                          "    return sp->x;\n"
+                          "}\n",
+                          1);
+}
+
+TEST(globals, block_static_ptr_initializer_reloc)
+{
+    EXPECT_INTERP_AND_ELF("int f(void) {\n"
+                          "    static int a = 5;\n"
+                          "    static int *p = &a;\n"
+                          "    *p = *p + 1;\n"
+                          "    return a;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f() + f();\n"
+                          "}\n",
+                          13);
+}
+
+TEST(globals, negative_block_static_addr_of_auto)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int x = 5;\n"
+                      "    static int *p = &x;\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(globals, negative_file_scope_nonconst_element)
+{
+    EXPECT_BUILD_FAIL("int x = 5;\n"
+                      "int g[2] = {x, 0};\n"
+                      "int main(void) {\n"
+                      "    return 0;\n"
+                      "}\n");
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int y = 5;\n"
+                      "    static int g[2] = {y, 0};\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(globals, negative_file_scope_overlong_list)
+{
+    EXPECT_BUILD_FAIL("int g[2] = {1, 2, 3};\n"
+                      "int main(void) {\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(globals, negative_file_scope_incomplete_array_list)
+{
+    /* 12b hard-rejects `[]` lists; 12d lifts it. Pins the regression floor. */
+    EXPECT_BUILD_FAIL("int g[] = {1, 2, 3};\n"
+                      "int main(void) {\n"
+                      "    return 0;\n"
+                      "}\n");
+}

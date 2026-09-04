@@ -788,16 +788,22 @@ i64 ir_interp_run(IrModule *m)
                 memset(globals[i].data, 0, size);
             }
         }
-        /* Second pass: pointer globals initialized to strings hold the target's
-           address (the ELF writer patches this via .rela.data). */
+        /* Second pass: pointer subobjects initialized to address constants
+           (string globals, &global) hold the target's address (the ELF writer
+           patches these via .rela.data/.rela.rodata R_X86_64_64). */
         for (u32 i = 0; i < nglobals; i++)
         {
             IrGlobal *ig = (IrGlobal *) vec_get(m->globals, i);
-            if (ig->init_reloc_target >= 0)
+            if (!ig->relocs)
             {
-                u64 addr = (u64) (uintptr_t) globals[ig->init_reloc_target].data;
-                memcpy(globals[i].data, &addr, 8);
-                globals[i].size = 8;
+                continue;
+            }
+            size_t nrelocs = vec_size(ig->relocs);
+            for (size_t r = 0; r < nrelocs; r++)
+            {
+                GlobalReloc *gr = (GlobalReloc *) vec_get(ig->relocs, r);
+                u64 addr = (u64) (uintptr_t) globals[gr->target].data;
+                memcpy(globals[i].data + gr->offset, &addr, 8);
             }
         }
     }

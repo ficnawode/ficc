@@ -190,6 +190,17 @@ typedef enum
     IR_LINK_EXTERN,
 } IrLinkage;
 
+/* One relocation site inside a global's init bytes: the 8 zero bytes at
+   `offset` (a pointer-typed subobject) are patched with the address of global
+   index `target` (D12.8). Same encoding as the old single-reloc path, which is
+   simply `{0, target}`. */
+typedef struct GlobalReloc GlobalReloc;
+struct GlobalReloc
+{
+    u32 offset; /* byte offset into init_data */
+    int target; /* global index whose address is written here */
+};
+
 typedef struct IrGlobal IrGlobal;
 struct IrGlobal
 {
@@ -200,8 +211,8 @@ struct IrGlobal
     u32 align;
     IrSection section;
     IrLinkage linkage;
-    int init_reloc_target; /* global index whose address is written into the
-                              init bytes (.rela.data R_X86_64_64), or -1 */
+    Vec *relocs; /* Vec<GlobalReloc*> — address constants patched by
+                    .rela.data/.rela.rodata R_X86_64_64, or NULL */
 };
 
 /* An IrModule owns all IR data for a compilation unit.
