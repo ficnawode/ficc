@@ -160,7 +160,6 @@ typedef struct DeclSpecifiers
 } DeclSpecifiers;
 
 static DeclSpecifiers parse_decl_specifiers(ParserCtx *p);
-static ASTNode *parse_expr(ParserCtx *p);
 static ASTNode *parse_expression(ParserCtx *p);
 static ASTNode *parse_stmt(ParserCtx *p);
 static ASTNode *parse_primary(ParserCtx *p);
@@ -961,7 +960,7 @@ static Type *parse_array_suffix(ParserCtx *p, Type *type)
         u64 len = 0;
         if (parser_peek(p)->kind != TOK_RBRACKET)
         {
-            ASTNode *size_expr = parse_expr(p);
+            ASTNode *size_expr = parse_assign(p);
             if (!size_expr || size_expr->kind != AST_INT_LITERAL)
             {
                 parser_error(p, "array size must be an integer constant");
@@ -1374,7 +1373,7 @@ static ASTNode *parse_case_stmt(ParserCtx *p)
     ASSERT(start->kind == TOK_KW_CASE);
     parser_advance(p);
 
-    ASTNode *expr = parse_expr(p);
+    ASTNode *expr = parse_assign(p);
     if (!expr)
     {
         return NULL;
@@ -1513,18 +1512,14 @@ static ASTNode *parse_stmt(ParserCtx *p)
     }
 }
 
-static ASTNode *parse_expr(ParserCtx *p)
-{
-    return parse_assign(p);
-}
-
 /* The C11 *expression* level (§6.5.17): comma-separated, left-associative,
-   value of the rightmost operand. This is DIFFERENT from parse_expr (the
-   assignment-expression level) — commas in argument lists, init-list
-   elements, and designator indexes are separators, not the operator, so those
-   sites call parse_expr. Only C11's expression positions (expression
-   statements, `return`, conditions, for-clauses, subscript indexes, ternary
-   middle, parenthesized primaries) route here. */
+   value of the rightmost operand. This is DIFFERENT from parse_assign (the
+   §6.5.16 *assignment-expression* level) — commas in argument lists,
+   init-list elements, designator indexes, array sizes, and `case` labels are
+   separators, not the operator, so those sites call parse_assign. Only C11's
+   *expression* positions (expression statements, `return`, conditions,
+   for-clauses, subscript indexes, ternary middle, parenthesized primaries)
+   come through the comma-aware parse_expression. */
 static ASTNode *parse_expression(ParserCtx *p)
 {
     ASTNode *left = parse_assign(p);
@@ -1558,7 +1553,7 @@ static ASTNode *parse_identifier_expr(ParserCtx *p, Token *t)
         {
             while (true)
             {
-                ASTNode *arg = parse_expr(p);
+                ASTNode *arg = parse_assign(p);
                 if (!arg)
                 {
                     return NULL;
@@ -2259,7 +2254,7 @@ static Designator *parse_designators(ParserCtx *p)
         else
         {
             parser_advance(p);
-            ASTNode *idx = parse_expr(p);
+            ASTNode *idx = parse_assign(p);
             if (!idx || idx->kind != AST_INT_LITERAL)
             {
                 parser_error(p, "array designator index must be an integer constant");
