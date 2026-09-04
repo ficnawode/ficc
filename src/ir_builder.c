@@ -1393,7 +1393,13 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
         if (w->is_string_fill)
         {
             ASTStringLiteral *sl = ast_as(ASTStringLiteral, w->value);
-            memcpy(buf + w->offset, sl->data, sl->length + 1);
+            /* §6.7.9p14: the NUL is stored only if there is room — clamp the
+               copy to the array size (`char s[2] = "hi"` drops the NUL). */
+            u32 need = (u32) sl->length + 1;
+            u32 len = w->type->arr.length
+                          ? (need < w->type->arr.length ? need : (u32) w->type->arr.length)
+                          : need;
+            memcpy(buf + w->offset, sl->data, len);
             continue;
         }
         int target = serializer_reloc_target(w->value, mod, global_map, static_map, arena);
@@ -1591,8 +1597,13 @@ static IrBlock *emit_init_plan(IrFunction *f, IrBlock *bb, IrOperand base, InitP
         {
             ASTStringLiteral *sl = ast_as(ASTStringLiteral, w->value);
             u32 sidx = ir_add_string_global(sl, ctx->mod, ctx->mod->arena);
-            ir_emit_memcpy(bb, ir_operand_vreg(addr), ir_operand_global(sidx),
-                           (u32) sl->length + 1);
+            /* §6.7.9p14: the NUL is stored only if there is room — clamp the
+               copy to the array size (`char s[2] = "hi"` drops the NUL). */
+            u32 need = (u32) sl->length + 1;
+            u32 len = w->type->arr.length
+                          ? (need < w->type->arr.length ? need : (u32) w->type->arr.length)
+                          : need;
+            ir_emit_memcpy(bb, ir_operand_vreg(addr), ir_operand_global(sidx), len);
         }
         else
         {

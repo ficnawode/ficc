@@ -290,3 +290,32 @@ TEST(typedef, negative_void_alias_variable)
                       "V v;\n"
                       "int main(void) { return 0; }\n");
 }
+
+TEST(typedef, const_qualified_cast_target)
+{
+    /* C11 §6.5.4: a cast may open with `const` applied to a typedef name —
+       `(const T)x` and `(const T *)&x` take the typedef-aware type-name
+       grammar (D12.3). */
+    EXPECT_INTERP_AND_ELF("typedef int T;\n"
+                          "int main(void) {\n"
+                          "    int x = 42;\n"
+                          "    if ((const T)x != 42) return 1;\n"
+                          "    const T *p = (const T *)&x;\n"
+                          "    if (*p != 42) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(typedef, negative_cast_discards_const_then_write)
+{
+    /* Casting away const is legal, but storing *through* the const pointer
+       writes to a const object — rejected by the §9 write gate. */
+    EXPECT_BUILD_FAIL("typedef int T;\n"
+                      "int main(void) {\n"
+                      "    int x = 5;\n"
+                      "    const T *p = &x;\n"
+                      "    *p = 6;\n"
+                      "    return 0;\n"
+                      "}\n");
+}

@@ -733,3 +733,32 @@ TEST(globals, negative_file_scope_bare_incomplete_array)
                       "    return 0;\n"
                       "}\n");
 }
+
+TEST(globals, file_scope_char_array_string_drops_nul)
+{
+    /* §6.7.9p14 at file scope: a string filling the array exactly drops the
+       NUL (`char g[2] = "hi"`), braced or not (relaxed-fit rule). */
+    EXPECT_INTERP_AND_ELF("char g[2] = \"hi\";\n"
+                          "char h[2] = {\"hi\"};\n"
+                          "int main(void) {\n"
+                          "    if (g[0] != 104 || g[1] != 105) return 1;\n"
+                          "    if (h[0] != 104 || h[1] != 105) return 2;\n"
+                          "    if (sizeof(g) != 2 || sizeof(h) != 2) return 3;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(globals, file_scope_empty_braces)
+{
+    /* Documented `{}` zero-init extension (D12.11), file-scope path. */
+    EXPECT_INTERP_AND_ELF("int g[5] = {};\n"
+                          "struct S { int a; int b; };\n"
+                          "struct S s = {};\n"
+                          "union U { int i; };\n"
+                          "union U u = {};\n"
+                          "int main(void) {\n"
+                          "    return g[0]+g[1]+g[2]+g[3]+g[4] + s.a + s.b + u.i;\n"
+                          "}\n",
+                          0);
+}

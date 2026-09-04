@@ -1067,7 +1067,7 @@ static bool plan_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *cty, u32 
             return false;
         }
         ASTStringLiteral *sl = ast_as(ASTStringLiteral, value);
-        if (sl->length + 1 > cty->arr.length)
+        if (sl->length > cty->arr.length)
         {
             sem_error(loc, "initializer-string for array of chars is too long");
             ctx->error = true;
@@ -1091,8 +1091,11 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
 
     /* §6.7.9p14: a character array may be initialized by a character string
        literal, braced or not — `char s[5] = "hi"` and `char s[5] = {"hi"}`
-       both fill the whole array (incl. the NUL); an unsized target infers
-       strlen+1 from the string, as in the unbraced path (P6). */
+       both fill the array; an unsized target infers strlen+1 from the string.
+       The terminating NUL is stored *if there is room*: `char s[2] = "hi"`
+       drops it (2 chars, no room), `char s[3] = "hi"` keeps it. The only
+       error is `strlen > size` (`char s[1] = "hi"`). The emission clamps the
+       copy length to the array size (ir_builder) so the NUL is dropped there. */
     if (type_is_array(t) && type_array_elem(t)->kind == TYPE_CHAR && nel == 1)
     {
         InitElem *e = (InitElem *) vec_get(list->elems, 0);
@@ -1115,7 +1118,7 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
                 plan_new_write(ctx, plan, base_off, t, e->value, true);
                 return true;
             }
-            if (need > t->arr.length)
+            if (sl->length > t->arr.length)
             {
                 sem_error(e->loc, "initializer-string for array of chars is too long");
                 ctx->error = true;
@@ -1283,7 +1286,7 @@ static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
         ctx->error = true;
         return false;
     }
-    if (sl->length + 1 > type_array_len(arr))
+    if (sl->length > type_array_len(arr))
     {
         sem_error(vd->base.loc, "initializer-string for array of chars is too long");
         ctx->error = true;
