@@ -1196,6 +1196,67 @@ static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *aren
     return idx;
 }
 
+/* A synthesized file-scope zero blob (D12.6): block-scope aggregate
+   initializers zero-fill their alloca slot with a single OP_MEMCPY from these
+   bytes, so missing subobjects are zeroed without extra store instructions. */
+static u32 ir_add_zero_blob(IrModule *mod, Arena *arena, u32 size)
+{
+    u32 idx = (u32) vec_size(mod->globals);
+    IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
+    size_t name_len = 24;
+    char *name_buf = arena_alloc(arena, name_len, 1);
+    snprintf(name_buf, name_len, "__zero_%u", idx);
+    g->name = name_buf;
+    g->type = type_array(type_char(), size);
+    g->init_data = encode_const_bytes(arena, 0, size);
+    g->init_len = size;
+    g->align = 1;
+    g->section = IR_SECTION_RODATA;
+    g->linkage = IR_LINK_LOCAL;
+    g->init_reloc_target = -1;
+    vec_push(mod->globals, g);
+    return idx;
+}
+
+/* Apply an InitPlan to the storage pointed at by `base` (D12.6 block half):
+   zero-fill the whole object, then apply each write as a scalar OP_STORE or a
+   char-array OP_MEMCPY, GEP'd from the slot base with the write's offset. */
+static IrBlock *emit_init_plan(IrFunction *f, IrBlock *bb, IrOperand base, InitPlan *plan,
+                               FuncBuilder *ctx)
+{
+    if (plan->total_size > 0)
+    {
+        u32 blob = ir_add_zero_blob(ctx->mod, ctx->mod->arena, (u32) plan->total_size);
+        ir_emit_memcpy(bb, base, ir_operand_global(blob), (u32) plan->total_size);
+    }
+    if (!plan->writes)
+    {
+        return bb;
+    }
+    size_t n = vec_size(plan->writes);
+    for (size_t i = 0; i < n; i++)
+    {
+        InitWrite *w = (InitWrite *) vec_get(plan->writes, i);
+        u32 addr = alloc_vreg_from_type(ctx, type_ptr(w->type));
+        ir_emit_gep(bb, addr, base, ir_operand_imm((i64) w->offset), 1);
+        if (w->is_string_fill)
+        {
+            ASTStringLiteral *sl = ast_as(ASTStringLiteral, w->value);
+            u32 sidx = ir_add_string_global(sl, ctx->mod, ctx->mod->arena);
+            ir_emit_memcpy(bb, ir_operand_vreg(addr), ir_operand_global(sidx),
+                           (u32) sl->length + 1);
+        }
+        else
+        {
+            ExprResult val = build_expr(w->value, f, bb, ctx);
+            bb = val.block;
+            IrOperand o = promote_to(ctx, bb, val.value, node_type(w->value), w->type);
+            ir_emit_store(bb, o, ir_operand_vreg(addr), w->type->size);
+        }
+    }
+    return bb;
+}
+
 static ExprResult build_string_literal_expr(ASTStringLiteral *sl, IrFunction *f, IrBlock *bb,
                                             FuncBuilder *ctx)
 {
@@ -1819,6 +1880,10 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
         Type *ptr_type = type_decay(vd->type);
         u32 dst = alloc_vreg_from_type(ctx, ptr_type);
         ir_emit_alloca(bb, dst, vd->type->size);
+        if (vd->plan)
+        {
+            bb = emit_init_plan(f, bb, ir_operand_vreg(dst), vd->plan, ctx);
+        }
         write_variable(ctx, vd, bb, ir_operand_vreg(dst));
         return bb;
     }
@@ -1828,7 +1893,11 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
            the pointer as the variable's value. */
         u32 dst = alloc_vreg_for_var(ctx, vd->type);
         ir_emit_alloca(bb, dst, vd->type->size);
-        if (vd->init)
+        if (vd->plan)
+        {
+            bb = emit_init_plan(f, bb, ir_operand_vreg(dst), vd->plan, ctx);
+        }
+        else if (vd->init)
         {
             ExprResult init = build_expr(vd->init, f, bb, ctx);
             bb = init.block;
@@ -1838,7 +1907,19 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
         return bb;
     }
     IrOperand val = ir_operand_imm(0);
-    if (vd->init)
+    if (vd->plan)
+    {
+        /* Scalar wrapped in a braced list (`int x = {42};`): unwrap to the
+           single element value and keep the plain SSA scalar path (D12.6). */
+        if (vd->plan->writes && vec_size(vd->plan->writes) > 0)
+        {
+            InitWrite *w = (InitWrite *) vec_get(vd->plan->writes, 0);
+            ExprResult init = build_expr(w->value, f, bb, ctx);
+            bb = init.block;
+            val = promote_to(ctx, bb, init.value, node_type(w->value), vd->type);
+        }
+    }
+    else if (vd->init)
     {
         ExprResult init = build_expr(vd->init, f, bb, ctx);
         bb = init.block;
@@ -2027,6 +2108,17 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
         case AST_CAST_EXPR:
             mark_addr_taken_expr(ast_as(ASTCastExpr, node)->operand, ctx);
             break;
+        case AST_INIT_LIST:
+        {
+            ASTInitList *il = ast_as(ASTInitList, node);
+            size_t n = vec_size(il->elems);
+            for (size_t i = 0; i < n; i++)
+            {
+                InitElem *e = (InitElem *) vec_get(il->elems, i);
+                mark_addr_taken_expr(e->value, ctx);
+            }
+            break;
+        }
         default:
             break; /* literals, identifiers, sizeof-type: nothing to walk */
     }

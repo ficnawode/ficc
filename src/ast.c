@@ -78,6 +78,7 @@ ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, StorageClass 
     n->const_init = 0;
     n->has_const_init = false;
     n->is_block_scope = false;
+    n->plan = NULL;
     return &n->base;
 }
 
@@ -297,6 +298,14 @@ ASTNode *ast_typedef_decl(Type *type, const char *name, Loc loc, Arena *arena)
     ASTTypedefDecl *n = ast_new_node(sizeof(ASTTypedefDecl), AST_TYPEDEF_DECL, loc, arena);
     n->type = type;
     n->name = name;
+    return &n->base;
+}
+
+ASTNode *ast_init_list(Vec *elems, Loc loc, Arena *arena)
+{
+    ASTInitList *n = ast_new_node(sizeof(ASTInitList), AST_INIT_LIST, loc, arena);
+    n->elems = elems;
+    n->plan = NULL;
     return &n->base;
 }
 
@@ -640,6 +649,28 @@ static void ast_dump_rec(ASTNode *node, int depth)
         {
             ASTTypedefDecl *td = ast_as(ASTTypedefDecl, node);
             printf("TYPEDEF_DECL %s = %s\n", td->name, type_kind_name(td->type->kind));
+            break;
+        }
+        case AST_INIT_LIST:
+        {
+            ASTInitList *il = ast_as(ASTInitList, node);
+            printf("INIT_LIST (%zu elems)\n", vec_size(il->elems));
+            for (size_t i = 0; i < vec_size(il->elems); i++)
+            {
+                InitElem *e = (InitElem *) vec_get(il->elems, i);
+                for (Designator *d = e->design; d; d = d->next)
+                {
+                    if (d->kind == ND_FIELD)
+                    {
+                        printf("%*s.%s\n", depth + 1, "", d->field);
+                    }
+                    else
+                    {
+                        printf("%*s[%lld]\n", depth + 1, "", (long long) d->index);
+                    }
+                }
+                ast_dump_rec(e->value, depth + 1);
+            }
             break;
         }
         default:

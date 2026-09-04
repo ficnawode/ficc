@@ -25,6 +25,20 @@ static Arena *type_arena;
 static U64Map *ptr_cache;
 static U64Map *array_cache;
 
+/* MurmurHash3 finalizer (same avalanche as hash_u64): mixes the key so
+   `elem`-pointer alignment and `length` low bits cannot alias. The naive
+   `(u64)elem ^ (length << 3)` collides when elem pointers sit 2^k apart — the
+   static singletons are spaced 128 bytes, so char[16] and int[0] share a key. */
+static u64 type_key_mix(u64 x)
+{
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
+}
+
 /* Qualified-type variant cache: base Type* -> const-qualified variant.
    Scalars, pointers, records, and enums get one interned variant (idempotent,
    so `const const int` is legal C11); arrays are qualified through their
@@ -312,7 +326,7 @@ Type *type_ptr(Type *pointee)
 Type *type_array(Type *elem, u64 length)
 {
     type_init_pool();
-    u64 key = ((u64) (uintptr_t) elem) ^ (length << 3);
+    u64 key = type_key_mix((u64) (uintptr_t) elem) ^ type_key_mix(length);
     Type *cached = u64map_get(array_cache, key);
     if (cached)
     {
@@ -411,6 +425,18 @@ void type_reset(void)
     tag_table = strmap_new(tag_arena);
 }
 
+/* Record/enum types are immortal (see type_reset above), so their tag strings
+   — used both as `record.tag`/`enumm.tag` and as the tag_table keys — must not
+   dangle into a per-compilation arena. Copy the caller's tag into the immortal
+   tag_arena the first time it is stored. */
+static const char *tag_intern(const char *tag)
+{
+    size_t len = strlen(tag);
+    char *copy = arena_alloc(tag_arena, len + 1, sizeof(char));
+    memcpy(copy, tag, len + 1);
+    return copy;
+}
+
 Type *type_record(TypeKind kind, const char *tag)
 {
     ASSERT(kind == TYPE_STRUCT || kind == TYPE_UNION);
@@ -429,11 +455,11 @@ Type *type_record(TypeKind kind, const char *tag)
     t->size = 0;
     t->qualifiers = 0;
     t->unqual_base = NULL;
-    t->record.tag = tag;
+    t->record.tag = tag_intern(tag);
     t->record.fields = NULL;
     t->record.complete = false;
     t->record.qual_variants = NULL;
-    strmap_set(tag_table, tag, t);
+    strmap_set(tag_table, t->record.tag, t);
     return t;
 }
 
@@ -524,9 +550,9 @@ Type *type_enum(const char *tag)
     t->size = type_int()->size;
     t->qualifiers = 0;
     t->unqual_base = NULL;
-    t->enumm.tag = tag;
+    t->enumm.tag = tag_intern(tag);
     t->enumm.complete = false;
-    strmap_set(tag_table, tag, t);
+    strmap_set(tag_table, t->enumm.tag, t);
     return t;
 }
 

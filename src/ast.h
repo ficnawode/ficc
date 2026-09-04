@@ -40,7 +40,8 @@
     X(AST_ENUM_DECL)                                                                               \
     X(AST_MEMBER_ACCESS)                                                                           \
     X(AST_CAST_EXPR)                                                                               \
-    X(AST_TYPEDEF_DECL)
+    X(AST_TYPEDEF_DECL)                                                                            \
+    X(AST_INIT_LIST)
 
 typedef enum
 {
@@ -146,11 +147,14 @@ struct ASTVarDecl
     ASTNode base;
     Type *type;
     const char *name;
-    ASTNode *init; /* NULL if no initializer */
+    ASTNode *init; /* NULL if no initializer; may be an AST_INIT_LIST or, for a
+                      char array, an AST_STRING_LITERAL */
     StorageClass storage;
-    i64 const_init;      /* folded file-scope constant initializer */
-    bool has_const_init; /* true when const_init is valid */
-    bool is_block_scope; /* declared inside a function body (vs file scope) */
+    i64 const_init;        /* folded file-scope constant initializer */
+    bool has_const_init;   /* true when const_init is valid */
+    bool is_block_scope;   /* declared inside a function body (vs file scope) */
+    struct InitPlan *plan; /* flattening plan for aggregate/string initializers
+                              (filled by semantic; NULL otherwise) */
 };
 
 typedef struct ASTExprStmt ASTExprStmt;
@@ -380,6 +384,62 @@ struct ASTTypedefDecl
     Type *type;
 };
 
+/* Initializer designators (C11 §6.7.9p1): `.field` members or `[idx]` array
+   elements, chained for nested subobjects. `next` chains in source order,
+   outermost first (`.a[0].b` → `.a` → `[0]` → `.b`). */
+typedef enum
+{
+    ND_FIELD, /* .field */
+    ND_INDEX, /* [idx] */
+} DesignatorKind;
+
+typedef struct Designator Designator;
+struct Designator
+{
+    DesignatorKind kind;
+    const char *field; /* ND_FIELD */
+    i64 index;         /* ND_INDEX */
+    Designator *next;
+};
+
+/* One element `[designators] value` of a brace-enclosed initializer list. */
+typedef struct InitElem InitElem;
+struct InitElem
+{
+    Designator *design; /* NULL when the element has no designators */
+    ASTNode *value;     /* expression, string literal, or nested AST_INIT_LIST */
+    Loc loc;
+};
+
+/* One flattened write produced by semantic's initializer planner (D12.5).
+   Scalar leaves lower to OP_STORE; char-array-from-string leaves
+   (is_string_fill, value is an ASTStringLiteral) lower to OP_MEMCPY. */
+typedef struct InitWrite InitWrite;
+struct InitWrite
+{
+    u32 offset;     /* byte offset of the subobject in the initialized object */
+    Type *type;     /* unqualified target type (scalar, or char array for a fill) */
+    ASTNode *value; /* expression (scalar) or ASTStringLiteral (string fill) */
+    bool is_string_fill;
+};
+
+/* A brace-enclosed initializer list `{ ... }` (C11 §6.7.9). `plan` holds the
+   flattened, offset-targeted lowering plan computed by semantic (D12.5). */
+typedef struct ASTInitList ASTInitList;
+struct ASTInitList
+{
+    ASTNode base;
+    Vec *elems; /* Vec<InitElem*> */
+    struct InitPlan *plan;
+};
+
+typedef struct InitPlan InitPlan;
+struct InitPlan
+{
+    Vec *writes;    /* Vec<InitWrite*> sorted by offset */
+    u64 total_size; /* byte size of the object being initialized */
+};
+
 ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body,
                       StorageClass storage, Loc loc, Arena *arena);
 ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
@@ -421,6 +481,7 @@ ASTNode *ast_member_access(ASTNode *object, const char *member, bool is_arrow, L
                            Arena *arena);
 ASTNode *ast_cast_expr(Type *target_type, ASTNode *operand, Loc loc, Arena *arena);
 ASTNode *ast_typedef_decl(Type *type, const char *name, Loc loc, Arena *arena);
+ASTNode *ast_init_list(Vec *elems, Loc loc, Arena *arena);
 
 void ast_dump(ASTNode *node);
 

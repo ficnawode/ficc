@@ -31,6 +31,9 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type);
 static bool check_func(ASTNode *node, SemanticCtx *ctx);
 static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx);
 static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx);
+static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *list, u32 base_off);
+static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd);
+static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type);
 
 static void sem_error(Loc loc, const char *fmt, ...)
 {
@@ -736,29 +739,46 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
     }
     var_decl->is_block_scope = true;
     strmap_set(current_scope(ctx), var_decl->name, var_decl);
-    if (var_decl->init && !check_expr(var_decl->init, ctx))
+    if (var_decl->init)
     {
-        return false;
-    }
-    if (var_decl->init && !check_value_used(var_decl->init, ctx))
-    {
-        return false;
-    }
-    if (type_is_record(var_decl->type) && var_decl->init &&
-        !type_assignable(var_decl->type, var_decl->init->expr_type))
-    {
-        sem_error(var_decl->base.loc, "invalid initializer for struct/union type '%s'",
-                  var_decl->type->record.tag);
-        ctx->error = true;
-        return false;
-    }
-    if (type_is_ptr(var_decl->type) && var_decl->init &&
-        !type_assignable(var_decl->type, var_decl->init->expr_type))
-    {
-        sem_error(var_decl->base.loc, "incompatible pointer type in initializer for '%s'",
-                  var_decl->name);
-        ctx->error = true;
-        return false;
+        if (var_decl->init->kind == AST_INIT_LIST)
+        {
+            InitPlan *plan = init_plan_new(ctx, var_decl->type);
+            if (!plan_list(ctx, plan, var_decl->type, ast_as(ASTInitList, var_decl->init), 0))
+            {
+                return false;
+            }
+            var_decl->plan = plan;
+            return true;
+        }
+        if (var_decl->init->kind == AST_STRING_LITERAL && type_is_array(var_decl->type))
+        {
+            return plan_char_array_from_string(ctx, var_decl);
+        }
+        if (!check_expr(var_decl->init, ctx))
+        {
+            return false;
+        }
+        if (!check_value_used(var_decl->init, ctx))
+        {
+            return false;
+        }
+        if (type_is_record(var_decl->type) &&
+            !type_assignable(var_decl->type, var_decl->init->expr_type))
+        {
+            sem_error(var_decl->base.loc, "invalid initializer for struct/union type '%s'",
+                      var_decl->type->record.tag);
+            ctx->error = true;
+            return false;
+        }
+        if (type_is_ptr(var_decl->type) &&
+            !type_assignable(var_decl->type, var_decl->init->expr_type))
+        {
+            sem_error(var_decl->base.loc, "incompatible pointer type in initializer for '%s'",
+                      var_decl->name);
+            ctx->error = true;
+            return false;
+        }
     }
     return true;
 }
@@ -766,6 +786,395 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
 static bool check_expression_statement(ASTExprStmt *expr_stmt, SemanticCtx *ctx)
 {
     return check_expr(expr_stmt->expr, ctx);
+}
+
+/* ---- initializer-list planner (C11 §6.7.9, D12.5) ----
+
+   Flattens a brace-enclosed initializer tree into offset-targeted writes on
+   the object being initialized. A cursor of aggregate frames walks the
+   subobjects in initialization order; brace elision falls out of the descent:
+   a scalar clause drills to the deepest leaf, a braced clause consumes a
+   whole subtree. Designators rebind the cursor relative to this list's object
+   (§6.7.9p18) so later undesignated clauses continue after the target. */
+
+typedef struct
+{
+    Type *agg; /* array / struct / union type this frame iterates */
+    u32 next;  /* next child index to consume within `agg` */
+    u32 base;  /* absolute byte offset of this aggregate in the object */
+} PlanFrame;
+
+static bool is_aggregate_type(Type *t)
+{
+    t = type_unqual(t);
+    return type_is_array(t) || type_is_record(t);
+}
+
+static u32 aggr_nchildren(Type *agg)
+{
+    agg = type_unqual(agg);
+    if (type_is_array(agg))
+    {
+        return (u32) agg->arr.length;
+    }
+    return (u32) vec_size(agg->record.fields);
+}
+
+static bool aggr_child(Type *agg, u32 idx, u32 base, Type **cty, u32 *coff)
+{
+    agg = type_unqual(agg);
+    if (type_is_array(agg))
+    {
+        if (idx >= agg->arr.length)
+        {
+            return false;
+        }
+        Type *elem = type_unqual(type_array_elem(agg));
+        *cty = elem;
+        *coff = base + (u32) (idx * agg->arr.elem->size);
+        return true;
+    }
+    size_t nf = vec_size(agg->record.fields);
+    if (idx >= nf)
+    {
+        return false;
+    }
+    RecordField *f = (RecordField *) vec_get(agg->record.fields, idx);
+    *cty = type_unqual(f->type);
+    *coff = base + f->offset; /* unions: every member sits at offset 0 */
+    return true;
+}
+
+/* Walk the fields of `agg` looking for `name`; returns its index on success. */
+static bool aggr_field_index(Type *agg, const char *name, u32 *out)
+{
+    agg = type_unqual(agg);
+    size_t nf = vec_size(agg->record.fields);
+    for (size_t i = 0; i < nf; i++)
+    {
+        RecordField *f = (RecordField *) vec_get(agg->record.fields, i);
+        if (strcmp(f->name, name) == 0)
+        {
+            *out = (u32) i;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void cursor_advance(Vec *stack)
+{
+    while (vec_size(stack) > 0)
+    {
+        PlanFrame *top = (PlanFrame *) vec_last(stack);
+        top->next++;
+        if (top->next < aggr_nchildren(top->agg))
+        {
+            return;
+        }
+        vec_pop(stack);
+    }
+}
+
+static InitWrite *plan_new_write(SemanticCtx *ctx, InitPlan *plan, u32 offset, Type *type,
+                                 ASTNode *value, bool is_string_fill)
+{
+    InitWrite *w = arena_alloc(ctx->arena, sizeof(InitWrite), _Alignof(InitWrite));
+    w->offset = offset;
+    w->type = type;
+    w->value = value;
+    w->is_string_fill = is_string_fill;
+    vec_push(plan->writes, w);
+    return w;
+}
+
+static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type)
+{
+    InitPlan *plan = arena_alloc(ctx->arena, sizeof(InitPlan), _Alignof(InitPlan));
+    plan->writes = vec_new(ctx->arena);
+    plan->total_size = type_sizeof(obj_type);
+    return plan;
+}
+
+/* Validate + record a scalar write (initialization bypasses the §9 write gate,
+   so const targets are fine — D12.10). */
+static bool plan_scalar_write(SemanticCtx *ctx, InitPlan *plan, Type *target, u32 offset,
+                              ASTNode *value, Loc loc)
+{
+    if (!check_expr(value, ctx))
+    {
+        return false;
+    }
+    if (!check_value_used(value, ctx))
+    {
+        return false;
+    }
+    if (!type_assignable(target, value->expr_type))
+    {
+        sem_error(loc, "incompatible type in initializer (target type differs)");
+        ctx->error = true;
+        return false;
+    }
+    plan_new_write(ctx, plan, offset, target, value, false);
+    return true;
+}
+
+static bool resolve_designator_path(SemanticCtx *ctx, Type *t, u32 base_off, Designator *d,
+                                    Vec *path, Type **out_ty, u32 *out_off, Loc loc)
+{
+    Type *cur_ty = type_unqual(t);
+    u32 cur_off = base_off;
+    for (Designator *dd = d; dd; dd = dd->next)
+    {
+        if (type_is_array(cur_ty))
+        {
+            if (dd->kind != ND_INDEX)
+            {
+                sem_error(loc, "field designator '.%s' used on an array object", dd->field);
+                ctx->error = true;
+                return false;
+            }
+            if (dd->index < 0 || (u64) dd->index >= cur_ty->arr.length)
+            {
+                sem_error(loc, "array designator index %lld is out of bounds",
+                          (long long) dd->index);
+                ctx->error = true;
+                return false;
+            }
+            PlanFrame *fr = arena_alloc(ctx->arena, sizeof(PlanFrame), _Alignof(PlanFrame));
+            fr->agg = cur_ty;
+            fr->base = cur_off;
+            fr->next = (u32) dd->index;
+            vec_push(path, fr);
+            Type *elem = type_unqual(type_array_elem(cur_ty));
+            cur_off = cur_off + (u32) (dd->index * cur_ty->arr.elem->size);
+            cur_ty = elem;
+        }
+        else if (type_is_record(cur_ty))
+        {
+            if (dd->kind != ND_INDEX)
+            {
+                u32 fidx;
+                if (!aggr_field_index(cur_ty, dd->field, &fidx))
+                {
+                    sem_error(loc, "no member named '%s' in '%s'", dd->field, cur_ty->record.tag);
+                    ctx->error = true;
+                    return false;
+                }
+                RecordField *f = (RecordField *) vec_get(cur_ty->record.fields, fidx);
+                PlanFrame *fr = arena_alloc(ctx->arena, sizeof(PlanFrame), _Alignof(PlanFrame));
+                fr->agg = cur_ty;
+                fr->base = cur_off;
+                fr->next = fidx;
+                vec_push(path, fr);
+                cur_off = cur_off + f->offset;
+                cur_ty = type_unqual(f->type);
+            }
+            else
+            {
+                sem_error(loc, "array designator used on a non-array object");
+                ctx->error = true;
+                return false;
+            }
+        }
+        else
+        {
+            sem_error(loc, "cannot apply a designator to a scalar object");
+            ctx->error = true;
+            return false;
+        }
+    }
+    *out_ty = cur_ty;
+    *out_off = cur_off;
+    return true;
+}
+
+static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *list, u32 base_off);
+
+/* Handle a clause whose value is a (non-braced) string literal: it fills a
+   whole `char[N]` subobject when it fits, otherwise it is an ordinary scalar
+   write (a `char *` member, or an error). */
+static bool plan_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *cty, u32 coff,
+                               ASTNode *value, Loc loc)
+{
+    if (type_is_array(cty))
+    {
+        if (cty->arr.length == 0)
+        {
+            sem_error(loc, "array has incomplete type");
+            ctx->error = true;
+            return false;
+        }
+        if (type_array_elem(cty)->kind != TYPE_CHAR)
+        {
+            sem_error(loc, "string literal only initializes a char array");
+            ctx->error = true;
+            return false;
+        }
+        ASTStringLiteral *sl = ast_as(ASTStringLiteral, value);
+        if (sl->length + 1 > cty->arr.length)
+        {
+            sem_error(loc, "initializer-string for array of chars is too long");
+            ctx->error = true;
+            return false;
+        }
+        plan_new_write(ctx, plan, coff, cty, value, true);
+        return true;
+    }
+    /* `char *` (or another pointer) member/array element: the string decays. */
+    return plan_scalar_write(ctx, plan, cty, coff, value, loc);
+}
+
+static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *list, u32 base_off)
+{
+    t = type_unqual(t);
+    size_t nel = vec_size(list->elems);
+    if (nel == 0)
+    {
+        return true; /* `{}`: zero-init, nothing to write */
+    }
+
+    if (is_scalar_type(t))
+    {
+        if (nel != 1)
+        {
+            sem_error(list->base.loc, "excess elements in scalar initializer");
+            ctx->error = true;
+            return false;
+        }
+        InitElem *e = (InitElem *) vec_get(list->elems, 0);
+        if (e->design)
+        {
+            sem_error(e->loc, "cannot use a designator with a scalar initializer");
+            ctx->error = true;
+            return false;
+        }
+        return plan_scalar_write(ctx, plan, t, base_off, e->value, e->loc);
+    }
+
+    if (type_is_array(t) && t->arr.length == 0)
+    {
+        sem_error(list->base.loc, "array has incomplete type");
+        ctx->error = true;
+        return false;
+    }
+
+    Vec *stack = vec_new(ctx->arena);
+    PlanFrame *root = arena_alloc(ctx->arena, sizeof(PlanFrame), _Alignof(PlanFrame));
+    root->agg = t;
+    root->next = 0;
+    root->base = base_off;
+    vec_push(stack, root);
+
+    for (size_t i = 0; i < nel; i++)
+    {
+        InitElem *e = (InitElem *) vec_get(list->elems, i);
+
+        if (e->design)
+        {
+            Vec *path = vec_new(ctx->arena);
+            Type *dt;
+            u32 doff;
+            if (!resolve_designator_path(ctx, t, base_off, e->design, path, &dt, &doff, e->loc))
+            {
+                return false;
+            }
+            stack = path;
+        }
+
+        if (vec_size(stack) == 0)
+        {
+            sem_error(e->loc, "excess elements in %s initializer",
+                      type_is_array(t) ? "array" : "struct/union");
+            ctx->error = true;
+            return false;
+        }
+
+        PlanFrame *top = (PlanFrame *) vec_last(stack);
+        Type *cty;
+        u32 coff;
+        if (!aggr_child(top->agg, top->next, top->base, &cty, &coff))
+        {
+            sem_error(e->loc, "excess elements in %s initializer",
+                      type_is_array(t) ? "array" : "struct/union");
+            ctx->error = true;
+            return false;
+        }
+
+        if (e->value->kind == AST_INIT_LIST)
+        {
+            if (!plan_list(ctx, plan, cty, ast_as(ASTInitList, e->value), coff))
+            {
+                return false;
+            }
+            cursor_advance(stack);
+        }
+        else if (e->value->kind == AST_STRING_LITERAL)
+        {
+            if (!plan_string_clause(ctx, plan, cty, coff, e->value, e->loc))
+            {
+                return false;
+            }
+            cursor_advance(stack);
+        }
+        else
+        {
+            /* Scalar clause with brace elision: drill to the leaf subobject. */
+            while (is_aggregate_type(cty))
+            {
+                PlanFrame *fr = arena_alloc(ctx->arena, sizeof(PlanFrame), _Alignof(PlanFrame));
+                fr->agg = cty;
+                fr->base = coff;
+                fr->next = 0;
+                vec_push(stack, fr);
+                top = (PlanFrame *) vec_last(stack);
+                if (!aggr_child(top->agg, top->next, top->base, &cty, &coff))
+                {
+                    sem_error(e->loc, "excess elements in %s initializer",
+                              type_is_array(t) ? "array" : "struct/union");
+                    ctx->error = true;
+                    return false;
+                }
+            }
+            if (!plan_scalar_write(ctx, plan, cty, coff, e->value, e->loc))
+            {
+                return false;
+            }
+            cursor_advance(stack);
+        }
+    }
+    return true;
+}
+
+/* `char s[N] = "hi"`: the bytes incl. NUL must fit (C11 §6.7.9p14), and the
+   rest of the array is zero-padded. Returns false on error and otherwise fills
+   vd->plan with a single string-fill write. */
+static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
+{
+    Type *arr = type_unqual(vd->type);
+    ASTStringLiteral *sl = ast_as(ASTStringLiteral, vd->init);
+    if (type_array_len(arr) == 0)
+    {
+        sem_error(vd->base.loc, "array '%s' has incomplete type", vd->name);
+        ctx->error = true;
+        return false;
+    }
+    if (type_array_elem(arr)->kind != TYPE_CHAR)
+    {
+        sem_error(vd->base.loc, "string-literal initializer requires a 'char' array");
+        ctx->error = true;
+        return false;
+    }
+    if (sl->length + 1 > type_array_len(arr))
+    {
+        sem_error(vd->base.loc, "initializer-string for array of chars is too long");
+        ctx->error = true;
+        return false;
+    }
+    InitPlan *plan = init_plan_new(ctx, arr);
+    plan_new_write(ctx, plan, 0, arr, vd->init, true);
+    vd->plan = plan;
+    return true;
 }
 
 static bool check_compound_statement(ASTCompoundStmt *compound_stmt, SemanticCtx *ctx,

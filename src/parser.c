@@ -215,6 +215,7 @@ static ASTNode *parse_log_or(ParserCtx *p);
 static ASTNode *parse_ternary(ParserCtx *p);
 static ASTNode *parse_assign(ParserCtx *p);
 static ASTNode *parse_postfix(ParserCtx *p);
+static ASTNode *parse_initializer(ParserCtx *p);
 
 static Type *parse_type_specifier(ParserCtx *p)
 {
@@ -502,6 +503,11 @@ static ASTNode *parse_return_stmt(ParserCtx *p)
 
 static Type *parse_array_suffix(ParserCtx *p, Type *type)
 {
+    /* C11 §6.7.6.2: `int a[2][3]` is array[2] of array[3] of int — the leftmost
+       bracket is the outermost dimension. Collect the lengths first so they
+       nest rightmost-innermost (array suffixes apply left-to-right). */
+    u64 dims[32];
+    size_t ndim = 0;
     while (parser_peek(p)->kind == TOK_LBRACKET)
     {
         parser_advance(p);
@@ -517,7 +523,16 @@ static Type *parse_array_suffix(ParserCtx *p, Type *type)
             len = (u64) ast_as(ASTIntLiteral, size_expr)->value;
         }
         parser_expect(p, TOK_RBRACKET, "]");
-        type = type_array(type, len);
+        if (ndim == 32)
+        {
+            parser_error(p, "too many array dimensions");
+            return NULL;
+        }
+        dims[ndim++] = len;
+    }
+    for (size_t i = ndim; i > 0; i--)
+    {
+        type = type_array(type, dims[i - 1]);
     }
     return type;
 }
@@ -598,7 +613,7 @@ static ASTNode *parse_var_decl(ParserCtx *p, StorageClass storage)
     if (parser_peek(p)->kind == TOK_ASSIGN)
     {
         parser_advance(p);
-        ASTNode *expr = parse_expr(p);
+        ASTNode *expr = parse_initializer(p);
         if (!expr)
         {
             return NULL;
@@ -1627,6 +1642,121 @@ static ASTNode *parse_assign(ParserCtx *p)
     return left;
 }
 
+/* A designator chain (C11 §6.7.9p1): `.field` members and `[index]` array
+   elements, outermost first. GNU `[a ... b]` ranges are rejected. Returns
+   NULL when the next token opens none. */
+static Designator *parse_designators(ParserCtx *p)
+{
+    Designator *head = NULL;
+    Designator **tail = &head;
+    while (parser_peek(p)->kind == TOK_DOT || parser_peek(p)->kind == TOK_LBRACKET)
+    {
+        Designator *d = arena_alloc(p->arena, sizeof(Designator), _Alignof(Designator));
+        d->next = NULL;
+        if (parser_peek(p)->kind == TOK_DOT)
+        {
+            parser_advance(p);
+            Token *name = parser_peek(p);
+            if (name->kind != TOK_IDENT)
+            {
+                parser_error(p, "expected field name after '.' designator");
+                return NULL;
+            }
+            parser_advance(p);
+            d->kind = ND_FIELD;
+            d->field = name->payload.str;
+            d->index = 0;
+        }
+        else
+        {
+            parser_advance(p);
+            ASTNode *idx = parse_expr(p);
+            if (!idx || idx->kind != AST_INT_LITERAL)
+            {
+                parser_error(p, "array designator index must be an integer constant");
+                return NULL;
+            }
+            if (!parser_expect(p, TOK_RBRACKET, "']'"))
+            {
+                return NULL;
+            }
+            d->kind = ND_INDEX;
+            d->index = ast_as(ASTIntLiteral, idx)->value;
+            d->field = NULL;
+        }
+        *tail = d;
+        tail = &d->next;
+    }
+    return head;
+}
+
+/* A brace-enclosed initializer list `{ elem1, elem2, ... }` with optional
+   designators and a trailing comma allowed. */
+static ASTNode *parse_init_list(ParserCtx *p)
+{
+    Token *start = parser_peek(p);
+    ASSERT(start->kind == TOK_LBRACE);
+    parser_advance(p);
+
+    Vec *elems = vec_new(p->arena);
+    while (parser_peek(p)->kind != TOK_RBRACE)
+    {
+        Token *elem_start = parser_peek(p);
+        InitElem *e = arena_alloc(p->arena, sizeof(InitElem), _Alignof(InitElem));
+        e->loc = elem_start->loc;
+        e->design = parse_designators(p);
+        if (!e->design)
+        {
+            e->value = parse_initializer(p);
+        }
+        else
+        {
+            if (!parser_expect(p, TOK_ASSIGN, "'='"))
+            {
+                return NULL;
+            }
+            e->value = parse_initializer(p);
+        }
+        if (!e->value)
+        {
+            return NULL;
+        }
+        vec_push(elems, e);
+
+        TokenKind sep = parser_peek(p)->kind;
+        if (sep == TOK_COMMA)
+        {
+            parser_advance(p);
+            if (parser_peek(p)->kind == TOK_RBRACE)
+            {
+                break; /* trailing comma */
+            }
+        }
+        else if (sep != TOK_RBRACE)
+        {
+            parser_error(p, "expected ',' or '}' in initializer list");
+            return NULL;
+        }
+    }
+    if (!parser_expect(p, TOK_RBRACE, "'}'"))
+    {
+        return NULL;
+    }
+
+    return ast_init_list(elems, start->loc, p->arena);
+}
+
+/* The right-hand side of an initializer: a brace-enclosed list, or a plain
+   assignment-expression (C11 §6.7.9p2). */
+static ASTNode *parse_initializer(ParserCtx *p)
+{
+    if (parser_peek(p)->kind == TOK_LBRACE)
+    {
+        return parse_init_list(p);
+    }
+    return parse_assign(p);
+}
+
 static ASTNode *parse_record_decl(ParserCtx *p, bool is_union)
 {
     Token *start = parser_peek(p);
@@ -2136,7 +2266,7 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
     if (parser_peek(p)->kind == TOK_ASSIGN)
     {
         parser_advance(p);
-        ASTNode *expr = parse_expr(p);
+        ASTNode *expr = parse_initializer(p);
         if (!expr)
         {
             return NULL;
