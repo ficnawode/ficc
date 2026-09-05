@@ -3,7 +3,6 @@
 
 #include "lexer.h"
 #include "type.h"
-#include "util/assert.h"
 #include "util/types.h"
 #include "util/vec.h"
 
@@ -594,7 +593,7 @@ ASTNode *ast_binary_expr(BinOpKind op, ASTNode *left, ASTNode *right, Loc loc, A
 ASTNode *ast_unary_expr(UnaryOpKind op, ASTNode *operand, Loc loc, Arena *arena);
 ASTNode *ast_incdec_expr(ASTNode *operand, bool is_inc, bool is_postfix, Loc loc, Arena *arena);
 ASTNode *ast_call_expr(const char *callee, Vec *args, Loc loc, Arena *arena);
-ASTNode *ast_call_expr_expr(ASTNode *callee_expr, Vec *args, Loc loc, Arena *arena);
+ASTNode *ast_indirect_call(ASTNode *callee_expr, Vec *args, Loc loc, Arena *arena);
 ASTNode *ast_ident(const char *name, Loc loc, Arena *arena);
 ASTNode *ast_if_stmt(ASTNode *cond, ASTNode *then_branch, ASTNode *else_branch, Loc loc,
                      Arena *arena);

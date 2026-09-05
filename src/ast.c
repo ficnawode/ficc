@@ -1,4 +1,5 @@
 #include "ast.h"
+#include "util/assert.h"
 #include <stdio.h>
 
 const char *ast_kind_name(ASTKind kind)
@@ -147,10 +148,9 @@ ASTNode *ast_call_expr(const char *callee, Vec *args, Loc loc, Arena *arena)
     return &n->base;
 }
 
-/* A call through a non-identifier function designator (D16.4): `(*fp)(x)`,
-   `p->hash(x)`, `(f)(x)`, or a function-pointer variable redirected by
-   semantic from the named form. */
-ASTNode *ast_call_expr_expr(ASTNode *callee_expr, Vec *args, Loc loc, Arena *arena)
+/* A call through a non-identifier expression `(*fp)(x)`, `p->hash(x)`,
+   `(f)(x)`. */
+ASTNode *ast_indirect_call(ASTNode *callee_expr, Vec *args, Loc loc, Arena *arena)
 {
     ASTCallExpr *n = ast_new_node(sizeof(ASTCallExpr), AST_CALL_EXPR, loc, arena);
     n->callee = NULL;

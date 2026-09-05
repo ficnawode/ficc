@@ -1,4 +1,5 @@
 #include "ir_builder.h"
+#include "util/assert.h"
 #include "util/hashmap.h"
 #include <stdarg.h>
 #include <stdio.h>
