@@ -1,5 +1,5 @@
 #include "lexer.h"
-#include "util/hashmap.h"
+#include "util/bytebuf.h"
 #include "util/vec.h"
 #include <stdio.h>
 #include <string.h>
@@ -8,7 +8,6 @@ typedef struct LexerCtx LexerCtx;
 struct LexerCtx
 {
     const char *file;
-    const char *src;
     Arena *arena;
     Vec *tokens;
     u32 line;
@@ -56,11 +55,7 @@ static u8 hex_digit_value(char c)
     {
         return (u8) (c - '0');
     }
-    if (c >= 'a')
-    {
-        return (u8) (c - 'a' + 10);
-    }
-    return (u8) (c - 'A' + 10);
+    return (u8) (c - (c >= 'a' ? 'a' : 'A') + 10);
 }
 
 static bool is_whitespace(char c)
@@ -68,63 +63,129 @@ static bool is_whitespace(char c)
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
-static StrMap *keyword_map;
-
-static void init_keyword_map(Arena *arena)
+typedef struct
 {
-    (void) arena;
-    if (keyword_map)
+    const char *name;
+    TokenKind kind;
+} Keyword;
+
+static const Keyword KEYWORDS[] = {
+    {"_Alignas", TOK_KW_ALIGNAS},
+    {"_Alignof", TOK_KW_ALIGNOF},
+    {"_Bool", TOK_KW_BOOL},
+    {"_Static_assert", TOK_KW_STATIC_ASSERT},
+    {"break", TOK_KW_BREAK},
+    {"case", TOK_KW_CASE},
+    {"char", TOK_KW_CHAR},
+    {"const", TOK_KW_CONST},
+    {"continue", TOK_KW_CONTINUE},
+    {"default", TOK_KW_DEFAULT},
+    {"do", TOK_KW_DO},
+    {"else", TOK_KW_ELSE},
+    {"enum", TOK_KW_ENUM},
+    {"extern", TOK_KW_EXTERN},
+    {"for", TOK_KW_FOR},
+    {"goto", TOK_KW_GOTO},
+    {"if", TOK_KW_IF},
+    {"int", TOK_KW_INT},
+    {"long", TOK_KW_LONG},
+    {"return", TOK_KW_RETURN},
+    {"short", TOK_KW_SHORT},
+    {"signed", TOK_KW_SIGNED},
+    {"sizeof", TOK_KW_SIZEOF},
+    {"static", TOK_KW_STATIC},
+    {"struct", TOK_KW_STRUCT},
+    {"switch", TOK_KW_SWITCH},
+    {"typedef", TOK_KW_TYPEDEF},
+    {"union", TOK_KW_UNION},
+    {"unsigned", TOK_KW_UNSIGNED},
+    {"void", TOK_KW_VOID},
+    {"while", TOK_KW_WHILE},
+};
+
+static TokenKind keyword_kind(const char *name)
+{
+    for (size_t i = 0; i < sizeof(KEYWORDS) / sizeof(KEYWORDS[0]); i++)
     {
-        return;
+        if (strcmp(KEYWORDS[i].name, name) == 0)
+        {
+            return KEYWORDS[i].kind;
+        }
     }
-    static Arena *kw_arena;
-    kw_arena = arena_new();
-    keyword_map = strmap_new(kw_arena);
-#define KW(s, k) strmap_set(keyword_map, s, (void *) (uintptr_t) (k))
-    KW("int", TOK_KW_INT);
-    KW("void", TOK_KW_VOID);
-    KW("return", TOK_KW_RETURN);
-    KW("if", TOK_KW_IF);
-    KW("else", TOK_KW_ELSE);
-    KW("while", TOK_KW_WHILE);
-    KW("for", TOK_KW_FOR);
-    KW("do", TOK_KW_DO);
-    KW("break", TOK_KW_BREAK);
-    KW("continue", TOK_KW_CONTINUE);
-    KW("goto", TOK_KW_GOTO);
-    KW("switch", TOK_KW_SWITCH);
-    KW("case", TOK_KW_CASE);
-    KW("default", TOK_KW_DEFAULT);
-    KW("char", TOK_KW_CHAR);
-    KW("short", TOK_KW_SHORT);
-    KW("long", TOK_KW_LONG);
-    KW("unsigned", TOK_KW_UNSIGNED);
-    KW("signed", TOK_KW_SIGNED);
-    KW("sizeof", TOK_KW_SIZEOF);
-    KW("_Alignof", TOK_KW_ALIGNOF);
-    KW("_Static_assert", TOK_KW_STATIC_ASSERT);
-    KW("_Bool", TOK_KW_BOOL);
-    KW("_Alignas", TOK_KW_ALIGNAS);
-    KW("struct", TOK_KW_STRUCT);
-    KW("union", TOK_KW_UNION);
-    KW("enum", TOK_KW_ENUM);
-    KW("static", TOK_KW_STATIC);
-    KW("extern", TOK_KW_EXTERN);
-    KW("const", TOK_KW_CONST);
-    KW("typedef", TOK_KW_TYPEDEF);
-#undef KW
+    return TOK_IDENT;
 }
 
-static TokenKind keyword_kind(const char *s)
+typedef struct
 {
-    TokenKind k = (TokenKind) (uintptr_t) strmap_get(keyword_map, s);
-    return k ? k : TOK_IDENT;
+    const char *spelling;
+    TokenKind kind;
+} Punct;
+
+/* longest first for max munch */
+static const Punct PUNCTS[] = {
+    {"...", TOK_ELLIPSIS},
+    {"<<=", TOK_SHL_ASSIGN},
+    {">>=", TOK_SHR_ASSIGN},
+    {"!=", TOK_NE},
+    {"%=", TOK_PERCENT_ASSIGN},
+    {"&&", TOK_LOG_AND},
+    {"&=", TOK_BW_AND_ASSIGN},
+    {"*=", TOK_STAR_ASSIGN},
+    {"++", TOK_PLUS_PLUS},
+    {"+=", TOK_PLUS_ASSIGN},
+    {"--", TOK_MINUS_MINUS},
+    {"-=", TOK_MINUS_ASSIGN},
+    {"->", TOK_ARROW},
+    {"/=", TOK_SLASH_ASSIGN},
+    {"<<", TOK_SHL},
+    {"<=", TOK_LE},
+    {"==", TOK_EQ},
+    {">=", TOK_GE},
+    {">>", TOK_SHR},
+    {"^=", TOK_BW_XOR_ASSIGN},
+    {"|=", TOK_BW_OR_ASSIGN},
+    {"||", TOK_LOG_OR},
+    {"!", TOK_NOT},
+    {"%", TOK_PERCENT},
+    {"&", TOK_BW_AND},
+    {"(", TOK_LPAREN},
+    {")", TOK_RPAREN},
+    {"*", TOK_STAR},
+    {"+", TOK_PLUS},
+    {",", TOK_COMMA},
+    {"-", TOK_MINUS},
+    {".", TOK_DOT},
+    {"/", TOK_SLASH},
+    {":", TOK_COLON},
+    {";", TOK_SEMI},
+    {"<", TOK_LT},
+    {"=", TOK_ASSIGN},
+    {">", TOK_GT},
+    {"?", TOK_QUESTION},
+    {"[", TOK_LBRACKET},
+    {"]", TOK_RBRACKET},
+    {"^", TOK_BW_XOR},
+    {"{", TOK_LBRACE},
+    {"|", TOK_BW_OR},
+    {"}", TOK_RBRACE},
+    {"~", TOK_TILDE},
+};
+
+static const Punct *punct_lookup(const char *s)
+{
+    for (size_t i = 0; i < sizeof(PUNCTS) / sizeof(PUNCTS[0]); i++)
+    {
+        if (strncmp(PUNCTS[i].spelling, s, strlen(PUNCTS[i].spelling)) == 0)
+        {
+            return &PUNCTS[i];
+        }
+    }
+    return NULL;
 }
 
 static void lexer_init(LexerCtx *ctx, const char *file, const char *src, Arena *arena)
 {
     ctx->file = file;
-    ctx->src = src;
     ctx->arena = arena;
     ctx->tokens = vec_new(arena);
     ctx->line = 1;
@@ -141,8 +202,7 @@ static void lexer_error(LexerCtx *ctx, const char *msg)
 
 static Loc lexer_loc(const LexerCtx *ctx)
 {
-    Loc loc = {ctx->file, ctx->line, ctx->col};
-    return loc;
+    return (Loc) {.file = ctx->file, .line = ctx->line, .col = ctx->col};
 }
 
 static void lexer_advance(LexerCtx *ctx)
@@ -169,233 +229,29 @@ static void lexer_push(LexerCtx *ctx, Token token)
     vec_push(ctx->tokens, slot);
 }
 
-static bool lex_whitespace(LexerCtx *ctx)
+static void lex_skip_whitespace(LexerCtx *ctx)
 {
-    if (!is_whitespace(*ctx->p))
-    {
-        return false;
-    }
-
     while (is_whitespace(*ctx->p))
     {
         lexer_advance(ctx);
     }
-    return true;
 }
 
-static bool lex_number(LexerCtx *ctx)
-{
-    if (!is_digit(*ctx->p))
-    {
-        return false;
-    }
-
-    Loc loc = lexer_loc(ctx);
-    u64 val = 0;
-    bool overflow = false;
-    bool is_hex = false;
-
-    if (ctx->p[0] == '0' && (ctx->p[1] == 'x' || ctx->p[1] == 'X'))
-    {
-        is_hex = true;
-        lexer_advance(ctx); /* 0 */
-        lexer_advance(ctx); /* x/X */
-        while (is_digit(*ctx->p) || (*ctx->p >= 'a' && *ctx->p <= 'f') ||
-               (*ctx->p >= 'A' && *ctx->p <= 'F'))
-        {
-            u64 digit;
-            if (is_digit(*ctx->p))
-            {
-                digit = (u64) (*ctx->p - '0');
-            }
-            else if (*ctx->p >= 'a')
-            {
-                digit = (u64) (*ctx->p - 'a' + 10);
-            }
-            else
-            {
-                digit = (u64) (*ctx->p - 'A' + 10);
-            }
-            if (!overflow && val > ((u64) INT64_MAX - digit) / 16)
-            {
-                lexer_error(ctx, "integer literal overflow");
-                val = (u64) INT64_MAX;
-                overflow = true;
-            }
-            else if (!overflow)
-            {
-                val = val * 16 + digit;
-            }
-            lexer_advance(ctx);
-        }
-    }
-    else
-    {
-        while (is_digit(*ctx->p))
-        {
-            u64 digit = (u64) (*ctx->p - '0');
-            if (!overflow && val > ((u64) INT64_MAX - digit) / 10)
-            {
-                lexer_error(ctx, "integer literal overflow");
-                val = (u64) INT64_MAX;
-                overflow = true;
-            }
-            else if (!overflow)
-            {
-                val = val * 10 + digit;
-            }
-            lexer_advance(ctx);
-        }
-    }
-
-    /* Parse integer suffixes: u/U, l/L, ll/LL */
-    bool is_unsigned = false;
-    IntSuffix length = SUFFIX_NONE;
-
-    if (*ctx->p == 'u' || *ctx->p == 'U')
-    {
-        is_unsigned = true;
-        lexer_advance(ctx);
-        if (*ctx->p == 'l' || *ctx->p == 'L')
-        {
-            length = SUFFIX_L;
-            lexer_advance(ctx);
-            if (*ctx->p == 'l' || *ctx->p == 'L')
-            {
-                length = SUFFIX_LL;
-                lexer_advance(ctx);
-            }
-        }
-    }
-    else if (*ctx->p == 'l' || *ctx->p == 'L')
-    {
-        length = SUFFIX_L;
-        lexer_advance(ctx);
-        if (*ctx->p == 'l' || *ctx->p == 'L')
-        {
-            length = SUFFIX_LL;
-            lexer_advance(ctx);
-        }
-        if (*ctx->p == 'u' || *ctx->p == 'U')
-        {
-            is_unsigned = true;
-            lexer_advance(ctx);
-        }
-    }
-
-    if (is_identifier_start(*ctx->p))
-    {
-        lexer_error(ctx, "invalid suffix on integer literal");
-        while (is_identifier_char(*ctx->p))
-        {
-            lexer_advance(ctx);
-        }
-    }
-
-    Token tok = {.kind = TOK_INT_LIT, .loc = loc, .payload.int_val = (i64) val};
-    tok.int_suffix.is_unsigned = is_unsigned;
-    tok.int_suffix.length = length;
-    tok.int_suffix.is_hex = is_hex;
-    lexer_push(ctx, tok);
-    return true;
-}
-
-static bool lex_ident(LexerCtx *ctx)
-{
-    if (!is_identifier_start(*ctx->p))
-    {
-        return false;
-    }
-
-    Loc loc = lexer_loc(ctx);
-    const char *start = ctx->p;
-
-    while (is_identifier_char(*ctx->p))
-    {
-        lexer_advance(ctx);
-    }
-
-    size_t len = (size_t) (ctx->p - start);
-    char *buf = arena_alloc(ctx->arena, len + 1, 1);
-    memcpy(buf, start, len);
-    buf[len] = '\0';
-
-    lexer_push(ctx, (Token) {.kind = keyword_kind(buf), .loc = loc, .payload.str = buf});
-    return true;
-}
-
-static bool lex_comment(LexerCtx *ctx)
-{
-    if (ctx->p[0] != '/' || ctx->p[1] != '*')
-    {
-        return false;
-    }
-
-    lexer_advance(ctx);
-    lexer_advance(ctx);
-
-    while (*ctx->p)
-    {
-        if (ctx->p[0] == '*' && ctx->p[1] == '/')
-        {
-            lexer_advance(ctx);
-            lexer_advance(ctx);
-            return true;
-        }
-        lexer_advance(ctx);
-    }
-
-    lexer_error(ctx, "unterminated comment");
-    return true; /* consumed opening, so don't re-error as unknown char */
-}
-
-/* Decode one escape sequence. The caller has already consumed the leading
-   backslash; *ctx->p is the first escape character. Returns the decoded value
-   and leaves the cursor just after the sequence. Simple escapes map per
-   §6.4.4.4p4 (incl. \' \" \?); octal (`\ooo`, one to three octal digits) and
-   hex (`\x…`, one or more hex digits) accumulate greedily with a saturated
-   accumulator (callers only need the >0xFF discriminator); an unknown escape
-   keeps the character itself (existing leniency). */
+/* Decode one escape sequence; the leading backslash is already consumed.
+   Returns e.g. 'n' -> '\n'. Numeric escapes accumulate greedily and can return
+   values > 0xFF, which callers reject. Unknown escapes keep the character. */
 static int lex_escape(LexerCtx *ctx)
 {
+    static const char simple_codes[] = "abfnrtv\\'\"?";
+    static const char simple_vals[] = {'\a', '\b', '\f', '\n', '\r', '\t',
+                                       '\v', '\\', '\'', '"',  '?'};
+
     char c = *ctx->p;
-    switch (c)
+    const char *hit = strchr(simple_codes, c);
+    if (hit)
     {
-        case 'a':
-            lexer_advance(ctx);
-            return '\a';
-        case 'b':
-            lexer_advance(ctx);
-            return '\b';
-        case 'f':
-            lexer_advance(ctx);
-            return '\f';
-        case 'n':
-            lexer_advance(ctx);
-            return '\n';
-        case 'r':
-            lexer_advance(ctx);
-            return '\r';
-        case 't':
-            lexer_advance(ctx);
-            return '\t';
-        case 'v':
-            lexer_advance(ctx);
-            return '\v';
-        case '\\':
-            lexer_advance(ctx);
-            return '\\';
-        case '\'':
-            lexer_advance(ctx);
-            return '\'';
-        case '"':
-            lexer_advance(ctx);
-            return '"';
-        case '?':
-            lexer_advance(ctx);
-            return '?';
-        default:
-            break;
+        lexer_advance(ctx);
+        return simple_vals[hit - simple_codes];
     }
 
     if (c >= '0' && c <= '7')
@@ -414,7 +270,7 @@ static int lex_escape(LexerCtx *ctx)
 
     if (c == 'x' || c == 'X')
     {
-        lexer_advance(ctx); /* consume x/X */
+        lexer_advance(ctx);
         if (!is_hex_digit(*ctx->p))
         {
             lexer_error(ctx, "hexadecimal escape sequence with no digits");
@@ -432,53 +288,143 @@ static int lex_escape(LexerCtx *ctx)
         return val;
     }
 
-    /* Unknown escape: keep the character and move past it. */
     lexer_advance(ctx);
     return c;
 }
 
-static void lex_buf_append(Arena *arena, char **buf, size_t *len, size_t *cap, char ch)
+static void lex_number(LexerCtx *ctx)
 {
-    if (*len + 1 >= *cap)
+    Loc loc = lexer_loc(ctx);
+
+    u64 base = 10;
+    bool is_hex = false;
+    if (ctx->p[0] == '0' && (ctx->p[1] == 'x' || ctx->p[1] == 'X'))
     {
-        *cap *= 2;
-        char *new_buf = arena_alloc(arena, *cap, 1);
-        memcpy(new_buf, *buf, *len);
-        *buf = new_buf;
+        base = 16;
+        is_hex = true;
+        lexer_advance(ctx);
+        lexer_advance(ctx);
     }
-    (*buf)[(*len)++] = ch;
+
+    u64 val = 0;
+    bool overflow = false;
+    while (base == 16 ? is_hex_digit(*ctx->p) : is_digit(*ctx->p))
+    {
+        u64 digit = hex_digit_value(*ctx->p);
+        if (!overflow && val > ((u64) INT64_MAX - digit) / base)
+        {
+            lexer_error(ctx, "integer literal overflow");
+            val = (u64) INT64_MAX;
+            overflow = true;
+        }
+        else if (!overflow)
+        {
+            val = val * base + digit;
+        }
+        lexer_advance(ctx);
+    }
+
+    /* Integer suffix: u? l? l? — plus a trailing u only when no leading one
+       was seen. Accepts u, ul, ull, l, ll, lu, llu (case-insensitive). */
+    bool is_unsigned = false;
+    IntSuffix length = SUFFIX_NONE;
+    if (*ctx->p == 'u' || *ctx->p == 'U')
+    {
+        is_unsigned = true;
+        lexer_advance(ctx);
+    }
+    if (*ctx->p == 'l' || *ctx->p == 'L')
+    {
+        length = SUFFIX_L;
+        lexer_advance(ctx);
+        if (*ctx->p == 'l' || *ctx->p == 'L')
+        {
+            length = SUFFIX_LL;
+            lexer_advance(ctx);
+        }
+    }
+    if (!is_unsigned && (*ctx->p == 'u' || *ctx->p == 'U'))
+    {
+        is_unsigned = true;
+        lexer_advance(ctx);
+    }
+
+    if (is_identifier_start(*ctx->p))
+    {
+        lexer_error(ctx, "invalid suffix on integer literal");
+        while (is_identifier_char(*ctx->p))
+        {
+            lexer_advance(ctx);
+        }
+    }
+
+    lexer_push(ctx, (Token) {.kind = TOK_INT_LIT,
+                             .loc = loc,
+                             .payload = {.int_val = (i64) val},
+                             .int_suffix = {
+                                 .is_unsigned = is_unsigned, .length = length, .is_hex = is_hex}});
 }
 
-static bool lex_string(LexerCtx *ctx)
+static void lex_ident(LexerCtx *ctx)
 {
-    if (*ctx->p != '"')
+    Loc loc = lexer_loc(ctx);
+    const char *start = ctx->p;
+
+    while (is_identifier_char(*ctx->p))
     {
-        return false;
+        lexer_advance(ctx);
     }
 
-    Loc loc = lexer_loc(ctx);
-    lexer_advance(ctx); /* consume opening " */
+    size_t len = (size_t) (ctx->p - start);
+    char *buf = arena_alloc(ctx->arena, len + 1, 1);
+    memcpy(buf, start, len);
+    buf[len] = '\0';
 
-    /* Accumulate characters into a scratch buffer (arena-backed). */
-    size_t cap = 64;
-    char *buf = arena_alloc(ctx->arena, cap, 1);
-    size_t len = 0;
+    lexer_push(ctx, (Token) {.kind = keyword_kind(buf), .loc = loc, .payload.str = buf});
+}
+
+static void lex_comment(LexerCtx *ctx)
+{
+    lexer_advance(ctx);
+    lexer_advance(ctx);
+
+    while (*ctx->p)
+    {
+        if (ctx->p[0] == '*' && ctx->p[1] == '/')
+        {
+            lexer_advance(ctx);
+            lexer_advance(ctx);
+            return;
+        }
+        lexer_advance(ctx);
+    }
+
+    lexer_error(ctx, "unterminated comment");
+}
+
+static void lex_string(LexerCtx *ctx)
+{
+    Loc loc = lexer_loc(ctx);
+    lexer_advance(ctx); /* opening quote */
+
+    ByteBuf buf;
+    bytebuf_init(&buf, ctx->arena);
 
     while (*ctx->p && *ctx->p != '"')
     {
         if (*ctx->p == '\\')
         {
-            lexer_advance(ctx); /* consume backslash */
-            lex_buf_append(ctx->arena, &buf, &len, &cap, (char) lex_escape(ctx));
+            lexer_advance(ctx); /* backslash */
+            bytebuf_append(&buf, (u8) lex_escape(ctx));
         }
         else if (*ctx->p == '\n')
         {
             lexer_error(ctx, "unterminated string literal");
-            return true;
+            return;
         }
         else
         {
-            lex_buf_append(ctx->arena, &buf, &len, &cap, *ctx->p);
+            bytebuf_append(&buf, (u8) *ctx->p);
             lexer_advance(ctx);
         }
     }
@@ -486,52 +432,41 @@ static bool lex_string(LexerCtx *ctx)
     if (*ctx->p != '"')
     {
         lexer_error(ctx, "unterminated string literal");
-        return true;
+        return;
     }
-    lexer_advance(ctx); /* consume closing " */
+    lexer_advance(ctx); /* closing quote */
 
-    /* NUL-terminate the string data */
-    if (len >= cap)
-    {
-        cap = len + 1;
-        char *new_buf = arena_alloc(ctx->arena, cap, 1);
-        memcpy(new_buf, buf, len);
-        buf = new_buf;
-    }
-    buf[len] = '\0';
+    size_t content_len = bytebuf_len(&buf);
+    bytebuf_append(&buf, '\0');
 
-    Token tok = {.kind = TOK_STRING_LIT, .loc = loc, .payload.str = buf, .str_len = (u32) len};
-    lexer_push(ctx, tok);
-    return true;
+    lexer_push(ctx, (Token) {.kind = TOK_STRING_LIT,
+                             .loc = loc,
+                             .payload.str = (const char *) bytebuf_data(&buf),
+                             .str_len = (u32) content_len});
 }
 
-static bool lex_char(LexerCtx *ctx)
+static void lex_char(LexerCtx *ctx)
 {
-    if (*ctx->p != '\'')
-    {
-        return false;
-    }
-
     Loc loc = lexer_loc(ctx);
-    lexer_advance(ctx); /* consume opening ' */
+    lexer_advance(ctx); /* opening ' */
 
     if (*ctx->p == '\'')
     {
         lexer_error(ctx, "empty character constant");
-        lexer_advance(ctx); /* consume closing ' so the error doesn't cascade */
-        return true;
+        lexer_advance(ctx); /* closing ', so the error doesn't cascade */
+        return;
     }
 
     if (*ctx->p == '\n' || *ctx->p == '\0')
     {
         lexer_error(ctx, "unterminated character constant");
-        return true;
+        return;
     }
 
     int val;
     if (*ctx->p == '\\')
     {
-        lexer_advance(ctx); /* consume backslash */
+        lexer_advance(ctx); /* backslash */
         val = lex_escape(ctx);
     }
     else
@@ -542,16 +477,8 @@ static bool lex_char(LexerCtx *ctx)
 
     if (*ctx->p != '\'')
     {
-        if (*ctx->p && *ctx->p != '\n')
-        {
-            lexer_error(ctx, "multi-character character constant");
-        }
-        else
-        {
-            lexer_error(ctx, "unterminated character constant");
-        }
-        /* Skip to the closing quote / newline / EOF so the error doesn't
-           cascade past the literal. */
+        lexer_error(ctx, *ctx->p && *ctx->p != '\n' ? "multi-character character constant"
+                                                    : "unterminated character constant");
         while (*ctx->p && *ctx->p != '\'' && *ctx->p != '\n')
         {
             lexer_advance(ctx);
@@ -560,9 +487,9 @@ static bool lex_char(LexerCtx *ctx)
         {
             lexer_advance(ctx);
         }
-        return true;
+        return;
     }
-    lexer_advance(ctx); /* consume closing ' */
+    lexer_advance(ctx); /* closing ' */
 
     if (val > 0xFF)
     {
@@ -570,304 +497,64 @@ static bool lex_char(LexerCtx *ctx)
     }
 
     lexer_push(ctx, (Token) {.kind = TOK_CHAR_LIT, .loc = loc, .payload.int_val = val});
-    return true;
 }
 
 static bool lex_punct(LexerCtx *ctx)
 {
-    Loc loc = lexer_loc(ctx);
-    char c = ctx->p[0];
-    char n = ctx->p[1];
-    TokenKind kind;
-    u32 advance = 1;
-
-    switch (c)
+    const Punct *m = punct_lookup(ctx->p);
+    if (!m)
     {
-        case '(':
-            kind = TOK_LPAREN;
-            break;
-        case ')':
-            kind = TOK_RPAREN;
-            break;
-        case '{':
-            kind = TOK_LBRACE;
-            break;
-        case '}':
-            kind = TOK_RBRACE;
-            break;
-        case '[':
-            kind = TOK_LBRACKET;
-            break;
-        case ']':
-            kind = TOK_RBRACKET;
-            break;
-        case ';':
-            kind = TOK_SEMI;
-            break;
-        case ':':
-            kind = TOK_COLON;
-            break;
-        case ',':
-            kind = TOK_COMMA;
-            break;
-        case '+':
-            if (n == '+')
-            {
-                kind = TOK_PLUS_PLUS;
-                advance = 2;
-            }
-            else if (n == '=')
-            {
-                kind = TOK_PLUS_ASSIGN;
-                advance = 2;
-            }
-            else
-            {
-                kind = TOK_PLUS;
-            }
-            break;
-        case '-':
-            if (n == '>')
-            {
-                kind = TOK_ARROW;
-                advance = 2;
-            }
-            else if (n == '-')
-            {
-                kind = TOK_MINUS_MINUS;
-                advance = 2;
-            }
-            else if (n == '=')
-            {
-                kind = TOK_MINUS_ASSIGN;
-                advance = 2;
-            }
-            else
-            {
-                kind = TOK_MINUS;
-            }
-            break;
-        case '.':
-            /* `...` is the variadic-parameter-list ellipsis (C11 §6.7.6.3p8);
-               `..` stays two TOK_DOTs and `.` is member access. */
-            if (n == '.' && ctx->p[2] == '.')
-            {
-                kind = TOK_ELLIPSIS;
-                advance = 3;
-            }
-            else
-            {
-                kind = TOK_DOT;
-            }
-            break;
-        case '*':
-            if (n == '=')
-            {
-                kind = TOK_STAR_ASSIGN;
-                advance = 2;
-            }
-            else
-            {
-                kind = TOK_STAR;
-            }
-            break;
-        case '/':
-            if (n == '=')
-            {
-                kind = TOK_SLASH_ASSIGN;
-                advance = 2;
-            }
-            else
-            {
-                kind = TOK_SLASH;
-            }
-            break;
-        case '%':
-            if (n == '=')
-            {
-                kind = TOK_PERCENT_ASSIGN;
-                advance = 2;
-            }
-            else
-            {
-                kind = TOK_PERCENT;
-            }
-            break;
-        case '=':
-            if (n == '=')
-            {
-                kind = TOK_EQ;
-                advance = 2;
-            }
-            else
-            {
-                kind = TOK_ASSIGN;
-            }
-            break;
-        case '!':
-            if (n == '=')
-            {
-                kind = TOK_NE;
-                advance = 2;
-            }
-            else
-            {
-                kind = TOK_NOT;
-            }
-            break;
-        case '?':
-            kind = TOK_QUESTION;
-            break;
-        case '<':
-            if (n == '=')
-            {
-                kind = TOK_LE;
-                advance = 2;
-            }
-            else if (n == '<')
-            {
-                /* `<<=` — the assignment form needs two-char lookahead. */
-                if (ctx->p[2] == '=')
-                {
-                    kind = TOK_SHL_ASSIGN;
-                    advance = 3;
-                }
-                else
-                {
-                    kind = TOK_SHL;
-                    advance = 2;
-                }
-            }
-            else
-            {
-                kind = TOK_LT;
-            }
-            break;
-        case '>':
-            if (n == '=')
-            {
-                kind = TOK_GE;
-                advance = 2;
-            }
-            else if (n == '>')
-            {
-                /* `>>=` — the assignment form needs two-char lookahead. */
-                if (ctx->p[2] == '=')
-                {
-                    kind = TOK_SHR_ASSIGN;
-                    advance = 3;
-                }
-                else
-                {
-                    kind = TOK_SHR;
-                    advance = 2;
-                }
-            }
-            else
-            {
-                kind = TOK_GT;
-            }
-            break;
-        case '&':
-            if (n == '&')
-            {
-                kind = TOK_LOG_AND;
-                advance = 2;
-            }
-            else if (n == '=')
-            {
-                kind = TOK_BW_AND_ASSIGN;
-                advance = 2;
-            }
-            else
-            {
-                kind = TOK_BW_AND;
-            }
-            break;
-        case '|':
-            if (n == '|')
-            {
-                kind = TOK_LOG_OR;
-                advance = 2;
-            }
-            else if (n == '=')
-            {
-                kind = TOK_BW_OR_ASSIGN;
-                advance = 2;
-            }
-            else
-            {
-                kind = TOK_BW_OR;
-            }
-            break;
-        case '^':
-            if (n == '=')
-            {
-                kind = TOK_BW_XOR_ASSIGN;
-                advance = 2;
-            }
-            else
-            {
-                kind = TOK_BW_XOR;
-            }
-            break;
-        case '~':
-            kind = TOK_TILDE;
-            break;
-        default:
-            return false;
+        return false;
     }
 
-    for (u32 i = 0; i < advance; i++)
+    Loc loc = lexer_loc(ctx);
+    size_t len = strlen(m->spelling);
+    for (size_t i = 0; i < len; i++)
     {
         lexer_advance(ctx);
     }
-    lexer_push(ctx, (Token) {.kind = kind, .loc = loc});
+    lexer_push(ctx, (Token) {.kind = m->kind, .loc = loc});
     return true;
 }
 
 LexResult lex(const char *file, const char *src, Arena *arena)
 {
-    init_keyword_map(arena);
     LexerCtx ctx;
     lexer_init(&ctx, file, src, arena);
 
     while (*ctx.p)
     {
-        if (lex_whitespace(&ctx))
+        if (is_whitespace(*ctx.p))
         {
-            continue;
+            lex_skip_whitespace(&ctx);
         }
-        if (lex_comment(&ctx))
+        else if (is_digit(*ctx.p))
         {
-            continue;
+            lex_number(&ctx);
         }
-        if (lex_string(&ctx))
+        else if (is_identifier_start(*ctx.p))
         {
-            continue;
+            lex_ident(&ctx);
         }
-        if (lex_char(&ctx))
+        else if (*ctx.p == '"')
         {
-            continue;
+            lex_string(&ctx);
         }
-        if (lex_number(&ctx))
+        else if (*ctx.p == '\'')
         {
-            continue;
+            lex_char(&ctx);
         }
-        if (lex_ident(&ctx))
+        else if (*ctx.p == '/' && ctx.p[1] == '*')
         {
-            continue;
+            lex_comment(&ctx);
         }
-        if (lex_punct(&ctx))
+        else if (!lex_punct(&ctx))
         {
-            continue;
+            lexer_error(&ctx, "unknown character");
+            lexer_advance(&ctx);
         }
-
-        lexer_error(&ctx, "unknown character");
-        lexer_advance(&ctx);
     }
 
-    /* EOF token */
     lexer_push(&ctx, (Token) {.kind = TOK_EOF, .loc = lexer_loc(&ctx)});
 
     size_t count = vec_size(ctx.tokens);
