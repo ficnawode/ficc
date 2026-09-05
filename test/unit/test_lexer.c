@@ -198,6 +198,78 @@ TEST(lexer, unterminated_comment)
     arena_free(a);
 }
 
+TEST(lexer, line_comment)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "int // comment\n x;", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 4);
+    EXPECT_EQ(t[0].kind, TOK_KW_INT);
+    EXPECT_EQ(t[1].kind, TOK_IDENT);
+    EXPECT_EQ(t[2].kind, TOK_SEMI);
+    EXPECT_EQ(t[3].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, line_comment_to_eof)
+{
+    /* A `//` comment runs to the end of input (no trailing newline). */
+    Arena *a = arena_new();
+    LexResult res = lex("t", "int x; // trailing", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 3);
+    EXPECT_EQ(t[0].kind, TOK_KW_INT);
+    EXPECT_EQ(t[1].kind, TOK_IDENT);
+    EXPECT_EQ(t[2].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, line_comment_does_not_swallow_newline)
+{
+    /* The comment ends at (and does not consume) the newline, so a token on
+       the next line is located on line 2. */
+    Arena *a = arena_new();
+    LexResult res = lex("t", "// c\nx", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_IDENT);
+    EXPECT_EQ(t[0].loc.line, 2);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, slash_is_not_comment)
+{
+    /* A lone `/` stays a division operator. */
+    Arena *a = arena_new();
+    LexResult res = lex("t", "a / b", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 4);
+    EXPECT_EQ(t[0].kind, TOK_IDENT);
+    EXPECT_EQ(t[1].kind, TOK_SLASH);
+    EXPECT_EQ(t[2].kind, TOK_IDENT);
+    EXPECT_EQ(t[3].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(lexer, line_and_block_comment_mixed)
+{
+    Arena *a = arena_new();
+    LexResult res = lex("t", "int /* block */ // line\n x;", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 4);
+    EXPECT_EQ(t[0].kind, TOK_KW_INT);
+    EXPECT_EQ(t[1].kind, TOK_IDENT);
+    EXPECT_EQ(t[2].kind, TOK_SEMI);
+    EXPECT_EQ(t[3].kind, TOK_EOF);
+    arena_free(a);
+}
+
 TEST(lexer, if_else_keywords)
 {
     Arena *a = arena_new();

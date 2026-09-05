@@ -402,6 +402,17 @@ static void lex_comment(LexerCtx *ctx)
     lexer_error(ctx, "unterminated comment");
 }
 
+static void lex_line_comment(LexerCtx *ctx)
+{
+    lexer_advance(ctx);
+    lexer_advance(ctx);
+
+    while (*ctx->p && *ctx->p != '\n')
+    {
+        lexer_advance(ctx);
+    }
+}
+
 static void lex_string(LexerCtx *ctx)
 {
     Loc loc = lexer_loc(ctx);
@@ -547,6 +558,10 @@ LexResult lex(const char *file, const char *src, Arena *arena)
         else if (*ctx.p == '/' && ctx.p[1] == '*')
         {
             lex_comment(&ctx);
+        }
+        else if (*ctx.p == '/' && ctx.p[1] == '/')
+        {
+            lex_line_comment(&ctx);
         }
         else if (!lex_punct(&ctx))
         {
