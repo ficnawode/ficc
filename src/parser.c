@@ -934,6 +934,45 @@ static bool parse_one_declarator(ParserCtx *p, Type *base, StorageClass storage,
     return true;
 }
 
+/* A *parameter* declarator: `{* const}* [name] [dims]`. The name is optional
+   in a function declaration/prototype (C11 §6.7.6.3 — `int f(int, int)` is
+   legal, and unnamed params may still carry abstract pointer declarators,
+   `int f(int *, int)`), but a *definition* must name every parameter
+   (§6.9.1p6) — the definition branch enforces that after deciding which form
+   it parsed. Unlike parse_declarator (which requires a name), an absent name
+   is not an error here. */
+static bool parse_param_declarator(ParserCtx *p, Type *base, Type **out_type, const char **out_name)
+{
+    *out_type = base;
+    *out_name = NULL;
+
+    while (parser_peek(p)->kind == TOK_STAR)
+    {
+        parser_advance(p);
+        *out_type = type_ptr(*out_type);
+        while (parser_peek(p)->kind == TOK_KW_CONST)
+        {
+            parser_advance(p);
+            *out_type = type_const(*out_type);
+        }
+    }
+
+    if (parser_peek(p)->kind == TOK_IDENT)
+    {
+        Token *name = parser_peek(p);
+        parser_advance(p);
+        *out_name = name->payload.str;
+    }
+
+    Type *with_dims = parse_array_suffix(p, *out_type);
+    if (!with_dims)
+    {
+        return false;
+    }
+    *out_type = with_dims;
+    return true;
+}
+
 static ASTNode *parse_param(ParserCtx *p)
 {
     Token *start = parser_peek(p);
@@ -945,18 +984,21 @@ static ASTNode *parse_param(ParserCtx *p)
 
     Type *type;
     const char *name;
-    if (!parse_declarator(p, specs.type, &type, &name))
+    if (!parse_param_declarator(p, specs.type, &type, &name))
     {
         return NULL;
     }
 
-    if (!parser_check_not_enumerator(p, name))
+    if (name)
     {
-        return NULL;
-    }
-    if (!name_declare(p, name, BIND_VAR, NULL))
-    {
-        return NULL;
+        if (!parser_check_not_enumerator(p, name))
+        {
+            return NULL;
+        }
+        if (!name_declare(p, name, BIND_VAR, NULL))
+        {
+            return NULL;
+        }
     }
 
     /* Array parameters decay to pointer (C11 §6.7.6.3p7); the declarator
@@ -992,10 +1034,12 @@ static Vec *parse_param_list(ParserCtx *p, bool *out_is_variadic)
         return params;
     }
 
-    /* `...` must follow at least one named parameter (C11 §6.7.6.3p8). */
+    /* `...` must follow at least one parameter (C11 §6.7.6.3p8; the C23 bare
+       `f(...)` stays a reject). The names of those parameters are irrelevant —
+       `int f(int, ...)` is legal. */
     if (t->kind == TOK_ELLIPSIS)
     {
-        parser_error(p, "'...' must follow at least one named parameter");
+        parser_error(p, "'...' must follow at least one parameter");
         return NULL;
     }
 
@@ -2954,11 +2998,25 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
 
         if (parser_peek(p)->kind == TOK_SEMI)
         {
-            /* Prototype: no body. */
+            /* Prototype: no body. The parameter names are optional in a
+               declaration (§6.7.6.3), so no named-parameter check. */
             parser_advance(p);
             pop_name_scope(p);
             return ast_func_decl(dtype, name, params, fn_storage, is_variadic, start->loc,
                                  p->arena);
+        }
+
+        /* A definition must name every one of its parameters (§6.9.1p6). */
+        size_t nparams = vec_size(params);
+        for (size_t i = 0; i < nparams; i++)
+        {
+            ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(params, i));
+            if (!param->name)
+            {
+                parser_error(p, "parameter %zu in definition of '%s' must have a name", i + 1,
+                             name);
+                return NULL;
+            }
         }
 
         ASTNode *body = parse_compound_stmt(p);

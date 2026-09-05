@@ -181,6 +181,57 @@ TEST(prototypes, negative_variadic_mismatch)
                       "}\n");
 }
 
+TEST(prototypes, unnamed_prototype_params)
+{
+    /* §6.7.6.3: declaration parameters may omit their names; the definition
+       supplies them (§6.9.1p6). */
+    const char *src = "int add(int, int);\n"
+                      "int add(int a, int b) {\n"
+                      "    return a + b;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return add(20, 22);\n"
+                      "}\n";
+    EXPECT_EQ(tc_run_interp(src), 42);
+    EXPECT_EQ(tc_run_elf(src), 42);
+}
+
+TEST(prototypes, unnamed_pointer_prototype_params)
+{
+    const char *src = "int mul(int *, int *);\n"
+                      "int mul(int *p, int *q) {\n"
+                      "    return *p * *q;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    int a = 21, b = 2;\n"
+                      "    return mul(&a, &b);\n"
+                      "}\n";
+    EXPECT_EQ(tc_run_interp(src), 42);
+    EXPECT_EQ(tc_run_elf(src), 42);
+}
+
+TEST(prototypes, unnamed_prototype_param_mismatch_rejected)
+{
+    /* The unnamed-param prototype still type-checks each call argument. */
+    EXPECT_BUILD_FAIL("int f(int);\n"
+                      "int main(void) {\n"
+                      "    return f(1, 2);\n"
+                      "}\n"
+                      "int f(int x) {\n"
+                      "    return x;\n"
+                      "}\n");
+}
+
+TEST(prototypes, definition_unnamed_param_rejected)
+{
+    EXPECT_BUILD_FAIL("int f(int, int) {\n"
+                      "    return 1;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
 TEST(prototypes, negative_incomplete_ellipsis)
 {
     EXPECT_BUILD_FAIL("int f(...);\n"

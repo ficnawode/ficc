@@ -558,7 +558,15 @@ static void ast_dump_rec(ASTNode *node, int depth)
         case AST_VAR_DECL:
         {
             ASTVarDecl *var_decl = ast_as(ASTVarDecl, node);
-            printf("VAR_DECL %s : %s\n", var_decl->name, type_kind_name(var_decl->type->kind));
+            if (var_decl->name)
+            {
+                printf("VAR_DECL %s : %s\n", var_decl->name, type_kind_name(var_decl->type->kind));
+            }
+            else
+            {
+                /* An unnamed parameter of a prototype (§6.7.6.3). */
+                printf("VAR_DECL <unnamed> : %s\n", type_kind_name(var_decl->type->kind));
+            }
             if (var_decl->init)
             {
                 ast_dump_rec(var_decl->init, depth + 1);

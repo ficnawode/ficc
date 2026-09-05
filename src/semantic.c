@@ -660,7 +660,16 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
         ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(callee->params, i));
         if (!type_assignable(param->type, arg->expr_type))
         {
-            sem_error(arg->loc, "incompatible argument type for parameter '%s'", param->name);
+            /* A prototype's parameters may be unnamed (§6.7.6.3), so fall back
+               to the parameter index for the diagnostic. */
+            if (param->name)
+            {
+                sem_error(arg->loc, "incompatible argument type for parameter '%s'", param->name);
+            }
+            else
+            {
+                sem_error(arg->loc, "incompatible argument type for parameter %zu", i + 1);
+            }
             ctx->error = true;
             return false;
         }

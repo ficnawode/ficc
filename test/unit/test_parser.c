@@ -199,6 +199,86 @@ TEST(parser, empty_ellipsis_prototype_rejected)
     EXPECT_PARSE_FAIL("int f(...);");
 }
 
+TEST(parser, prototype_unnamed_params)
+{
+    /* C11 §6.7.6.3: parameter names are optional in a function declaration. */
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int add(int, int);", a);
+    EXPECT_NOTNULL(ast);
+
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDecl *fd = ast_as(ASTFuncDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(vec_size(fd->sig.params), 2);
+    for (size_t i = 0; i < 2; i++)
+    {
+        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(fd->sig.params, i));
+        EXPECT_NULL(param->name);
+        EXPECT_TRUE(param->type == type_int());
+    }
+
+    arena_free(a);
+}
+
+TEST(parser, prototype_unnamed_pointer_params)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(int *, int *);", a);
+    EXPECT_NOTNULL(ast);
+
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDecl *fd = ast_as(ASTFuncDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(vec_size(fd->sig.params), 2);
+    for (size_t i = 0; i < 2; i++)
+    {
+        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(fd->sig.params, i));
+        EXPECT_NULL(param->name);
+        EXPECT_EQ(param->type->kind, TYPE_PTR);
+    }
+
+    arena_free(a);
+}
+
+TEST(parser, prototype_unnamed_variadic)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int sum(int, ...);", a);
+    EXPECT_NOTNULL(ast);
+
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDecl *fd = ast_as(ASTFuncDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_TRUE(fd->sig.is_variadic);
+    EXPECT_EQ(vec_size(fd->sig.params), 1);
+    ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(fd->sig.params, 0));
+    EXPECT_NULL(param->name);
+
+    arena_free(a);
+}
+
+TEST(parser, definition_unnamed_param_rejected)
+{
+    /* C11 §6.9.1p6: a function definition must name every parameter. */
+    EXPECT_PARSE_FAIL("int f(int, int) {\n"
+                      "    return 1;\n"
+                      "}");
+}
+
+TEST(parser, mixed_named_unnamed_prototype)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(int x, int);", a);
+    EXPECT_NOTNULL(ast);
+
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDecl *fd = ast_as(ASTFuncDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(vec_size(fd->sig.params), 2);
+    ASTVarDecl *p0 = ast_as(ASTVarDecl, (ASTNode *) vec_get(fd->sig.params, 0));
+    ASTVarDecl *p1 = ast_as(ASTVarDecl, (ASTNode *) vec_get(fd->sig.params, 1));
+    EXPECT_STR_EQ(p0->name, "x");
+    EXPECT_NULL(p1->name);
+
+    arena_free(a);
+}
+
 TEST(parser, multiple_functions)
 {
     Arena *a = arena_new();

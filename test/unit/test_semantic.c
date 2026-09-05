@@ -916,6 +916,27 @@ TEST(semantic, prototype_variadic_vs_definition_arity)
                       "}");
 }
 
+TEST(semantic, prototype_unnamed_params_then_definition)
+{
+    EXPECT_BUILD_SUCCEED("int add(int, int);\n"
+                         "int add(int a, int b) {\n"
+                         "    return a + b;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return add(1, 2);\n"
+                         "}");
+}
+
+TEST(semantic, definition_unnamed_param_rejected)
+{
+    EXPECT_BUILD_FAIL("int f(int, int) {\n"
+                      "    return 1;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return 0;\n"
+                      "}");
+}
+
 TEST(semantic, prototype_collides_with_global_var)
 {
     EXPECT_BUILD_FAIL("int x(void);\n"
