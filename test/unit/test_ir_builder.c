@@ -696,3 +696,47 @@ TEST(ir_builder, va_start_six_named_params_full_gp)
     EXPECT_TRUE(saw_start);
     arena_free(a);
 }
+
+TEST(ir_builder, va_arg_and_end_emit_opcodes)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int f(int a, ...) {\n"
+                                  "    __builtin_va_list ap;\n"
+                                  "    __builtin_va_start(ap, a);\n"
+                                  "    int v = __builtin_va_arg(ap, int);\n"
+                                  "    __builtin_va_end(ap);\n"
+                                  "    return v;\n"
+                                  "}\n"
+                                  "int main(void) {\n"
+                                  "    return 0;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    EXPECT_STR_EQ(f->name, "f");
+    bool saw_arg = false;
+    bool saw_end = false;
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t bi = 0; bi < nblocks; bi++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
+        size_t ninstr = vec_size(bb->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
+            if (in->opcode == OP_VA_ARG)
+            {
+                /* The raw slot is width-8; the builder converts to int. */
+                EXPECT_EQ(m->widths[in->result], 8);
+                saw_arg = true;
+            }
+            if (in->opcode == OP_VA_END)
+            {
+                saw_end = true;
+            }
+        }
+    }
+    EXPECT_TRUE(saw_arg);
+    EXPECT_TRUE(saw_end);
+    arena_free(a);
+}

@@ -1383,3 +1383,67 @@ TEST(parser, raw_va_list_not_a_type_before_shim)
                       "    return 0;\n"
                       "}\n");
 }
+
+TEST(parser, builtin_va_arg_special_form)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(int a, ...) {\n"
+                            "    __builtin_va_list ap;\n"
+                            "    __builtin_va_start(ap, a);\n"
+                            "    return __builtin_va_arg(ap, int);\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 2));
+    ASTVaArgExpr *va = ast_as(ASTVaArgExpr, ret->expr);
+    EXPECT_EQ(va->base.kind, AST_VA_ARG_EXPR);
+    EXPECT_TRUE(va->type == type_int());
+    EXPECT_TRUE(ast_as(ASTIdent, va->ap)->name != NULL);
+    arena_free(a);
+}
+
+TEST(parser, builtin_va_arg_missing_type_rejected)
+{
+    EXPECT_PARSE_FAIL("int f(int a, ...) {\n"
+                      "    __builtin_va_list ap;\n"
+                      "    __builtin_va_start(ap, a);\n"
+                      "    return __builtin_va_arg(ap);\n"
+                      "}\n");
+}
+
+TEST(parser, builtin_va_arg_non_type_second_arg_rejected)
+{
+    EXPECT_PARSE_FAIL("int f(int a, ...) {\n"
+                      "    __builtin_va_list ap;\n"
+                      "    __builtin_va_start(ap, a);\n"
+                      "    return __builtin_va_arg(ap, a);\n"
+                      "}\n");
+}
+
+TEST(parser, builtin_va_arg_pointer_type)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int f(int a, ...) {\n"
+                            "    __builtin_va_list ap;\n"
+                            "    __builtin_va_start(ap, a);\n"
+                            "    return *(char *)__builtin_va_arg(ap, char *);\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 2));
+    /* `*(char *)X`: the outer node is a unary deref over a cast over the
+       va_arg special form. */
+    ASTUnaryExpr *deref = ast_as(ASTUnaryExpr, ret->expr);
+    ASTCastExpr *cast = ast_as(ASTCastExpr, deref->operand);
+    EXPECT_EQ(cast->target_type->kind, TYPE_PTR);
+    ASTVaArgExpr *va = ast_as(ASTVaArgExpr, cast->operand);
+    EXPECT_EQ(va->base.kind, AST_VA_ARG_EXPR);
+    EXPECT_TRUE(type_is_ptr(va->type));
+    arena_free(a);
+}

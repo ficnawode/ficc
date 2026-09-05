@@ -1141,6 +1141,21 @@ static ExprResult build_cast_expr(ASTCastExpr *ce, IrFunction *f, IrBlock *bb, F
     return expr_result(promote_to(ctx, bb, src.value, src_type, target), bb);
 }
 
+/* `__builtin_va_arg(ap, type)` (D15.6/D15.7): fetch the full 8-byte slot via
+   OP_VA_ARG (which advances the ap in the backends), then convert to the
+   requested type — the stored value is already promotion-shaped, and the
+   existing promote_to path supplies TRUNC/ZEXT/SEXT, so pointers load whole and
+   narrow integers truncate to the right width. */
+static ExprResult build_va_arg_expr(ASTVaArgExpr *va, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+{
+    ExprResult ap = build_expr(va->ap, f, bb, ctx);
+    Type *target = type_rvalue(va->type);
+    u32 raw = alloc_vreg_from_type(ctx, type_long());
+    ir_emit_va_arg(ap.block, raw, ap.value);
+    return expr_result(promote_to(ctx, ap.block, ir_operand_vreg(raw), type_long(), target),
+                       ap.block);
+}
+
 /* Compiler builtins __builtin_va_start/__builtin_va_end (D15.3, D15.4).
    __builtin_va_start(ap, last): gp_offset/stack_skip are pure compile-time
    functions of the enclosing function's named-parameter count (f->params
@@ -1162,7 +1177,9 @@ static ExprResult build_va_builtin(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, 
     }
     if (strcmp(ce->callee, "__builtin_va_end") == 0)
     {
-        return build_expr((ASTNode *) vec_get(ce->args, 0), f, bb, ctx);
+        ExprResult ap = build_expr((ASTNode *) vec_get(ce->args, 0), f, bb, ctx);
+        ir_emit_va_end(ap.block, ap.value);
+        return expr_result(ir_operand_imm(0), ap.block);
     }
     ir_error((ASTNode *) ce, "unknown builtin '%s'", ce->callee);
     ctx->failed = true;
@@ -2031,6 +2048,8 @@ static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuil
             return build_member_access_expr(ast_as(ASTMemberAccess, node), f, bb, ctx);
         case AST_CAST_EXPR:
             return build_cast_expr(ast_as(ASTCastExpr, node), f, bb, ctx);
+        case AST_VA_ARG_EXPR:
+            return build_va_arg_expr(ast_as(ASTVaArgExpr, node), f, bb, ctx);
         case AST_COMPOUND_LITERAL:
             return build_compound_literal_expr(ast_as(ASTCompoundLiteral, node), f, bb, ctx);
         default:

@@ -276,6 +276,16 @@ static X86Mem x86_mem_rax(i32 disp)
     return m;
 }
 
+static X86Mem x86_mem_rcx(i32 disp)
+{
+    X86Mem m;
+    m.base = R_ECX;
+    m.index = NO_REG;
+    m.scale = 1;
+    m.disp = disp;
+    return m;
+}
+
 /* Where an IR operand lives on the x86 side: immediates stay immediate,
    vregs live in their frame slot. */
 static X86Operand xop_vreg(u32 vreg)
@@ -751,6 +761,8 @@ static void lower_gep(IrInstr *in, CodegenCtx *ctx);
 static void lower_alloca(IrInstr *in, CodegenCtx *ctx);
 static void lower_memcpy(IrInstr *in, CodegenCtx *ctx);
 static void lower_va_start(IrInstr *in, CodegenCtx *ctx);
+static void lower_va_arg(IrInstr *in, CodegenCtx *ctx);
+static void lower_va_end(IrInstr *in, CodegenCtx *ctx);
 static X86Mem load_ptr(CodegenCtx *ctx, IrOperand ptr);
 
 #define LOWER_ENTRIES(X)                                                                           \
@@ -794,7 +806,9 @@ static X86Mem load_ptr(CodegenCtx *ctx, IrOperand ptr);
     X(OP_GEP, lower_gep)                                                                           \
     X(OP_ALLOCA, lower_alloca)                                                                     \
     X(OP_MEMCPY, lower_memcpy)                                                                     \
-    X(OP_VA_START, lower_va_start)
+    X(OP_VA_START, lower_va_start)                                                                 \
+    X(OP_VA_ARG, lower_va_arg)                                                                     \
+    X(OP_VA_END, lower_va_end)
 
 /* Dispatch table indexed by opcode; unlisted opcodes are NULL and diagnosed
    in lower_instr rather than silently miscompiled. */
@@ -947,6 +961,59 @@ static void lower_va_start(IrInstr *in, CodegenCtx *ctx)
 
     emit_lea(ctx->buf, R_EDX, x86_mem_rbp(-(i32) ctx->save_area_off)); /* reg_save_area */
     emit_mov(ctx->buf, 8, xop_mem(x86_mem_rax(16)), xop_reg(R_EDX));
+}
+
+/* __builtin_va_arg(ap, type): the GP-then-overflow walk (D15.6). All slots are
+   8 bytes and gp_offset only takes multiples of 8 below 48, so a signed
+   compare is exact. The dual arms share no code path, so the two internal
+   branches are emitted with placeholder displacements and poked once both arm
+   offsets are known (they are always within the function's .text bytes). */
+static void lower_va_arg(IrInstr *in, CodegenCtx *ctx)
+{
+    ByteBuf *b = ctx->buf;
+    X86Mem ap = load_ptr(ctx, in->ops[0]); /* ap -> %rax */
+
+    emit_mov(b, 4, xop_reg(R_EDX), xop_mem(ap)); /* gp = *(u32*)(ap+0) */
+    emit_binop_rhs(b, 4, &cmp_spec, R_EDX, xop_imm(48));
+
+    bytebuf_append(b, X86_TWO_BYTE_ESC);
+    bytebuf_append(b, (u8) (X86_JCC_BASE + CC_GE));
+    u32 jge_disp = bytebuf_len(b);
+    bytebuf_append_i32(b, 0);
+
+    /* GP arm: src = regs + gp; ap.gp_offset = gp + 8 */
+    emit_mov(b, 8, xop_reg(R_ECX), xop_mem(x86_mem_rax(16)));
+    emit_reg_reg(b, arith_specs[OP_ADD].mem, R_ECX, R_EDX); /* rcx = regs + gp */
+    emit_binop_rhs(b, 4, &arith_specs[OP_ADD], R_EDX, xop_imm(8));
+    emit_mov(b, 4, xop_mem(ap), xop_reg(R_EDX));
+
+    bytebuf_append(b, X86_JMP_REL32);
+    u32 jmp_disp = bytebuf_len(b);
+    bytebuf_append_i32(b, 0);
+
+    /* Overflow arm: src reads the saved old ovf; ap.overflow += 8 */
+    u32 ovf_arm = bytebuf_len(b);
+    emit_mov(b, 8, xop_reg(R_ECX), xop_mem(x86_mem_rax(8)));
+    emit_mov(b, 8, xop_reg(R_R8), xop_reg(R_ECX));
+    emit_binop_rhs(b, 8, &arith_specs[OP_ADD], R_ECX, xop_imm(8));
+    emit_mov(b, 8, xop_mem(x86_mem_rax(8)), xop_reg(R_ECX));
+    emit_mov(b, 8, xop_reg(R_ECX), xop_reg(R_R8));
+
+    /* done: raw = *(u64*)src, stored to the width-8 result vreg */
+    u32 done = bytebuf_len(b);
+    bytebuf_poke_u32(b, jge_disp, (u32) (ovf_arm - (i32) (jge_disp + 4)));
+    bytebuf_poke_u32(b, jmp_disp, (u32) (done - (i32) (jmp_disp + 4)));
+
+    emit_mov(b, 8, xop_reg(R_EDX), xop_mem(x86_mem_rcx(0)));
+    emit_mov(b, 8, xop_vreg(in->result), xop_reg(R_EDX));
+}
+
+/* __builtin_va_end(ap): no-op (SysV has no va_end action; kept in the IR for
+   source symmetry and the future va_copy). */
+static void lower_va_end(IrInstr *in, CodegenCtx *ctx)
+{
+    (void) in;
+    (void) ctx;
 }
 
 static void lower_ret(IrInstr *in, CodegenCtx *ctx)

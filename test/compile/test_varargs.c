@@ -131,3 +131,149 @@ TEST(varargs, va_end_runs)
                           "}\n",
                           42);
 }
+
+TEST(varargs, sum_over_named_regs)
+{
+    EXPECT_INTERP_AND_ELF("int sum(int n, ...) {\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, n);\n"
+                          "    int t = 0;\n"
+                          "    for (int i = 0; i < n; i++) {\n"
+                          "        t += __builtin_va_arg(ap, int);\n"
+                          "    }\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return t;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return sum(3, 10, 20, 30);\n"
+                          "}\n",
+                          60);
+}
+
+TEST(varargs, sum_zero_args)
+{
+    EXPECT_INTERP_AND_ELF("int sum(int n, ...) {\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, n);\n"
+                          "    int t = 0;\n"
+                          "    for (int i = 0; i < n; i++) {\n"
+                          "        t += __builtin_va_arg(ap, int);\n"
+                          "    }\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return t;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return sum(0);\n"
+                          "}\n",
+                          0);
+}
+
+TEST(varargs, sum_crosses_into_overflow)
+{
+    /* Nine trailing args: five ride GP slots past the named `n` (rdi), the
+       remaining seven spill to the caller's stack. The walk must cross the
+       gp >= 48 branch and keep reading through the overflow region. */
+    EXPECT_INTERP_AND_ELF("int sum(int n, ...) {\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, n);\n"
+                          "    int t = 0;\n"
+                          "    for (int i = 0; i < n; i++) {\n"
+                          "        t += __builtin_va_arg(ap, int);\n"
+                          "    }\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return t;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return sum(9, 1,2,3,4,5,6,7,8,9);\n"
+                          "}\n",
+                          45);
+}
+
+TEST(varargs, char_varargs_read)
+{
+    /* Default promotions rank char up to int at the call site; va_arg with a
+       char target truncates the promoted slot back to its byte. */
+    EXPECT_INTERP_AND_ELF("int f(int n, ...) {\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, n);\n"
+                          "    char a = __builtin_va_arg(ap, char);\n"
+                          "    char b = __builtin_va_arg(ap, char);\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return a + b;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f(2, (char)40, (char)2);\n"
+                          "}\n",
+                          42);
+}
+
+TEST(varargs, pointer_varargs_read)
+{
+    EXPECT_INTERP_AND_ELF("int f(int n, ...) {\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, n);\n"
+                          "    int a = *__builtin_va_arg(ap, int *);\n"
+                          "    int b = *__builtin_va_arg(ap, int *);\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return a + b;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    int x = 20;\n"
+                          "    int y = 22;\n"
+                          "    return f(2, &x, &y);\n"
+                          "}\n",
+                          42);
+}
+
+TEST(varargs, mixed_type_sequence)
+{
+    EXPECT_INTERP_AND_ELF("int f(int n, ...) {\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, n);\n"
+                          "    int i = __builtin_va_arg(ap, int);\n"
+                          "    char c = __builtin_va_arg(ap, char);\n"
+                          "    long l = __builtin_va_arg(ap, long);\n"
+                          "    int *p = __builtin_va_arg(ap, int *);\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return i + c + (int)l + *p;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    int x = 2;\n"
+                          "    return f(4, 20, (char)7, (long)13, &x);\n"
+                          "}\n",
+                          42);
+}
+
+TEST(varargs, va_list_passed_to_helper)
+{
+    /* The passing pattern: a helper reads a va_list that the caller
+       va_start'd, so the same ap object is walked from a different frame.
+       Both backends must advance gp_offset identically across the handoff. */
+    EXPECT_INTERP_AND_ELF("int read_two(__builtin_va_list ap) {\n"
+                          "    return __builtin_va_arg(ap, int) + __builtin_va_arg(ap, int);\n"
+                          "}\n"
+                          "int f(int a, ...) {\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, a);\n"
+                          "    int s = read_two(ap);\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return s;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f(1, 20, 21, 99);\n"
+                          "}\n",
+                          41);
+}
+
+TEST(varargs, const_first_named_param)
+{
+    /* Const interplay: a `const` first named parameter is fine in a variadic
+       signature (top-level qualifiers are ignored for the function type). */
+    EXPECT_INTERP_AND_ELF("int f(const int a, ...) {\n"
+                          "    return a;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f(42, 1, 2);\n"
+                          "}\n",
+                          42);
+}

@@ -47,7 +47,8 @@
     X(AST_INIT_LIST)                                                                               \
     X(AST_COMPOUND_LITERAL)                                                                        \
     X(AST_DECL_LIST)                                                                               \
-    X(AST_STATIC_ASSERT)
+    X(AST_STATIC_ASSERT)                                                                           \
+    X(AST_VA_ARG_EXPR)
 
 typedef enum
 {
@@ -446,6 +447,18 @@ struct ASTCastExpr
     ASTNode *operand;
 };
 
+/* A `__builtin_va_arg(ap, type)` special form (D15.3): unlike va_start/va_end
+   its second argument is a *type-name*, so it is not a call expression. The
+   type is parsed by the frontend and validated by semantic; semantic sets
+   expr_type to it. */
+typedef struct ASTVaArgExpr ASTVaArgExpr;
+struct ASTVaArgExpr
+{
+    ASTNode base;
+    ASTNode *ap;
+    Type *type;
+};
+
 /* A typedef declaration `typedef <type> <name>;` (C11 §6.7.7). The name is an
    ordinary identifier (§6.2.3) that shadows/aliases the interned `type`; the
    parser registers it in its ordinary-name table at the point of declaration,
@@ -580,6 +593,7 @@ ASTNode *ast_enum_decl(const char *tag, Vec *constants, Loc loc, Arena *arena);
 ASTNode *ast_member_access(ASTNode *object, const char *member, bool is_arrow, Loc loc,
                            Arena *arena);
 ASTNode *ast_cast_expr(Type *target_type, ASTNode *operand, Loc loc, Arena *arena);
+ASTNode *ast_va_arg_expr(ASTNode *ap, Type *type, Loc loc, Arena *arena);
 ASTNode *ast_typedef_decl(Type *type, const char *name, Loc loc, Arena *arena);
 ASTNode *ast_init_list(Vec *elems, Loc loc, Arena *arena);
 ASTNode *ast_compound_literal(Type *type, ASTNode *init, Loc loc, Arena *arena);

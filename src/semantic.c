@@ -486,7 +486,8 @@ static bool check_va_builtin(ASTCallExpr *call_expr, SemanticCtx *ctx)
     {
         if (got != 2)
         {
-            sem_error(call_expr->base.loc, "'__builtin_va_start' expects 2 arguments, got %zu", got);
+            sem_error(call_expr->base.loc, "'__builtin_va_start' expects 2 arguments, got %zu",
+                      got);
             ctx->error = true;
             return false;
         }
@@ -535,6 +536,28 @@ static bool check_va_builtin(ASTCallExpr *call_expr, SemanticCtx *ctx)
         }
     }
     call_expr->base.expr_type = type_void();
+    return true;
+}
+
+/* `__builtin_va_arg(ap, type)` (D15.3): the ap must be a va_list (decayed);
+   the type must be one the promoted slot can produce — reject void, records,
+   and arrays (all other ficc types are scalar/pointer and complete). The value
+   is an rvalue of the requested type. */
+static bool check_va_arg_expr(ASTVaArgExpr *va, SemanticCtx *ctx)
+{
+    if (!builtin_check_va_list_arg(va->ap, ctx))
+    {
+        return false;
+    }
+    Type *t = type_rvalue(va->type);
+    if (t->kind == TYPE_VOID || type_is_record(t) || type_is_array(t))
+    {
+        sem_error(va->base.loc,
+                  "'__builtin_va_arg' argument type cannot be void, a record, or an array");
+        ctx->error = true;
+        return false;
+    }
+    va->base.expr_type = t;
     return true;
 }
 
@@ -906,6 +929,12 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
             return node->expr_type;
         case AST_CAST_EXPR:
             if (!check_cast_expr(ast_as(ASTCastExpr, node), ctx))
+            {
+                return NULL;
+            }
+            return node->expr_type;
+        case AST_VA_ARG_EXPR:
+            if (!check_va_arg_expr(ast_as(ASTVaArgExpr, node), ctx))
             {
                 return NULL;
             }

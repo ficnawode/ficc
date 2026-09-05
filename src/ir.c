@@ -159,6 +159,25 @@ IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offs
     return ins;
 }
 
+/* __builtin_va_arg(ap, type): advance the ap to the next argument and fetch
+   its full 8-byte slot into the width-8 result vreg; the builder converts to
+   the requested type afterwards (D15.6/D15.7). */
+IrInstr *ir_emit_va_arg(IrBlock *bb, u32 dst, IrOperand ap)
+{
+    IrInstr *ins = instr_new(bb, OP_VA_ARG, dst, 1);
+    ins->ops[0] = ap;
+    return ins;
+}
+
+/* __builtin_va_end(ap): a no-op in both backends (kept for source symmetry
+   and the future va_copy). */
+IrInstr *ir_emit_va_end(IrBlock *bb, IrOperand ap)
+{
+    IrInstr *ins = instr_new(bb, OP_VA_END, NO_VREG, 1);
+    ins->ops[0] = ap;
+    return ins;
+}
+
 IrInstr *ir_emit_br(IrBlock *bb, const char *target_label)
 {
     IrInstr *ins = instr_new(bb, OP_BR, NO_VREG, 0);
@@ -358,6 +377,9 @@ static void dump_instr(IrInstr *ins, IrModule *m)
         case OP_VA_START:
             printf(", stack_skip=%lld, gp_offset=%lld", (long long) ins->ops[1].u.imm,
                    (long long) ins->ops[2].u.imm);
+            break;
+        case OP_VA_END:
+            printf(" ap");
             break;
         case OP_SWITCH:
             dump_switch_cases(ins);

@@ -197,6 +197,8 @@ static i64 eval_zext(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_sext(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_unreachable(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs);
+static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs);
+static i64 eval_va_end(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_store(IrInstr *in, InterpCtx *ctx, i64 *regs);
 static i64 eval_gep(IrInstr *in, InterpCtx *ctx, i64 *regs);
@@ -243,6 +245,8 @@ static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *star
     X(OP_PHI, eval_phi)                                                                            \
     X(OP_UNREACHABLE, eval_unreachable)                                                            \
     X(OP_VA_START, eval_va_start)                                                                  \
+    X(OP_VA_ARG, eval_va_arg)                                                                      \
+    X(OP_VA_END, eval_va_end)                                                                      \
     X(OP_LOAD, eval_load)                                                                          \
     X(OP_STORE, eval_store)                                                                        \
     X(OP_GEP, eval_gep)                                                                            \
@@ -521,6 +525,51 @@ static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs)
     memcpy(ap + 8, &ovf, 8);
     u64 save = (u64) (uintptr_t) fr->va_save;
     memcpy(ap + 16, &save, 8);
+    return 0;
+}
+
+/* __builtin_va_arg(ap, type): the GP-then-overflow walk (D15.6), identical to
+   lower_va_arg's memory sequence — read ap fields, branch, advance the field,
+   fetch the 8-byte slot into the width-8 result vreg. */
+static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    u8 *ap = resolve_ptr(ctx, in->ops[0], regs);
+    if (!ap)
+    {
+        return 1;
+    }
+    u32 gp;
+    u64 ovf;
+    u64 regs_base;
+    memcpy(&gp, ap, 4);
+    memcpy(&ovf, ap + 8, 8);
+    memcpy(&regs_base, ap + 16, 8);
+    u64 src;
+    if (gp < 48)
+    {
+        src = regs_base + gp;
+        gp += 8;
+        memcpy(ap, &gp, 4);
+    }
+    else
+    {
+        src = ovf;
+        ovf += 8;
+        memcpy(ap + 8, &ovf, 8);
+    }
+    i64 raw;
+    memcpy(&raw, (void *) (uintptr_t) src, 8);
+    regs[in->result] = raw;
+    mask_vreg(ctx, regs, in->result);
+    return 0;
+}
+
+/* __builtin_va_end(ap): no-op (SysV has no va_end action). */
+static i64 eval_va_end(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    (void) in;
+    (void) ctx;
+    (void) regs;
     return 0;
 }
 

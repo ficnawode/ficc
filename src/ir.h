@@ -49,7 +49,9 @@
     X(OP_PHI)                                                                                      \
     X(OP_SELECT)                                                                                   \
     X(OP_UNREACHABLE)                                                                              \
-    X(OP_VA_START)
+    X(OP_VA_START)                                                                                 \
+    X(OP_VA_ARG)                                                                                   \
+    X(OP_VA_END)
 
 typedef enum
 {
@@ -256,6 +258,8 @@ IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src);
 IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOperand *args);
 void ir_call_set_variadic(IrInstr *call, bool is_variadic);
 IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offset);
+IrInstr *ir_emit_va_arg(IrBlock *bb, u32 dst, IrOperand ap);
+IrInstr *ir_emit_va_end(IrBlock *bb, IrOperand ap);
 IrInstr *ir_emit_br(IrBlock *bb, const char *target_label);
 IrInstr *ir_emit_brcond(IrBlock *bb, IrOperand cond, const char *true_label,
                         const char *false_label);

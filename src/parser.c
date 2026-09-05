@@ -2,6 +2,7 @@
 #include "util/hashmap.h"
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 typedef struct ParserCtx ParserCtx;
 struct ParserCtx
@@ -1779,6 +1780,48 @@ static ASTNode *parse_identifier_expr(ParserCtx *p, Token *t)
     return ast_ident(name, t->loc, p->arena);
 }
 
+/* `__builtin_va_arg ( assignment-expression , type-name )` (D15.3): the second
+   argument is a type-name, so this cannot ride through the ordinary call path.
+   The assignment-expression level stops at the comma, and the type-name uses
+   the same specifier + abstract-declarator machinery as casts. */
+static ASTNode *parse_builtin_va_arg(ParserCtx *p, Token *t)
+{
+    parser_advance(p); /* consume `__builtin_va_arg` */
+    if (!parser_expect(p, TOK_LPAREN, "'('"))
+    {
+        return NULL;
+    }
+    ASTNode *ap = parse_assign(p);
+    if (!ap)
+    {
+        return NULL;
+    }
+    if (!parser_expect(p, TOK_COMMA, "','"))
+    {
+        return NULL;
+    }
+    if (!is_typename_start_at(p, p->pos))
+    {
+        parser_error(p, "expected a type name after ',' in '__builtin_va_arg'");
+        return NULL;
+    }
+    Type *ty = parse_type_specifier(p);
+    if (!ty)
+    {
+        return NULL;
+    }
+    ty = parse_abstract_declarator(p, ty);
+    if (!ty)
+    {
+        return NULL;
+    }
+    if (!parser_expect(p, TOK_RPAREN, "')'"))
+    {
+        return NULL;
+    }
+    return ast_va_arg_expr(ap, ty, t->loc, p->arena);
+}
+
 static ASTNode *parse_primary(ParserCtx *p)
 {
     Token *t = parser_peek(p);
@@ -1800,6 +1843,11 @@ static ASTNode *parse_primary(ParserCtx *p)
         }
         case TOK_IDENT:
         {
+            if (strcmp(t->payload.str, "__builtin_va_arg") == 0 && p->pos + 1 < p->count &&
+                p->tokens[p->pos + 1].kind == TOK_LPAREN)
+            {
+                return parse_builtin_va_arg(p, t);
+            }
             i64 *const_val = strmap_get(p->enum_consts, t->payload.str);
             if (const_val)
             {

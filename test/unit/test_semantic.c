@@ -713,3 +713,70 @@ TEST(semantic, raw_va_start_call_is_undeclared)
                       "    return f(1);\n"
                       "}\n");
 }
+
+TEST(semantic, va_arg_valid)
+{
+    EXPECT_BUILD_SUCCEED("int f(int a, ...) {\n"
+                         "    __builtin_va_list ap;\n"
+                         "    __builtin_va_start(ap, a);\n"
+                         "    int v = __builtin_va_arg(ap, int);\n"
+                         "    __builtin_va_end(ap);\n"
+                         "    return a + v;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return f(1, 2);\n"
+                         "}\n");
+}
+
+TEST(semantic, va_arg_void_target_rejected)
+{
+    EXPECT_BUILD_FAIL("int f(int a, ...) {\n"
+                      "    __builtin_va_list ap;\n"
+                      "    __builtin_va_start(ap, a);\n"
+                      "    __builtin_va_arg(ap, void);\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}\n");
+}
+
+TEST(semantic, va_arg_record_target_rejected)
+{
+    EXPECT_BUILD_FAIL("struct S { int x; };\n"
+                      "int f(int a, ...) {\n"
+                      "    __builtin_va_list ap;\n"
+                      "    __builtin_va_start(ap, a);\n"
+                      "    __builtin_va_arg(ap, struct S);\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}\n");
+}
+
+TEST(semantic, va_arg_array_target_rejected)
+{
+    EXPECT_BUILD_FAIL("typedef int IA[4];\n"
+                      "int f(int a, ...) {\n"
+                      "    __builtin_va_list ap;\n"
+                      "    __builtin_va_start(ap, a);\n"
+                      "    __builtin_va_arg(ap, IA);\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}\n");
+}
+
+TEST(semantic, va_arg_first_arg_not_va_list)
+{
+    EXPECT_BUILD_FAIL("int f(int a, ...) {\n"
+                      "    int x = 0;\n"
+                      "    __builtin_va_arg(x, int);\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}\n");
+}
