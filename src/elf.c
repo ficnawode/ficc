@@ -214,6 +214,46 @@ static u32 sh_info_first_nonlocal(size_t nglobals, Vec *globals, size_t nfuncs, 
     return last_local;
 }
 
+static CodegenFunc *find_codegen_func_elf(CodegenModule *cm, const char *name)
+{
+    size_t n = vec_size(cm->funcs);
+    for (size_t i = 0; i < n; i++)
+    {
+        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
+        if (strcmp(cf->name, name) == 0)
+        {
+            return cf;
+        }
+    }
+    return NULL;
+}
+
+/* Symbol-table index of a function name: a defined in-module function is at
+   FIRST_GLOBAL_SYM + nglobals + <func index>; a declaration-only extern is at
+   FIRST_GLOBAL_SYM + nglobals + nfuncs + <extern index>. Returns 0 if not
+   found (only the null-symbol index 0 is a valid fallback). */
+static u32 func_sym_index(CodegenModule *cm, size_t nglobals, size_t nfuncs, const char *name,
+                          Vec *extern_syms)
+{
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
+        if (strcmp(cf->name, name) == 0)
+        {
+            return FIRST_GLOBAL_SYM + (u32) nglobals + (u32) i;
+        }
+    }
+    size_t nuniq = vec_size(extern_syms);
+    for (size_t j = 0; j < nuniq; j++)
+    {
+        if (strcmp((const char *) vec_get(extern_syms, j), name) == 0)
+        {
+            return FIRST_GLOBAL_SYM + (u32) nglobals + (u32) nfuncs + (u32) j;
+        }
+    }
+    return 0;
+}
+
 void elf_write(CodegenModule *cm, const char *path)
 {
     FILE *f = fopen(path, "wb");
@@ -335,10 +375,10 @@ void elf_write(CodegenModule *cm, const char *path)
                  SEC_TEXT, cf->offset, bytebuf_len(cf->bytes));
     }
 
-    /* Declaration-only extern functions referenced by calls (Phase 16):
-       one SHN_UNDEF STB_GLOBAL symbol per unique name, placed after the
-       defined-function symbols; elf's symbol index for extern e is
-       FIRST_GLOBAL_SYM + nglobals + nfuncs + e. */
+    /* Declaration-only extern functions referenced by calls *or* whose address
+       is taken (Phase 16): one SHN_UNDEF STB_GLOBAL symbol per unique name,
+       placed after the defined-function symbols; elf's symbol index for extern
+       e is FIRST_GLOBAL_SYM + nglobals + nfuncs + e. */
     size_t nextern = cm->extern_calls ? vec_size(cm->extern_calls) : 0;
     Vec *extern_syms = vec_new(arena); /* Vec<const char*> — unique names */
     for (size_t i = 0; i < nextern; i++)
@@ -359,6 +399,73 @@ void elf_write(CodegenModule *cm, const char *path)
             vec_push(extern_syms, (void *) ec->name);
             u32 name_off = strtab_add(&strtab, ec->name);
             sym_emit(&symtab, name_off, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), SHN_UNDEF, 0, 0);
+        }
+    }
+    /* Function-address loads (`&f`/designator, D16.1) of *extern* functions
+       also need an undefined symbol, even if never called. */
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, fi);
+        size_t nfp = vec_size(cf->func_patches);
+        for (size_t pi = 0; pi < nfp; pi++)
+        {
+            FuncAddrPatch *fp = (FuncAddrPatch *) vec_get(cf->func_patches, pi);
+            if (find_codegen_func_elf(cm, fp->name))
+            {
+                continue; /* defined in-module — no undefined symbol needed */
+            }
+            bool seen = false;
+            size_t nuniq = vec_size(extern_syms);
+            for (size_t j = 0; j < nuniq; j++)
+            {
+                if (strcmp((const char *) vec_get(extern_syms, j), fp->name) == 0)
+                {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen)
+            {
+                vec_push(extern_syms, (void *) fp->name);
+                u32 name_off = strtab_add(&strtab, fp->name);
+                sym_emit(&symtab, name_off, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), SHN_UNDEF, 0, 0);
+            }
+        }
+    }
+    /* File-scope function-pointer initializers (D16.1): a data-side
+       R_X86_64_64 relocation against an *extern* function also needs an
+       undefined symbol. */
+    for (size_t i = 0; i < nglobals; i++)
+    {
+        IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
+        if (!g->relocs)
+        {
+            continue;
+        }
+        size_t nrelocs = vec_size(g->relocs);
+        for (size_t r = 0; r < nrelocs; r++)
+        {
+            GlobalReloc *gr = (GlobalReloc *) vec_get(g->relocs, r);
+            if (!gr->is_func || find_codegen_func_elf(cm, gr->func_name))
+            {
+                continue;
+            }
+            bool seen = false;
+            size_t nuniq = vec_size(extern_syms);
+            for (size_t j = 0; j < nuniq; j++)
+            {
+                if (strcmp((const char *) vec_get(extern_syms, j), gr->func_name) == 0)
+                {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen)
+            {
+                vec_push(extern_syms, (void *) gr->func_name);
+                u32 name_off = strtab_add(&strtab, gr->func_name);
+                sym_emit(&symtab, name_off, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), SHN_UNDEF, 0, 0);
+            }
         }
     }
 
@@ -396,6 +503,20 @@ void elf_write(CodegenModule *cm, const char *path)
         rela_emit(&rela_text, ec->text_offset, sym_idx, R_X86_64_PLT32, -4);
     }
 
+    /* Function-address loads (`&f`/designator, D16.1): R_X86_64_32S against
+       the function's own symbol (defined or SHN_UNDEF extern). */
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, fi);
+        size_t nfp = vec_size(cf->func_patches);
+        for (size_t pi = 0; pi < nfp; pi++)
+        {
+            FuncAddrPatch *fp = (FuncAddrPatch *) vec_get(cf->func_patches, pi);
+            u32 sym_idx = func_sym_index(cm, nglobals, nfuncs, fp->name, extern_syms);
+            rela_emit(&rela_text, cf->offset + fp->offset, sym_idx, R_X86_64_32S, 0);
+        }
+    }
+
     ByteBuf rela_data;
     ByteBuf rela_rodata;
     bytebuf_init(&rela_data, arena);
@@ -412,8 +533,18 @@ void elf_write(CodegenModule *cm, const char *path)
         {
             GlobalReloc *gr = (GlobalReloc *) vec_get(g->relocs, r);
             ByteBuf *target = g->section == IR_SECTION_RODATA ? &rela_rodata : &rela_data;
-            rela_emit(target, global_off[i] + gr->offset, FIRST_GLOBAL_SYM + gr->target,
-                      R_X86_64_64, 0);
+            u32 sym_idx;
+            if (gr->is_func)
+            {
+                /* A function-address initializer (D16.1): R_X86_64_64 against
+                   the function's symbol. */
+                sym_idx = func_sym_index(cm, nglobals, nfuncs, gr->func_name, extern_syms);
+            }
+            else
+            {
+                sym_idx = FIRST_GLOBAL_SYM + gr->target;
+            }
+            rela_emit(target, global_off[i] + gr->offset, sym_idx, R_X86_64_64, 0);
         }
     }
 

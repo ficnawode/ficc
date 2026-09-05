@@ -103,3 +103,42 @@ TEST(type, va_list_shape)
     EXPECT_TRUE(type_decay(vl)->kind == TYPE_PTR);
     EXPECT_TRUE(type_deref(type_decay(vl)) == e);
 }
+/* --- Phase 16b (D16.1): pointer-to-function composition --- */
+
+TEST(type, fn_ptr_is_ptr_of_interned_func)
+{
+    Arena *a = arena_new();
+    Type *ft = type_func(type_int(), params_int(a, 1), false);
+    Type *fp1 = type_ptr(ft);
+    Type *fp2 = type_ptr(ft);
+    /* Pointer interning: the same pointee is the same pointer type. */
+    EXPECT_TRUE(fp1 == fp2);
+    EXPECT_EQ(fp1->kind, TYPE_PTR);
+    EXPECT_EQ(sizeof(void *), 8);
+    EXPECT_EQ(type_sizeof(fp1), 8);
+    EXPECT_EQ(type_deref(fp1), ft);
+    arena_free(a);
+}
+
+TEST(type, fn_ptr_decay_from_designator)
+{
+    Arena *a = arena_new();
+    Type *ft = type_func(type_int(), params_int(a, 1), false);
+    /* A function designator decays to a pointer to the function (§6.3.2.1p4). */
+    Type *decayed = type_decay(ft);
+    EXPECT_EQ(decayed->kind, TYPE_PTR);
+    EXPECT_EQ(type_deref(decayed), ft);
+    /* Decay of a non-function type is identity. */
+    EXPECT_TRUE(type_decay(type_int()) == type_int());
+    arena_free(a);
+}
+
+TEST(type, type_is_function)
+{
+    Arena *a = arena_new();
+    Type *ft = type_func(type_int(), params_int(a, 1), false);
+    EXPECT_TRUE(type_is_function(ft));
+    EXPECT_FALSE(type_is_function(type_ptr(ft)));
+    EXPECT_FALSE(type_is_function(type_int()));
+    arena_free(a);
+}

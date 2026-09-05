@@ -794,7 +794,21 @@ Type *type_decay(Type *t)
     {
         return type_ptr(t->arr.elem);
     }
+    if (t->kind == TYPE_FUNC)
+    {
+        /* Function-to-pointer conversion (C11 §6.3.2.1p4): a function
+           designator used in any other context than the operand of `&`,
+           `sizeof`, `_Alignof`, or unary `*` converts to a pointer to the
+           function (D16.1 — pointer-to-function is TYPE_PTR whose pointee is
+           the interned TYPE_FUNC). */
+        return type_ptr(t);
+    }
     return t;
+}
+
+bool type_is_function(Type *t)
+{
+    return t && t->kind == TYPE_FUNC;
 }
 
 u64 type_sizeof(Type *t)

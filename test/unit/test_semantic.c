@@ -945,3 +945,58 @@ TEST(semantic, prototype_collides_with_global_var)
                       "    return x(1);\n"
                       "}");
 }
+
+/* --- Phase 16b: function designators / function-pointer semantics --- */
+
+TEST(semantic, function_designator_in_expression)
+{
+    EXPECT_BUILD_SUCCEED("int f(int x) {\n"
+                         "    return x;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    int (*fp)(int) = f;\n"
+                         "    return fp == f ? 1 : 0;\n"
+                         "}");
+}
+
+TEST(semantic, function_designator_undeclared_error)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int (*fp)(int) = not_a_function;\n"
+                      "    return 0;\n"
+                      "}");
+}
+
+TEST(semantic, sizeof_function_designator_rejected)
+{
+    EXPECT_BUILD_FAIL("int f(int x);\n"
+                      "int main(void) {\n"
+                      "    int x = sizeof(f);\n"
+                      "    (void) x;\n"
+                      "    return 0;\n"
+                      "}");
+}
+
+TEST(semantic, incompatible_function_pointer_assign)
+{
+    EXPECT_BUILD_FAIL("int a(int);\n"
+                      "int b(long);\n"
+                      "int main(void) {\n"
+                      "    int (*fp)(int) = (int (*)(long)) b;\n"
+                      "    (void) fp;\n"
+                      "    return 0;\n"
+                      "}");
+}
+
+TEST(semantic, file_scope_fn_ptr_init_referencing_function)
+{
+    /* The function must resolve even though globals are planned before
+       function bodies are checked (D16.1 pass order). */
+    EXPECT_BUILD_SUCCEED("int f(int x);\n"
+                         "int main(void) {\n"
+                         "    return f(0) + 1;\n"
+                         "}\n"
+                         "int f(int x) {\n"
+                         "    return x;\n"
+                         "}");
+}

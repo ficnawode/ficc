@@ -261,8 +261,11 @@ typedef struct ASTCallExpr ASTCallExpr;
 struct ASTCallExpr
 {
     ASTNode base;
-    const char *callee;
-    Vec *args; /* Vec<ASTNode*> */
+    const char *callee;   /* named callee (a function name / builtin); NULL when
+                             callee_expr is used (D16.4) */
+    Vec *args;            /* Vec<ASTNode*> */
+    ASTNode *callee_expr; /* indirect callee (a function designator or
+                          function-pointer value); NULL for a named call */
 };
 
 typedef struct ASTIdent ASTIdent;
@@ -271,6 +274,8 @@ struct ASTIdent
     ASTNode base;
     const char *name;
     ASTVarDecl *decl; /* resolved declaration (filled by semantic) */
+    bool is_func;     /* TRUE when `name` names a function (designator, D16.1);
+                         decl stays NULL then */
 };
 
 typedef struct ASTIfStmt ASTIfStmt;
@@ -589,6 +594,7 @@ ASTNode *ast_binary_expr(BinOpKind op, ASTNode *left, ASTNode *right, Loc loc, A
 ASTNode *ast_unary_expr(UnaryOpKind op, ASTNode *operand, Loc loc, Arena *arena);
 ASTNode *ast_incdec_expr(ASTNode *operand, bool is_inc, bool is_postfix, Loc loc, Arena *arena);
 ASTNode *ast_call_expr(const char *callee, Vec *args, Loc loc, Arena *arena);
+ASTNode *ast_call_expr_expr(ASTNode *callee_expr, Vec *args, Loc loc, Arena *arena);
 ASTNode *ast_ident(const char *name, Loc loc, Arena *arena);
 ASTNode *ast_if_stmt(ASTNode *cond, ASTNode *then_branch, ASTNode *else_branch, Loc loc,
                      Arena *arena);

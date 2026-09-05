@@ -1602,3 +1602,70 @@ TEST(parser, builtin_va_arg_pointer_type)
     EXPECT_TRUE(type_is_ptr(va->type));
     arena_free(a);
 }
+
+/* --- Phase 16b: function-pointer declarator shapes --- */
+
+TEST(parser, fn_ptr_declarator)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int (*fp)(int);", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_STR_EQ(vd->name, "fp");
+    EXPECT_EQ(vd->type->kind, TYPE_PTR);
+    Type *pointee = type_deref(vd->type);
+    EXPECT_EQ(pointee->kind, TYPE_FUNC);
+    EXPECT_TRUE(pointee->func.ret == type_int());
+    EXPECT_EQ(vec_size(pointee->func.params), 1);
+    arena_free(a);
+}
+
+TEST(parser, fn_ptr_typedef)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("typedef int (*Op)(int a, int b);", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTTypedefDecl *td = ast_as(ASTTypedefDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_STR_EQ(td->name, "Op");
+    EXPECT_EQ(td->type->kind, TYPE_PTR);
+    EXPECT_EQ(type_deref(td->type)->kind, TYPE_FUNC);
+    arena_free(a);
+}
+
+TEST(parser, fn_returning_pointer_stays_function)
+{
+    /* `int *f(int)` is a function returning int*, NOT a pointer to function
+       (the lone `*` precedes the name; the function suffix belongs to the
+       definition path). */
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int *f(int a) { return 0; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fd = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(fd->sig.ret_type->kind, TYPE_PTR);
+    EXPECT_EQ(type_sizeof(fd->sig.ret_type), 8);
+    arena_free(a);
+}
+
+TEST(parser, fn_ptr_param)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int apply(int (*fn)(int), int x);", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDecl *fd = ast_as(ASTFuncDecl, (ASTNode *) vec_get(prog->decls, 0));
+    ASTVarDecl *p0 = ast_as(ASTVarDecl, (ASTNode *) vec_get(fd->sig.params, 0));
+    EXPECT_EQ(p0->type->kind, TYPE_PTR);
+    EXPECT_EQ(type_deref(p0->type)->kind, TYPE_FUNC);
+    arena_free(a);
+}
+
+TEST(parser, abstract_fn_ptr_cast_typename)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { int (*fp)(int) = (int (*)(int)) 0; return 0; }", a);
+    EXPECT_NOTNULL(ast);
+    arena_free(a);
+}

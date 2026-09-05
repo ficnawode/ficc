@@ -143,6 +143,19 @@ ASTNode *ast_call_expr(const char *callee, Vec *args, Loc loc, Arena *arena)
     ASTCallExpr *n = ast_new_node(sizeof(ASTCallExpr), AST_CALL_EXPR, loc, arena);
     n->callee = callee;
     n->args = args;
+    n->callee_expr = NULL;
+    return &n->base;
+}
+
+/* A call through a non-identifier function designator (D16.4): `(*fp)(x)`,
+   `p->hash(x)`, `(f)(x)`, or a function-pointer variable redirected by
+   semantic from the named form. */
+ASTNode *ast_call_expr_expr(ASTNode *callee_expr, Vec *args, Loc loc, Arena *arena)
+{
+    ASTCallExpr *n = ast_new_node(sizeof(ASTCallExpr), AST_CALL_EXPR, loc, arena);
+    n->callee = NULL;
+    n->args = args;
+    n->callee_expr = callee_expr;
     return &n->base;
 }
 
@@ -151,6 +164,7 @@ ASTNode *ast_ident(const char *name, Loc loc, Arena *arena)
     ASTIdent *n = ast_new_node(sizeof(ASTIdent), AST_IDENT, loc, arena);
     n->name = name;
     n->decl = NULL;
+    n->is_func = false;
     return &n->base;
 }
 
@@ -613,7 +627,15 @@ static void ast_dump_rec(ASTNode *node, int depth)
         case AST_CALL_EXPR:
         {
             ASTCallExpr *call_expr = ast_as(ASTCallExpr, node);
-            printf("CALL %s (%zu args)\n", call_expr->callee, vec_size(call_expr->args));
+            if (call_expr->callee_expr)
+            {
+                printf("CALL <expr> (%zu args)\n", vec_size(call_expr->args));
+                ast_dump_rec(call_expr->callee_expr, depth + 1);
+            }
+            else
+            {
+                printf("CALL %s (%zu args)\n", call_expr->callee, vec_size(call_expr->args));
+            }
             dump_node_list(call_expr->args, depth);
             break;
         }

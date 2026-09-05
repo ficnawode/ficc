@@ -62,17 +62,22 @@ typedef enum
 
 #define NO_VREG 0xFFFFFFFFU
 
-/* IrOperand: immediate, virtual register, or global reference.
-   The union is named `u` so every arm is explicit at every use site. */
+/* IrOperand: immediate, virtual register, global, or function reference.
+   The union is named `u` so every arm is explicit at every use site.
+   `is_func` (D16.1) is a function *designator*: the operand's value is the
+   address of the named function (mirrors is_global, whose value is the
+   address of the named object). */
 typedef struct
 {
     bool is_imm;
     bool is_global;
+    bool is_func;
     union
     {
         u32 vreg;
         i64 imm;
         u32 global_index;
+        const char *func_name; /* valid when is_func */
     } u;
 } IrOperand;
 
@@ -112,6 +117,9 @@ typedef struct
     IrOperand *args;
     const char *name;
     bool is_variadic; /* callee is a variadic function (SysV %al at the call) */
+    bool is_indirect; /* D16.4: callee is an operand value, not a named symbol */
+    IrOperand callee; /* indirect-call target (a function pointer), when
+                         is_indirect */
 } IrCallPayload;
 
 typedef struct
@@ -202,8 +210,10 @@ typedef enum
 typedef struct GlobalReloc GlobalReloc;
 struct GlobalReloc
 {
-    u32 offset; /* byte offset into init_data */
-    int target; /* global index whose address is written here */
+    u32 offset;            /* byte offset into init_data */
+    int target;            /* global index whose address is written here (when !is_func) */
+    bool is_func;          /* D16.1: the address written is a *function*'s */
+    const char *func_name; /* the referenced function, when is_func */
 };
 
 typedef struct IrGlobal IrGlobal;
@@ -257,6 +267,7 @@ IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOpera
 IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src);
 IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOperand *args);
 void ir_call_set_variadic(IrInstr *call, bool is_variadic);
+void ir_call_set_indirect(IrInstr *call, IrOperand callee);
 IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offset);
 IrInstr *ir_emit_va_arg(IrBlock *bb, u32 dst, IrOperand ap);
 IrInstr *ir_emit_va_end(IrBlock *bb, IrOperand ap);
@@ -279,6 +290,7 @@ IrInstr *ir_emit_memcpy(IrBlock *bb, IrOperand dst, IrOperand src, u32 size_byte
 IrOperand ir_operand_imm(i64 val);
 IrOperand ir_operand_vreg(u32 vreg);
 IrOperand ir_operand_global(u32 global_index);
+IrOperand ir_operand_func(const char *func_name);
 
 /* dump */
 void ir_dump(IrModule *m);

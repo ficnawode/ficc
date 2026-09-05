@@ -524,6 +524,12 @@ static ExprResult build_int_literal_expr(ASTIntLiteral *lit, IrFunction *f, IrBl
 static ExprResult build_ident_expr(ASTIdent *id, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     (void) f;
+    if (id->is_func)
+    {
+        /* A function designator (§6.3.2.1p4) is its address; like a global,
+           the operand itself carries that value (no load). */
+        return expr_result(ir_operand_func(id->name), bb);
+    }
     ASTVarDecl *decl = id->decl;
     ASSERT(decl != NULL);
     if (decl->is_block_scope && decl->storage != SC_STATIC)
@@ -1020,8 +1026,8 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
     ExprResult left = build_expr(be->left, f, bb, ctx);
     ExprResult right = build_expr(be->right, f, left.block, ctx);
 
-    ArithSpec spec = {be->op, node_type(be->left), node_type(be->right), node_type((ASTNode *) be),
-                      (ASTNode *) be};
+    ArithSpec spec = {be->op, type_decay(node_type(be->left)), type_decay(node_type(be->right)),
+                      node_type((ASTNode *) be), (ASTNode *) be};
     ArithResult ar = lower_arith_into(spec, left.value, right.value, right.block, ctx);
     return expr_result(ar.value, ar.block);
 }
@@ -1044,7 +1050,7 @@ static ExprResult build_compound_assign(ASTBinaryExpr *be, IrFunction *f, IrBloc
     IrOperand cur = load_lvalue(ctx, bb, &lv.slot);
     ExprResult right = build_expr(be->right, f, bb, ctx);
     bb = right.block;
-    Type *rt = node_type(be->right);
+    Type *rt = type_decay(node_type(be->right));
 
     ArithSpec spec;
     spec.op = plain_op(be->op);
@@ -1188,29 +1194,42 @@ static ExprResult build_va_builtin(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, 
 
 static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
-    Type *callee_type = strmap_get(ctx->func_types, ce->callee);
-    if (!callee_type)
+    /* Resolve the callee: a named function (direct) or a runtime value
+       (indirect, D16.4 — `(*fp)(x)`, `p->hash(x)`, `fp(x)` through a
+       function-pointer variable). */
+    Type *callee_type;
+    IrOperand indirect_callee = ir_operand_imm(0);
+    bool indirect = ce->callee_expr != NULL;
+    if (indirect)
     {
-        /* Compiler builtins (__builtin_va_start/__builtin_va_end): never in
-           func_types. A user
-           definition with the same name wins (semantic resolves it there and
-           this branch is unreachable for it), so the name is ours to lower. */
-        return build_va_builtin(ce, f, bb, ctx);
+        ExprResult cres = build_expr(ce->callee_expr, f, bb, ctx);
+        bb = cres.block;
+        indirect_callee = cres.value;
+        callee_type = node_type(ce->callee_expr);
+        if (type_is_function(callee_type))
+        {
+            callee_type = type_decay(callee_type);
+        }
+        ASSERT(callee_type && type_is_ptr(callee_type));
+        callee_type = type_deref(callee_type);
+    }
+    else
+    {
+        callee_type = strmap_get(ctx->func_types, ce->callee);
+        if (!callee_type)
+        {
+            /* Compiler builtins (__builtin_va_start/__builtin_va_end): never
+               in func_types. A user
+               definition with the same name wins (semantic resolves it there
+               and this branch is unreachable for it), so the name is ours to
+               lower. */
+            return build_va_builtin(ce, f, bb, ctx);
+        }
     }
     ASSERT(callee_type->kind == TYPE_FUNC);
     Type *callee_ret = callee_type->func.ret;
     bool is_variadic = callee_type->func.is_variadic;
-    IrFunction *callee_ir = NULL;
-    size_t nfuncs = vec_size(ctx->mod->funcs);
-    for (size_t fi = 0; fi < nfuncs; fi++)
-    {
-        IrFunction *cf = (IrFunction *) vec_get(ctx->mod->funcs, fi);
-        if (strcmp(cf->name, ce->callee) == 0)
-        {
-            callee_ir = cf;
-            break;
-        }
-    }
+    size_t n_declared = vec_size(callee_type->func.params);
 
     /* By-memory convention (D4.2): a record return is written through a hidden
        sret pointer argument (allocated here); record arguments are copied into
@@ -1244,17 +1263,17 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
             args[slot] = ir_operand_vreg(tmp);
             continue;
         }
+        /* The parameter type drives default argument promotions: the typed
+           signature's params (the interned function type from D15.1) for the
+           named part, then the variadic tail re-ranks char/short/_Bool to
+           int (§6.5.2.2p7). */
         Type *param_type = NULL;
-        if (callee_ir && slot < vec_size(callee_ir->params))
+        if (i < n_declared)
         {
-            IrParam *p = (IrParam *) vec_get(callee_ir->params, slot);
-            param_type = p->type;
+            param_type = (Type *) vec_get(callee_type->func.params, i);
         }
         else if (is_variadic)
         {
-            /* Default argument promotions on the variadic tail (§6.5.2.2p7):
-               char/short/_Bool re-rank to int; float would go to double (no
-               floats yet). */
             param_type = type_promote(arg_type);
         }
         else
@@ -1274,7 +1293,16 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
     {
         dst = callee_ret->kind == TYPE_VOID ? NO_VREG : alloc_vreg_from_type(ctx, callee_ret);
     }
-    IrInstr *call = ir_emit_call(bb, dst, ce->callee, total_args, args);
+    IrInstr *call;
+    if (indirect)
+    {
+        call = ir_emit_call(bb, dst, "", total_args, args);
+        ir_call_set_indirect(call, indirect_callee);
+    }
+    else
+    {
+        call = ir_emit_call(bb, dst, ce->callee, total_args, args);
+    }
     ir_call_set_variadic(call, is_variadic);
     if (sret)
     {
@@ -1287,6 +1315,12 @@ static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
 {
     ExprResult ptr_res = build_expr(ue->operand, f, bb, ctx);
     Type *result_type = node_type((ASTNode *) ue);
+    if (type_is_function(result_type))
+    {
+        /* `*fp` yields the function designator, whose value is the function's
+           address — the same pointer we already hold (§6.3.2.1p4). */
+        return ptr_res;
+    }
     if (type_is_record(result_type) || type_is_array(result_type))
     {
         /* Records/arrays are memory: the pointer is the value, no load. */
@@ -1340,6 +1374,11 @@ static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, 
     if (operand->kind == AST_IDENT)
     {
         ASTIdent *id = ast_as(ASTIdent, operand);
+        if (id->is_func)
+        {
+            /* `&f` = the function's address, identical to the designator. */
+            return expr_result(ir_operand_func(id->name), bb);
+        }
         ASTVarDecl *decl = id->decl;
         ASSERT(decl != NULL);
         u32 midx = NO_VREG;
@@ -1618,15 +1657,35 @@ static void ir_global_add_reloc(IrGlobal *g, u32 offset, int target, Arena *aren
     GlobalReloc *r = arena_alloc(arena, sizeof(GlobalReloc), _Alignof(GlobalReloc));
     r->offset = offset;
     r->target = target;
+    r->is_func = false;
+    r->func_name = NULL;
+    vec_push(g->relocs, r);
+}
+
+/* A data-side function-address relocation (D16.1): a file-scope function-
+   pointer initializer writes the function's address here. elf.c resolves it
+   against the function's symbol like the code-side R_X86_64_32S loads. */
+static void ir_global_add_func_reloc(IrGlobal *g, u32 offset, const char *func_name, Arena *arena)
+{
+    if (!g->relocs)
+    {
+        g->relocs = vec_new(arena);
+    }
+    GlobalReloc *r = arena_alloc(arena, sizeof(GlobalReloc), _Alignof(GlobalReloc));
+    r->offset = offset;
+    r->target = -1;
+    r->is_func = true;
+    r->func_name = func_name;
     vec_push(g->relocs, r);
 }
 
 /* Resolve an initializer leaf to the global whose address it names (an address
    constant, §6.6p9): `&global`, `&static`, or a string literal in pointer
    position. `static_map` may be NULL when no block-scope statics are visible.
-   Returns the global index, or -1 if the leaf is not an address constant. */
+Returns the global index, or -2 with *out_func set for a function-address
+    relocation (D16.1), or -1 if the leaf is not an address constant. */
 static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
-                                   U64Map *static_map, Arena *arena);
+                                   U64Map *static_map, Arena *arena, const char **out_func);
 
 /* Serialize an anonymous file-scope compound literal (D12.9): `int *p =
    &(int){5};` at file scope turns the literal into an anonymous IrGlobal whose
@@ -1658,11 +1717,23 @@ static u32 emit_file_scope_compound(ASTCompoundLiteral *cl, IrModule *mod, Arena
 }
 
 static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
-                                   U64Map *static_map, Arena *arena)
+                                   U64Map *static_map, Arena *arena, const char **out_func)
 {
+    *out_func = NULL;
     if (value->kind == AST_STRING_LITERAL)
     {
         return (int) ir_add_string_global(ast_as(ASTStringLiteral, value), mod, arena);
+    }
+    if (value->kind == AST_IDENT)
+    {
+        /* A bare function designator as an address constant (D16.1):
+           `int (*fp)(int) = f;` / a file-scope fn-ptr table. */
+        ASTIdent *id = ast_as(ASTIdent, value);
+        if (id->is_func)
+        {
+            *out_func = id->name;
+            return -2; /* function-address relocation */
+        }
     }
     if (value->kind == AST_UNARY_EXPR)
     {
@@ -1679,7 +1750,14 @@ static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global
             }
             if (u->operand->kind == AST_IDENT)
             {
-                ASTVarDecl *decl = ast_as(ASTIdent, u->operand)->decl;
+                ASTIdent *id = ast_as(ASTIdent, u->operand);
+                if (id->is_func)
+                {
+                    /* `&f` — the designator's address, a function reloc. */
+                    *out_func = id->name;
+                    return -2;
+                }
+                ASTVarDecl *decl = id->decl;
                 if (!decl)
                 {
                     return -1;
@@ -1734,7 +1812,14 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
             memcpy(buf + w->offset, sl->data, len);
             continue;
         }
-        int target = serializer_reloc_target(w->value, mod, global_map, static_map, arena);
+        const char *func_name = NULL;
+        int target =
+            serializer_reloc_target(w->value, mod, global_map, static_map, arena, &func_name);
+        if (func_name)
+        {
+            ir_global_add_func_reloc(g, w->offset, func_name, arena);
+            continue;
+        }
         if (target >= 0)
         {
             ir_global_add_reloc(g, w->offset, target, arena);
@@ -1788,7 +1873,9 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
         /* char *p = "..." → 8-byte address, patched by a relocation against
            the string symbol. Read-only pointer (`char * const p`) in
            .rodata, plain pointer in .data. */
-        int str_idx = serializer_reloc_target(vd->init, mod, global_map, static_map, arena);
+        const char *unused_func = NULL;
+        int str_idx =
+            serializer_reloc_target(vd->init, mod, global_map, static_map, arena, &unused_func);
         g->init_data = encode_const_bytes(arena, 0, 8);
         g->init_len = 8;
         g->section = is_const ? IR_SECTION_RODATA : IR_SECTION_DATA;

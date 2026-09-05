@@ -108,6 +108,23 @@ static ASTVarDecl *scope_top_lookup(SemanticCtx *ctx, const char *name)
     return strmap_get(current_scope(ctx), name);
 }
 
+/* A function *definition* (AST_FUNC_DEF) and a function *prototype*
+   (AST_FUNC_DECL) both embed a FuncSig after their ASTNode base (D16.2), so
+   either kind reduces to the same signature record. */
+static FuncSig *func_sig_of(ASTNode *node)
+{
+    if (node->kind == AST_FUNC_DEF)
+    {
+        return &ast_as(ASTFuncDef, node)->sig;
+    }
+    return &ast_as(ASTFuncDecl, node)->sig;
+}
+
+static bool func_node_defined(ASTNode *node)
+{
+    return node->kind == AST_FUNC_DEF;
+}
+
 static bool check_identifier_expr(ASTIdent *ident, SemanticCtx *ctx)
 {
     ASTVarDecl *decl = scope_lookup(ctx, ident->name);
@@ -115,15 +132,26 @@ static bool check_identifier_expr(ASTIdent *ident, SemanticCtx *ctx)
     {
         decl = strmap_get(ctx->global_vars, ident->name);
     }
-    if (!decl)
+    if (decl)
     {
-        sem_error(ident->base.loc, "undeclared identifier '%s'", ident->name);
-        ctx->error = true;
-        return false;
+        ident->decl = decl;
+        ident->base.expr_type = type_decay(decl->type);
+        return true;
     }
-    ident->decl = decl;
-    ident->base.expr_type = type_decay(decl->type);
-    return true;
+    /* A function designator (§6.3.2.1p4): the name of a declared or defined
+       function. Its value is a pointer to the function; `&f`, `f`, `*fp` all
+       denote the same address (D16.1 — pointer-to-function is TYPE_PTR whose
+       pointee is the interned TYPE_FUNC). */
+    ASTNode *fnode = strmap_get(ctx->globals, ident->name);
+    if (fnode)
+    {
+        ident->is_func = true;
+        ident->base.expr_type = type_ptr(func_sig_of(fnode)->func_type);
+        return true;
+    }
+    sem_error(ident->base.loc, "undeclared identifier '%s'", ident->name);
+    ctx->error = true;
+    return false;
 }
 
 static bool is_comparison_op(BinOpKind op)
@@ -238,6 +266,12 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     }
     Type *lt = binary_expr->left->expr_type;
     Type *rt = binary_expr->right->expr_type;
+    /* Array and function designators decay to pointers in value positions
+       (§6.3.2.1p3/p4): a function operand used where a value is expected is
+       its address. Identifiers already decay in check_identifier_expr; this
+       folds nested designators like `(*fp)` in `fp == *fp`. */
+    lt = type_decay(lt);
+    rt = type_decay(rt);
     Type *result = NULL;
     bool left_void_ok = binary_expr->op == BIN_COMMA; /* §6.5.17p2: the comma's
                                 left operand is evaluated as a void expression */
@@ -389,7 +423,16 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
         }
         if (operand->kind == AST_IDENT)
         {
-            ASTVarDecl *decl = ast_as(ASTIdent, operand)->decl;
+            ASTIdent *id = ast_as(ASTIdent, operand);
+            if (id->is_func)
+            {
+                /* `&f`: the function designator is already a pointer to the
+                   function (its decayed form), so the address of a function is
+                   that same pointer (D16.1). */
+                unary_expr->base.expr_type = op_type;
+                return true;
+            }
+            ASTVarDecl *decl = id->decl;
             /* Any lvalue identifier is addressable: file globals and block
                statics are address constants, and block-scope autos spill to a
                stack slot (Phase 9b). */
@@ -564,20 +607,6 @@ static bool check_va_arg_expr(ASTVaArgExpr *va, SemanticCtx *ctx)
 /* A function *definition* (AST_FUNC_DEF) and a function *prototype*
    (AST_FUNC_DECL) both embed a FuncSig after their ASTNode base (D16.2), so
    either kind reduces to the same signature record. */
-static FuncSig *func_sig_of(ASTNode *node)
-{
-    if (node->kind == AST_FUNC_DEF)
-    {
-        return &ast_as(ASTFuncDef, node)->sig;
-    }
-    return &ast_as(ASTFuncDecl, node)->sig;
-}
-
-static bool func_node_defined(ASTNode *node)
-{
-    return node->kind == AST_FUNC_DEF;
-}
-
 /* The interned function type (D15.1/D16.1) of a signature: the return type and
    the param types each top-level-unqualified (§6.7.6.3p15), plus the variadic
    bit. type_func interns structurally, so two compatible signatures produce the
@@ -594,46 +623,31 @@ static Type *build_func_type(FuncSig *sig, SemanticCtx *ctx)
     return type_func(type_unqual(sig->ret_type), param_types, sig->is_variadic);
 }
 
-static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
+/* Validate a call's argument list and result against a *signature* (a
+   `Vec<Type*>` of parameter types — the interned function type from D15.1).
+   Shared by named calls (params from the AST) and indirect calls (from the
+   pointed-to function type). Sets the call's result type. */
+static bool check_call_args(ASTCallExpr *call_expr, Type *ret_type, Vec *param_types,
+                            bool is_variadic, const char *callee_name, SemanticCtx *ctx)
 {
-    ASTNode *callee_node = strmap_get(ctx->globals, call_expr->callee);
-    if (!callee_node)
-    {
-        /* __builtin_va_start/__builtin_va_end are compiler builtins, never
-           ASTFuncDefs; semantic validates their fixed signatures, the IR
-           builder recognizes the names and emits OP_VA_START. A user
-           definition of the same name is shadowed by the globals lookup above
-           (user declaration wins). The raw va_start/va_end names are NOT
-           builtins in Phase 15 — they arrive via the Phase 17 stdarg.h shim. */
-        if (strcmp(call_expr->callee, "__builtin_va_start") == 0 ||
-            strcmp(call_expr->callee, "__builtin_va_end") == 0)
-        {
-            return check_va_builtin(call_expr, ctx);
-        }
-        sem_error(call_expr->base.loc, "undeclared function '%s'", call_expr->callee);
-        ctx->error = true;
-        return false;
-    }
-    FuncSig *callee = func_sig_of(callee_node);
-
-    size_t expected = vec_size(callee->params);
+    size_t expected = vec_size(param_types);
     size_t got = vec_size(call_expr->args);
-    if (callee->is_variadic)
+    if (is_variadic)
     {
         /* §6.5.2.2p6: the fixed (named) part is enforced; extra args are
            legal. */
         if (got < expected)
         {
             sem_error(call_expr->base.loc, "function '%s' expects at least %zu arguments, got %zu",
-                      call_expr->callee, expected, got);
+                      callee_name, expected, got);
             ctx->error = true;
             return false;
         }
     }
     else if (expected != got)
     {
-        sem_error(call_expr->base.loc, "function '%s' expects %zu arguments, got %zu",
-                  call_expr->callee, expected, got);
+        sem_error(call_expr->base.loc, "function '%s' expects %zu arguments, got %zu", callee_name,
+                  expected, got);
         ctx->error = true;
         return false;
     }
@@ -657,27 +671,109 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
         {
             continue;
         }
-        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(callee->params, i));
-        if (!type_assignable(param->type, arg->expr_type))
+        if (!type_assignable((Type *) vec_get(param_types, i), arg->expr_type))
         {
-            /* A prototype's parameters may be unnamed (§6.7.6.3), so fall back
-               to the parameter index for the diagnostic. */
-            if (param->name)
-            {
-                sem_error(arg->loc, "incompatible argument type for parameter '%s'", param->name);
-            }
-            else
-            {
-                sem_error(arg->loc, "incompatible argument type for parameter %zu", i + 1);
-            }
+            sem_error(arg->loc, "incompatible argument type for parameter %zu", i + 1);
             ctx->error = true;
             return false;
         }
     }
     /* The function value is an unqualified rvalue even for a const return
        type (`const int f()`). */
-    call_expr->base.expr_type = type_rvalue(callee->ret_type);
+    call_expr->base.expr_type = type_rvalue(ret_type);
     return true;
+}
+
+static bool check_indirect_call(ASTCallExpr *call_expr, SemanticCtx *ctx);
+
+static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
+{
+    if (call_expr->callee_expr)
+    {
+        return check_indirect_call(call_expr, ctx);
+    }
+
+    ASTNode *callee_node = strmap_get(ctx->globals, call_expr->callee);
+    if (!callee_node)
+    {
+        /* __builtin_va_start/__builtin_va_end are compiler builtins, never
+           ASTFuncDefs; semantic validates their fixed signatures, the IR
+           builder recognizes the names and emits OP_VA_START. A user
+           definition of the same name is shadowed by the globals lookup above
+           (user declaration wins). The raw va_start/va_end names are NOT
+           builtins in Phase 15 — they arrive via the Phase 17 stdarg.h shim. */
+        if (strcmp(call_expr->callee, "__builtin_va_start") == 0 ||
+            strcmp(call_expr->callee, "__builtin_va_end") == 0)
+        {
+            return check_va_builtin(call_expr, ctx);
+        }
+        ASTVarDecl *vdecl = scope_lookup(ctx, call_expr->callee);
+        if (!vdecl)
+        {
+            vdecl = strmap_get(ctx->global_vars, call_expr->callee);
+        }
+        if (vdecl)
+        {
+            if (type_is_ptr(vdecl->type) && type_deref(vdecl->type)->kind == TYPE_FUNC)
+            {
+                /* `fp(x)` where `fp` is a function-pointer *variable* is an
+                   indirect call (D16.4): redirect to the callee-expression
+                   form and validate against the pointed-to function type. */
+                ASTNode *ident = ast_ident(call_expr->callee, call_expr->base.loc, ctx->arena);
+                ASTIdent *id = ast_as(ASTIdent, ident);
+                id->decl = vdecl;
+                id->base.expr_type = type_decay(vdecl->type);
+                call_expr->callee_expr = ident;
+                call_expr->callee = NULL;
+                return check_indirect_call(call_expr, ctx);
+            }
+            sem_error(call_expr->base.loc,
+                      "called object '%s' is not a function or function "
+                      "pointer",
+                      call_expr->callee);
+            ctx->error = true;
+            return false;
+        }
+        sem_error(call_expr->base.loc, "undeclared function '%s'", call_expr->callee);
+        ctx->error = true;
+        return false;
+    }
+    FuncSig *callee = func_sig_of(callee_node);
+
+    /* Reduce the declared AST params to their types (the interned function
+       type's identity, exactly as build_func_type does). */
+    Vec *param_types = vec_new(ctx->arena);
+    size_t nparams = vec_size(callee->params);
+    for (size_t i = 0; i < nparams; i++)
+    {
+        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(callee->params, i));
+        vec_push(param_types, type_unqual(param->type));
+    }
+    return check_call_args(call_expr, callee->ret_type, param_types, callee->is_variadic,
+                           call_expr->callee, ctx);
+}
+
+static bool check_indirect_call(ASTCallExpr *call_expr, SemanticCtx *ctx)
+{
+    ASTNode *callee = call_expr->callee_expr;
+    if (!check_expr(callee, ctx))
+    {
+        return false;
+    }
+    Type *ct = callee->expr_type;
+    if (type_is_function(ct))
+    {
+        ct = type_decay(ct); /* a bare function designator in callee position */
+    }
+    if (!type_is_ptr(ct) || type_deref(ct)->kind != TYPE_FUNC)
+    {
+        sem_error(callee->loc, "called object is not a function or function pointer");
+        ctx->error = true;
+        return false;
+    }
+    Type *fn = type_deref(ct);
+    return check_call_args(call_expr, fn->func.ret, fn->func.params, fn->func.is_variadic, "<>",
+                           ctx);
 }
 
 static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx)
@@ -852,10 +948,18 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
                operand of sizeof, so `sizeof(arr)` is the whole array size. */
             if (se->operand->kind == AST_IDENT)
             {
-                ASTVarDecl *decl = ast_as(ASTIdent, se->operand)->decl;
-                if (decl && type_is_array(decl->type))
+                ASTIdent *id = ast_as(ASTIdent, se->operand);
+                if (id->is_func)
                 {
-                    op_type = decl->type;
+                    /* §6.3.2.1p4: a function designator's decay is suppressed
+                       under sizeof — `sizeof(f)` is `sizeof(function)` (a
+                       constraint violation, §6.5.3.4p1); recover the type. */
+                    ASTNode *fnode = strmap_get(ctx->globals, id->name);
+                    op_type = func_sig_of(fnode)->func_type;
+                }
+                else if (id->decl && type_is_array(id->decl->type))
+                {
+                    op_type = id->decl->type;
                 }
             }
             else if (se->operand->kind == AST_COMPOUND_LITERAL &&
@@ -865,9 +969,18 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
                    either (§6.5.2.5p4 note) — the array type survives. */
                 op_type = ast_as(ASTCompoundLiteral, se->operand)->type;
             }
+            /* sizeof on a function type is a constraint violation
+               (§6.5.3.4p1); a function designator reaches here *undecayed*
+               only as a direct sizeof operand (identifiers decay elsewhere). */
             if (op_type->kind == TYPE_VOID)
             {
                 sem_error(node->loc, "sizeof(void) is invalid");
+                ctx->error = true;
+                return NULL;
+            }
+            if (type_is_function(op_type))
+            {
+                sem_error(node->loc, "invalid application of 'sizeof' to a function type");
                 ctx->error = true;
                 return NULL;
             }
@@ -1023,8 +1136,8 @@ static bool check_return_stmt(ASTReturnStmt *return_stmt, SemanticCtx *ctx, Type
     {
         return false;
     }
-    if (return_stmt->expr && type_is_record(ret_type) &&
-        !type_assignable(ret_type, return_stmt->expr->expr_type))
+    Type *expr_type = return_stmt->expr ? type_decay(return_stmt->expr->expr_type) : NULL;
+    if (return_stmt->expr && type_is_record(ret_type) && !type_assignable(ret_type, expr_type))
     {
         sem_error(return_stmt->base.loc,
                   "returning a value incompatible with struct/union return type '%s'",
@@ -1032,8 +1145,8 @@ static bool check_return_stmt(ASTReturnStmt *return_stmt, SemanticCtx *ctx, Type
         ctx->error = true;
         return false;
     }
-    if (return_stmt->expr && type_is_ptr(ret_type) && type_is_ptr(return_stmt->expr->expr_type) &&
-        !type_assignable(ret_type, return_stmt->expr->expr_type))
+    if (return_stmt->expr && type_is_ptr(ret_type) && type_is_ptr(expr_type) &&
+        !type_assignable(ret_type, expr_type))
     {
         sem_error(return_stmt->base.loc, "incompatible pointer type in return");
         ctx->error = true;
@@ -1075,7 +1188,7 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
             }
             if (!handled)
             {
-                if (var_decl->init->kind == AST_UNARY_EXPR)
+                if (var_decl->init->kind == AST_UNARY_EXPR || var_decl->init->kind == AST_IDENT)
                 {
                     if (!plan_ptr_initializer(ctx, var_decl))
                     {
@@ -1670,6 +1783,24 @@ static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
 {
     if (vd->init->kind != AST_UNARY_EXPR)
     {
+        if (vd->init->kind == AST_IDENT)
+        {
+            /* A bare function designator (`fp = f;`, D16.1): an address
+               constant whose reloc the IR serializer emits. The parser only
+               lets function names reach here as values; plan_scalar_write
+               resolves the designator (is_func) via check_expr. */
+            if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_FUNC)
+            {
+                return false;
+            }
+            InitPlan *plan = init_plan_new(ctx, vd->type);
+            if (!plan_scalar_write(ctx, plan, type_unqual(vd->type), 0, vd->init, vd->base.loc))
+            {
+                return false;
+            }
+            vd->plan = plan;
+            return true;
+        }
         return false;
     }
     ASTUnaryExpr *u = ast_as(ASTUnaryExpr, vd->init);
@@ -2149,13 +2280,23 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     {
         return false;
     }
-    Type *tt = type_rvalue(ternary->then_expr->expr_type);
-    Type *te = type_rvalue(ternary->else_expr->expr_type);
+    Type *tt = type_decay(type_rvalue(ternary->then_expr->expr_type));
+    Type *te = type_decay(type_rvalue(ternary->else_expr->expr_type));
     if (type_is_record(tt) || type_is_record(te))
     {
         sem_error(ternary->base.loc, "conditional operator on record type");
         ctx->error = true;
         return false;
+    }
+    if (type_is_ptr(tt) || type_is_ptr(te))
+    {
+        /* §6.5.15p6: both operands are pointers to compatible types (or one is
+           a null pointer constant). The result picks the pointer side — the
+           common case is a function-pointer or data-pointer ternary; decayed
+           function designators reach here as identical ptr-to-function types
+           (D16.1). */
+        ternary->base.expr_type = type_rvalue(type_is_ptr(tt) ? tt : te);
+        return true;
     }
     ternary->base.expr_type = type_common(type_promote(tt), type_promote(te));
     return true;
@@ -2494,7 +2635,7 @@ static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
         }
         if (!handled)
         {
-            if (vd->init->kind == AST_UNARY_EXPR)
+            if (vd->init->kind == AST_UNARY_EXPR || vd->init->kind == AST_IDENT)
             {
                 if (!plan_ptr_initializer(ctx, vd))
                 {
@@ -2750,12 +2891,16 @@ ASTNode *semantic_check(ASTNode *ast, Arena *arena)
         return NULL;
     }
 
-    if (!collect_global_variables(prog, &ctx))
+    /* Functions are collected before globals (D16.1) so that file-scope
+       initializers may reference function designators — their signatures are
+       guaranteed present when global plans are built. Name collisions in
+       either direction are caught by the other pass's reverse map check. */
+    if (!collect_function_definitions(prog, &ctx))
     {
         return NULL;
     }
 
-    if (!collect_function_definitions(prog, &ctx))
+    if (!collect_global_variables(prog, &ctx))
     {
         return NULL;
     }

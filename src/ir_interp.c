@@ -56,6 +56,13 @@ struct InterpCtx
     u64 alloca_limit;
     InterpGlobal *globals;
     u32 nglobals;
+
+    /* Function pseudo-addresses (D16.1): each function gets a stable synthetic
+       "address" so a designator/`&f` value is a usable pointer within the
+       interpreter (compared, stored, passed — and, in Phase 16c, resolved back
+       to the IrFunction for an indirect call). */
+    u64 *func_addrs;
+    u32 nfuncs;
 };
 
 /* Frame: call-stack entry with register file. For a variadic callee, the
@@ -84,6 +91,20 @@ static i64 operand_val(InterpCtx *ctx, IrOperand o, i64 *regs)
     {
         ASSERT(o.u.global_index < ctx->nglobals);
         return (i64) (uintptr_t) ctx->globals[o.u.global_index].data;
+    }
+    if (o.is_func)
+    {
+        for (u32 i = 0; i < ctx->nfuncs; i++)
+        {
+            IrFunction *fn = (IrFunction *) vec_get(ctx->mod->funcs, i);
+            if (strcmp(fn->name, o.u.func_name) == 0)
+            {
+                return (i64) ctx->func_addrs[i];
+            }
+        }
+        interp_error("undefined function '%s'", o.u.func_name);
+        ctx->error = true;
+        return 0;
     }
     ASSERT(o.u.vreg < ctx->nregs);
     return regs[o.u.vreg];
@@ -415,13 +436,41 @@ static i64 eval_icmp(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
+/* Resolve a function pseudo-address (D16.1) back to its IrFunction for an
+   indirect call (D16.4). NULL when the pointer doesn't name any function. */
+static IrFunction *find_func_by_addr(InterpCtx *ctx, i64 addr)
+{
+    for (u32 i = 0; i < ctx->nfuncs; i++)
+    {
+        if ((i64) ctx->func_addrs[i] == addr)
+        {
+            return (IrFunction *) vec_get(ctx->mod->funcs, i);
+        }
+    }
+    return NULL;
+}
+
 static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    IrFunction *callee = strmap_get(ctx->func_map, in->extra.call.name);
-    if (!callee)
+    IrFunction *callee;
+    if (in->extra.call.is_indirect)
     {
-        interp_error("undefined function '%s'", in->extra.call.name);
-        return 1;
+        i64 addr = operand_val(ctx, in->extra.call.callee, regs);
+        callee = find_func_by_addr(ctx, addr);
+        if (!callee)
+        {
+            interp_error("indirect call through an invalid function pointer");
+            return 1;
+        }
+    }
+    else
+    {
+        callee = strmap_get(ctx->func_map, in->extra.call.name);
+        if (!callee)
+        {
+            interp_error("undefined function '%s'", in->extra.call.name);
+            return 1;
+        }
     }
 
     StrMap *saved_block_map = ctx->block_map;
@@ -938,14 +987,42 @@ i64 ir_interp_run(IrModule *m)
             for (size_t r = 0; r < nrelocs; r++)
             {
                 GlobalReloc *gr = (GlobalReloc *) vec_get(ig->relocs, r);
-                u64 addr = (u64) (uintptr_t) globals[gr->target].data;
-                memcpy(globals[i].data + gr->offset, &addr, 8);
+                if (gr->is_func)
+                {
+                    /* A function-address initializer (D16.1): write the
+                       referenced function's pseudo-address (the same stable
+                       values operand_val materializes for designators, so
+                       comparisons and indirect calls agree). */
+                    i64 addr = 0;
+                    for (size_t fi = 0; fi < vec_size(m->funcs); fi++)
+                    {
+                        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+                        if (strcmp(f->name, gr->func_name) == 0)
+                        {
+                            addr = 0x400000000LL + (i64) fi * 8;
+                            break;
+                        }
+                    }
+                    memcpy(globals[i].data + gr->offset, &addr, 8);
+                }
+                else
+                {
+                    u64 addr = (u64) (uintptr_t) globals[gr->target].data;
+                    memcpy(globals[i].data + gr->offset, &addr, 8);
+                }
             }
         }
     }
 
 #define ALLOCA_SIZE (1ULL << 20)
     u8 *alloca_buf = arena_alloc(frame_arena, ALLOCA_SIZE, 8);
+
+    /* Function pseudo-addresses, aligned with m->funcs order (D16.1). */
+    u64 *func_addrs = arena_alloc(frame_arena, (nfuncs ? nfuncs : 1) * sizeof(u64), sizeof(u64));
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        func_addrs[i] = 0x400000000ULL + (u64) i * 8;
+    }
 
     InterpCtx ctx = {
         .mod = m,
@@ -955,6 +1032,8 @@ i64 ir_interp_run(IrModule *m)
         .func_map = func_map,
         .globals = globals,
         .nglobals = nglobals,
+        .func_addrs = func_addrs,
+        .nfuncs = (u32) nfuncs,
         .alloca_base = alloca_buf,
         .alloca_top = 0,
         .alloca_limit = ALLOCA_SIZE,

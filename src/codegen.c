@@ -66,6 +66,7 @@ struct CodegenCtx
     Vec *patches;           /* Vec<CallPatch*> */
     Vec *block_patches;     /* Vec<BranchPatch*> */
     Vec *global_patches;    /* Vec<GlobalPatch*> */
+    Vec *func_patches;      /* Vec<FuncAddrPatch*> — function-address loads */
     Vec *switch_tables;     /* Vec<SwitchTableRec*> */
     u32 save_area_off;      /* register save area offset below %rbp (variadic fns) */
 };
@@ -307,6 +308,8 @@ static X86Operand xop_from_operand(IrOperand op)
 }
 
 static void emit_global_addr_to(ByteBuf *buf, u8 reg, u32 global_idx, Vec *patches, Arena *arena);
+static void emit_func_addr_to(ByteBuf *buf, u8 reg, const char *name, Vec *patches, Arena *arena);
+static u8 vreg_width(CodegenCtx *ctx, u32 vreg);
 static X86Operand lowered_operand(CodegenCtx *ctx, IrOperand op, u8 reg)
 {
     if (op.is_global)
@@ -314,7 +317,24 @@ static X86Operand lowered_operand(CodegenCtx *ctx, IrOperand op, u8 reg)
         emit_global_addr_to(ctx->buf, reg, op.u.global_index, ctx->global_patches, ctx->arena);
         return xop_reg(reg);
     }
+    if (op.is_func)
+    {
+        emit_func_addr_to(ctx->buf, reg, op.u.func_name, ctx->func_patches, ctx->arena);
+        return xop_reg(reg);
+    }
     return xop_from_operand(op);
+}
+
+/* Width of a lowered operand's value. Addresses (globals, function
+   designators/pointers, D16.1) are always 8 bytes; a materialized immediate is
+   treated as 4 (the mov-imm32sx convention, unchanged). */
+static u8 operand_width(CodegenCtx *ctx, IrOperand op)
+{
+    if (op.is_global || op.is_func)
+    {
+        return 8;
+    }
+    return op.is_imm ? 4 : vreg_width(ctx, op.u.vreg);
 }
 
 static u8 modrm(u8 mod, u8 reg, u8 rm)
@@ -726,6 +746,14 @@ static void emit_jmp_reg(ByteBuf *buf, u8 reg)
     bytebuf_append(buf, modrm(3, 4, reg));
 }
 
+/* `call *%reg` (FF /2) — indirect call through a function pointer. */
+static void emit_call_reg(ByteBuf *buf, u8 reg)
+{
+    bytebuf_append(buf, rex(true, false, false, reg >= 8));
+    bytebuf_append(buf, X86_IND_JMP);
+    bytebuf_append(buf, modrm(3, 2, reg));
+}
+
 /* ------------------------------------------------------------------ */
 /* IR lowering                                                         */
 /*                                                                      */
@@ -904,7 +932,7 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
     for (u32 i = 6; i < nargs; i++)
     {
         IrOperand arg = in->extra.call.args[i];
-        u8 w = arg.is_imm ? 4 : vreg_width(ctx, arg.u.vreg);
+        u8 w = operand_width(ctx, arg);
         emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, arg, R_EAX));
         emit_mov(ctx->buf, 8, xop_mem(x86_mem_rsp((i32) (i - 6) * 8)), xop_reg(R_EAX));
     }
@@ -913,7 +941,7 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
     for (i32 i = (i32) n_reg_args - 1; i >= 0; i--)
     {
         IrOperand arg = in->extra.call.args[i];
-        u8 w = arg.is_imm ? 4 : vreg_width(ctx, arg.u.vreg);
+        u8 w = operand_width(ctx, arg);
         emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, arg, R_EAX));
         emit_mov(ctx->buf, w, xop_reg(abi_arg_regs[i]), xop_reg(R_EAX));
     }
@@ -926,7 +954,19 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
         emit_xor_eax_eax(ctx->buf);
     }
 
-    emit_call_placeholder(ctx->buf, in->extra.call.name, ctx->patches, ctx->arena);
+    if (in->extra.call.is_indirect)
+    {
+        /* Indirect call (D16.4): load the callee pointer into %r11 (a SysV
+           caller-saved scratch that is *not* an argument register — %rcx is
+           arg 4 once 5+ args are in flight) and `call *%r11`. %rax keeps the
+           vector count (%al, variadic) and then the result. */
+        emit_mov(ctx->buf, 8, xop_reg(R_R11), lowered_operand(ctx, in->extra.call.callee, R_R11));
+        emit_call_reg(ctx->buf, R_R11);
+    }
+    else
+    {
+        emit_call_placeholder(ctx->buf, in->extra.call.name, ctx->patches, ctx->arena);
+    }
 
     if (in->result != NO_VREG)
     {
@@ -1021,7 +1061,7 @@ static void lower_ret(IrInstr *in, CodegenCtx *ctx)
     if (in->nops > 0)
     {
         IrOperand val = in->ops[0];
-        u8 w = val.is_imm ? 4 : vreg_width(ctx, val.u.vreg);
+        u8 w = operand_width(ctx, val);
         emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, val, R_ECX));
     }
     else
@@ -1060,7 +1100,7 @@ static void lower_switch(IrInstr *in, CodegenCtx *ctx)
        (full width for w=8/imm, sign- or zero-extended otherwise). Both the
        chain compares and the table's range/index math then run in 64 bits. */
     IrOperand src = in->ops[0];
-    u8 w = src.is_imm ? 8 : vreg_width(ctx, src.u.vreg);
+    u8 w = operand_width(ctx, src);
     if (src.is_imm)
     {
         emit_mov(ctx->buf, 8, xop_reg(R_EAX), xop_imm(src.u.imm));
@@ -1302,6 +1342,20 @@ static void emit_global_addr(ByteBuf *buf, u32 global_idx, Vec *patches, Arena *
     emit_global_addr_to(buf, R_EAX, global_idx, patches, arena);
 }
 
+static void emit_func_addr_to(ByteBuf *buf, u8 reg, const char *name, Vec *patches, Arena *arena)
+{
+    /* Same encoding as emit_global_addr_to: `mov reg, imm32sx` (C7 /0),
+       relocated with R_X86_64_32S against the function's symbol. */
+    bytebuf_append(buf, rex(true, false, false, reg >= 8));
+    bytebuf_append(buf, X86_MOV_RM_IMM32SX);
+    bytebuf_append(buf, modrm(3, 0, reg));
+    FuncAddrPatch *fp = arena_alloc(arena, sizeof(FuncAddrPatch), sizeof(void *));
+    fp->name = name;
+    fp->offset = bytebuf_len(buf);
+    vec_push(patches, fp);
+    bytebuf_append_u32(buf, 0);
+}
+
 static void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src)
 {
     u8 rex_b = rex(true, dst_reg >= 8, reg_is_extended(src.index), reg_is_extended(src.base));
@@ -1315,6 +1369,10 @@ static X86Mem load_ptr(CodegenCtx *ctx, IrOperand ptr)
     if (ptr.is_global)
     {
         emit_global_addr(ctx->buf, ptr.u.global_index, ctx->global_patches, ctx->arena);
+    }
+    else if (ptr.is_func)
+    {
+        emit_func_addr_to(ctx->buf, R_EAX, ptr.u.func_name, ctx->func_patches, ctx->arena);
     }
     else
     {
@@ -1462,10 +1520,11 @@ static void scan_vreg(u32 *max, u32 vreg)
 
 static void scan_operand(u32 *max, IrOperand op)
 {
-    if (!op.is_imm)
+    if (op.is_imm || op.is_global || op.is_func)
     {
-        scan_vreg(max, op.u.vreg);
+        return;
     }
+    scan_vreg(max, op.u.vreg);
 }
 
 static void scan_instr_vregs(u32 *max, IrInstr *in)
@@ -1477,6 +1536,10 @@ static void scan_instr_vregs(u32 *max, IrInstr *in)
     }
     if (in->opcode == OP_CALL)
     {
+        if (in->extra.call.is_indirect)
+        {
+            scan_operand(max, in->extra.call.callee);
+        }
         for (u32 a = 0; a < in->extra.call.nargs; a++)
         {
             scan_operand(max, in->extra.call.args[a]);
@@ -1633,10 +1696,15 @@ static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
                 emit_global_addr(ctx->buf, pc->src.u.global_index, ctx->global_patches, ctx->arena);
                 emit_mov(ctx->buf, 8, xop_vreg(pc->dst_vreg), xop_reg(R_EAX));
             }
+            else if (pc->src.is_func)
+            {
+                emit_func_addr_to(ctx->buf, R_EAX, pc->src.u.func_name, ctx->func_patches,
+                                  ctx->arena);
+                emit_mov(ctx->buf, 8, xop_vreg(pc->dst_vreg), xop_reg(R_EAX));
+            }
             else
             {
-                u8 pw = pc->src.is_imm ? vreg_width(ctx, pc->dst_vreg)
-                                       : vreg_width(ctx, pc->src.u.vreg);
+                u8 pw = operand_width(ctx, pc->src);
                 emit_mov(ctx->buf, pw, xop_reg(R_EAX), lowered_operand(ctx, pc->src, R_ECX));
                 emit_mov(ctx->buf, pw, xop_vreg(pc->dst_vreg), xop_reg(R_EAX));
             }
@@ -1666,6 +1734,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     Vec *patches = vec_new(arena);
     Vec *block_patches = vec_new(arena);
     Vec *global_patches = vec_new(arena);
+    Vec *func_patches = vec_new(arena);
 
     FrameInfo fr = frame_plan(f);
     emit_prologue(buf, f, mod, &fr);
@@ -1689,6 +1758,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         .patches = patches,
         .block_patches = block_patches,
         .global_patches = global_patches,
+        .func_patches = func_patches,
         .switch_tables = vec_new(arena),
         .save_area_off = fr.save_area_off,
     };
@@ -1746,6 +1816,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     cf->offset = 0;
     cf->patches = patches;
     cf->global_patches = global_patches;
+    cf->func_patches = func_patches;
     cf->is_static = f->is_static;
 }
 

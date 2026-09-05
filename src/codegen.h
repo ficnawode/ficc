@@ -23,6 +23,15 @@ typedef struct
     size_t text_offset; /* absolute byte offset of the rel32 field within .text */
 } ExternCall;
 
+/* Taking the *address* of a function (`&f`, or `f` as a designator value,
+   D16.1): `mov $f, imm32sx` with an R_X86_64_32S relocation against the
+   function symbol (defined in-module or SHN_UNDEF extern). */
+typedef struct
+{
+    const char *name;
+    size_t offset; /* byte offset of the immediate within the function's bytebuf */
+} FuncAddrPatch;
+
 /* Per-function machine code record */
 typedef struct CodegenFunc CodegenFunc;
 struct CodegenFunc
@@ -32,6 +41,7 @@ struct CodegenFunc
     size_t offset;       /* start position in .text */
     Vec *patches;        /* Vec<CallPatch*> — function call patches */
     Vec *global_patches; /* Vec<GlobalPatch*> — global-data reference patches */
+    Vec *func_patches;   /* Vec<FuncAddrPatch*> — function-address loads (D16.1) */
     bool is_static;      /* emit as STB_LOCAL in the object file */
 };
 

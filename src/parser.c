@@ -146,6 +146,9 @@ static bool name_declare(ParserCtx *p, const char *name, ParserBindingKind kind,
 static Type *parse_type_specifier(ParserCtx *p);
 static Type *parse_abstract_declarator(ParserCtx *p, Type *base);
 static Type *parse_array_suffix(ParserCtx *p, Type *type);
+static Vec *parse_param_list(ParserCtx *p, bool *out_is_variadic);
+static bool parse_declarator_ex(ParserCtx *p, Type *base, Type **out_type, const char **out_name,
+                                bool name_optional);
 
 /* Declaration specifiers: the base type of a declaration plus the tag-
    definition node produced by an inline *tagged* struct/union/enum
@@ -832,8 +835,126 @@ static Type *parse_type_specifier(ParserCtx *p)
    (`{* const}*`): a type-name in cast/sizeof position, which cannot carry a
    name. Array suffixes remain the caller's (casts/sizeof route them through
    parse_array_suffix). */
+static Type *ptr_n(Type *t, u32 n)
+{
+    for (u32 i = 0; i < n; i++)
+    {
+        t = type_ptr(t);
+    }
+    return t;
+}
+
+/* Number of leading pointer layers on `t` (and the innermost non-pointer
+   type, via *out_innermost). Used to re-interpret the parenthesized
+   declarator `(*fp)`: its pointer layers become the *outermost* wrapper
+   (pointer to function), so `int (*fp)(int)` is ready "fp is pointer to
+   function(int) returning int", not "function returning pointer". */
+static u32 ptr_depth(Type *t, Type **out_innermost)
+{
+    u32 n = 0;
+    while (t->kind == TYPE_PTR)
+    {
+        n++;
+        t = t->ptr.pointee;
+    }
+    *out_innermost = t;
+    return n;
+}
+
+/* A parenthesized declarator core: `(*name)`, `(*name)(params)`, `(*)`, or
+   `(*)(params)` (D16.1 — pointer-to-function). Starts after the `(`. Parses the
+   inner declarator recursively, then consumes any `[dims]`/`(params)` suffixes
+   that belong to *this* level. `name_optional` allows the abstract form.
+   `nptr` is the leading pointer count of this level (parsed by the caller
+   *before* the `(`): it folds into the return/element type of the first
+   suffix, so `int *(*fp)(void)` is a pointer to a function returning int*. */
+static bool parse_decl_group(ParserCtx *p, Type *base, u32 nptr, Type **out_type,
+                             const char **out_name, bool name_optional)
+{
+    Type *inner;
+    const char *inner_name = NULL;
+    if (!parse_declarator_ex(p, base, &inner, &inner_name, name_optional))
+    {
+        return false;
+    }
+    if (!parser_expect(p, TOK_RPAREN, "')'"))
+    {
+        return false;
+    }
+
+    Type *core;
+    u32 inner_ptrs = ptr_depth(inner, &core);
+
+    /* Suffixes (array/function) at the group's level. The leading pointers of
+       this level fold into the first suffix as return/element type; the
+       *inner* pointers wrap the whole. */
+    Type *suffix_type = core;
+    while (parser_peek(p)->kind == TOK_LBRACKET || parser_peek(p)->kind == TOK_LPAREN)
+    {
+        if (parser_peek(p)->kind == TOK_LBRACKET)
+        {
+            suffix_type = parse_array_suffix(p, ptr_n(suffix_type, nptr));
+            if (!suffix_type)
+            {
+                return false;
+            }
+            nptr = 0;
+        }
+        else
+        {
+            /* Function suffix: like the function-definition path, the `(` is
+               consumed *before* parse_param_list. */
+            parser_advance(p);
+            bool variadic = false;
+            Vec *params = parse_param_list(p, &variadic);
+            if (!params)
+            {
+                return false;
+            }
+            if (!parser_expect(p, TOK_RPAREN, "')'"))
+            {
+                return false;
+            }
+            /* type_func interns a signature over *types* (D15.1); the param
+               list is a Vec of ASTVarDecls, so reduce it to their (already
+               decayed, unqualified) types, exactly like semantic's
+               build_func_type. */
+            Vec *param_types = vec_new(p->arena);
+            size_t nparams = vec_size(params);
+            for (size_t i = 0; i < nparams; i++)
+            {
+                ASTVarDecl *pd = ast_as(ASTVarDecl, (ASTNode *) vec_get(params, i));
+                vec_push(param_types, type_unqual(pd->type));
+            }
+            suffix_type = type_func(ptr_n(suffix_type, nptr), param_types, variadic);
+            nptr = 0;
+        }
+    }
+    suffix_type = ptr_n(suffix_type, nptr);
+    *out_type = ptr_n(suffix_type, inner_ptrs);
+    *out_name = inner_name;
+    return true;
+}
+
+/* Abstract declarator with no identifier: `{*const}* [ ( group ) ]` for casts
+   and type-names. The group may carry a `(params)` suffix. A trailing bare
+   abstract group `(*)` is rejected (an abstract declarator needs a suffix to
+   mean anything). */
 static Type *parse_abstract_declarator(ParserCtx *p, Type *base)
 {
+    if (parser_peek(p)->kind == TOK_LPAREN)
+    {
+        /* `( *... )( ... )` — parse_decl_group consumes the whole group
+           including its closing `)` and the enclosing `(params)` suffix. */
+        parser_advance(p);
+        Type *type;
+        const char *name = NULL;
+        if (!parse_decl_group(p, base, 0, &type, &name, true))
+        {
+            return NULL;
+        }
+        return type;
+    }
     while (parser_peek(p)->kind == TOK_STAR)
     {
         parser_advance(p);
@@ -847,41 +968,85 @@ static Type *parse_abstract_declarator(ParserCtx *p, Type *base)
     return base;
 }
 
-/* A concrete declarator `{* const}* name [dims]` attached to a specifier's
-   base type. `int *a, b;` gives a and b the same base with independent
-   decorators (`b` stays `int`). */
-static bool parse_declarator(ParserCtx *p, Type *base, Type **out_type, const char **out_name)
+/* The concrete-declarator engine: `{*const}*` pointer chain, then either a
+   parenthesized declarator (whose enclosing `(params)`/`[dims]` suffix comes
+   here) or an identifier (whose `(params)` suffix is left to the caller — the
+   function-definition/prototype path — and whose `[dims]` suffix is consumed).
+   `name_optional` tolerates the abstract nameless form (parameters).
+   Pointer-level const (`int * const p`) is preserved: consts that follow a `*`
+   qualify the pointer just formed, applied here to the outermost constructed
+   pointer layer. */
+static bool parse_declarator_ex(ParserCtx *p, Type *base, Type **out_type, const char **out_name,
+                                bool name_optional)
 {
     *out_type = base;
     *out_name = NULL;
 
+    /* Leading pointers — folded into the return/element type of this level's
+       first suffix, or wrapped about the bare declarator. */
+    u32 nptr = 0;
+    u32 nconst = 0;
     while (parser_peek(p)->kind == TOK_STAR)
     {
         parser_advance(p);
-        *out_type = type_ptr(*out_type);
+        nptr++;
         while (parser_peek(p)->kind == TOK_KW_CONST)
         {
             parser_advance(p);
-            *out_type = type_const(*out_type);
+            nconst++;
         }
     }
 
-    Token *name = parser_peek(p);
-    if (name->kind != TOK_IDENT)
+    if (parser_peek(p)->kind == TOK_LPAREN)
+    {
+        /* Parenthesized declarator: `(*fp)` / `(*)(params)`. */
+        parser_advance(p);
+        if (!parse_decl_group(p, base, nptr, out_type, out_name, true))
+        {
+            return false;
+        }
+        return true;
+    }
+
+    if (parser_peek(p)->kind == TOK_IDENT)
+    {
+        Token *name = parser_peek(p);
+        parser_advance(p);
+        *out_name = name->payload.str;
+    }
+    else if (!name_optional)
     {
         parser_error(p, "expected declarator name");
         return false;
     }
-    parser_advance(p);
-    *out_name = name->payload.str;
 
-    Type *with_dims = parse_array_suffix(p, *out_type);
-    if (!with_dims)
+    Type *type = base;
+    if (parser_peek(p)->kind == TOK_LBRACKET)
     {
-        return false;
+        type = parse_array_suffix(p, ptr_n(type, nptr));
+        if (!type)
+        {
+            return false;
+        }
+        nptr = 0;
     }
-    *out_type = with_dims;
+    type = ptr_n(type, nptr);
+    for (u32 i = 0; i < nconst; i++)
+    {
+        type = type_const(type);
+    }
+    *out_type = type;
     return true;
+}
+
+/* A concrete declarator `{* const}* name [dims]` attached to a specifier's
+   base type. `int *a, b;` gives a and b the same base with independent
+   decorators (`b` stays `int`). A parenthesized `(*name)(params)` folds the
+   function suffix into the pointer-to-function type (D16.1). A plain name's
+   `(params)` is left for the caller (function definitions/prototypes). */
+static bool parse_declarator(ParserCtx *p, Type *base, Type **out_type, const char **out_name)
+{
+    return parse_declarator_ex(p, base, out_type, out_name, false);
 }
 
 /* The `name (= init)?` run of an init-declarator list, minus specifiers. */
@@ -934,45 +1099,13 @@ static bool parse_one_declarator(ParserCtx *p, Type *base, StorageClass storage,
     return true;
 }
 
-/* A *parameter* declarator: `{* const}* [name] [dims]`. The name is optional
-   in a function declaration/prototype (C11 §6.7.6.3 — `int f(int, int)` is
-   legal, and unnamed params may still carry abstract pointer declarators,
-   `int f(int *, int)`), but a *definition* must name every parameter
-   (§6.9.1p6) — the definition branch enforces that after deciding which form
-   it parsed. Unlike parse_declarator (which requires a name), an absent name
-   is not an error here. */
-static bool parse_param_declarator(ParserCtx *p, Type *base, Type **out_type, const char **out_name)
-{
-    *out_type = base;
-    *out_name = NULL;
-
-    while (parser_peek(p)->kind == TOK_STAR)
-    {
-        parser_advance(p);
-        *out_type = type_ptr(*out_type);
-        while (parser_peek(p)->kind == TOK_KW_CONST)
-        {
-            parser_advance(p);
-            *out_type = type_const(*out_type);
-        }
-    }
-
-    if (parser_peek(p)->kind == TOK_IDENT)
-    {
-        Token *name = parser_peek(p);
-        parser_advance(p);
-        *out_name = name->payload.str;
-    }
-
-    Type *with_dims = parse_array_suffix(p, *out_type);
-    if (!with_dims)
-    {
-        return false;
-    }
-    *out_type = with_dims;
-    return true;
-}
-
+/* A *parameter* declarator: `{*const}* [name] [dims]`, plus the parenthesized
+   form `(*name)(params)` / `(*)(params)` for function-pointer parameters
+   (D16.1). The name is optional in a function declaration/prototype
+   (C11 §6.7.6.3 — `int f(int, int)` is legal, and unnamed params may still
+   carry abstract declarators, `int f(int *, int)`), but a *definition* must
+   name every parameter (§6.9.1p6) — the definition branch enforces that.
+   parse_declarator_ex with name_optional=true is exactly this. */
 static ASTNode *parse_param(ParserCtx *p)
 {
     Token *start = parser_peek(p);
@@ -984,7 +1117,7 @@ static ASTNode *parse_param(ParserCtx *p)
 
     Type *type;
     const char *name;
-    if (!parse_param_declarator(p, specs.type, &type, &name))
+    if (!parse_declarator_ex(p, specs.type, &type, &name, true))
     {
         return NULL;
     }
@@ -2169,6 +2302,37 @@ static ASTNode *parse_postfix_ops(ParserCtx *p, ASTNode *node)
             parser_advance(p);
             node = ast_incdec_expr(node, t->kind == TOK_PLUS_PLUS, true, t->loc, p->arena);
         }
+        else if (t->kind == TOK_LPAREN)
+        {
+            /* A call through a non-identifier designator (D16.4): `(*fp)(x)`,
+               `p->hash(x)`, `(f)(x)` — anything `parse_identifier_expr` does
+               not already handle. `name(...)` stays the named-call form so
+               builtins and direct calls keep their string key. */
+            parser_advance(p);
+            Vec *args = vec_new(p->arena);
+            if (parser_peek(p)->kind != TOK_RPAREN)
+            {
+                while (true)
+                {
+                    ASTNode *arg = parse_assign(p);
+                    if (!arg)
+                    {
+                        return NULL;
+                    }
+                    vec_push(args, arg);
+                    if (parser_peek(p)->kind != TOK_COMMA)
+                    {
+                        break;
+                    }
+                    parser_advance(p);
+                }
+            }
+            if (!parser_expect(p, TOK_RPAREN, "')'"))
+            {
+                return NULL;
+            }
+            node = ast_call_expr_expr(node, args, t->loc, p->arena);
+        }
         else
         {
             break;
@@ -2854,6 +3018,20 @@ static bool resolve_constant_init(ParserCtx *p, ASTVarDecl *vd, ASTNode *expr)
         vd->init = expr;
         return true;
     }
+    if (expr->kind == AST_IDENT)
+    {
+        /* A bare function designator is an address constant (§6.6p9) usable
+           as a value (D16.1): `fp = f;`, a file-scope fn-ptr table element.
+           The parser knows function names (BIND_FUNC was registered when the
+           definition was parsed); the serializer relocates against the
+           function's symbol. */
+        ParserBinding *b = name_lookup(p, ast_as(ASTIdent, expr)->name);
+        if (b && b->kind == BIND_FUNC)
+        {
+            vd->init = expr;
+            return true;
+        }
+    }
     if (expr->kind == AST_UNARY_EXPR)
     {
         /* Address constant (§6.6p9): `&g` or `&(type){...}` (a compound
@@ -3129,3 +3307,10 @@ ASTNode *parse(Token *tokens, u64 count, Arena *arena)
 
     return ast_program(decls, tokens[0].loc, arena);
 }
+
+#ifdef FICC_DEBUG_DECL
+static void dbgpos(const char *fn, ParserCtx *p)
+{
+    fprintf(stderr, "[dbg] %s @kind=%d pos=%d\n", fn, parser_peek(p)->kind, p->pos);
+}
+#endif

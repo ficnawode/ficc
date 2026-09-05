@@ -136,6 +136,8 @@ IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOpera
     ins->extra.call.args = args;
     ins->extra.call.name = name;
     ins->extra.call.is_variadic = false;
+    ins->extra.call.is_indirect = false;
+    ins->extra.call.callee = ir_operand_imm(0);
     return ins;
 }
 
@@ -143,6 +145,17 @@ void ir_call_set_variadic(IrInstr *call, bool is_variadic)
 {
     ASSERT(call->opcode == OP_CALL);
     call->extra.call.is_variadic = is_variadic;
+}
+
+/* Mark a call as *indirect* (D16.4): the target is the runtime value of the
+   `callee` operand (a function pointer), not the named symbol `name` (which is
+   then ignored). Append-only — every existing direct call keeps byte-identical
+   lowering. */
+void ir_call_set_indirect(IrInstr *call, IrOperand callee)
+{
+    ASSERT(call->opcode == OP_CALL);
+    call->extra.call.is_indirect = true;
+    call->extra.call.callee = callee;
 }
 
 /* va_start(ap, last): writes the four va_list fields into *ap. The spill of the
@@ -271,6 +284,7 @@ IrOperand ir_operand_imm(i64 val)
     IrOperand o;
     o.is_imm = true;
     o.is_global = false;
+    o.is_func = false;
     o.u.imm = val;
     return o;
 }
@@ -280,6 +294,7 @@ IrOperand ir_operand_vreg(u32 vreg)
     IrOperand o;
     o.is_imm = false;
     o.is_global = false;
+    o.is_func = false;
     o.u.vreg = vreg;
     return o;
 }
@@ -289,7 +304,18 @@ IrOperand ir_operand_global(u32 global_index)
     IrOperand o;
     o.is_imm = false;
     o.is_global = true;
+    o.is_func = false;
     o.u.global_index = global_index;
+    return o;
+}
+
+IrOperand ir_operand_func(const char *func_name)
+{
+    IrOperand o;
+    o.is_imm = false;
+    o.is_global = false;
+    o.is_func = true;
+    o.u.func_name = func_name;
     return o;
 }
 
@@ -298,6 +324,10 @@ static void dump_operand(IrOperand op)
     if (op.is_global)
     {
         printf("g%u", op.u.global_index);
+    }
+    else if (op.is_func)
+    {
+        printf("@%s", op.u.func_name);
     }
     else if (op.is_imm)
     {
@@ -321,7 +351,16 @@ static void dump_phi_entries(IrInstr *ins)
 
 static void dump_call_args(IrInstr *ins)
 {
-    printf(" %s", ins->extra.call.name);
+    if (ins->extra.call.is_indirect)
+    {
+        printf(" [@");
+        dump_operand(ins->extra.call.callee);
+        printf("]");
+    }
+    else
+    {
+        printf(" %s", ins->extra.call.name);
+    }
     for (u32 i = 0; i < ins->extra.call.nargs; i++)
     {
         printf(", ");

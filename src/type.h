@@ -155,6 +155,7 @@ Type *type_deref(Type *t);
 Type *type_array_elem(Type *t);
 u64 type_array_len(Type *t);
 Type *type_decay(Type *t);
+bool type_is_function(Type *t);
 u64 type_sizeof(Type *t);
 u64 type_alignof(Type *t);
 
