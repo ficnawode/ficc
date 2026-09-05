@@ -1768,6 +1768,7 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena)
     CodegenModule *cm = arena_alloc(arena, sizeof(CodegenModule), sizeof(void *));
     cm->funcs = vec_new(arena);
     cm->globals = ir->globals;
+    cm->extern_calls = vec_new(arena);
 
     size_t nfuncs = vec_size(ir->funcs);
     for (size_t i = 0; i < nfuncs; i++)
@@ -1797,7 +1798,14 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena)
             CodegenFunc *target = find_codegen_func(cm, cp->target);
             if (!target)
             {
-                codegen_error(NULL, "undefined function '%s'", cp->target);
+                /* A call to a declaration-only extern (Phase 16): leave the
+                   rel32 field as 0 and hand the site to elf.c, which emits an
+                   SHN_UNDEF symbol + R_X86_64_PLT32 relocation for the linker
+                   (libc calls, other translation units). */
+                ExternCall *ec = arena_alloc(arena, sizeof(ExternCall), sizeof(void *));
+                ec->name = cp->target;
+                ec->text_offset = cf->offset + cp->offset;
+                vec_push(cm->extern_calls, ec);
                 continue;
             }
             i32 rel = (i32) (target->offset - (cf->offset + cp->offset + 4));

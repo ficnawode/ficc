@@ -2923,7 +2923,8 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
             return NULL;
         }
         /* extern on a function definition is an ordinary definition (C11
-           §6.9.1); prototypes (no body) are not supported yet. */
+           §6.9.1); a `;` after the parameter list is a prototype (forward
+           declaration, §6.7.6.3) — accepted for the first time in Phase 16. */
         StorageClass fn_storage = storage == SC_STATIC ? SC_STATIC : SC_NONE;
         if (!parser_check_not_enumerator(p, name))
         {
@@ -2949,6 +2950,15 @@ static ASTNode *parse_top_level_decl(ParserCtx *p)
         if (!parser_expect(p, TOK_RPAREN, "')'"))
         {
             return NULL;
+        }
+
+        if (parser_peek(p)->kind == TOK_SEMI)
+        {
+            /* Prototype: no body. */
+            parser_advance(p);
+            pop_name_scope(p);
+            return ast_func_decl(dtype, name, params, fn_storage, is_variadic, start->loc,
+                                 p->arena);
         }
 
         ASTNode *body = parse_compound_stmt(p);

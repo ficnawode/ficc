@@ -13,6 +13,16 @@ typedef struct
     u32 global_index; /* index into IrModule globals */
 } GlobalPatch;
 
+/* A call to a function not defined in this module (a declaration-only extern,
+   Phase 16). The direct `call rel32` stays unresolved (field = 0); elf.c emits
+   an SHN_UNDEF symbol + an R_X86_64_PLT32 relocation so the linker resolves it
+   (libc functions, other translation units). */
+typedef struct
+{
+    const char *name;
+    size_t text_offset; /* absolute byte offset of the rel32 field within .text */
+} ExternCall;
+
 /* Per-function machine code record */
 typedef struct CodegenFunc CodegenFunc;
 struct CodegenFunc
@@ -29,8 +39,9 @@ struct CodegenFunc
 typedef struct CodegenModule CodegenModule;
 struct CodegenModule
 {
-    Vec *funcs;   /* Vec<CodegenFunc*> */
-    Vec *globals; /* Vec<IrGlobal*> — for .rodata/.data/.bss emission */
+    Vec *funcs;        /* Vec<CodegenFunc*> */
+    Vec *globals;      /* Vec<IrGlobal*> — for .rodata/.data/.bss emission */
+    Vec *extern_calls; /* Vec<ExternCall*> — calls to declaration-only externs */
 };
 
 /* Convert IR to machine code bytes. */

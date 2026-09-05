@@ -16,9 +16,27 @@ TEST(ast, func_def_constructor)
     EXPECT_EQ(node->kind, AST_FUNC_DEF);
 
     ASTFuncDef *fn = ast_as(ASTFuncDef, node);
-    EXPECT_TRUE(fn->ret_type == type_int());
-    EXPECT_STR_EQ(fn->name, "foo");
+    EXPECT_TRUE(fn->sig.ret_type == type_int());
+    EXPECT_STR_EQ(fn->sig.name, "foo");
     EXPECT_TRUE(fn->body == body);
+
+    arena_free(a);
+}
+
+TEST(ast, func_decl_constructor)
+{
+    Arena *a = arena_new();
+    Vec *params = vec_new(a);
+    ASTNode *node = ast_func_decl(type_int(), "foo", params, SC_NONE, true, (Loc) {"t", 1, 1}, a);
+
+    EXPECT_NOTNULL(node);
+    EXPECT_EQ(node->kind, AST_FUNC_DECL);
+
+    ASTFuncDecl *fd = ast_as(ASTFuncDecl, node);
+    EXPECT_TRUE(fd->sig.ret_type == type_int());
+    EXPECT_STR_EQ(fd->sig.name, "foo");
+    EXPECT_EQ(fd->sig.is_variadic, true);
+    EXPECT_NULL(fd->sig.func_type);
 
     arena_free(a);
 }

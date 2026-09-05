@@ -48,6 +48,7 @@ typedef uint64_t Elf64_Off;
 
 #define R_X86_64_32S 11
 #define R_X86_64_64 1
+#define R_X86_64_PLT32 4
 
 typedef struct Elf64_Ehdr Elf64_Ehdr;
 struct Elf64_Ehdr
@@ -181,11 +182,11 @@ static void shdr_emit(ByteBuf *out, u32 name, u32 type, u64 flags, u64 offset, u
     bytebuf_append_u64(out, entsize);
 }
 
-static void rela_emit(ByteBuf *out, u64 offset, u32 sym_idx, u32 type)
+static void rela_emit(ByteBuf *out, u64 offset, u32 sym_idx, u32 type, i64 addend)
 {
     bytebuf_append_u64(out, offset);
     bytebuf_append_u64(out, ((u64) sym_idx << 32) | type);
-    bytebuf_append_u64(out, 0);
+    bytebuf_append_u64(out, (u64) addend);
 }
 
 /* One past the last STB_LOCAL symbol index: .symtab sh_info. Section symbols
@@ -334,6 +335,33 @@ void elf_write(CodegenModule *cm, const char *path)
                  SEC_TEXT, cf->offset, bytebuf_len(cf->bytes));
     }
 
+    /* Declaration-only extern functions referenced by calls (Phase 16):
+       one SHN_UNDEF STB_GLOBAL symbol per unique name, placed after the
+       defined-function symbols; elf's symbol index for extern e is
+       FIRST_GLOBAL_SYM + nglobals + nfuncs + e. */
+    size_t nextern = cm->extern_calls ? vec_size(cm->extern_calls) : 0;
+    Vec *extern_syms = vec_new(arena); /* Vec<const char*> — unique names */
+    for (size_t i = 0; i < nextern; i++)
+    {
+        ExternCall *ec = (ExternCall *) vec_get(cm->extern_calls, i);
+        bool seen = false;
+        size_t nuniq = vec_size(extern_syms);
+        for (size_t j = 0; j < nuniq; j++)
+        {
+            if (strcmp((const char *) vec_get(extern_syms, j), ec->name) == 0)
+            {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen)
+        {
+            vec_push(extern_syms, (void *) ec->name);
+            u32 name_off = strtab_add(&strtab, ec->name);
+            sym_emit(&symtab, name_off, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), SHN_UNDEF, 0, 0);
+        }
+    }
+
     /* Relocations reference the global's own symbol (5+i), not its section
        symbol, so the linker adjusts for prepended section content. */
     ByteBuf rela_text;
@@ -345,8 +373,27 @@ void elf_write(CodegenModule *cm, const char *path)
         {
             GlobalPatch *gp = (GlobalPatch *) vec_get(cf->global_patches, pi);
             rela_emit(&rela_text, cf->offset + gp->offset, FIRST_GLOBAL_SYM + gp->global_index,
-                      R_X86_64_32S);
+                      R_X86_64_32S, 0);
         }
+    }
+
+    /* External function calls: R_X86_64_PLT32 against the SHN_UNDEF symbol,
+       addend -4 (gcc convention — the rel32 field spans to the next
+       instruction). r_offset is the absolute .text offset of the field. */
+    for (size_t i = 0; i < nextern; i++)
+    {
+        ExternCall *ec = (ExternCall *) vec_get(cm->extern_calls, i);
+        u32 sym_idx = 0;
+        size_t nuniq = vec_size(extern_syms);
+        for (size_t j = 0; j < nuniq; j++)
+        {
+            if (strcmp((const char *) vec_get(extern_syms, j), ec->name) == 0)
+            {
+                sym_idx = FIRST_GLOBAL_SYM + (u32) nglobals + (u32) nfuncs + (u32) j;
+                break;
+            }
+        }
+        rela_emit(&rela_text, ec->text_offset, sym_idx, R_X86_64_PLT32, -4);
     }
 
     ByteBuf rela_data;
@@ -366,7 +413,7 @@ void elf_write(CodegenModule *cm, const char *path)
             GlobalReloc *gr = (GlobalReloc *) vec_get(g->relocs, r);
             ByteBuf *target = g->section == IR_SECTION_RODATA ? &rela_rodata : &rela_data;
             rela_emit(target, global_off[i] + gr->offset, FIRST_GLOBAL_SYM + gr->target,
-                      R_X86_64_64);
+                      R_X86_64_64, 0);
         }
     }
 

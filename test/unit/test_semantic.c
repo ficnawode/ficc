@@ -780,3 +780,147 @@ TEST(semantic, va_arg_first_arg_not_va_list)
                       "    return f(1);\n"
                       "}\n");
 }
+
+/* --- Phase 16a: function prototypes / forward declarations --- */
+
+TEST(semantic, prototype_then_definition)
+{
+    EXPECT_BUILD_SUCCEED("int add(int a, int b);\n"
+                         "int add(int a, int b) {\n"
+                         "    return a + b;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return add(1, 2);\n"
+                         "}");
+}
+
+TEST(semantic, prototype_call_before_definition)
+{
+    EXPECT_BUILD_SUCCEED("int add(int a, int b);\n"
+                         "int main(void) {\n"
+                         "    return add(1, 2);\n"
+                         "}\n"
+                         "int add(int a, int b) {\n"
+                         "    return a + b;\n"
+                         "}");
+}
+
+TEST(semantic, repeated_prototypes)
+{
+    EXPECT_BUILD_SUCCEED("int add(int a, int b);\n"
+                         "int add(int a, int b);\n"
+                         "int add(int a, int b);\n"
+                         "int add(int a, int b) {\n"
+                         "    return a + b;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return add(1, 2);\n"
+                         "}");
+}
+
+TEST(semantic, prototype_after_definition)
+{
+    EXPECT_BUILD_SUCCEED("int add(int a, int b) {\n"
+                         "    return a + b;\n"
+                         "}\n"
+                         "int add(int a, int b);\n"
+                         "int main(void) {\n"
+                         "    return add(1, 2);\n"
+                         "}");
+}
+
+TEST(semantic, prototype_variadic)
+{
+    EXPECT_BUILD_SUCCEED("int sum(int n, ...);\n"
+                         "int main(void) {\n"
+                         "    return sum(0);\n"
+                         "}\n"
+                         "int sum(int n, ...) {\n"
+                         "    return n;\n"
+                         "}");
+}
+
+TEST(semantic, prototype_const_param_compatible)
+{
+    /* §6.7.6.3p15: top-level parameter qualifiers are ignored for
+       compatibility. */
+    EXPECT_BUILD_SUCCEED("int f(const int a);\n"
+                         "int f(int a) {\n"
+                         "    return a;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return f(5);\n"
+                         "}");
+}
+
+TEST(semantic, prototype_conflicting_param_type)
+{
+    EXPECT_BUILD_FAIL("int f(int a);\n"
+                      "int f(long a);\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}");
+}
+
+TEST(semantic, prototype_conflicting_arity)
+{
+    EXPECT_BUILD_FAIL("int f(int a, int b);\n"
+                      "int f(int a);\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}");
+}
+
+TEST(semantic, prototype_static_then_global)
+{
+    EXPECT_BUILD_FAIL("static int f(int a);\n"
+                      "int f(int a) {\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}");
+}
+
+TEST(semantic, prototype_static_then_static)
+{
+    EXPECT_BUILD_SUCCEED("static int f(int a);\n"
+                         "static int f(int a) {\n"
+                         "    return a;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return f(1);\n"
+                         "}");
+}
+
+TEST(semantic, prototype_two_definitions_rejected)
+{
+    EXPECT_BUILD_FAIL("int f(int a);\n"
+                      "int f(int a) {\n"
+                      "    return a;\n"
+                      "}\n"
+                      "int f(int a) {\n"
+                      "    return a + 1;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}");
+}
+
+TEST(semantic, prototype_variadic_vs_definition_arity)
+{
+    EXPECT_BUILD_FAIL("int f(int a);\n"
+                      "int f(int a, ...);\n"
+                      "int main(void) {\n"
+                      "    return f(1);\n"
+                      "}");
+}
+
+TEST(semantic, prototype_collides_with_global_var)
+{
+    EXPECT_BUILD_FAIL("int x(void);\n"
+                      "int x = 5;\n"
+                      "int main(void) {\n"
+                      "    return x(1);\n"
+                      "}");
+}

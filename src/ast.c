@@ -27,13 +27,26 @@ ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *bo
                       StorageClass storage, bool is_variadic, Loc loc, Arena *arena)
 {
     ASTFuncDef *n = ast_new_node(sizeof(ASTFuncDef), AST_FUNC_DEF, loc, arena);
-    n->ret_type = ret_type;
-    n->name = name;
-    n->params = params;
+    n->sig.ret_type = ret_type;
+    n->sig.name = name;
+    n->sig.params = params;
     n->body = body;
-    n->storage = storage;
-    n->is_variadic = is_variadic;
-    n->func_type = NULL;
+    n->sig.storage = storage;
+    n->sig.is_variadic = is_variadic;
+    n->sig.func_type = NULL;
+    return &n->base;
+}
+
+ASTNode *ast_func_decl(Type *ret_type, const char *name, Vec *params, StorageClass storage,
+                       bool is_variadic, Loc loc, Arena *arena)
+{
+    ASTFuncDecl *n = ast_new_node(sizeof(ASTFuncDecl), AST_FUNC_DECL, loc, arena);
+    n->sig.ret_type = ret_type;
+    n->sig.name = name;
+    n->sig.params = params;
+    n->sig.storage = storage;
+    n->sig.is_variadic = is_variadic;
+    n->sig.func_type = NULL;
     return &n->base;
 }
 
@@ -498,9 +511,18 @@ static void ast_dump_rec(ASTNode *node, int depth)
         case AST_FUNC_DEF:
         {
             ASTFuncDef *func_def = ast_as(ASTFuncDef, node);
-            printf("FUNC_DEF %s -> %s%s\n", func_def->name,
-                   type_kind_name(func_def->ret_type->kind), func_def->is_variadic ? " ..." : "");
+            printf("FUNC_DEF %s -> %s%s\n", func_def->sig.name,
+                   type_kind_name(func_def->sig.ret_type->kind),
+                   func_def->sig.is_variadic ? " ..." : "");
             ast_dump_rec(func_def->body, depth + 1);
+            break;
+        }
+        case AST_FUNC_DECL:
+        {
+            ASTFuncDecl *func_decl = ast_as(ASTFuncDecl, node);
+            printf("FUNC_DECL %s -> %s%s\n", func_decl->sig.name,
+                   type_kind_name(func_decl->sig.ret_type->kind),
+                   func_decl->sig.is_variadic ? " ..." : "");
             break;
         }
         case AST_COMPOUND_STMT:

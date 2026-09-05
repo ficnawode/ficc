@@ -2717,24 +2717,24 @@ static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilde
 
 static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlock *entry)
 {
-    f->is_variadic = ast->is_variadic;
+    f->is_variadic = ast->sig.is_variadic;
     ctx->sret_vreg = NO_VREG;
-    if (type_is_record(ast->ret_type))
+    if (type_is_record(ast->sig.ret_type))
     {
         /* Record returns arrive through a hidden sret pointer (D4.2). */
-        u32 vreg = alloc_vreg_for_var(ctx, ast->ret_type);
+        u32 vreg = alloc_vreg_for_var(ctx, ast->sig.ret_type);
         IrParam *p = arena_alloc(ctx->mod->arena, sizeof(IrParam), sizeof(void *));
         p->name = "__sret";
-        p->type = type_ptr(ast->ret_type);
+        p->type = type_ptr(ast->sig.ret_type);
         p->vreg = vreg;
         vec_push(f->params, p);
         ctx->sret_vreg = vreg;
     }
 
-    size_t nparams = vec_size(ast->params);
+    size_t nparams = vec_size(ast->sig.params);
     for (size_t i = 0; i < nparams; i++)
     {
-        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(ast->params, i));
+        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(ast->sig.params, i));
         /* Struct params arrive as a pointer to the caller's copy (D4.2). */
         Type *ssa_type = var_ssa_type(param->type);
         u32 vreg = alloc_vreg_from_type(ctx, ssa_type);
@@ -2993,8 +2993,8 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
     }
     ASTFuncDef *func_ast = (ASTFuncDef *) ast;
 
-    IrFunction *func = ir_module_add_func(mod, func_ast->name, func_ast->ret_type);
-    func->is_static = func_ast->storage == SC_STATIC;
+    IrFunction *func = ir_module_add_func(mod, func_ast->sig.name, func_ast->sig.ret_type);
+    func->is_static = func_ast->sig.storage == SC_STATIC;
     IrBlock *entry = ir_func_add_block(func, "entry");
 
     if (func_ast->body->kind != AST_COMPOUND_STMT)
@@ -3049,10 +3049,28 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
+        Type *func_type = NULL;
+        const char *fname = NULL;
         if (decl->kind == AST_FUNC_DEF)
         {
             ASTFuncDef *fn = ast_as(ASTFuncDef, decl);
-            strmap_set(func_types, fn->name, fn->func_type);
+            func_type = fn->sig.func_type;
+            fname = fn->sig.name;
+        }
+        else if (decl->kind == AST_FUNC_DECL)
+        {
+            /* A prototype (declaration-only extern) seeds func_types too, so
+               calls to functions declared but not defined in this TU resolve
+               their signature (param types, variadic bit) exactly like calls
+               to defined functions. No IrFunction is emitted for it — the
+               ELF side emits an SHN_UNDEF symbol reference. */
+            ASTFuncDecl *fd = ast_as(ASTFuncDecl, decl);
+            func_type = fd->sig.func_type;
+            fname = fd->sig.name;
+        }
+        if (func_type && fname)
+        {
+            strmap_set(func_types, fname, func_type);
         }
     }
 
@@ -3090,7 +3108,8 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
         if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL ||
             decl->kind == AST_VAR_DECL || decl->kind == AST_TYPEDEF_DECL ||
-            decl->kind == AST_DECL_LIST || decl->kind == AST_STATIC_ASSERT)
+            decl->kind == AST_DECL_LIST || decl->kind == AST_STATIC_ASSERT ||
+            decl->kind == AST_FUNC_DECL)
         {
             continue;
         }

@@ -48,7 +48,8 @@
     X(AST_COMPOUND_LITERAL)                                                                        \
     X(AST_DECL_LIST)                                                                               \
     X(AST_STATIC_ASSERT)                                                                           \
-    X(AST_VA_ARG_EXPR)
+    X(AST_VA_ARG_EXPR)                                                                             \
+    X(AST_FUNC_DECL)
 
 typedef enum
 {
@@ -117,17 +118,40 @@ struct ASTNode
 
 #define ast_as(T, node) ((T *) (node))
 
+/* The signature shared by a function *definition* and a function *prototype*
+   (D16.2). A prototype (`int f(int);`) and a definition (`int f(int){...}`) are
+   distinct AST nodes but carry the same name/params/storage/variadic/func_type,
+   so both embed this record after the `ASTNode base`. Passes that only need a
+   signature (semantic symbol merge, the IR builder's func_types seeding,
+   ast_dump) take a `FuncSig*` and are agnostic to which node hosts it. */
+typedef struct FuncSig FuncSig;
+struct FuncSig
+{
+    Type *ret_type;
+    const char *name;
+    Vec *params;          /* Vec<ASTNode*> (parameter declarations; empty for void) */
+    StorageClass storage; /* SC_STATIC = internal linkage */
+    bool is_variadic;     /* trailing unnamed args (C11 §6.7.6.3p8) */
+    Type *func_type;      /* interned function type (filled by semantic; NULL at parse time) */
+};
+
 typedef struct ASTFuncDef ASTFuncDef;
 struct ASTFuncDef
 {
     ASTNode base;
-    Type *ret_type;
-    const char *name;
-    Vec *params; /* Vec<ASTNode*> (parameter declarations; empty for void) */
+    FuncSig sig;
     ASTNode *body;
-    StorageClass storage; /* SC_STATIC = internal linkage */
-    bool is_variadic;     /* trailing unnamed args (C11 §6.7.6.3p8) */
-    Type *func_type;      /* interned function type (filled by semantic; NULL at parse time) */
+};
+
+/* A function *prototype* / forward declaration: `int f(int);` at file scope —
+   a declaration without a body (C11 §6.7.6.3). Registers the signature in the
+   symbol table so calls may precede a definition or resolve to a declaration-
+   only extern. No body, so no body-consuming pass can reach it. */
+typedef struct ASTFuncDecl ASTFuncDecl;
+struct ASTFuncDecl
+{
+    ASTNode base;
+    FuncSig sig;
 };
 
 typedef struct ASTCompoundStmt ASTCompoundStmt;
@@ -550,6 +574,8 @@ struct ASTCompoundLiteral
 
 ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body,
                       StorageClass storage, bool is_variadic, Loc loc, Arena *arena);
+ASTNode *ast_func_decl(Type *ret_type, const char *name, Vec *params, StorageClass storage,
+                       bool is_variadic, Loc loc, Arena *arena);
 ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
 ASTNode *ast_return_stmt(ASTNode *expr, Loc loc, Arena *arena);
 ASTNode *ast_int_literal(i64 value, bool is_unsigned, IntSuffix length, bool is_hex, Loc loc,

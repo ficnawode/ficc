@@ -561,10 +561,43 @@ static bool check_va_arg_expr(ASTVaArgExpr *va, SemanticCtx *ctx)
     return true;
 }
 
+/* A function *definition* (AST_FUNC_DEF) and a function *prototype*
+   (AST_FUNC_DECL) both embed a FuncSig after their ASTNode base (D16.2), so
+   either kind reduces to the same signature record. */
+static FuncSig *func_sig_of(ASTNode *node)
+{
+    if (node->kind == AST_FUNC_DEF)
+    {
+        return &ast_as(ASTFuncDef, node)->sig;
+    }
+    return &ast_as(ASTFuncDecl, node)->sig;
+}
+
+static bool func_node_defined(ASTNode *node)
+{
+    return node->kind == AST_FUNC_DEF;
+}
+
+/* The interned function type (D15.1/D16.1) of a signature: the return type and
+   the param types each top-level-unqualified (§6.7.6.3p15), plus the variadic
+   bit. type_func interns structurally, so two compatible signatures produce the
+   same pointer. */
+static Type *build_func_type(FuncSig *sig, SemanticCtx *ctx)
+{
+    Vec *param_types = vec_new(ctx->arena);
+    size_t nparams = vec_size(sig->params);
+    for (size_t i = 0; i < nparams; i++)
+    {
+        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(sig->params, i));
+        vec_push(param_types, type_unqual(param->type));
+    }
+    return type_func(type_unqual(sig->ret_type), param_types, sig->is_variadic);
+}
+
 static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
 {
-    ASTFuncDef *callee = strmap_get(ctx->globals, call_expr->callee);
-    if (!callee)
+    ASTNode *callee_node = strmap_get(ctx->globals, call_expr->callee);
+    if (!callee_node)
     {
         /* __builtin_va_start/__builtin_va_end are compiler builtins, never
            ASTFuncDefs; semantic validates their fixed signatures, the IR
@@ -581,6 +614,7 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
         ctx->error = true;
         return false;
     }
+    FuncSig *callee = func_sig_of(callee_node);
 
     size_t expected = vec_size(callee->params);
     size_t got = vec_size(call_expr->args);
@@ -2236,10 +2270,10 @@ static bool setup_function_params(ASTFuncDef *func_def, SemanticCtx *ctx)
 {
     /* Parameters live in the function's outermost scope, which check_func has
        already pushed. */
-    size_t nparams = vec_size(func_def->params);
+    size_t nparams = vec_size(func_def->sig.params);
     for (size_t i = 0; i < nparams; i++)
     {
-        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(func_def->params, i));
+        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(func_def->sig.params, i));
         if (scope_top_lookup(ctx, param->name))
         {
             sem_error(param->base.loc, "redeclaration of parameter '%s'", param->name);
@@ -2265,7 +2299,7 @@ static bool check_function_body(ASTFuncDef *func_def, SemanticCtx *ctx)
     for (size_t i = 0; i < nstmts; i++)
     {
         ASTNode *stmt = (ASTNode *) vec_get(body->stmts, i);
-        if (!check_stmt(stmt, ctx, func_def->ret_type))
+        if (!check_stmt(stmt, ctx, func_def->sig.ret_type))
         {
             return false;
         }
@@ -2371,18 +2405,6 @@ static void collect_labels(ASTNode *node, SemanticCtx *ctx)
 /* The interned function type of a definition (D15.1): the return type and the
    parameter types unqualified — top-level qualifiers are ignored for
    function-type compatibility (§6.7.6.3p15) — plus the variadic bit. */
-static Type *build_func_type(ASTFuncDef *fn, SemanticCtx *ctx)
-{
-    Vec *param_types = vec_new(ctx->arena);
-    size_t nparams = vec_size(fn->params);
-    for (size_t i = 0; i < nparams; i++)
-    {
-        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->params, i));
-        vec_push(param_types, type_unqual(param->type));
-    }
-    return type_func(type_unqual(fn->ret_type), param_types, fn->is_variadic);
-}
-
 static bool check_func(ASTNode *node, SemanticCtx *ctx)
 {
     ASSERT(node->kind == AST_FUNC_DEF);
@@ -2394,7 +2416,7 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
     ctx->labels = strmap_new(ctx->arena);
 
     push_scope(ctx);
-    ctx->func_params = fn->params;
+    ctx->func_params = fn->sig.params;
     if (!setup_function_params(fn, ctx))
     {
         pop_scope(ctx);
@@ -2403,7 +2425,7 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
         ctx->labels = saved_labels;
         return false;
     }
-    fn->func_type = build_func_type(fn, ctx);
+    fn->sig.func_type = build_func_type(&fn->sig, ctx);
 
     /* Labels may be referenced before they are defined (goto can jump forward),
        so collect them before checking the function body. */
@@ -2617,16 +2639,17 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
             }
             continue;
         }
-        if (decl->kind != AST_FUNC_DEF)
+        if (decl->kind != AST_FUNC_DEF && decl->kind != AST_FUNC_DECL)
         {
-            sem_error(decl->loc, "expected function definition at top level");
+            sem_error(decl->loc, "expected function definition or prototype at top level");
             return false;
         }
-        ASTFuncDef *fn = ast_as(ASTFuncDef, decl);
+        FuncSig *fn = func_sig_of(decl);
+        fn->func_type = build_func_type(fn, ctx);
         ASTNode *prev = strmap_get(ctx->globals, fn->name);
         if (prev)
         {
-            ASTFuncDef *pfn = ast_as(ASTFuncDef, prev);
+            FuncSig *pfn = func_sig_of(prev);
             if ((pfn->storage == SC_STATIC) != (fn->storage == SC_STATIC))
             {
                 sem_error(decl->loc, "%s declaration of '%s' follows %s declaration",
@@ -2634,15 +2657,36 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
                           pfn->storage == SC_STATIC ? "static" : "non-static");
                 return false;
             }
-            sem_error(decl->loc, "redefinition of '%s'", fn->name);
-            return false;
+            if (func_node_defined(prev) && func_node_defined(decl))
+            {
+                sem_error(decl->loc, "redefinition of '%s'", fn->name);
+                return false;
+            }
+            /* §6.7.6.3: a repeat declaration must be *compatible*. The
+               interned function type (type_func) makes compatible signatures
+               pointer-equal, so a pointer compare is the compatibility check. */
+            if (pfn->func_type != fn->func_type)
+            {
+                sem_error(decl->loc, "conflicting types for '%s'", fn->name);
+                return false;
+            }
+            /* A definition upgrades a prior prototype: keep the definition in
+               the symbol table (it completes the signature). A repeated
+               prototype keeps the existing entry. */
+            if (!func_node_defined(prev) && func_node_defined(decl))
+            {
+                strmap_set(ctx->globals, fn->name, decl);
+            }
         }
-        if (strmap_get(ctx->global_vars, fn->name))
+        else
         {
-            sem_error(decl->loc, "redefinition of '%s'", fn->name);
-            return false;
+            if (strmap_get(ctx->global_vars, fn->name))
+            {
+                sem_error(decl->loc, "redefinition of '%s'", fn->name);
+                return false;
+            }
+            strmap_set(ctx->globals, fn->name, decl);
         }
-        strmap_set(ctx->globals, fn->name, fn);
     }
     return true;
 }

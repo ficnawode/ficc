@@ -55,8 +55,8 @@ TEST(parser, void_ptr_param)
     EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
-    EXPECT_EQ(vec_size(fn->params), 1);
-    ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->params, 0));
+    EXPECT_EQ(vec_size(fn->sig.params), 1);
+    ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->sig.params, 0));
     EXPECT_EQ(param->type->kind, TYPE_PTR);
     EXPECT_EQ(type_deref(param->type)->kind, TYPE_VOID);
     arena_free(a);
@@ -69,7 +69,7 @@ TEST(parser, void_still_empty_param_list)
     EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
-    EXPECT_EQ(vec_size(fn->params), 0);
+    EXPECT_EQ(vec_size(fn->sig.params), 0);
     arena_free(a);
 }
 
@@ -105,8 +105,8 @@ TEST(parser, func_def_shape)
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     EXPECT_NOTNULL(fn);
     EXPECT_EQ(fn->base.kind, AST_FUNC_DEF);
-    EXPECT_STR_EQ(fn->name, "main");
-    EXPECT_TRUE(fn->ret_type == type_int());
+    EXPECT_STR_EQ(fn->sig.name, "main");
+    EXPECT_TRUE(fn->sig.ret_type == type_int());
     EXPECT_NOTNULL(fn->body);
 
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
@@ -124,6 +124,81 @@ TEST(parser, func_def_shape)
     arena_free(a);
 }
 
+TEST(parser, prototype_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int add(int a, int b);", a);
+    EXPECT_NOTNULL(ast);
+
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    EXPECT_NOTNULL(prog);
+    EXPECT_EQ(vec_size(prog->decls), 1);
+
+    ASTNode *decl = (ASTNode *) vec_get(prog->decls, 0);
+    EXPECT_EQ(decl->kind, AST_FUNC_DECL);
+
+    ASTFuncDecl *fd = ast_as(ASTFuncDecl, decl);
+    EXPECT_STR_EQ(fd->sig.name, "add");
+    EXPECT_TRUE(fd->sig.ret_type == type_int());
+    EXPECT_EQ(vec_size(fd->sig.params), 2);
+    EXPECT_EQ(fd->sig.storage, SC_NONE);
+    EXPECT_FALSE(fd->sig.is_variadic);
+
+    arena_free(a);
+}
+
+TEST(parser, prototype_variadic)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int sum(int n, ...);", a);
+    EXPECT_NOTNULL(ast);
+
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDecl *fd = ast_as(ASTFuncDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_STR_EQ(fd->sig.name, "sum");
+    EXPECT_TRUE(fd->sig.is_variadic);
+    EXPECT_EQ(vec_size(fd->sig.params), 1);
+
+    arena_free(a);
+}
+
+TEST(parser, prototype_storage_class)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("static int helper(int x);", a);
+    EXPECT_NOTNULL(ast);
+
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDecl *fd = ast_as(ASTFuncDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(fd->sig.storage, SC_STATIC);
+
+    arena_free(a);
+}
+
+TEST(parser, prototype_then_definition)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int add(int a, int b);\n"
+                            "int add(int a, int b) {\n"
+                            "    return a + b;\n"
+                            "}",
+                            a);
+    EXPECT_NOTNULL(ast);
+
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    EXPECT_EQ(vec_size(prog->decls), 2);
+    EXPECT_EQ(((ASTNode *) vec_get(prog->decls, 0))->kind, AST_FUNC_DECL);
+    EXPECT_EQ(((ASTNode *) vec_get(prog->decls, 1))->kind, AST_FUNC_DEF);
+
+    arena_free(a);
+}
+
+TEST(parser, empty_ellipsis_prototype_rejected)
+{
+    /* C11 §6.7.6.3p8: `...` must follow at least one named parameter. */
+    EXPECT_PARSE_FAIL("int f(...);");
+}
+
 TEST(parser, multiple_functions)
 {
     Arena *a = arena_new();
@@ -139,8 +214,8 @@ TEST(parser, multiple_functions)
     EXPECT_EQ(vec_size(prog->decls), 2);
     ASTFuncDef *f = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTFuncDef *g = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 1));
-    EXPECT_STR_EQ(f->name, "f");
-    EXPECT_STR_EQ(g->name, "g");
+    EXPECT_STR_EQ(f->sig.name, "f");
+    EXPECT_STR_EQ(g->sig.name, "g");
     arena_free(a);
 }
 
@@ -151,9 +226,9 @@ TEST(parser, params_with_names)
     EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
-    EXPECT_EQ(vec_size(fn->params), 2);
-    ASTVarDecl *p0 = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->params, 0));
-    ASTVarDecl *p1 = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->params, 1));
+    EXPECT_EQ(vec_size(fn->sig.params), 2);
+    ASTVarDecl *p0 = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->sig.params, 0));
+    ASTVarDecl *p1 = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->sig.params, 1));
     EXPECT_STR_EQ(p0->name, "a");
     EXPECT_STR_EQ(p1->name, "b");
     arena_free(a);
@@ -966,7 +1041,7 @@ TEST(parser, typedef_param_use)
     EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 1));
-    ASTVarDecl *p = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->params, 0));
+    ASTVarDecl *p = ast_as(ASTVarDecl, (ASTNode *) vec_get(fn->sig.params, 0));
     EXPECT_EQ(p->type, type_int());
     arena_free(a);
 }
@@ -1315,8 +1390,8 @@ TEST(parser, variadic_param_list)
     EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
-    EXPECT_EQ(vec_size(fn->params), 1);
-    EXPECT_TRUE(fn->is_variadic);
+    EXPECT_EQ(vec_size(fn->sig.params), 1);
+    EXPECT_TRUE(fn->sig.is_variadic);
     arena_free(a);
 }
 
@@ -1327,8 +1402,8 @@ TEST(parser, variadic_multi_named)
     EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
-    EXPECT_EQ(vec_size(fn->params), 2);
-    EXPECT_TRUE(fn->is_variadic);
+    EXPECT_EQ(vec_size(fn->sig.params), 2);
+    EXPECT_TRUE(fn->sig.is_variadic);
     arena_free(a);
 }
 
@@ -1350,8 +1425,8 @@ TEST(parser, fixed_param_list_not_variadic)
     EXPECT_NOTNULL(ast);
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
-    EXPECT_EQ(vec_size(fn->params), 0);
-    EXPECT_FALSE(fn->is_variadic);
+    EXPECT_EQ(vec_size(fn->sig.params), 0);
+    EXPECT_FALSE(fn->sig.is_variadic);
     arena_free(a);
 }
 
