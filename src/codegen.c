@@ -6,22 +6,12 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Patch record for a `call rel32` or intra-function jump placeholder.
-   `offset` is the displacement field in the instruction stream. */
+/* A rel32 field patched later; `target` is a function name (calls) or block label (jcc/jmp). */
 typedef struct
 {
     size_t offset;
     const char *target;
-} CallPatch;
-
-/* Patch record for a conditional or unconditional intra-function jump.
-   Same shape as CallPatch, but kept separate because the resolution logic
-   (block offset vs. function offset) and target namespace are different. */
-typedef struct
-{
-    size_t offset;
-    const char *target;
-} BranchPatch;
+} PatchSite;
 
 typedef struct
 {
@@ -29,11 +19,7 @@ typedef struct
     u32 dst_vreg;
 } PhiCopy;
 
-/* A switch-lowered jump table pending in-function .text emission. The table is
-   indexed by `val − min` (one entry per value in the case range, gaps filled
-   with the default label, so the correct case block is found directly). The
-   lea RIP-relative displacement is patched once the table's offset inside the
-   function bytebuf is known. */
+/* Jump table appended to the function's .text, indexed by `val − min`; gaps route to default. */
 typedef struct
 {
     size_t disp_field_off; /* byte offset of the lea rip+disp32 field */
@@ -41,15 +27,11 @@ typedef struct
     const char **targets;  /* nentries block labels, index = value − min */
 } SwitchTableRec;
 
-/* Per-function frame layout. Vreg i lives at slot (i+1)*8 below %rbp. For a
-   variadic function, a fixed 176-byte register save area (48 GP + 128-byte xmm
-   reservation, SysV §9.2) is reserved immediately below the vreg slots;
-   save_area_off is its offset below %rbp (0 for non-variadic functions). */
+/* Per-function frame: vreg i at slot (i+1)*8 below %rbp; variadic funcs add a 176-byte SysV save area. */
 typedef struct
 {
-    u32 n_vregs;
-    u32 frame_size;    /* rounded up to 16 (ABI) */
-    u32 save_area_off; /* the save area below the vreg slots, 0 if not variadic */
+    u32 frame_size;    /* total frame size below %rbp, rounded up to 16 (ABI) */
+    u32 save_area_off; /* register save area offset below %rbp, 0 if non-variadic */
 } FrameInfo;
 
 typedef struct CodegenCtx CodegenCtx;
@@ -63,8 +45,8 @@ struct CodegenCtx
     StrMap *label_to_block; /* block label -> IrBlock* */
     U64Map *block_to_index; /* IrBlock* -> block index */
     size_t *block_offsets;  /* per-block offset within the function bytes */
-    Vec *patches;           /* Vec<CallPatch*> */
-    Vec *block_patches;     /* Vec<BranchPatch*> */
+    Vec *patches;           /* Vec<PatchSite*> — function call rel32 fields */
+    Vec *block_patches;     /* Vec<PatchSite*> — intra-function jump rel32 fields */
     Vec *global_patches;    /* Vec<GlobalPatch*> */
     Vec *func_patches;      /* Vec<FuncAddrPatch*> — function-address loads */
     Vec *switch_tables;     /* Vec<SwitchTableRec*> */
@@ -130,8 +112,7 @@ typedef enum
     CC_G
 } CondCode;
 
-/* x86 opcode and prefix bytes used by the encoder. Values that take a register
-   nibble in the low 3 bits are named *_BASE. */
+/* Opcode and prefix bytes used by the encoder; values taking a register nibble in the low 3 bits are named *_BASE. */
 typedef enum
 {
     X86_TWO_BYTE_ESC = 0x0F,
@@ -152,7 +133,6 @@ typedef enum
     X86_JMP_REL32 = 0xE9,
     X86_IND_JMP = 0xFF, /* /4: jmp r/m64 (register operand) */
 
-    X86_ADD_RM8_REG8 = 0x02,
     X86_MOV_RM8_REG8 = 0x88,
     X86_MOV_RM32_REG32 = 0x89,
     X86_MOV_REG8_RM8 = 0x8A,
@@ -161,7 +141,7 @@ typedef enum
 
     X86_MOV_REG8_IMM8_BASE = 0xB0,
     X86_MOV_REG_IMM_BASE = 0xB8,
-    X86_MOV_RM_IMM32SX = 0xC7, /* mov r/m64, imm32 sign-extended (for global addrs) */
+    X86_MOV_RM_IMM32SX = 0xC7, /* mov r/m64, imm32 sign-extended (address constants) */
 
     X86_GROUP1_IMM8 = 0x80,
     X86_GROUP1_IMM32 = 0x81,
@@ -287,8 +267,7 @@ static X86Mem x86_mem_rcx(i32 disp)
     return m;
 }
 
-/* Where an IR operand lives on the x86 side: immediates stay immediate,
-   vregs live in their frame slot. */
+/* Immediates stay immediate; vregs live in their frame slot. */
 static X86Operand xop_vreg(u32 vreg)
 {
     return xop_mem(x86_mem_rbp(-(i32) ((vreg + 1) * 8)));
@@ -325,9 +304,7 @@ static X86Operand lowered_operand(CodegenCtx *ctx, IrOperand op, u8 reg)
     return xop_from_operand(op);
 }
 
-/* Width of a lowered operand's value. Addresses (globals, function
-   designators/pointers, D16.1) are always 8 bytes; a materialized immediate is
-   treated as 4 (the mov-imm32sx convention, unchanged). */
+/* Lowered value width: addresses are 8 bytes; a materialized immediate counts as 4 (mov-imm32sx). */
 static u8 operand_width(CodegenCtx *ctx, IrOperand op)
 {
     if (op.is_global || op.is_func)
@@ -536,8 +513,7 @@ static const u8 icmp_cc[OP_ICMP_SGE + 1] = {
     [OP_ICMP_SGT] = CC_G, [OP_ICMP_SGE] = CC_GE,
 };
 
-/* reg64,reg64 form of a `r64, r/m64`-style op (e.g. sub/cmp/add): destination
-   is modrm.reg, source is modrm.rm. REX.W only — caller registers < 8. */
+/* reg64,reg64 op form: destination is modrm.reg, source modrm.rm; REX.W only, caller regs < 8. */
 static void emit_reg_reg(ByteBuf *buf, u8 opcode, u8 dst_reg, u8 src_reg)
 {
     bytebuf_append(buf, X86_REX_W);
@@ -550,16 +526,20 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
 {
     if (width == 1)
     {
-        u8 digit = s->digit;
         if (rhs.kind == XOP_IMM)
         {
             bytebuf_append(buf, X86_GROUP1_IMM8);
-            bytebuf_append(buf, modrm(3, digit, dst_reg));
+            bytebuf_append(buf, modrm(3, s->digit, dst_reg));
             bytebuf_append_i8(buf, (i8) rhs.u.imm);
             return;
         }
-        ASSERT(rhs.kind == XOP_REG || rhs.kind == XOP_MEM);
-        bytebuf_append(buf, X86_ADD_RM8_REG8);
+        /* Byte ops use `op r8, r/m8` (mem opcode − 1); AL/CL only, no REX, a memory RHS is loaded to %cl first. */
+        if (rhs.kind == XOP_MEM)
+        {
+            emit_mov_byte(buf, xop_reg(R_ECX), rhs);
+            rhs = xop_reg(R_ECX);
+        }
+        bytebuf_append(buf, (u8) (s->mem - 1));
         bytebuf_append(buf, modrm(3, dst_reg, rhs.u.reg));
         return;
     }
@@ -584,8 +564,7 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
     }
     if (rhs.kind == XOP_REG)
     {
-        /* `%reg op= reg` form (modrm mod=3): reached when the RHS is a global
-           address constant lowered into a register (cf. lowered_operand). */
+        /* `%reg op= reg` form: RHS is a global/function address lowered into a register (cf. lowered_operand). */
         emit_os16(buf, width);
         bytebuf_append(buf, rex(width == 8, dst_reg >= 8, false, rhs.u.reg >= 8));
         if (s->mem_0f)
@@ -707,35 +686,55 @@ static void emit_ud2(ByteBuf *buf)
     bytebuf_append(buf, X86_UD2);
 }
 
+/* Opcode + placeholder rel32; the record goes to `patches` for the right resolution pass. */
+static void emit_rel_patch(ByteBuf *buf, u8 opcode, const char *target, Vec *patches, Arena *arena)
+{
+    PatchSite *site = arena_alloc(arena, sizeof(PatchSite), sizeof(void *));
+    site->target = target;
+    bytebuf_append(buf, opcode);
+    site->offset = bytebuf_len(buf);
+    vec_push(patches, site);
+    bytebuf_append_i32(buf, 0);
+}
+
 static void emit_jcc(ByteBuf *buf, u8 cc, const char *target, Vec *patches, Arena *arena)
 {
-    BranchPatch *bp = arena_alloc(arena, sizeof(BranchPatch), sizeof(void *));
-    bp->target = target;
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    emit_rel_patch(buf, (u8) (X86_JCC_BASE + cc), target, patches, arena);
+}
+
+static void emit_jmp(ByteBuf *buf, const char *target, Vec *patches, Arena *arena)
+{
+    emit_rel_patch(buf, X86_JMP_REL32, target, patches, arena);
+}
+
+static void emit_call(ByteBuf *buf, const char *target, Vec *patches, Arena *arena)
+{
+    emit_rel_patch(buf, X86_CALL_REL32, target, patches, arena);
+}
+
+/* Internal-label branch: emit a placeholder rel32 and return the field offset to poke later. */
+static size_t emit_jcc_pending(ByteBuf *buf, u8 cc)
+{
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, (u8) (X86_JCC_BASE + cc));
-    bp->offset = bytebuf_len(buf);
-    vec_push(patches, bp);
+    size_t off = bytebuf_len(buf);
     bytebuf_append_i32(buf, 0);
+    return off;
 }
 
-static void emit_jmp_placeholder(ByteBuf *buf, const char *target, Vec *patches, Arena *arena)
+static size_t emit_jmp_pending(ByteBuf *buf)
 {
-    BranchPatch *bp = arena_alloc(arena, sizeof(BranchPatch), sizeof(void *));
-    bp->target = target;
     bytebuf_append(buf, X86_JMP_REL32);
-    bp->offset = bytebuf_len(buf);
-    vec_push(patches, bp);
+    size_t off = bytebuf_len(buf);
     bytebuf_append_i32(buf, 0);
+    return off;
 }
 
-static void emit_call_placeholder(ByteBuf *buf, const char *target, Vec *patches, Arena *arena)
+static void patch_rel32(ByteBuf *buf, size_t field_off, size_t target)
 {
-    CallPatch *cp = arena_alloc(arena, sizeof(CallPatch), sizeof(void *));
-    cp->target = target;
-    bytebuf_append(buf, X86_CALL_REL32);
-    cp->offset = bytebuf_len(buf);
-    vec_push(patches, cp);
-    bytebuf_append_i32(buf, 0);
+    i32 rel = (i32) ((i64) target - (i64) (field_off + 4));
+    bytebuf_poke_u32(buf, field_off, (u32) rel);
 }
 
 /* FF /4: jmp r/m64 — indirect jump to the absolute address in a register. */
@@ -756,12 +755,9 @@ static void emit_call_reg(ByteBuf *buf, u8 reg)
 
 /* ------------------------------------------------------------------ */
 /* IR lowering                                                         */
-/*                                                                      */
-/* Scratch-register contract: all lower_* functions may use R_EAX, R_ECX,
-   and R_EDX as temporaries.  The register allocator must not schedule
-   live ranges that overlap the lowering of a single IR instruction. */
 /* ------------------------------------------------------------------ */
 
+/* Scratch: lower_* may clobber R_EAX/R_ECX/R_EDX, so the allocator must not schedule live ranges across one lowering. */
 typedef void (*LowerFn)(IrInstr *in, CodegenCtx *ctx);
 
 static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src);
@@ -838,8 +834,7 @@ static X86Mem load_ptr(CodegenCtx *ctx, IrOperand ptr);
     X(OP_VA_ARG, lower_va_arg)                                                                     \
     X(OP_VA_END, lower_va_end)
 
-/* Dispatch table indexed by opcode; unlisted opcodes are NULL and diagnosed
-   in lower_instr rather than silently miscompiled. */
+/* Dispatch table indexed by opcode; unlisted opcodes hit the error path in lower_instr. */
 static const LowerFn lower_fns[] = {
 #define LOWER_INIT(op, fn) [op] = fn,
     LOWER_ENTRIES(LOWER_INIT)
@@ -946,9 +941,7 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
         emit_mov(ctx->buf, w, xop_reg(abi_arg_regs[i]), xop_reg(R_EAX));
     }
 
-    /* SysV: for a variadic callee, %al holds the count of vector registers
-       used in arguments. ficc has no floats yet, so always zero — and it must
-       be emitted here, after the argument loads clobber %eax. */
+    /* SysV: variadic callees get the vector count in %al; no floats yet, so emit 0 here, after the arg loads clobber %eax. */
     if (in->extra.call.is_variadic)
     {
         emit_xor_eax_eax(ctx->buf);
@@ -956,16 +949,13 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
 
     if (in->extra.call.is_indirect)
     {
-        /* Indirect call (D16.4): load the callee pointer into %r11 (a SysV
-           caller-saved scratch that is *not* an argument register — %rcx is
-           arg 4 once 5+ args are in flight) and `call *%r11`. %rax keeps the
-           vector count (%al, variadic) and then the result. */
+        /* Indirect call: load the callee pointer into %r11 (caller-saved, not an arg register) and `call *%r11`. */
         emit_mov(ctx->buf, 8, xop_reg(R_R11), lowered_operand(ctx, in->extra.call.callee, R_R11));
         emit_call_reg(ctx->buf, R_R11);
     }
     else
     {
-        emit_call_placeholder(ctx->buf, in->extra.call.name, ctx->patches, ctx->arena);
+        emit_call(ctx->buf, in->extra.call.name, ctx->patches, ctx->arena);
     }
 
     if (in->result != NO_VREG)
@@ -980,13 +970,7 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
     }
 }
 
-/* va_start(ap, last): materialize the four va_list fields for the current
-   function's frame. ops[0] = ap (loaded into %rax), ops[1] = imm stack_skip
-   (bytes of named stack args before the first unnamed one), ops[2] = imm
-   gp_offset. The GP registers were already spilled into the save area by
-   emit_prologue, so this only records addresses and constants — the overflow
-   area is the caller's first stack arg (rbp + 16) advanced past any named
-   stack args, and reg_save_area is the reserved frame region. */
+/* va_start: record the four va_list fields; the GP regs were spilled by emit_prologue, so this only stores addresses and constants. */
 static void lower_va_start(IrInstr *in, CodegenCtx *ctx)
 {
     (void) load_ptr(ctx, in->ops[0]);                                 /* ap -> %rax */
@@ -1003,11 +987,7 @@ static void lower_va_start(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, 8, xop_mem(x86_mem_rax(16)), xop_reg(R_EDX));
 }
 
-/* __builtin_va_arg(ap, type): the GP-then-overflow walk (D15.6). All slots are
-   8 bytes and gp_offset only takes multiples of 8 below 48, so a signed
-   compare is exact. The dual arms share no code path, so the two internal
-   branches are emitted with placeholder displacements and poked once both arm
-   offsets are known (they are always within the function's .text bytes). */
+/* va_arg: GP-then-overflow walk; all slots are 8 bytes and gp_offset is a multiple of 8 below 48, so a signed compare is exact. */
 static void lower_va_arg(IrInstr *in, CodegenCtx *ctx)
 {
     ByteBuf *b = ctx->buf;
@@ -1016,23 +996,17 @@ static void lower_va_arg(IrInstr *in, CodegenCtx *ctx)
     emit_mov(b, 4, xop_reg(R_EDX), xop_mem(ap)); /* gp = *(u32*)(ap+0) */
     emit_binop_rhs(b, 4, &cmp_spec, R_EDX, xop_imm(48));
 
-    bytebuf_append(b, X86_TWO_BYTE_ESC);
-    bytebuf_append(b, (u8) (X86_JCC_BASE + CC_GE));
-    u32 jge_disp = bytebuf_len(b);
-    bytebuf_append_i32(b, 0);
+    size_t jge_field = emit_jcc_pending(b, CC_GE); /* gp >= 48 -> overflow arm */
 
     /* GP arm: src = regs + gp; ap.gp_offset = gp + 8 */
     emit_mov(b, 8, xop_reg(R_ECX), xop_mem(x86_mem_rax(16)));
     emit_reg_reg(b, arith_specs[OP_ADD].mem, R_ECX, R_EDX); /* rcx = regs + gp */
     emit_binop_rhs(b, 4, &arith_specs[OP_ADD], R_EDX, xop_imm(8));
     emit_mov(b, 4, xop_mem(ap), xop_reg(R_EDX));
-
-    bytebuf_append(b, X86_JMP_REL32);
-    u32 jmp_disp = bytebuf_len(b);
-    bytebuf_append_i32(b, 0);
+    size_t ovf_jmp_field = emit_jmp_pending(b);
 
     /* Overflow arm: src reads the saved old ovf; ap.overflow += 8 */
-    u32 ovf_arm = bytebuf_len(b);
+    size_t ovf_arm = bytebuf_len(b);
     emit_mov(b, 8, xop_reg(R_ECX), xop_mem(x86_mem_rax(8)));
     emit_mov(b, 8, xop_reg(R_R8), xop_reg(R_ECX));
     emit_binop_rhs(b, 8, &arith_specs[OP_ADD], R_ECX, xop_imm(8));
@@ -1040,16 +1014,15 @@ static void lower_va_arg(IrInstr *in, CodegenCtx *ctx)
     emit_mov(b, 8, xop_reg(R_ECX), xop_reg(R_R8));
 
     /* done: raw = *(u64*)src, stored to the width-8 result vreg */
-    u32 done = bytebuf_len(b);
-    bytebuf_poke_u32(b, jge_disp, (u32) (ovf_arm - (i32) (jge_disp + 4)));
-    bytebuf_poke_u32(b, jmp_disp, (u32) (done - (i32) (jmp_disp + 4)));
+    size_t done = bytebuf_len(b);
+    patch_rel32(b, jge_field, ovf_arm);
+    patch_rel32(b, ovf_jmp_field, done);
 
     emit_mov(b, 8, xop_reg(R_EDX), xop_mem(x86_mem_rcx(0)));
     emit_mov(b, 8, xop_vreg(in->result), xop_reg(R_EDX));
 }
 
-/* __builtin_va_end(ap): no-op (SysV has no va_end action; kept in the IR for
-   source symmetry and the future va_copy). */
+/* va_end: no-op (SysV has no va_end action), kept in the IR for symmetry and future va_copy. */
 static void lower_va_end(IrInstr *in, CodegenCtx *ctx)
 {
     (void) in;
@@ -1074,7 +1047,7 @@ static void lower_ret(IrInstr *in, CodegenCtx *ctx)
 
 static void lower_br(IrInstr *in, CodegenCtx *ctx)
 {
-    emit_jmp_placeholder(ctx->buf, in->extra.br.target_label, ctx->block_patches, ctx->arena);
+    emit_jmp(ctx->buf, in->extra.br.target_label, ctx->block_patches, ctx->arena);
 }
 
 static void lower_brcond(IrInstr *in, CodegenCtx *ctx)
@@ -1082,13 +1055,76 @@ static void lower_brcond(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, 4, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
     emit_test_eax_eax(ctx->buf);
     emit_jcc(ctx->buf, CC_E, in->extra.brcond.false_label, ctx->block_patches, ctx->arena);
-    emit_jmp_placeholder(ctx->buf, in->extra.brcond.true_label, ctx->block_patches, ctx->arena);
+    emit_jmp(ctx->buf, in->extra.brcond.true_label, ctx->block_patches, ctx->arena);
 }
 
-/* Jump-table vs compare-chain cutoff: a table is only built when the case
-   range is tight enough that it stays small (range+1 ≤ JT_MAX_RANGE+1 entries
-   of 8 bytes). Sparse switches fall back to the compare-chain. */
+/* Jump table only when the case range stays small (range+1 ≤ JT_MAX_RANGE entries); sparse switches use the compare-chain. */
 #define JT_MAX_RANGE 256
+
+/* Load the control value into %rax at its exact 64-bit semantic value (sign/zero-extend narrow sources). */
+static void emit_switch_control(CodegenCtx *ctx, IrOperand src)
+{
+    u8 w = operand_width(ctx, src);
+    if (src.is_imm)
+    {
+        emit_mov(ctx->buf, 8, xop_reg(R_EAX), xop_imm(src.u.imm));
+        return;
+    }
+    emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, src, R_EAX));
+    if (w < 8 && ir_vreg_signed(ctx->mod, src.u.vreg))
+    {
+        emit_movsx(ctx->buf, w, 8, R_EAX, xop_reg(R_EAX));
+    }
+    else if (w < 4)
+    {
+        emit_movzx(ctx->buf, w, 8, R_EAX, xop_reg(R_EAX));
+    }
+    /* w==4 unsigned: mov %eax already zero-extends into %rax */
+}
+
+/* Bounds-check %rax to [min,max], subtract min, then jump through the full-range table (gaps → default). */
+static void emit_switch_table(CodegenCtx *ctx, IrSwitchCase *cases, u32 n, i64 min, i64 max,
+                              const char *default_label)
+{
+    /* The wrap-around subtraction is exact because the bounds checks give index < 2^63; negative ranges need signed ordering. */
+    u8 below_cc = min < 0 ? CC_L : CC_B;
+    u8 above_cc = min < 0 ? CC_G : CC_A;
+    u64 range = (u64) max - (u64) min;
+
+    emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_imm(min));
+    emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX); /* cmp %rax, %rcx */
+    emit_jcc(ctx->buf, below_cc, default_label, ctx->block_patches, ctx->arena);
+    emit_mov(ctx->buf, 8, xop_reg(R_EDX), xop_imm(max));
+    emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_EDX); /* cmp %rax, %rdx */
+    emit_jcc(ctx->buf, above_cc, default_label, ctx->block_patches, ctx->arena);
+    emit_reg_reg(ctx->buf, arith_specs[OP_SUB].mem, R_EAX, R_ECX); /* sub %rax, %rcx */
+
+    /* lea %rdx,[rip+disp32] patched once the table offset is known; RIP-relative entries need no relocations. */
+    emit_lea(ctx->buf, R_EDX,
+             (X86Mem) {.base = NO_REG, .index = NO_REG, .scale = 1, .disp = 0});
+    size_t disp_field_off = bytebuf_len(ctx->buf) - 4;
+
+    emit_mov(ctx->buf, 8, xop_reg(R_EAX),
+             xop_mem((X86Mem) {.base = R_EDX, .index = R_EAX, .scale = 8, .disp = 0}));
+    emit_reg_reg(ctx->buf, arith_specs[OP_ADD].mem, R_EAX, R_EDX); /* add %rax, %rdx */
+    emit_jmp_reg(ctx->buf, R_EAX);
+
+    size_t nentries = (size_t) range + 1;
+    SwitchTableRec *rec = arena_alloc(ctx->arena, sizeof(SwitchTableRec), sizeof(void *));
+    rec->disp_field_off = disp_field_off;
+    rec->nentries = (u32) nentries;
+    rec->targets = arena_alloc(ctx->arena, nentries * sizeof(const char *), sizeof(void *));
+    for (size_t e = 0; e < nentries; e++)
+    {
+        rec->targets[e] = default_label;
+    }
+    for (u32 i = 0; i < n; i++)
+    {
+        size_t idx = (size_t) ((u64) cases[i].val - (u64) min);
+        rec->targets[idx] = cases[i].label;
+    }
+    vec_push(ctx->switch_tables, rec);
+}
 
 static void lower_switch(IrInstr *in, CodegenCtx *ctx)
 {
@@ -1096,98 +1132,21 @@ static void lower_switch(IrInstr *in, CodegenCtx *ctx)
     IrSwitchCase *cases = in->extra.sw.cases;
     const char *default_label = in->extra.sw.default_label;
 
-    /* Load the controlling value into %rax as its exact 64-bit semantic value
-       (full width for w=8/imm, sign- or zero-extended otherwise). Both the
-       chain compares and the table's range/index math then run in 64 bits. */
-    IrOperand src = in->ops[0];
-    u8 w = operand_width(ctx, src);
-    if (src.is_imm)
-    {
-        emit_mov(ctx->buf, 8, xop_reg(R_EAX), xop_imm(src.u.imm));
-    }
-    else
-    {
-        emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, src, R_EAX));
-        if (w < 8)
-        {
-            if (ir_vreg_signed(ctx->mod, src.u.vreg))
-            {
-                emit_movsx(ctx->buf, w, 8, R_EAX, xop_reg(R_EAX));
-            }
-            else if (w < 4)
-            {
-                emit_movzx(ctx->buf, w, 8, R_EAX, xop_reg(R_EAX));
-            }
-            /* w==4 unsigned: mov eax already zero-extends into %rax */
-        }
-    }
+    emit_switch_control(ctx, in->ops[0]);
 
-    bool use_table = false;
     if (n >= 2)
     {
-        i64 min, max;
-        min = max = cases[0].val;
+        i64 min = cases[0].val, max = cases[0].val;
         for (u32 i = 1; i < n; i++)
         {
-            if (cases[i].val < min)
-            {
-                min = cases[i].val;
-            }
-            if (cases[i].val > max)
-            {
-                max = cases[i].val;
-            }
+            min = cases[i].val < min ? cases[i].val : min;
+            max = cases[i].val > max ? cases[i].val : max;
         }
         /* u64 wrap subtraction gives the true range for |range| < 2^63. */
         u64 range = (u64) max - (u64) min;
-        use_table = range <= JT_MAX_RANGE;
-
-        if (use_table)
+        if (range <= JT_MAX_RANGE)
         {
-            /* Bounds check, then index = val − min. The wrap-around subtraction
-               is exact because the bounds checks guarantee the index ∈
-               [0, range+1) < 2^63. Negative case ranges need signed ordering
-               (an unsigned view of a negative value looks huge); ranges that
-               never go below 0 compare fine as unsigned either way. */
-            static const u8 below_cc[2] = {CC_B, CC_L};
-            static const u8 above_cc[2] = {CC_A, CC_G};
-            u8 signed_cc = min < 0;
-            emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_imm(min));
-            emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX); /* cmp rax, rcx */
-            emit_jcc(ctx->buf, below_cc[signed_cc], default_label, ctx->block_patches, ctx->arena);
-            emit_mov(ctx->buf, 8, xop_reg(R_EDX), xop_imm(max));
-            emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_EDX); /* cmp rax, rdx */
-            emit_jcc(ctx->buf, above_cc[signed_cc], default_label, ctx->block_patches, ctx->arena);
-            emit_reg_reg(ctx->buf, arith_specs[OP_SUB].mem, R_EAX, R_ECX); /* sub rax, rcx */
-
-            /* lea rdx, [rip+disp32]; the table is appended to the function's
-               .text bytes, so the displacement is patched once its offset is
-               known. RIP-relative + self-relative entries need no relocations. */
-            emit_lea(ctx->buf, R_EDX,
-                     (X86Mem) {.base = NO_REG, .index = NO_REG, .scale = 1, .disp = 0});
-            size_t disp_field_off = bytebuf_len(ctx->buf) - 4;
-
-            emit_mov(ctx->buf, 8, xop_reg(R_EAX),
-                     xop_mem((X86Mem) {.base = R_EDX, .index = R_EAX, .scale = 8, .disp = 0}));
-            emit_reg_reg(ctx->buf, arith_specs[OP_ADD].mem, R_EAX, R_EDX); /* add rax, rdx */
-            emit_jmp_reg(ctx->buf, R_EAX);
-
-            /* Full-range table: one entry per value, gaps route to default. */
-            size_t nentries = (size_t) range + 1;
-            SwitchTableRec *rec = arena_alloc(ctx->arena, sizeof(SwitchTableRec), sizeof(void *));
-            rec->disp_field_off = disp_field_off;
-            rec->nentries = (u32) nentries;
-            rec->targets = arena_alloc(ctx->arena, nentries * sizeof(const char *), sizeof(void *));
-            for (size_t e = 0; e < nentries; e++)
-            {
-                rec->targets[e] = default_label;
-            }
-            for (u32 i = 0; i < n; i++)
-            {
-                size_t idx = (size_t) ((u64) cases[i].val - (u64) min);
-                rec->targets[idx] = cases[i].label;
-            }
-            vec_push(ctx->switch_tables, rec);
+            emit_switch_table(ctx, cases, n, min, max, default_label);
             return;
         }
     }
@@ -1202,11 +1161,11 @@ static void lower_switch(IrInstr *in, CodegenCtx *ctx)
         else
         {
             emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_imm(cases[i].val));
-            emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX); /* cmp rax, rcx */
+            emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX); /* cmp %rax, %rcx */
         }
         emit_jcc(ctx->buf, CC_E, cases[i].label, ctx->block_patches, ctx->arena);
     }
-    emit_jmp_placeholder(ctx->buf, default_label, ctx->block_patches, ctx->arena);
+    emit_jmp(ctx->buf, default_label, ctx->block_patches, ctx->arena);
 }
 
 static void lower_phi(IrInstr *in, CodegenCtx *ctx)
@@ -1295,9 +1254,7 @@ static void lower_zext(IrInstr *in, CodegenCtx *ctx)
     {
         u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
         emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
-        /* A 4-byte source needs no MOVZX: writing EAX already zero-extends to
-           RAX on x86-64, and the 0F B7 form only zero-extends 16 bits — it
-           would (correctly with sw==2, wrongly with sw==4) keep bits 0..15. */
+        /* A 4-byte source needs no MOVZX: writing EAX zero-extends to RAX, and 0F B7 only zero-extends 16 bits. */
         if (sw < 4)
         {
             emit_movzx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
@@ -1323,13 +1280,17 @@ static void lower_sext(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
-static void emit_global_addr_to(ByteBuf *buf, u8 reg, u32 global_idx, Vec *patches, Arena *arena)
+/* `mov reg, imm32sx` (C7 /0): the zero-extension-free encoding GNU ld relocates with R_X86_64_32S. */
+static void emit_addr_mov_imm32(ByteBuf *buf, u8 reg)
 {
-    /* mov r64, imm32 sign-extended (C7 /0): this zero-extension-free encoding is
-       what GNU ld relocates against undefined (cross-TU) symbols. */
     bytebuf_append(buf, rex(true, false, false, reg >= 8));
     bytebuf_append(buf, X86_MOV_RM_IMM32SX);
     bytebuf_append(buf, modrm(3, 0, reg));
+}
+
+static void emit_global_addr_to(ByteBuf *buf, u8 reg, u32 global_idx, Vec *patches, Arena *arena)
+{
+    emit_addr_mov_imm32(buf, reg);
     GlobalPatch *gp = arena_alloc(arena, sizeof(GlobalPatch), sizeof(void *));
     gp->offset = bytebuf_len(buf);
     gp->global_index = global_idx;
@@ -1344,11 +1305,7 @@ static void emit_global_addr(ByteBuf *buf, u32 global_idx, Vec *patches, Arena *
 
 static void emit_func_addr_to(ByteBuf *buf, u8 reg, const char *name, Vec *patches, Arena *arena)
 {
-    /* Same encoding as emit_global_addr_to: `mov reg, imm32sx` (C7 /0),
-       relocated with R_X86_64_32S against the function's symbol. */
-    bytebuf_append(buf, rex(true, false, false, reg >= 8));
-    bytebuf_append(buf, X86_MOV_RM_IMM32SX);
-    bytebuf_append(buf, modrm(3, 0, reg));
+    emit_addr_mov_imm32(buf, reg);
     FuncAddrPatch *fp = arena_alloc(arena, sizeof(FuncAddrPatch), sizeof(void *));
     fp->name = name;
     fp->offset = bytebuf_len(buf);
@@ -1392,8 +1349,7 @@ static void lower_load(IrInstr *in, CodegenCtx *ctx)
 static void lower_store(IrInstr *in, CodegenCtx *ctx)
 {
     u32 w = (u32) in->ops[2].u.imm;
-    /* Materialize the value first (ECX) so a global-pointer operand for the
-       destination (load_ptr -> EAX) cannot clobber it. */
+    /* Materialize the value first (ECX) so a global-pointer destination can't clobber it. */
     X86Operand val = lowered_operand(ctx, in->ops[0], R_ECX);
     if (val.kind == XOP_MEM || val.kind == XOP_IMM)
     {
@@ -1408,8 +1364,7 @@ static void lower_gep(IrInstr *in, CodegenCtx *ctx)
 {
     i64 stride = in->ops[2].u.imm;
 
-    /* Member access hot path: index is imm(1), so base + 1*offset folds into a
-       plain displacement (offset ∉ {1,2,4,8} breaks the SIB scale field). */
+    /* Member-access fast path: index=1 folds base + stride into a plain displacement. */
     if (in->ops[1].is_imm && in->ops[1].u.imm == 1)
     {
         X86Mem base = load_ptr(ctx, in->ops[0]);
@@ -1472,11 +1427,18 @@ static void lower_memcpy(IrInstr *in, CodegenCtx *ctx)
     bytebuf_append(ctx->buf, X86_MOVSB);
 }
 
+/* True for the ten icmp predicates; designated initializers keep this order-independent from IR_OPCODES. */
+static const bool is_icmp_op_table[OP_ICMP_SGE + 1] = {
+    [OP_ICMP_EQ] = true,  [OP_ICMP_NE] = true, [OP_ICMP_ULT] = true, [OP_ICMP_ULE] = true,
+    [OP_ICMP_UGT] = true, [OP_ICMP_UGE] = true, [OP_ICMP_SLT] = true, [OP_ICMP_SLE] = true,
+    [OP_ICMP_SGT] = true, [OP_ICMP_SGE] = true,
+};
+
 /* arithmetic/compare have no imm64 form: an imm RHS must fit a sign-extended imm32 */
 static bool is_imm_rhs_op(IrOpcode op)
 {
     return op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_AND || op == OP_OR ||
-           op == OP_XOR || (op >= OP_ICMP_EQ && op <= OP_ICMP_SGE);
+           op == OP_XOR || (op <= OP_ICMP_SGE && is_icmp_op_table[op]);
 }
 
 static bool instr_has_bad_imm(IrInstr *in, CodegenCtx *ctx)
@@ -1567,13 +1529,10 @@ static FrameInfo frame_plan(IrFunction *f)
     }
 
     FrameInfo fr = {0};
-    fr.n_vregs = max_vreg + 1;
-    u32 total = fr.n_vregs * 8;
+    u32 total = (max_vreg + 1) * 8;
     if (f->is_variadic)
     {
-        /* The SysV register save area below the vreg slots: 48 GP + 128-byte
-           xmm reservation. The prologue spills into it; va_start points
-           reg_save_area at it. */
+        /* SysV register save area below the vreg slots (48 GP + 128-byte xmm reservation); the prologue spills into it. */
         fr.save_area_off = total + 176;
         total = fr.save_area_off;
     }
@@ -1581,8 +1540,7 @@ static FrameInfo frame_plan(IrFunction *f)
     return fr;
 }
 
-/* Move incoming args into their param vreg slots. Args 7+ sit at
-   16 + (i-6)*8(%rbp) and must be routed through %eax. */
+/* Move incoming args into their param vreg slots; stack args (7+) sit at 16+(i-6)*8(%rbp), routed through %eax. */
 static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod)
 {
     size_t nparams = vec_size(f->params);
@@ -1607,13 +1565,10 @@ static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, FrameInfo 
     bytebuf_append(buf, X86_PUSH_RBP);
     emit_mov(buf, 8, xop_reg(R_EBP), xop_reg(R_ESP));
 
-    /* n_vregs >= 1, so the frame is always at least 16 bytes. */
+    /* The frame always holds at least one 8-byte vreg slot, so it's ≥ 16. */
     emit_binop_rhs(buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(fr->frame_size));
 
-    /* Variadic functions immediately capture the six GP argument registers
-       into the register save area — before emit_param_shuffle's %eax scratch
-       for stack args can reuse them (the arg regs themselves are read-only
-       here: mov reg -> [mem] never clobbers the source). */
+    /* Spill the six GP arg registers here, before emit_param_shuffle's %eax scratch for stack args (mov reg→[mem] never clobbers the source). */
     if (f->is_variadic)
     {
         for (size_t i = 0; i < 6; i++)
@@ -1667,6 +1622,26 @@ static void collect_phi_copies(IrFunction *f, CodegenCtx *ctx)
     }
 }
 
+/* Lower a PHI source into vreg `dst`; global/func addresses materialize as 8-byte addresses, else at the value's own width. */
+static void emit_phi_copy(CodegenCtx *ctx, IrOperand src, u32 dst_vreg)
+{
+    if (src.is_global)
+    {
+        emit_global_addr(ctx->buf, src.u.global_index, ctx->global_patches, ctx->arena);
+        emit_mov(ctx->buf, 8, xop_vreg(dst_vreg), xop_reg(R_EAX));
+        return;
+    }
+    if (src.is_func)
+    {
+        emit_func_addr_to(ctx->buf, R_EAX, src.u.func_name, ctx->func_patches, ctx->arena);
+        emit_mov(ctx->buf, 8, xop_vreg(dst_vreg), xop_reg(R_EAX));
+        return;
+    }
+    u8 pw = operand_width(ctx, src);
+    emit_mov(ctx->buf, pw, xop_reg(R_EAX), lowered_operand(ctx, src, R_ECX));
+    emit_mov(ctx->buf, pw, xop_vreg(dst_vreg), xop_reg(R_EAX));
+}
+
 static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
 {
     ctx->block_offsets[bi] = bytebuf_len(ctx->buf);
@@ -1691,23 +1666,7 @@ static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
         for (size_t pi = 0; pi < npc; pi++)
         {
             PhiCopy *pc = (PhiCopy *) vec_get(ctx->phi_copies[bi], pi);
-            if (pc->src.is_global)
-            {
-                emit_global_addr(ctx->buf, pc->src.u.global_index, ctx->global_patches, ctx->arena);
-                emit_mov(ctx->buf, 8, xop_vreg(pc->dst_vreg), xop_reg(R_EAX));
-            }
-            else if (pc->src.is_func)
-            {
-                emit_func_addr_to(ctx->buf, R_EAX, pc->src.u.func_name, ctx->func_patches,
-                                  ctx->arena);
-                emit_mov(ctx->buf, 8, xop_vreg(pc->dst_vreg), xop_reg(R_EAX));
-            }
-            else
-            {
-                u8 pw = operand_width(ctx, pc->src);
-                emit_mov(ctx->buf, pw, xop_reg(R_EAX), lowered_operand(ctx, pc->src, R_ECX));
-                emit_mov(ctx->buf, pw, xop_vreg(pc->dst_vreg), xop_reg(R_EAX));
-            }
+            emit_phi_copy(ctx, pc->src, pc->dst_vreg);
         }
         lower_instr((IrInstr *) vec_get(blk->instrs, ii), ctx);
     }
@@ -1718,12 +1677,11 @@ static void resolve_block_patches(CodegenCtx *ctx)
     size_t npatches = vec_size(ctx->block_patches);
     for (size_t pi = 0; pi < npatches; pi++)
     {
-        BranchPatch *bp = (BranchPatch *) vec_get(ctx->block_patches, pi);
-        IrBlock *target = strmap_get(ctx->label_to_block, bp->target);
+        PatchSite *site = (PatchSite *) vec_get(ctx->block_patches, pi);
+        IrBlock *target = strmap_get(ctx->label_to_block, site->target);
         ASSERT(target != NULL && "branch target names a block the IR builder created");
         size_t ti = (size_t) u64map_get(ctx->block_to_index, (u64) (uintptr_t) target);
-        i32 rel = (i32) ((i64) ctx->block_offsets[ti] - (i64) (bp->offset + 4));
-        bytebuf_poke_u32(ctx->buf, bp->offset, (u32) rel);
+        patch_rel32(ctx->buf, site->offset, ctx->block_offsets[ti]);
     }
 }
 
@@ -1777,10 +1735,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         emit_block((IrBlock *) vec_get(f->blocks, bi), bi, &ctx);
     }
 
-    /* Append switch jump tables at the end of the function's .text bytes. Each
-       entry holds `target_block_offset − table_base_offset`, so runtime
-       resolution is `table_base + entry`; combined with the RIP-relative lea
-       the table needs no relocations and relocates with the function. */
+    /* Append jump tables after the function body; entries store target−table_base so runtime resolves table_base + entry, with no relocations. */
     size_t nst = vec_size(ctx.switch_tables);
     if (nst > 0)
     {
@@ -1865,35 +1820,19 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena)
         size_t npatches = vec_size(cf->patches);
         for (size_t pi = 0; pi < npatches; pi++)
         {
-            CallPatch *cp = (CallPatch *) vec_get(cf->patches, pi);
-            CodegenFunc *target = find_codegen_func(cm, cp->target);
+            PatchSite *site = (PatchSite *) vec_get(cf->patches, pi);
+            CodegenFunc *target = find_codegen_func(cm, site->target);
             if (!target)
             {
-                /* A call to a declaration-only extern (Phase 16): leave the
-                   rel32 field as 0 and hand the site to elf.c, which emits an
-                   SHN_UNDEF symbol + R_X86_64_PLT32 relocation for the linker
-                   (libc calls, other translation units). */
+                /* Call to a declaration-only extern: leave rel32 as 0 and let elf.c emit an SHN_UNDEF symbol + R_X86_64_PLT32 relocation. */
                 ExternCall *ec = arena_alloc(arena, sizeof(ExternCall), sizeof(void *));
-                ec->name = cp->target;
-                ec->text_offset = cf->offset + cp->offset;
+                ec->name = site->target;
+                ec->text_offset = cf->offset + site->offset;
                 vec_push(cm->extern_calls, ec);
                 continue;
             }
-            i32 rel = (i32) (target->offset - (cf->offset + cp->offset + 4));
-            bytebuf_poke_u32(cf->bytes, cp->offset, (u32) rel);
-        }
-    }
-
-    /* Apply global-data patches: leave placeholder for R_X86_64_32 relocations.
-       The linker reads the addend from the relocation entry, not the instruction. */
-    for (size_t i = 0; i < nfuncs; i++)
-    {
-        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
-        size_t ngp = vec_size(cf->global_patches);
-        for (size_t pi = 0; pi < ngp; pi++)
-        {
-            GlobalPatch *gp = (GlobalPatch *) vec_get(cf->global_patches, pi);
-            bytebuf_poke_u32(cf->bytes, gp->offset, 0);
+            i32 rel = (i32) (target->offset - (cf->offset + site->offset + 4));
+            bytebuf_poke_u32(cf->bytes, site->offset, (u32) rel);
         }
     }
 
