@@ -182,13 +182,10 @@ static bool is_compound_assign_op(BinOpKind op)
     return op <= BIN_XOR_ASSIGN && is_compound_assign_table[op];
 }
 
-/* C11 §6.5.16.1p1 assignment compatibility, used by `=`, call arguments,
-   returns, and initializers. Pointers: the pointee types must match after
-   stripping qualifiers, and the left may only *gain* qualifiers at the first
-   pointee level (adding const is fine; discarding it is a constraint
-   violation; deeper pointer levels must match exactly — `int**` is not
-   assignable to `const int**`). Records: identical unqualified type. Other
-   scalar conversions are permitted (width conversions happen at IR lowering). */
+/* §6.5.16.1p1 assignment compatibility (used by `=`, call args, returns,
+   initializers): pointers gain qualifiers only at the first pointee level
+   (`int**` is not assignable to `const int**`); records must be identical;
+   other scalars convert freely. */
 static bool type_assignable(Type *dst, Type *src)
 {
     dst = type_unqual(dst);
@@ -269,119 +266,161 @@ static bool check_modifiable_lvalue(ASTNode *lhs, SemanticCtx *ctx)
     return true;
 }
 
+/* §6.5.16.1: `E1 = E2` requires a modifiable lvalue; pointer and record targets
+   are checked for assignability. Returns the result type (an rvalue of the lhs
+   type), or NULL after emitting an error. */
+static Type *check_assign_expr(ASTBinaryExpr *be, Type *lt, Type *rt, SemanticCtx *ctx)
+{
+    if (!check_modifiable_lvalue(be->left, ctx))
+    {
+        return NULL;
+    }
+    if (type_is_ptr(lt) && type_is_ptr(rt) && !type_assignable(lt, rt))
+    {
+        sem_error(be->base.loc, "incompatible pointer types in assignment");
+        ctx->error = true;
+        return NULL;
+    }
+    if ((type_is_record(lt) || type_is_record(rt)) && !type_assignable(lt, rt))
+    {
+        sem_error(be->base.loc, "incompatible types in struct/union assignment");
+        ctx->error = true;
+        return NULL;
+    }
+    return type_rvalue(lt);
+}
+
+/* §6.5.16.2: `E1 op= E2` = `E1 = E1 op (E2)` with E1 evaluated once; a pointer
+   lhs is legal only for `+=`/`-=` with an integer rhs. */
+static Type *check_compound_assign_expr(ASTBinaryExpr *be, Type *lt, Type *rt, SemanticCtx *ctx)
+{
+    if (!check_modifiable_lvalue(be->left, ctx))
+    {
+        return NULL;
+    }
+    bool is_ptr_add_sub = be->op == BIN_ADD_ASSIGN || be->op == BIN_SUB_ASSIGN;
+    if (type_is_ptr(lt) && (!is_ptr_add_sub || type_is_ptr(rt)))
+    {
+        sem_error(be->base.loc,
+                  "invalid operands to compound assignment (pointer allowed only with "
+                  "'+=' / '-=' and an integer operand)");
+        ctx->error = true;
+        return NULL;
+    }
+    if (!type_is_ptr(lt) && !type_is_integer(rt))
+    {
+        sem_error(be->base.loc, "invalid operands to compound assignment");
+        ctx->error = true;
+        return NULL;
+    }
+    return type_rvalue(lt);
+}
+
+/* Result type of a non-assignment binary op on scalar/pointer operands: logical
+   and comparison ops yield int; pointer add/sub of a pointer and an integer
+   keeps the pointer; otherwise the usual arithmetic conversion's common type. */
+static Type *value_op_result(BinOpKind op, Type *lt, Type *rt)
+{
+    if (op == BIN_LOG_AND || op == BIN_LOG_OR || is_comparison_op(op))
+    {
+        return type_int();
+    }
+    if (type_is_ptr(lt) && (op == BIN_ADD || op == BIN_SUB) && !type_is_ptr(rt))
+    {
+        return lt;
+    }
+    return type_common(type_promote(lt), type_promote(rt));
+}
+
 static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
 {
     if (!check_expr(binary_expr->left, ctx) || !check_expr(binary_expr->right, ctx))
     {
         return false;
     }
-    Type *lt = binary_expr->left->expr_type;
-    Type *rt = binary_expr->right->expr_type;
     /* Array and function designators decay to pointers in value positions
-       (§6.3.2.1p3/p4): a function operand used where a value is expected is
-       its address. Identifiers already decay in check_identifier_expr; this
-       folds nested designators like `(*fp)` in `fp == *fp`. */
-    lt = type_decay(lt);
-    rt = type_decay(rt);
-    Type *result = NULL;
-    bool left_void_ok = binary_expr->op == BIN_COMMA; /* §6.5.17p2: the comma's
-                                left operand is evaluated as a void expression */
+       (§6.3.2.1p3/p4); identifiers already decay in check_identifier_expr,
+       this folds nested designators like `(*fp)` in `fp == *fp`. */
+    Type *lt = type_decay(binary_expr->left->expr_type);
+    Type *rt = type_decay(binary_expr->right->expr_type);
+    bool left_void_ok = binary_expr->op == BIN_COMMA; /* §6.5.17p2: the comma's left
+                                        operand is evaluated as a void expression */
     if ((!left_void_ok && !check_value_used(binary_expr->left, ctx)) ||
         !check_value_used(binary_expr->right, ctx))
     {
         /* `(void)x + 1`, `f() = 5` — operand is void, not a value. */
         return false;
     }
-    if ((type_is_record(lt) || type_is_record(rt)) && binary_expr->op != BIN_ASSIGN)
+    if (binary_expr->op != BIN_ASSIGN && (type_is_record(lt) || type_is_record(rt)))
     {
         sem_error(binary_expr->base.loc, "invalid operands to operator (record type)");
         ctx->error = true;
         return false;
     }
-    if (binary_expr->op == BIN_ASSIGN)
+    Type *result;
+    BinOpKind op = binary_expr->op;
+    if (op == BIN_ASSIGN)
     {
-        ASTNode *lhs = binary_expr->left;
-        if (!check_modifiable_lvalue(lhs, ctx))
-        {
-            return false;
-        }
-        if (type_is_ptr(lt) && type_is_ptr(rt) && !type_assignable(lt, rt))
-        {
-            sem_error(binary_expr->base.loc, "incompatible pointer types in assignment");
-            ctx->error = true;
-            return false;
-        }
-        if ((type_is_record(lt) || type_is_record(rt)) && !type_assignable(lt, rt))
-        {
-            sem_error(binary_expr->base.loc, "incompatible types in struct/union assignment");
-            ctx->error = true;
-            return false;
-        }
-        result = type_rvalue(lt);
+        result = check_assign_expr(binary_expr, lt, rt, ctx);
     }
-    else if (is_compound_assign_op(binary_expr->op))
+    else if (is_compound_assign_op(op))
     {
-        /* §6.5.16.2: `E1 op= E2` ≡ `E1 = E1 op (E2)` with E1 evaluated once.
-           The lvalue gate is the plain-assignment gate (const, arrays);
-           records are already rejected above; a pointer lhs is legal only for
-           `+=`/`-=` with an integer rhs (`p -= q` is E1 = ptr minus ptr = an
-           integer — not assignable back). */
-        ASTNode *lhs = binary_expr->left;
-        if (!check_modifiable_lvalue(lhs, ctx))
-        {
-            return false;
-        }
-        bool is_ptr_add_sub =
-            binary_expr->op == BIN_ADD_ASSIGN || binary_expr->op == BIN_SUB_ASSIGN;
-        if (type_is_ptr(lt) && (!is_ptr_add_sub || type_is_ptr(rt)))
-        {
-            sem_error(binary_expr->base.loc,
-                      "invalid operands to compound assignment (pointer allowed only with "
-                      "'+=' / '-=' and an integer operand)");
-            ctx->error = true;
-            return false;
-        }
-        if (!type_is_ptr(lt) && !type_is_integer(rt))
-        {
-            sem_error(binary_expr->base.loc, "invalid operands to compound assignment");
-            ctx->error = true;
-            return false;
-        }
-        result = type_rvalue(lt);
+        result = check_compound_assign_expr(binary_expr, lt, rt, ctx);
     }
-    else if (binary_expr->op == BIN_COMMA)
+    else if (op == BIN_COMMA)
     {
-        /* §6.5.17: the left operand is evaluated and discarded; the value and
-           type of the expression are the right operand's. The result is not
-           an lvalue (an lvalue on the left is fine — it is simply evaluated).
-           A record right operand was already rejected by the record check
-           above (records are not values). */
+        /* §6.5.17: the value and type are the right operand's. */
         result = type_rvalue(rt);
     }
     else
     {
-        lt = type_rvalue(lt);
-        rt = type_rvalue(rt);
-        if (binary_expr->op == BIN_LOG_AND || binary_expr->op == BIN_LOG_OR)
-        {
-            result = type_int();
-        }
-        else if (is_comparison_op(binary_expr->op))
-        {
-            result = type_int();
-        }
-        else if (type_is_ptr(lt) && (binary_expr->op == BIN_ADD || binary_expr->op == BIN_SUB) &&
-                 !type_is_ptr(rt))
-        {
-            result = lt;
-        }
-        else
-        {
-            result = type_common(type_promote(lt), type_promote(rt));
-        }
+        result = value_op_result(op, type_rvalue(lt), type_rvalue(rt));
+    }
+    if (!result)
+    {
+        return false;
     }
     binary_expr->base.expr_type = result;
     return true;
+}
+
+/* `&operand`: a pointer to the operand's declared (lvalue) type, qualifiers
+   included; NULL after emitting an error. */
+static Type *check_address_of(ASTNode *operand, SemanticCtx *ctx)
+{
+    if (operand->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, operand)->op == UN_DEREF)
+    {
+        return type_ptr(operand->expr_type);
+    }
+    if (operand->kind == AST_SUBSCRIPT_EXPR || operand->kind == AST_MEMBER_ACCESS)
+    {
+        return type_ptr(operand->expr_type);
+    }
+    if (operand->kind == AST_IDENT)
+    {
+        ASTIdent *id = ast_as(ASTIdent, operand);
+        if (id->is_func)
+        {
+            return operand->expr_type; /* `&f` is already the function's address */
+        }
+        if (!id->decl)
+        {
+            sem_error(operand->loc, "cannot take address of this expression");
+            ctx->error = true;
+            return NULL;
+        }
+        return type_ptr(type_decay(id->decl->type));
+    }
+    if (operand->kind == AST_COMPOUND_LITERAL)
+    {
+        /* The anonymous object's address; pointee qualifiers survive, so
+           `&(const struct S){...}` is `const struct S *`. */
+        Type *ty = ast_as(ASTCompoundLiteral, operand)->type;
+        return type_ptr(type_decay(ty));
+    }
+    sem_error(operand->loc, "cannot take address of this expression");
+    ctx->error = true;
+    return NULL;
 }
 
 static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
@@ -408,63 +447,19 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
             ctx->error = true;
             return false;
         }
-        /* Lvalue: the pointee type carries the const (const int* -> const int). */
+        /* The pointee type carries the const (const int* -> const int). */
         unary_expr->base.expr_type = type_deref(op_type);
         return true;
     }
     if (unary_expr->op == UN_ADDR)
     {
-        ASTNode *operand = unary_expr->operand;
-        /* Address-of yields a pointer to the operand's *declared* (lvalue)
-           type, qualifiers included: &const_x is `const int*`. */
-        if (operand->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, operand)->op == UN_DEREF)
+        Type *t = check_address_of(unary_expr->operand, ctx);
+        if (!t)
         {
-            unary_expr->base.expr_type = type_ptr(op_type);
-            return true;
+            return false;
         }
-        if (operand->kind == AST_SUBSCRIPT_EXPR)
-        {
-            unary_expr->base.expr_type = type_ptr(op_type);
-            return true;
-        }
-        if (operand->kind == AST_MEMBER_ACCESS)
-        {
-            unary_expr->base.expr_type = type_ptr(op_type);
-            return true;
-        }
-        if (operand->kind == AST_IDENT)
-        {
-            ASTIdent *id = ast_as(ASTIdent, operand);
-            if (id->is_func)
-            {
-                /* `&f`: the designator is already the function's address. */
-                unary_expr->base.expr_type = op_type;
-                return true;
-            }
-            ASTVarDecl *decl = id->decl;
-            /* Any lvalue identifier is addressable: file globals and block
-               statics are address constants, block-scope autos spill to a
-               stack slot. */
-            if (!decl)
-            {
-                sem_error(unary_expr->base.loc, "cannot take address of this expression");
-                ctx->error = true;
-                return false;
-            }
-            unary_expr->base.expr_type = type_ptr(type_decay(decl->type));
-            return true;
-        }
-        if (operand->kind == AST_COMPOUND_LITERAL)
-        {
-            /* The anonymous compound literal's address; the pointee keeps its
-               qualifiers, so `&(const struct S){...}` is `const struct S *`. */
-            Type *ty = ast_as(ASTCompoundLiteral, operand)->type;
-            unary_expr->base.expr_type = type_ptr(type_decay(ty));
-            return true;
-        }
-        sem_error(unary_expr->base.loc, "cannot take address of this expression");
-        ctx->error = true;
-        return false;
+        unary_expr->base.expr_type = t;
+        return true;
     }
     if (op_type->kind == TYPE_VOID)
     {
@@ -799,11 +794,8 @@ static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx)
         ctx->error = true;
         return false;
     }
-    /* A cast does not yield an lvalue, and a cast to a qualified type has the
-       same effect as a cast to its unqualified version (C11 §6.5.4p4): the
-       result is the rvalue of the target, so top-level `const` is dropped
-       while pointee qualifiers survive (`(const int *)p` stays
-       pointer-to-const-int). */
+    /* A cast is never an lvalue; a qualified target equals the unqualified one
+       (§6.5.4p4): top-level const drops, pointee qualifiers survive. */
     ce->base.expr_type = type_rvalue(target);
     return true;
 }
@@ -849,10 +841,9 @@ static bool check_member_access(ASTMemberAccess *ma, SemanticCtx *ctx)
         ctx->error = true;
         return false;
     }
-    /* C11 §6.5.2.3p4: member access on a const-qualified object (or through a
-       pointer to one) yields a const-qualified member lvalue. For array
-       members the qualifier lands on the element via type_const, so `s.a[i]`
-       writes are caught and decay gives `const T*`. */
+    /* §6.5.2.3p4: a const-qualified object (or pointer to one) yields const members;
+       array members take the qualifier on the element, so `s.a[i]` writes and the
+       `const T*` decay work. */
     ma->field_offset = type_record_field_offset(record_type, ma->member);
     ma->field_type = field_type;
     if (type_is_const(record_type))
@@ -1126,15 +1117,81 @@ static bool check_return_stmt(ASTReturnStmt *return_stmt, SemanticCtx *ctx, Type
     return true;
 }
 
+/* A block-scope `extern` names an external-linkage entity (§6.2.2p5); it
+   allocates no local storage and resolves through the file-scope namespace,
+   not the block locals. */
+static bool check_block_extern(ASTVarDecl *var_decl, SemanticCtx *ctx)
+{
+    if (var_decl->init)
+    {
+        sem_error(var_decl->base.loc, "'%s' has both 'extern' and an initializer", var_decl->name);
+        ctx->error = true;
+        return false;
+    }
+    if (strmap_get(ctx->globals, var_decl->name))
+    {
+        sem_error(var_decl->base.loc, "'%s' redeclared as different kind of symbol",
+                  var_decl->name);
+        ctx->error = true;
+        return false;
+    }
+    ASTVarDecl *existing = strmap_get(ctx->global_vars, var_decl->name);
+    if (existing && existing->storage == SC_STATIC)
+    {
+        sem_error(var_decl->base.loc, "extern declaration of '%s' follows static declaration",
+                  var_decl->name);
+        ctx->error = true;
+        return false;
+    }
+    if (!existing)
+    {
+        strmap_set(ctx->global_vars, var_decl->name, var_decl);
+    }
+    return true;
+}
+
+/* Check a block-scope automatic variable's initializer: aggregates are planned,
+   scalar expressions are checked and type-assigned to the variable. */
+static bool check_auto_initializer(ASTVarDecl *var_decl, SemanticCtx *ctx)
+{
+    bool handled;
+    if (!plan_var_aggregate_init(ctx, var_decl, &handled))
+    {
+        return false;
+    }
+    if (handled)
+    {
+        return true;
+    }
+    if (!check_expr(var_decl->init, ctx) || !check_value_used(var_decl->init, ctx))
+    {
+        return false;
+    }
+    Type *init_type = var_decl->init->expr_type;
+    if (type_is_record(var_decl->type) && !type_assignable(var_decl->type, init_type))
+    {
+        sem_error(var_decl->base.loc, "invalid initializer for struct/union type '%s'",
+                  var_decl->type->record.tag);
+        ctx->error = true;
+        return false;
+    }
+    if (type_is_ptr(var_decl->type) && !type_assignable(var_decl->type, init_type))
+    {
+        sem_error(var_decl->base.loc, "incompatible pointer type in initializer for '%s'",
+                  var_decl->name);
+        ctx->error = true;
+        return false;
+    }
+    return true;
+}
+
 static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
 {
     if (scope_top_lookup(ctx, var_decl->name))
     {
         sem_error(var_decl->base.loc, "redeclaration of '%s'", var_decl->name);
         ctx->error = true;
-        {
-            return false;
-        }
+        return false;
     }
     if (var_decl->type->kind == TYPE_VOID)
     {
@@ -1144,11 +1201,8 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
     }
     if (var_decl->storage == SC_STATIC)
     {
-        /* Block-scope statics are file-backed objects: the parser folded a
-           constant initializer into const_init, routed a brace list, a string
-           literal, or an address constant into init; everything else is
-           rejected. Lists / char arrays get a plan; the serializer emits the
-           bytes. */
+        /* Statics are file-backed: the parser folded scalar constants into
+           const_init, routed aggregates/strings/addresses into init. */
         if (var_decl->init && plan_var_initializer(ctx, var_decl) == PLAN_ERROR)
         {
             return false;
@@ -1160,76 +1214,13 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
     }
     if (var_decl->storage == SC_EXTERN)
     {
-        /* Block-scope extern declares the external-linkage entity (C11
-           §6.2.2p5); it allocates no local storage and resolves through the
-           file-scope/external namespace, not the block locals. */
-        if (var_decl->init)
-        {
-            sem_error(var_decl->base.loc, "'%s' has both 'extern' and an initializer",
-                      var_decl->name);
-            ctx->error = true;
-            return false;
-        }
-        if (strmap_get(ctx->globals, var_decl->name))
-        {
-            sem_error(var_decl->base.loc, "'%s' redeclared as different kind of symbol",
-                      var_decl->name);
-            ctx->error = true;
-            return false;
-        }
-        ASTVarDecl *existing = strmap_get(ctx->global_vars, var_decl->name);
-        if (existing && existing->storage == SC_STATIC)
-        {
-            sem_error(var_decl->base.loc,
-                      "extern declaration of '%s' follows static "
-                      "declaration",
-                      var_decl->name);
-            ctx->error = true;
-            return false;
-        }
-        if (!existing)
-        {
-            strmap_set(ctx->global_vars, var_decl->name, var_decl);
-        }
-        return true;
+        return check_block_extern(var_decl, ctx);
     }
     var_decl->is_block_scope = true;
     strmap_set(current_scope(ctx), var_decl->name, var_decl);
-    if (var_decl->init)
+    if (var_decl->init && !check_auto_initializer(var_decl, ctx))
     {
-        bool handled;
-        if (!plan_var_aggregate_init(ctx, var_decl, &handled))
-        {
-            return false;
-        }
-        if (handled)
-        {
-            return true;
-        }
-        if (!check_expr(var_decl->init, ctx))
-        {
-            return false;
-        }
-        if (!check_value_used(var_decl->init, ctx))
-        {
-            return false;
-        }
-        if (type_is_record(var_decl->type) &&
-            !type_assignable(var_decl->type, var_decl->init->expr_type))
-        {
-            sem_error(var_decl->base.loc, "invalid initializer for struct/union type '%s'",
-                      var_decl->type->record.tag);
-            ctx->error = true;
-            return false;
-        }
-        if (type_is_ptr(var_decl->type) &&
-            !type_assignable(var_decl->type, var_decl->init->expr_type))
-        {
-            sem_error(var_decl->base.loc, "incompatible pointer type in initializer for '%s'",
-                      var_decl->name);
-            ctx->error = true;
-            return false;
-        }
+        return false;
     }
     /* A `[]` array with no initializer (or an incomplete record/array element)
        stays incomplete — rejected after completion would have run. */
@@ -1496,13 +1487,9 @@ static bool plan_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *cty, u32 
     return plan_scalar_write(ctx, plan, cty, coff, value, loc);
 }
 
-/* §6.7.9p14: a character array may be initialized by a character string
-   literal, braced or not — `char s[5] = "hi"` and `char s[5] = {"hi"}` both
-   fill the array; an unsized target infers strlen+1 from the string. The
-   terminating NUL is stored *if there is room* (`char s[2] = "hi"` drops it,
-   `char s[3] = "hi"` keeps it); only `strlen > size` is an error. The emission
-   clamps the copy length to the array size (ir_builder) so the NUL is dropped
-   there. */
+/* §6.7.9p14: a lone string literal fills `char[N]` (`s[5]="hi"` and `{"hi"}` agree);
+   an unsized target infers strlen+1, the NUL is kept only if it fits, and
+   `strlen > size` is an error (the ir_builder clamps the copy length). */
 static PlanResult plan_char_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *t,
                                           ASTInitList *list, InitElem *e, u32 base_off)
 {
@@ -1537,10 +1524,9 @@ static PlanResult plan_char_string_clause(SemanticCtx *ctx, InitPlan *plan, Type
     return PLAN_HANDLED;
 }
 
-/* Consume one list element: rebind the cursor via its designator (if any),
-   then plan the clause — a nested brace list, a string fill, or a scalar with
-   brace elision (drilling to the leaf subobject). `stackp` may be replaced by a
-   designator path; the cursor is advanced once the clause consumes its target. */
+/* Consume one list element: apply its designator (if any), then plan the clause
+   — a nested brace list, a string fill, or a scalar with brace elision (drilling
+   to the leaf subobject). `stackp` may be replaced by a designator path. */
 static bool plan_elem(SemanticCtx *ctx, InitPlan *plan, Type *t, InitElem *e, u32 base_off,
                       Vec **stackp)
 {
@@ -1686,11 +1672,9 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
         {
             return false;
         }
-        /* The growable root's cursor (after the clause) is the inferred length: a
-           boundary position (`root.next`) counts fully-consumed elements; a
-           cursor still inside the current element — a deeper frame remains on
-           the stack — counts `root.next + 1` (a partially-filled row is one
-           element, §6.7.9p22). */
+        /* The growable root's cursor after the clause is the inferred length: a boundary
+           `root.next` counts complete elements; a cursor still inside the current element
+           counts `root.next + 1` (a partially-filled row is one element, §6.7.9p22). */
         if (plan->grow_array && vec_size(stack) > 0)
         {
             PlanFrame *rf = (PlanFrame *) vec_get(stack, 0);
@@ -1738,20 +1722,17 @@ static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
     return true;
 }
 
-/* `int *p = &g;` or `int *p = &(type){...};` (block static or file scope): a
-   bare address constant in pointer position. The value type-checks against
-   the pointer target; the IR serializer turns it into one 8-byte relocation
-   write (§6.6p9 — a compound literal is an address constant). */
+/* `int *p = &g;` / `&(type){...}` (block static or file scope): a bare address
+   constant in pointer position; the serializer turns it into one 8-byte
+   relocation write (§6.6p9 — a compound literal is an address constant). */
 static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
 {
     if (vd->init->kind != AST_UNARY_EXPR)
     {
         if (vd->init->kind == AST_IDENT)
         {
-            /* A bare function designator (`fp = f;`): an address
-               constant whose reloc the IR serializer emits. The parser only
-               lets function names reach here as values; plan_scalar_write
-               resolves the designator (is_func) via check_expr. */
+            /* A bare function designator (`fp = f;`): an address constant whose
+               reloc the serializer emits; check_expr resolves the designator. */
             if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_FUNC)
             {
                 return false;
@@ -1785,11 +1766,9 @@ static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
     return true;
 }
 
-/* Run the planner over a brace-list initializer, completing a declared-against
-   `[]` array *through* `type_out` first (the fresh type is built from the
-   planner's inferred length; the interned 0-length type is never mutated).
-   Shared by var declarations and compound literals. Returns false
-   on error. */
+/* Run the planner over a brace list, completing a declared-against `[]` array
+   through `type_out` first (the interned 0-length type is never mutated).
+   Shared by var declarations and compound literals. */
 static bool plan_brace_list(SemanticCtx *ctx, Type **type_out, ASTNode *init, InitPlan **plan_out)
 {
     InitPlan *plan = init_plan_new(ctx, *type_out);
@@ -1847,10 +1826,9 @@ static bool check_aggregate_const_init(ASTVarDecl *vd, SemanticCtx *ctx)
     return true;
 }
 
-/* Plan a declaration's initializer when it is an aggregate, a string, or an
-   address constant; scalar initializers return PLAN_NONE and are checked as
-   ordinary expressions by the caller. Shared by file- and block-scope (static)
-   declarations so both see the same forms. */
+/* Plan a declaration's initializer when it is an aggregate, string, or address
+   constant; scalar initializers return PLAN_NONE and are checked as ordinary
+   expressions by the caller. */
 static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
 {
     bool handled;
@@ -1875,11 +1853,8 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
     return PLAN_NONE;
 }
 
-/* A compound literal `(type){ ... }` (C11 §6.5.2.5). Check the target type,
-   run the planner against the list (completing `[]`), and set the node's
-   lowering plan. The node is an lvalue of the *declared* type (qualifiers
-   intact: `(const struct S){...}` is a const lvalue); initialization itself
-   bypasses the write gate. */
+/* A compound literal `(type){ ... }` (§6.5.2.5): an lvalue of the declared type,
+   qualifiers intact; initialization itself bypasses the write gate. */
 static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx)
 {
     Type *ty = type_unqual(cl->type);
@@ -1991,6 +1966,94 @@ static bool check_for_statement(ASTForStmt *for_stmt, SemanticCtx *ctx, Type *re
     return ok;
 }
 
+/* Fold a unary integer-constant operation; false when the op doesn't fold. */
+static bool fold_unary_constant(UnaryOpKind op, i64 v, i64 *out)
+{
+    switch (op)
+    {
+        case UN_NEG:
+            *out = -v;
+            return true;
+        case UN_BIT_NOT:
+            *out = ~v;
+            return true;
+        case UN_LOG_NOT:
+            *out = !v;
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* Fold a binary integer-constant operation; division by zero and out-of-range
+   shifts are not foldable. */
+static bool fold_binary_constant(BinOpKind op, i64 l, i64 r, i64 *out)
+{
+    switch (op)
+    {
+        case BIN_ADD:
+            *out = l + r;
+            return true;
+        case BIN_SUB:
+            *out = l - r;
+            return true;
+        case BIN_MUL:
+            *out = l * r;
+            return true;
+        case BIN_DIV:
+        case BIN_REM:
+            if (r == 0)
+            {
+                return false;
+            }
+            *out = op == BIN_DIV ? l / r : l % r;
+            return true;
+        case BIN_SHL:
+        case BIN_SHR:
+            if (r < 0 || r > 63)
+            {
+                return false;
+            }
+            *out = op == BIN_SHL ? l << r : l >> r;
+            return true;
+        case BIN_AND:
+            *out = l & r;
+            return true;
+        case BIN_OR:
+            *out = l | r;
+            return true;
+        case BIN_XOR:
+            *out = l ^ r;
+            return true;
+        case BIN_LOG_AND:
+            *out = l && r;
+            return true;
+        case BIN_LOG_OR:
+            *out = l || r;
+            return true;
+        case BIN_EQ:
+            *out = l == r;
+            return true;
+        case BIN_NE:
+            *out = l != r;
+            return true;
+        case BIN_LT:
+            *out = l < r;
+            return true;
+        case BIN_GT:
+            *out = l > r;
+            return true;
+        case BIN_LE:
+            *out = l <= r;
+            return true;
+        case BIN_GE:
+            *out = l >= r;
+            return true;
+        default:
+            return false;
+    }
+}
+
 static bool fold_integer_constant(ASTNode *node, i64 *out)
 {
     if (!node)
@@ -2006,96 +2069,14 @@ static bool fold_integer_constant(ASTNode *node, i64 *out)
         {
             ASTUnaryExpr *u = ast_as(ASTUnaryExpr, node);
             i64 v;
-            if (!fold_integer_constant(u->operand, &v))
-            {
-                return false;
-            }
-            switch (u->op)
-            {
-                case UN_NEG:
-                    *out = -v;
-                    return true;
-                case UN_BIT_NOT:
-                    *out = ~v;
-                    return true;
-                case UN_LOG_NOT:
-                    *out = !v;
-                    return true;
-                default:
-                    return false;
-            }
+            return fold_integer_constant(u->operand, &v) && fold_unary_constant(u->op, v, out);
         }
         case AST_BINARY_EXPR:
         {
             ASTBinaryExpr *b = ast_as(ASTBinaryExpr, node);
             i64 l, r;
-            if (!fold_integer_constant(b->left, &l) || !fold_integer_constant(b->right, &r))
-            {
-                return false;
-            }
-            switch (b->op)
-            {
-                case BIN_ADD:
-                    *out = l + r;
-                    return true;
-                case BIN_SUB:
-                    *out = l - r;
-                    return true;
-                case BIN_MUL:
-                    *out = l * r;
-                    return true;
-                case BIN_DIV:
-                case BIN_REM:
-                    if (r == 0)
-                    {
-                        return false;
-                    }
-                    *out = b->op == BIN_DIV ? l / r : l % r;
-                    return true;
-                case BIN_SHL:
-                case BIN_SHR:
-                    if (r < 0 || r > 63)
-                    {
-                        return false;
-                    }
-                    *out = b->op == BIN_SHL ? l << r : l >> r;
-                    return true;
-                case BIN_AND:
-                    *out = l & r;
-                    return true;
-                case BIN_OR:
-                    *out = l | r;
-                    return true;
-                case BIN_XOR:
-                    *out = l ^ r;
-                    return true;
-                case BIN_LOG_AND:
-                    *out = l && r;
-                    return true;
-                case BIN_LOG_OR:
-                    *out = l || r;
-                    return true;
-                case BIN_EQ:
-                    *out = l == r;
-                    return true;
-                case BIN_NE:
-                    *out = l != r;
-                    return true;
-                case BIN_LT:
-                    *out = l < r;
-                    return true;
-                case BIN_GT:
-                    *out = l > r;
-                    return true;
-                case BIN_LE:
-                    *out = l <= r;
-                    return true;
-                case BIN_GE:
-                    *out = l >= r;
-                    return true;
-                default:
-                    return false;
-            }
+            return fold_integer_constant(b->left, &l) && fold_integer_constant(b->right, &r) &&
+                   fold_binary_constant(b->op, l, r, out);
         }
         case AST_TERNARY_EXPR:
         {
@@ -2109,28 +2090,21 @@ static bool fold_integer_constant(ASTNode *node, i64 *out)
                         : fold_integer_constant(te->else_expr, out);
         }
         case AST_SIZEOF_TYPE:
-            /* check_expr has already computed size_value. */
             *out = (i64) ast_as(ASTSizeofType, node)->size_value;
             return true;
         case AST_SIZEOF_EXPR:
-            /* check_expr has already resolved the operand type and set
-               size_value, so `case sizeof(x):` works here. */
             *out = (i64) ast_as(ASTSizeofExpr, node)->size_value;
             return true;
         case AST_ALIGNOF_TYPE:
-            /* check_expr has already computed align_value. */
             *out = (i64) ast_as(ASTAlignofType, node)->align_value;
             return true;
         case AST_ALIGNOF_EXPR:
-            /* check_expr has already resolved the operand type and set
-               align_value, so `case _Alignof(x):` works here. */
             *out = (i64) ast_as(ASTAlignofExpr, node)->align_value;
             return true;
         case AST_CAST_EXPR:
         {
-            /* Casts are permitted in integer constant expressions (§6.6p6);
-               operand types are known by now, so `case (int)sizeof(x):`
-               folds here. Only integer targets fold to an integer constant. */
+            /* Casts are allowed in integer constant expressions (§6.6p6), so
+               `case (int)sizeof(x):` folds here; only integer targets fold. */
             ASTCastExpr *ce = ast_as(ASTCastExpr, node);
             i64 v;
             if (!fold_integer_constant(ce->operand, &v) || !type_is_integer(ce->target_type))
@@ -2295,14 +2269,8 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     return true;
 }
 
-/* A typedef names an existing (interned) type — it introduces no new type and
-   no storage (C11 §6.7.7). The parser has already registered the name and
-   resolved every later use through the interned `Type`, so semantic's job here
-   is only to validate the *target*. Everything the language can legally
-   typedef — scalar types, pointers, records (complete or forward), enums,
-   even void (`typedef void V; V *p;`) — is valid; the meaningful checks live
-   at the use site (a `void` variable, an incomplete object, etc.). Nothing
-   else to do yet, but the node must not reach the loud-default error. */
+/* A typedef names an existing interned type (§6.7.7); the parser registered the
+   name, so semantic only rejects the unsupported function-type target. */
 static bool check_typedef_decl(ASTTypedefDecl *td, SemanticCtx *ctx)
 {
     if (td->type->kind == TYPE_FUNC)
@@ -2315,10 +2283,9 @@ static bool check_typedef_decl(ASTTypedefDecl *td, SemanticCtx *ctx)
     return true;
 }
 
-/* `_Static_assert(expr, "msg")` (§6.7.4): expr must be an integer constant
-   expression; the value is checked at compile time and the message reported on
-   failure. check_expr runs first so type-dependent subexpressions
-   (`sizeof(x)`, `_Alignof(x)`) resolve, then fold_integer_constant evaluates. */
+/* `_Static_assert(expr, "msg")` (§6.7.4): expr must fold to a constant (after
+   check_expr resolves its type-dependent subexpressions); the message is
+   reported when the value is zero. */
 static bool check_static_assert(ASTStaticAssert *sa, SemanticCtx *ctx)
 {
     if (!check_expr(sa->expr, ctx))
@@ -2554,6 +2521,51 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
    tentative/extern declarations merge; the most-defined declaration wins (a
    definition replaces an extern-only one; an initialized definition replaces a
    tentative one); two definitions collide. */
+/* Merge a file-scope declaration with a prior one (§6.9.2p2, §6.7.3p8-10):
+   linkage and qualifier mismatches, and two constant definitions, are errors. */
+static bool merge_global_var(ASTVarDecl *vd, ASTVarDecl *existing, SemanticCtx *ctx)
+{
+    if ((existing->storage == SC_STATIC) != (vd->storage == SC_STATIC))
+    {
+        sem_error(vd->base.loc, "%s declaration of '%s' follows %s declaration",
+                  vd->storage == SC_STATIC ? "static" : "non-static", vd->name,
+                  existing->storage == SC_STATIC ? "static" : "non-static");
+        ctx->error = true;
+        return false;
+    }
+    if (type_unqual(existing->type) == type_unqual(vd->type) &&
+        type_is_const(existing->type) != type_is_const(vd->type))
+    {
+        sem_error(vd->base.loc, "conflicting type qualifiers in declaration of '%s'", vd->name);
+        ctx->error = true;
+        return false;
+    }
+    if (existing->has_const_init && vd->has_const_init)
+    {
+        sem_error(vd->base.loc, "redefinition of '%s'", vd->name);
+        ctx->error = true;
+        return false;
+    }
+    return true;
+}
+
+/* C11 §6.9.2p2: the most-defined declaration wins — a definition replaces an
+   extern-only declaration, an initialized definition replaces a tentative one. */
+static bool global_replaced(ASTVarDecl *vd, ASTVarDecl *existing)
+{
+    if (!existing)
+    {
+        return true;
+    }
+    if (existing->storage == SC_EXTERN && vd->storage != SC_EXTERN)
+    {
+        return true;
+    }
+    return vd->has_const_init && !existing->has_const_init;
+}
+
+/* Validate and register one file-scope variable: tentative/extern declarations
+   merge, two constant definitions collide, and the most-defined one wins. */
 static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
 {
     if (strmap_get(ctx->globals, vd->name))
@@ -2605,42 +2617,11 @@ static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
     }
 
     ASTVarDecl *existing = strmap_get(ctx->global_vars, vd->name);
-    if (existing)
+    if (existing && !merge_global_var(vd, existing, ctx))
     {
-        if ((existing->storage == SC_STATIC) != (vd->storage == SC_STATIC))
-        {
-            sem_error(vd->base.loc, "%s declaration of '%s' follows %s declaration",
-                      vd->storage == SC_STATIC ? "static" : "non-static", vd->name,
-                      existing->storage == SC_STATIC ? "static" : "non-static");
-            ctx->error = true;
-            return false;
-        }
-        /* C11 §6.7.3p8-10: compatible types must have identical qualifiers;
-           `int x;` followed by `const int x;` is incompatible. */
-        if (type_unqual(existing->type) == type_unqual(vd->type) &&
-            type_is_const(existing->type) != type_is_const(vd->type))
-        {
-            sem_error(vd->base.loc, "conflicting type qualifiers in declaration of '%s'", vd->name);
-            ctx->error = true;
-            return false;
-        }
-        if (existing->has_const_init && vd->has_const_init)
-        {
-            sem_error(vd->base.loc, "redefinition of '%s'", vd->name);
-            ctx->error = true;
-            return false;
-        }
+        return false;
     }
-    bool replace = existing == NULL;
-    if (existing && existing->storage == SC_EXTERN && vd->storage != SC_EXTERN)
-    {
-        replace = true;
-    }
-    if (existing && vd->has_const_init && !existing->has_const_init)
-    {
-        replace = true;
-    }
-    if (replace)
+    if (global_replaced(vd, existing))
     {
         strmap_set(ctx->global_vars, vd->name, vd);
     }
@@ -2696,6 +2677,40 @@ static bool check_file_scope_asserts(ASTProgram *prog, SemanticCtx *ctx)
     return true;
 }
 
+/* Merge a function declaration/definition with a prior same-named entry
+   (§6.7.6.3): linkage and double-definition are errors; compatible signatures
+   are pointer-equal interned types; a definition upgrades a prior prototype. */
+static bool merge_function_decl(ASTNode *decl, ASTNode *prev, SemanticCtx *ctx)
+{
+    FuncSig *fn = func_sig_of(decl);
+    FuncSig *pfn = func_sig_of(prev);
+    if ((pfn->storage == SC_STATIC) != (fn->storage == SC_STATIC))
+    {
+        sem_error(decl->loc, "%s declaration of '%s' follows %s declaration",
+                  fn->storage == SC_STATIC ? "static" : "non-static", fn->name,
+                  pfn->storage == SC_STATIC ? "static" : "non-static");
+        ctx->error = true;
+        return false;
+    }
+    if (func_node_defined(prev) && func_node_defined(decl))
+    {
+        sem_error(decl->loc, "redefinition of '%s'", fn->name);
+        ctx->error = true;
+        return false;
+    }
+    if (pfn->func_type != fn->func_type)
+    {
+        sem_error(decl->loc, "conflicting types for '%s'", fn->name);
+        ctx->error = true;
+        return false;
+    }
+    if (!func_node_defined(prev) && func_node_defined(decl))
+    {
+        strmap_set(ctx->globals, fn->name, decl);
+    }
+    return true;
+}
+
 /* Register every function definition and prototype: intern its function type,
    merge/reject against any prior same-named entry. */
 static bool register_functions(ASTProgram *prog, SemanticCtx *ctx)
@@ -2730,36 +2745,9 @@ static bool register_functions(ASTProgram *prog, SemanticCtx *ctx)
         ASTNode *prev = strmap_get(ctx->globals, fn->name);
         if (prev)
         {
-            FuncSig *pfn = func_sig_of(prev);
-            if ((pfn->storage == SC_STATIC) != (fn->storage == SC_STATIC))
+            if (!merge_function_decl(decl, prev, ctx))
             {
-                sem_error(decl->loc, "%s declaration of '%s' follows %s declaration",
-                          fn->storage == SC_STATIC ? "static" : "non-static", fn->name,
-                          pfn->storage == SC_STATIC ? "static" : "non-static");
-                ctx->error = true;
                 return false;
-            }
-            if (func_node_defined(prev) && func_node_defined(decl))
-            {
-                sem_error(decl->loc, "redefinition of '%s'", fn->name);
-                ctx->error = true;
-                return false;
-            }
-            /* §6.7.6.3: a repeat declaration must be *compatible*. The
-               interned function type (type_func) makes compatible signatures
-               pointer-equal, so a pointer compare is the compatibility check. */
-            if (pfn->func_type != fn->func_type)
-            {
-                sem_error(decl->loc, "conflicting types for '%s'", fn->name);
-                ctx->error = true;
-                return false;
-            }
-            /* A definition upgrades a prior prototype: keep the definition in
-               the symbol table (it completes the signature). A repeated
-               prototype keeps the existing entry. */
-            if (!func_node_defined(prev) && func_node_defined(decl))
-            {
-                strmap_set(ctx->globals, fn->name, decl);
             }
         }
         else
@@ -2826,10 +2814,9 @@ ASTNode *semantic_check(ASTNode *ast, Arena *arena)
         return NULL;
     }
 
-    /* Functions are registered before globals so that file-scope initializers may
-       reference function designators — their signatures are guaranteed present
-       when global plans are built. Name collisions in either direction are
-       caught by the other pass's reverse-map check. */
+    /* Functions are registered before globals so file-scope initializers may
+       reference function designators; cross-map collisions are caught by each
+       pass's reverse-map check. */
     if (!register_functions(prog, &ctx))
     {
         return NULL;
