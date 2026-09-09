@@ -117,12 +117,7 @@ struct ASTNode
 
 #define ast_as(T, node) ((T *) (node))
 
-/* The signature shared by a function *definition* and a function *prototype*
-   (D16.2). A prototype (`int f(int);`) and a definition (`int f(int){...}`) are
-   distinct AST nodes but carry the same name/params/storage/variadic/func_type,
-   so both embed this record after the `ASTNode base`. Passes that only need a
-   signature (semantic symbol merge, the IR builder's func_types seeding,
-   ast_dump) take a `FuncSig*` and are agnostic to which node hosts it. */
+/* Signature shared by a function definition (`{...}`) and a prototype (`;`). */
 typedef struct FuncSig FuncSig;
 struct FuncSig
 {
@@ -142,10 +137,7 @@ struct ASTFuncDef
     ASTNode *body;
 };
 
-/* A function *prototype* / forward declaration: `int f(int);` at file scope —
-   a declaration without a body (C11 §6.7.6.3). Registers the signature in the
-   symbol table so calls may precede a definition or resolve to a declaration-
-   only extern. No body, so no body-consuming pass can reach it. */
+/* A function prototype / forward declaration: a signature without a body. */
 typedef struct ASTFuncDecl ASTFuncDecl;
 struct ASTFuncDecl
 {
@@ -181,7 +173,7 @@ typedef struct ASTProgram ASTProgram;
 struct ASTProgram
 {
     ASTNode base;
-    Vec *decls; /* Vec<ASTNode*> (func defs) */
+    Vec *decls; /* Vec<ASTNode*> — top-level declarations */
 };
 
 typedef struct ASTVarDecl ASTVarDecl;
@@ -190,26 +182,16 @@ struct ASTVarDecl
     ASTNode base;
     Type *type;
     const char *name;
-    ASTNode *init; /* NULL if no initializer; may be an AST_INIT_LIST or, for a
-                      char array, an AST_STRING_LITERAL */
+    ASTNode *init; /* NULL if none; an AST_INIT_LIST or AST_STRING_LITERAL for a char array */
     StorageClass storage;
     i64 const_init;        /* folded file-scope constant initializer */
     bool has_const_init;   /* true when const_init is valid */
     bool is_block_scope;   /* declared inside a function body (vs file scope) */
-    struct InitPlan *plan; /* flattening plan for aggregate/string initializers
-                              (filled by semantic; NULL otherwise) */
-    u32 alignas;           /* requested alignment (_Alignas), 0 = natural (D14.6:
-                              recorded but applied only up to the natural alignment) */
+    struct InitPlan *plan; /* aggregate/string flattening plan (filled by semantic) or NULL */
+    u32 alignas;           /* requested _Alignas alignment, 0 = natural */
 };
 
-/* An init-declarator list `int a = 1, b = 2;` (C11 §6.7.6) — several
-   declarators sharing one declaration-specifier sequence. The parser returns
-   a bare AST_VAR_DECL for a single declarator and wraps the list in this node
-   only when there are two or more; every declarator shares the declared
-   type, and each pointer/array decorator applies per-declarator (`int *a, b;`
-   makes a a pointer and b an int). Finger, the AST's comma sits at the
-   assignment-expression level, so this node mirrors Phase 13d's separator
-   boundary: the list comma is a separator, never a BIN_COMMA. */
+/* An init-declarator list `int a = 1, b = 2;` sharing one declaration-specifier sequence (C11 §6.7.6). */
 typedef struct ASTDeclList ASTDeclList;
 struct ASTDeclList
 {
@@ -241,12 +223,7 @@ struct ASTUnaryExpr
     ASTNode *operand;
 };
 
-/* A prefix (`++x` / `--x`) or postfix (`x++` / `x--`) increment/decrement
-   (C11 §6.5.2.4). The operand is a modifiable lvalue of arithmetic or pointer
-   type; the expression is not an lvalue. Postfix yields the old value, prefix
-   the new value — semantic stamps expr_type as the operand's unqualified
-   type, and the IR builder lowers through load/compute/store (no new
-   opcodes). */
+/* Prefix (`++x`) or postfix (`x++`) increment/decrement (C11 §6.5.2.4); its operand is a modifiable lvalue. */
 typedef struct ASTIncDecExpr ASTIncDecExpr;
 struct ASTIncDecExpr
 {
@@ -260,11 +237,9 @@ typedef struct ASTCallExpr ASTCallExpr;
 struct ASTCallExpr
 {
     ASTNode base;
-    const char *callee;   /* named callee (a function name / builtin); NULL when
-                             callee_expr is used (D16.4) */
+const char *callee;   /* named callee / builtin; NULL when callee_expr is used */
     Vec *args;            /* Vec<ASTNode*> */
-    ASTNode *callee_expr; /* indirect callee (a function designator or
-                          function-pointer value); NULL for a named call */
+    ASTNode *callee_expr; /* indirect callee (function designator / pointer value); NULL for named calls */
 };
 
 typedef struct ASTIdent ASTIdent;
@@ -272,9 +247,8 @@ struct ASTIdent
 {
     ASTNode base;
     const char *name;
-    ASTVarDecl *decl; /* resolved declaration (filled by semantic) */
-    bool is_func;     /* TRUE when `name` names a function (designator, D16.1);
-                         decl stays NULL then */
+    ASTVarDecl *decl; /* resolved declaration (filled by semantic); NULL when is_func */
+    bool is_func;     /* true when `name` is a function designator; decl stays NULL */
 };
 
 typedef struct ASTIfStmt ASTIfStmt;
@@ -463,10 +437,7 @@ struct ASTMemberAccess
     Type *field_type; /* filled by semantic */
 };
 
-/* A cast `(type) expr` (C11 §5.5.4). The target type is the *declared* cast
-   target (qualifiers intact: `(const int *)`, `(int * const)`); semantic sets
-   expr_type to type_rvalue(target) — a cast is never an lvalue and a cast to a
-   qualified type equals a cast to the unqualified type (§6.5.4p4). */
+/* Cast `(type) expr` (C11 §5.5.4): never an lvalue; a qualified target equals the unqualified type (§6.5.4p4). */
 typedef struct ASTCastExpr ASTCastExpr;
 struct ASTCastExpr
 {
@@ -475,10 +446,7 @@ struct ASTCastExpr
     ASTNode *operand;
 };
 
-/* A `__builtin_va_arg(ap, type)` special form (D15.3): unlike va_start/va_end
-   its second argument is a *type-name*, so it is not a call expression. The
-   type is parsed by the frontend and validated by semantic; semantic sets
-   expr_type to it. */
+/* `__builtin_va_arg(ap, type)`: its second argument is a type-name, so it is a special form, not a call. */
 typedef struct ASTVaArgExpr ASTVaArgExpr;
 struct ASTVaArgExpr
 {
@@ -487,11 +455,7 @@ struct ASTVaArgExpr
     Type *type;
 };
 
-/* A typedef declaration `typedef <type> <name>;` (C11 §6.7.7). The name is an
-   ordinary identifier (§6.2.3) that shadows/aliases the interned `type`; the
-   parser registers it in its ordinary-name table at the point of declaration,
-   so it is visible for casts/`sizeof`/specifiers from here on in its scope.
-   Semantic validates the type; the IR builder ignores the node. */
+/* A typedef declaration `typedef <type> <name>;` (C11 §6.7.7): the name is an ordinary identifier (§6.2.3). */
 typedef struct ASTTypedefDecl ASTTypedefDecl;
 struct ASTTypedefDecl
 {
@@ -500,9 +464,7 @@ struct ASTTypedefDecl
     Type *type;
 };
 
-/* Initializer designators (C11 §6.7.9p1): `.field` members or `[idx]` array
-   elements, chained for nested subobjects. `next` chains in source order,
-   outermost first (`.a[0].b` → `.a` → `[0]` → `.b`). */
+/* Initializer designators (C11 §6.7.9p1): `.field` members / `[idx]` elements, chained outermost-first. */
 typedef enum
 {
     ND_FIELD, /* .field */
@@ -527,9 +489,7 @@ struct InitElem
     Loc loc;
 };
 
-/* One flattened write produced by semantic's initializer planner (D12.5).
-   Scalar leaves lower to OP_STORE; char-array-from-string leaves
-   (is_string_fill, value is an ASTStringLiteral) lower to OP_MEMCPY. */
+/* One flattened write from semantic's initializer planner (scalar, or a char-array string fill). */
 typedef struct InitWrite InitWrite;
 struct InitWrite
 {
@@ -539,8 +499,7 @@ struct InitWrite
     bool is_string_fill;
 };
 
-/* A brace-enclosed initializer list `{ ... }` (C11 §6.7.9). `plan` holds the
-   flattened, offset-targeted lowering plan computed by semantic (D12.5). */
+/* A brace-enclosed initializer list `{ ... }` (C11 §6.7.9) with semantic's flattened lowering plan. */
 typedef struct ASTInitList ASTInitList;
 struct ASTInitList
 {
@@ -554,19 +513,11 @@ struct InitPlan
 {
     Vec *writes;    /* Vec<InitWrite*> sorted by offset */
     u64 total_size; /* byte size of the object being initialized */
-    /* D12.7: the declared-against `[]` array (outermost rank) is resized from
-       its initializer. Only the root plan call may grow; semantic rewrites
-       vd->type to a fresh type_array(elem, inferred_len) afterwards. */
-    bool grow_array;  /* outermost array is `[]` — cursor is unbounded */
+    bool grow_array;  /* outermost array is `[]` — resized from its initializer */
     u64 inferred_len; /* largest element index+1 reached while grow_array */
 };
 
-/* A compound literal `(type){ ... }` (C11 §6.5.2.5): a type-name (typedef-aware,
-   D12.3) followed by a brace-enclosed initializer list. The node is an lvalue
-   whose value is the address of the anonymous object it denotes: automatic
-   duration at block scope (inline alloca), static at file scope (anonymous
-   IrGlobal). `plan` is semantic's annotated lowering plan over `init` (D12.9);
-   `type` may be completed from `[]` by semantic, exactly like a var declaration. */
+/* Compound literal `(type){ ... }` (C11 §6.5.2.5): an lvalue denoting an anonymous object. */
 typedef struct ASTCompoundLiteral ASTCompoundLiteral;
 struct ASTCompoundLiteral
 {
