@@ -16,7 +16,7 @@ struct SemanticCtx
     int loop_depth;
     int switch_depth;
     Vec *switch_sem_stack; /* Vec<SwitchSem*> — per-switch case-value sets */
-    Vec *func_params;      /* enclosing function's ASTVarDecl* list (for builtin
+    Vec *fn_params;        /* enclosing function's ASTVarDecl* list (for builtin
                               va_start validation), NULL outside function bodies */
     bool error;
 };
@@ -29,15 +29,23 @@ struct SwitchSem
     bool has_default;
 };
 
+/* How a declaration's initializer was handled by the planner. */
+typedef enum
+{
+    PLAN_HANDLED, /* aggregate / string / address-constant initializer was planned */
+    PLAN_NONE,    /* scalar initializer — not planned; the caller checks it as an expression */
+    PLAN_ERROR,   /* a diagnostic was emitted; the caller must abort */
+} PlanResult;
+
 static Type *check_expr(ASTNode *node, SemanticCtx *ctx);
 static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type);
 static bool check_func(ASTNode *node, SemanticCtx *ctx);
 static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx);
 static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx);
 static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *list, u32 base_off);
-static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd);
-static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd);
 static bool plan_var_aggregate_init(SemanticCtx *ctx, ASTVarDecl *vd, bool *handled);
+static bool check_aggregate_const_init(ASTVarDecl *vd, SemanticCtx *ctx);
+static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd);
 static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type);
 static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx);
 
@@ -109,9 +117,7 @@ static ASTVarDecl *scope_top_lookup(SemanticCtx *ctx, const char *name)
     return strmap_get(current_scope(ctx), name);
 }
 
-/* A function *definition* (AST_FUNC_DEF) and a function *prototype*
-   (AST_FUNC_DECL) both embed a FuncSig after their ASTNode base (D16.2), so
-   either kind reduces to the same signature record. */
+/* Both AST_FUNC_DEF and AST_FUNC_DECL embed a FuncSig; either kind reduces to it. */
 static FuncSig *func_sig_of(ASTNode *node)
 {
     if (node->kind == AST_FUNC_DEF)
@@ -139,10 +145,7 @@ static bool check_identifier_expr(ASTIdent *ident, SemanticCtx *ctx)
         ident->base.expr_type = type_decay(decl->type);
         return true;
     }
-    /* A function designator (§6.3.2.1p4): the name of a declared or defined
-       function. Its value is a pointer to the function; `&f`, `f`, `*fp` all
-       denote the same address (D16.1 — pointer-to-function is TYPE_PTR whose
-       pointee is the interned TYPE_FUNC). */
+    /* A function designator (§6.3.2.1p4): its value is a pointer to the function. */
     ASTNode *fnode = strmap_get(ctx->globals, ident->name);
     if (fnode)
     {
@@ -155,14 +158,28 @@ static bool check_identifier_expr(ASTIdent *ident, SemanticCtx *ctx)
     return false;
 }
 
+/* One bool per BinOpKind: comparison operators (==, !=, <, >, <=, >=). */
+static const bool is_comparison_op_table[BIN_GE + 1] = {
+    [BIN_EQ] = true, [BIN_NE] = true, [BIN_LT] = true,
+    [BIN_GT] = true, [BIN_LE] = true, [BIN_GE] = true,
+};
+
+/* One bool per BinOpKind: compound-assignment operators (+=, -=, ... , ^=). */
+static const bool is_compound_assign_table[BIN_XOR_ASSIGN + 1] = {
+    [BIN_ADD_ASSIGN] = true, [BIN_SUB_ASSIGN] = true, [BIN_MUL_ASSIGN] = true,
+    [BIN_DIV_ASSIGN] = true, [BIN_REM_ASSIGN] = true, [BIN_SHL_ASSIGN] = true,
+    [BIN_SHR_ASSIGN] = true, [BIN_AND_ASSIGN] = true, [BIN_OR_ASSIGN] = true,
+    [BIN_XOR_ASSIGN] = true,
+};
+
 static bool is_comparison_op(BinOpKind op)
 {
-    return op >= BIN_EQ && op <= BIN_GE;
+    return op <= BIN_GE && is_comparison_op_table[op];
 }
 
 static bool is_compound_assign_op(BinOpKind op)
 {
-    return op >= BIN_ADD_ASSIGN && op <= BIN_XOR_ASSIGN;
+    return op <= BIN_XOR_ASSIGN && is_compound_assign_table[op];
 }
 
 /* C11 §6.5.16.1p1 assignment compatibility, used by `=`, call arguments,
@@ -205,16 +222,9 @@ static bool type_assignable(Type *dst, Type *src)
     return true;
 }
 
-/* The single modifiable-lvalue gate (steering §Phase 9): an lvalue that is
-   not const. Every write-introducing operator — plain assignment, compound
-   assignment (Phase 13c), and `++`/`--` (Phase 13b) — routes through this one
-   check, so the const interplay (incl. typedef'd const pointers, Phase 12)
-   is enforced identically everywhere. */
-/* True when the lvalue expression denotes an array, including the decayed
-   cases: an array identifier's expr_type is a pointer (type_decay), but its
-   declared type is an array, and a member whose field_type is an array. An
-   array is never a modifiable lvalue (§6.3.2.1), so the write gate must see
-   through the decay to reject `a = x`, `a++`, `a += 1`. */
+/* True when the (possibly decayed) lvalue expression denotes an array: arrays
+   are never modifiable lvalues (§6.3.2.1), so the write gate must see through
+   the decay to reject `a = x`, `a++`, `a += 1`. */
 static bool lvalue_is_array(ASTNode *lhs)
 {
     if (type_is_array(lhs->expr_type))
@@ -427,16 +437,14 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
             ASTIdent *id = ast_as(ASTIdent, operand);
             if (id->is_func)
             {
-                /* `&f`: the function designator is already a pointer to the
-                   function (its decayed form), so the address of a function is
-                   that same pointer (D16.1). */
+                /* `&f`: the designator is already the function's address. */
                 unary_expr->base.expr_type = op_type;
                 return true;
             }
             ASTVarDecl *decl = id->decl;
             /* Any lvalue identifier is addressable: file globals and block
-               statics are address constants, and block-scope autos spill to a
-               stack slot (Phase 9b). */
+               statics are address constants, block-scope autos spill to a
+               stack slot. */
             if (!decl)
             {
                 sem_error(unary_expr->base.loc, "cannot take address of this expression");
@@ -448,9 +456,8 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
         }
         if (operand->kind == AST_COMPOUND_LITERAL)
         {
-            /* `&(struct S){...}`: the anonymous object's address (D12.9). The
-               pointee is the declared lvalue type, qualifiers included, so
-               `&(const struct S){...}` is `const struct S *`. */
+            /* The anonymous compound literal's address; the pointee keeps its
+               qualifiers, so `&(const struct S){...}` is `const struct S *`. */
             Type *ty = ast_as(ASTCompoundLiteral, operand)->type;
             unary_expr->base.expr_type = type_ptr(type_decay(ty));
             return true;
@@ -500,9 +507,9 @@ static bool check_incdec_expr(ASTIncDecExpr *incdec, SemanticCtx *ctx)
     return true;
 }
 
-/* A __builtin_va_start/__builtin_va_end argument must be a `va_list` after
-   decay: a pointer to the builtin va_list element type (D15.2; array-of-1
-   decays to the 24-byte struct). Pointer-equality on the interned element. */
+/* A va_start/va_end/va_arg argument must be a `va_list` after decay: a pointer
+   to the builtin va_list element type (the array-of-1 decays to the 24-byte
+   struct); pointer-equality on the interned element. */
 static bool builtin_check_va_list_arg(ASTNode *arg, SemanticCtx *ctx)
 {
     if (!check_expr(arg, ctx))
@@ -519,10 +526,9 @@ static bool builtin_check_va_list_arg(ASTNode *arg, SemanticCtx *ctx)
     return true;
 }
 
-/* Compiler-builtin va_start/va_end (D15.3): fixed signatures over the va_list
-   object. `__builtin_va_start(ap, last)` requires `last` to be an identifier
-   naming a parameter of the enclosing function (its value is unused — the
-   offsets are compile-time, D15.4; any named parameter is accepted). */
+/* The va_start/va_end builtins have fixed signatures over the va_list object.
+   `__builtin_va_start(ap, last)` requires `last` to name one of the enclosing
+   function's parameters (its value is unused; offsets are compile-time). */
 static bool check_va_builtin(ASTCallExpr *call_expr, SemanticCtx *ctx)
 {
     size_t got = vec_size(call_expr->args);
@@ -545,13 +551,13 @@ static bool check_va_builtin(ASTCallExpr *call_expr, SemanticCtx *ctx)
             return false;
         }
         bool is_param = false;
-        if (last->kind == AST_IDENT && ctx->func_params)
+        if (last->kind == AST_IDENT && ctx->fn_params)
         {
             ASTVarDecl *decl = ast_as(ASTIdent, last)->decl;
-            size_t n = vec_size(ctx->func_params);
+            size_t n = vec_size(ctx->fn_params);
             for (size_t i = 0; i < n; i++)
             {
-                if ((ASTVarDecl *) vec_get(ctx->func_params, i) == decl)
+                if ((ASTVarDecl *) vec_get(ctx->fn_params, i) == decl)
                 {
                     is_param = true;
                     break;
@@ -583,10 +589,8 @@ static bool check_va_builtin(ASTCallExpr *call_expr, SemanticCtx *ctx)
     return true;
 }
 
-/* `__builtin_va_arg(ap, type)` (D15.3): the ap must be a va_list (decayed);
-   the type must be one the promoted slot can produce — reject void, records,
-   and arrays (all other ficc types are scalar/pointer and complete). The value
-   is an rvalue of the requested type. */
+/* `__builtin_va_arg(ap, type)`: ap must be a va_list (decayed); the type must
+   not be void, a record, or an array. The value is an rvalue of that type. */
 static bool check_va_arg_expr(ASTVaArgExpr *va, SemanticCtx *ctx)
 {
     if (!builtin_check_va_list_arg(va->ap, ctx))
@@ -605,13 +609,9 @@ static bool check_va_arg_expr(ASTVaArgExpr *va, SemanticCtx *ctx)
     return true;
 }
 
-/* A function *definition* (AST_FUNC_DEF) and a function *prototype*
-   (AST_FUNC_DECL) both embed a FuncSig after their ASTNode base (D16.2), so
-   either kind reduces to the same signature record. */
-/* The interned function type (D15.1/D16.1) of a signature: the return type and
-   the param types each top-level-unqualified (§6.7.6.3p15), plus the variadic
-   bit. type_func interns structurally, so two compatible signatures produce the
-   same pointer. */
+/* The interned function type of a signature: the return and each param type
+   top-level-unqualified (§6.7.6.3p15), plus the variadic bit. type_func interns
+   structurally, so compatible signatures are pointer-equal. */
 static Type *build_func_type(FuncSig *sig, SemanticCtx *ctx)
 {
     Vec *param_types = vec_new(ctx->arena);
@@ -624,8 +624,7 @@ static Type *build_func_type(FuncSig *sig, SemanticCtx *ctx)
     return type_func(type_unqual(sig->ret_type), param_types, sig->is_variadic);
 }
 
-/* Validate a call's argument list and result against a *signature* (a
-   `Vec<Type*>` of parameter types — the interned function type from D15.1).
+/* Validate a call's argument list and result against a parameter-type list.
    Shared by named calls (params from the AST) and indirect calls (from the
    pointed-to function type). Sets the call's result type. */
 static bool check_call_args(ASTCallExpr *call_expr, Type *ret_type, Vec *param_types,
@@ -695,63 +694,58 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
     }
 
     ASTNode *callee_node = strmap_get(ctx->globals, call_expr->callee);
-    if (!callee_node)
+    if (callee_node)
     {
-        /* __builtin_va_start/__builtin_va_end are compiler builtins, never
-           ASTFuncDefs; semantic validates their fixed signatures, the IR
-           builder recognizes the names and emits OP_VA_START. A user
-           definition of the same name is shadowed by the globals lookup above
-           (user declaration wins). The raw va_start/va_end names are NOT
-           builtins in Phase 15 — they arrive via the Phase 17 stdarg.h shim. */
-        if (strcmp(call_expr->callee, "__builtin_va_start") == 0 ||
-            strcmp(call_expr->callee, "__builtin_va_end") == 0)
+        FuncSig *callee = func_sig_of(callee_node);
+        /* Reduce the declared AST params to their types (the interned function
+           type's identity, exactly as build_func_type does). */
+        Vec *param_types = vec_new(ctx->arena);
+        size_t nparams = vec_size(callee->params);
+        for (size_t i = 0; i < nparams; i++)
         {
-            return check_va_builtin(call_expr, ctx);
+            ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(callee->params, i));
+            vec_push(param_types, type_unqual(param->type));
         }
-        ASTVarDecl *vdecl = scope_lookup(ctx, call_expr->callee);
-        if (!vdecl)
+        return check_call_args(call_expr, callee->ret_type, param_types, callee->is_variadic,
+                               call_expr->callee, ctx);
+    }
+
+    /* va_start/va_end builtins are never ASTFuncDefs; a user definition of the
+       same name wins (the globals lookup above). */
+    if (strcmp(call_expr->callee, "__builtin_va_start") == 0 ||
+        strcmp(call_expr->callee, "__builtin_va_end") == 0)
+    {
+        return check_va_builtin(call_expr, ctx);
+    }
+
+    ASTVarDecl *vdecl = scope_lookup(ctx, call_expr->callee);
+    if (!vdecl)
+    {
+        vdecl = strmap_get(ctx->global_vars, call_expr->callee);
+    }
+    if (vdecl)
+    {
+        if (type_is_ptr(vdecl->type) && type_deref(vdecl->type)->kind == TYPE_FUNC)
         {
-            vdecl = strmap_get(ctx->global_vars, call_expr->callee);
+            /* `fp(x)` where `fp` is a function-pointer variable is an indirect
+               call: redirect to the callee-expression form and validate against
+               the pointed-to function type. */
+            ASTNode *ident = ast_ident(call_expr->callee, call_expr->base.loc, ctx->arena);
+            ASTIdent *id = ast_as(ASTIdent, ident);
+            id->decl = vdecl;
+            id->base.expr_type = type_decay(vdecl->type);
+            call_expr->callee_expr = ident;
+            call_expr->callee = NULL;
+            return check_indirect_call(call_expr, ctx);
         }
-        if (vdecl)
-        {
-            if (type_is_ptr(vdecl->type) && type_deref(vdecl->type)->kind == TYPE_FUNC)
-            {
-                /* `fp(x)` where `fp` is a function-pointer *variable* is an
-                   indirect call (D16.4): redirect to the callee-expression
-                   form and validate against the pointed-to function type. */
-                ASTNode *ident = ast_ident(call_expr->callee, call_expr->base.loc, ctx->arena);
-                ASTIdent *id = ast_as(ASTIdent, ident);
-                id->decl = vdecl;
-                id->base.expr_type = type_decay(vdecl->type);
-                call_expr->callee_expr = ident;
-                call_expr->callee = NULL;
-                return check_indirect_call(call_expr, ctx);
-            }
-            sem_error(call_expr->base.loc,
-                      "called object '%s' is not a function or function "
-                      "pointer",
-                      call_expr->callee);
-            ctx->error = true;
-            return false;
-        }
-        sem_error(call_expr->base.loc, "undeclared function '%s'", call_expr->callee);
+        sem_error(call_expr->base.loc, "called object '%s' is not a function or function pointer",
+                  call_expr->callee);
         ctx->error = true;
         return false;
     }
-    FuncSig *callee = func_sig_of(callee_node);
-
-    /* Reduce the declared AST params to their types (the interned function
-       type's identity, exactly as build_func_type does). */
-    Vec *param_types = vec_new(ctx->arena);
-    size_t nparams = vec_size(callee->params);
-    for (size_t i = 0; i < nparams; i++)
-    {
-        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(callee->params, i));
-        vec_push(param_types, type_unqual(param->type));
-    }
-    return check_call_args(call_expr, callee->ret_type, param_types, callee->is_variadic,
-                           call_expr->callee, ctx);
+    sem_error(call_expr->base.loc, "undeclared function '%s'", call_expr->callee);
+    ctx->error = true;
+    return false;
 }
 
 static bool check_indirect_call(ASTCallExpr *call_expr, SemanticCtx *ctx)
@@ -872,236 +866,211 @@ static bool check_member_access(ASTMemberAccess *ma, SemanticCtx *ctx)
     return true;
 }
 
+/* resolve a whole-sized expression node: `ok ? node->expr_type : NULL`. */
+static Type *expr_done(bool ok, ASTNode *node)
+{
+    return ok ? node->expr_type : NULL;
+}
+
+static bool check_int_literal(ASTIntLiteral *lit, SemanticCtx *ctx)
+{
+    ASTNode *node = &lit->base;
+    node->expr_type = type_int_literal(lit->value, lit->is_hex, lit->is_unsigned, lit->length);
+    (void) ctx;
+    return true;
+}
+
+static bool check_string_literal(ASTStringLiteral *sl, SemanticCtx *ctx)
+{
+    ASTNode *node = &sl->base;
+    node->expr_type = type_decay(type_array(type_char(), sl->length + 1));
+    (void) ctx;
+    return true;
+}
+
+static bool check_subscript_expr(ASTSubscriptExpr *se, SemanticCtx *ctx)
+{
+    ASTNode *node = &se->base;
+    if (!check_expr(se->array, ctx) || !check_expr(se->index, ctx))
+    {
+        return false;
+    }
+    Type *ptr_type = type_decay(se->array->expr_type);
+    if (!type_is_ptr(ptr_type))
+    {
+        sem_error(node->loc, "subscripted value is not a pointer or array");
+        ctx->error = true;
+        return false;
+    }
+    node->expr_type = type_deref(ptr_type);
+    return true;
+}
+
+static bool check_sizeof_expr(ASTSizeofExpr *se, SemanticCtx *ctx)
+{
+    ASTNode *node = &se->base;
+    if (!check_expr(se->operand, ctx))
+    {
+        return false;
+    }
+    Type *op_type = se->operand->expr_type;
+    /* §6.3.2.1p3: array-to-pointer decay is suppressed for the direct operand of sizeof. */
+    if (se->operand->kind == AST_IDENT)
+    {
+        ASTIdent *id = ast_as(ASTIdent, se->operand);
+        if (id->is_func)
+        {
+            /* No decay: `sizeof(f)` is sizeof(function type), rejected below. */
+            ASTNode *fnode = strmap_get(ctx->globals, id->name);
+            op_type = func_sig_of(fnode)->func_type;
+        }
+        else if (id->decl && type_is_array(id->decl->type))
+        {
+            op_type = id->decl->type;
+        }
+    }
+    else if (se->operand->kind == AST_COMPOUND_LITERAL &&
+             type_is_array(ast_as(ASTCompoundLiteral, se->operand)->type))
+    {
+        /* Compound literals do not decay either (§6.5.2.5p4 note). */
+        op_type = ast_as(ASTCompoundLiteral, se->operand)->type;
+    }
+    if (op_type->kind == TYPE_VOID)
+    {
+        sem_error(node->loc, "sizeof(void) is invalid");
+        ctx->error = true;
+        return false;
+    }
+    if (type_is_function(op_type))
+    {
+        sem_error(node->loc, "invalid application of 'sizeof' to a function type");
+        ctx->error = true;
+        return false;
+    }
+    if (type_is_record(op_type) && !type_is_complete(op_type))
+    {
+        sem_error(node->loc, "sizeof of incomplete type");
+        ctx->error = true;
+        return false;
+    }
+    se->size_value = type_sizeof(op_type);
+    node->expr_type = type_ulong();
+    return true;
+}
+
+static bool check_sizeof_type(ASTSizeofType *st, SemanticCtx *ctx)
+{
+    ASTNode *node = &st->base;
+    if (st->type->kind == TYPE_VOID)
+    {
+        sem_error(node->loc, "sizeof(void) is invalid");
+        ctx->error = true;
+        return false;
+    }
+    if (type_is_record(st->type) && !type_is_complete(st->type))
+    {
+        sem_error(node->loc, "sizeof of incomplete type");
+        ctx->error = true;
+        return false;
+    }
+    st->size_value = type_sizeof(st->type);
+    node->expr_type = type_ulong();
+    return true;
+}
+
+static bool check_alignof_expr(ASTAlignofExpr *ae, SemanticCtx *ctx)
+{
+    ASTNode *node = &ae->base;
+    if (!check_expr(ae->operand, ctx))
+    {
+        return false;
+    }
+    Type *op_type = ae->operand->expr_type;
+    /* §6.3.2.1p3: decay is suppressed for the direct operand of _Alignof, so an
+       array aligns as its element type. */
+    if (ae->operand->kind == AST_IDENT)
+    {
+        ASTVarDecl *decl = ast_as(ASTIdent, ae->operand)->decl;
+        if (decl && type_is_array(decl->type))
+        {
+            op_type = decl->type;
+        }
+    }
+    if (op_type->kind == TYPE_VOID)
+    {
+        sem_error(node->loc, "_Alignof(void) is invalid");
+        ctx->error = true;
+        return false;
+    }
+    if (!type_is_complete(op_type))
+    {
+        sem_error(node->loc, "_Alignof of incomplete type");
+        ctx->error = true;
+        return false;
+    }
+    ae->align_value = type_alignof(op_type);
+    node->expr_type = type_ulong();
+    return true;
+}
+
+static bool check_alignof_type(ASTAlignofType *at, SemanticCtx *ctx)
+{
+    ASTNode *node = &at->base;
+    if (at->type->kind == TYPE_VOID)
+    {
+        sem_error(node->loc, "_Alignof(void) is invalid");
+        ctx->error = true;
+        return false;
+    }
+    if (!type_is_complete(at->type))
+    {
+        sem_error(node->loc, "_Alignof of incomplete type");
+        ctx->error = true;
+        return false;
+    }
+    at->align_value = type_alignof(at->type);
+    node->expr_type = type_ulong();
+    return true;
+}
+
 static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
 {
     switch (node->kind)
     {
         case AST_INT_LITERAL:
-        {
-            ASTIntLiteral *lit = ast_as(ASTIntLiteral, node);
-            node->expr_type =
-                type_int_literal(lit->value, lit->is_hex, lit->is_unsigned, lit->length);
-            return node->expr_type;
-        }
+            return expr_done(check_int_literal(ast_as(ASTIntLiteral, node), ctx), node);
         case AST_IDENT:
-            if (!check_identifier_expr(ast_as(ASTIdent, node), ctx))
-            {
-                return NULL;
-            }
-            return node->expr_type;
+            return expr_done(check_identifier_expr(ast_as(ASTIdent, node), ctx), node);
         case AST_BINARY_EXPR:
-            if (!check_binary_expr(ast_as(ASTBinaryExpr, node), ctx))
-            {
-                return NULL;
-            }
-            return node->expr_type;
+            return expr_done(check_binary_expr(ast_as(ASTBinaryExpr, node), ctx), node);
         case AST_UNARY_EXPR:
-            if (!check_unary_expr(ast_as(ASTUnaryExpr, node), ctx))
-            {
-                return NULL;
-            }
-            return node->expr_type;
+            return expr_done(check_unary_expr(ast_as(ASTUnaryExpr, node), ctx), node);
         case AST_INCDEC_EXPR:
-            if (!check_incdec_expr(ast_as(ASTIncDecExpr, node), ctx))
-            {
-                return NULL;
-            }
-            return node->expr_type;
+            return expr_done(check_incdec_expr(ast_as(ASTIncDecExpr, node), ctx), node);
         case AST_CALL_EXPR:
-            if (!check_call_expr(ast_as(ASTCallExpr, node), ctx))
-            {
-                return NULL;
-            }
-            return node->expr_type;
+            return expr_done(check_call_expr(ast_as(ASTCallExpr, node), ctx), node);
         case AST_TERNARY_EXPR:
-            if (!check_ternary_expression(ast_as(ASTTernaryExpr, node), ctx))
-            {
-                return NULL;
-            }
-            return node->expr_type;
+            return expr_done(check_ternary_expression(ast_as(ASTTernaryExpr, node), ctx), node);
         case AST_SUBSCRIPT_EXPR:
-        {
-            ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, node);
-            if (!check_expr(se->array, ctx) || !check_expr(se->index, ctx))
-            {
-                return NULL;
-            }
-            Type *arr_type = se->array->expr_type;
-            Type *ptr_type = type_decay(arr_type);
-            if (!type_is_ptr(ptr_type))
-            {
-                sem_error(node->loc, "subscripted value is not a pointer or array");
-                ctx->error = true;
-                return NULL;
-            }
-            node->expr_type = type_deref(ptr_type);
-            return node->expr_type;
-        }
+            return expr_done(check_subscript_expr(ast_as(ASTSubscriptExpr, node), ctx), node);
         case AST_SIZEOF_EXPR:
-        {
-            ASTSizeofExpr *se = ast_as(ASTSizeofExpr, node);
-            if (!check_expr(se->operand, ctx))
-            {
-                return NULL;
-            }
-            Type *op_type = se->operand->expr_type;
-            /* §6.3.2.1p3: array-to-pointer decay is suppressed for the direct
-               operand of sizeof, so `sizeof(arr)` is the whole array size. */
-            if (se->operand->kind == AST_IDENT)
-            {
-                ASTIdent *id = ast_as(ASTIdent, se->operand);
-                if (id->is_func)
-                {
-                    /* §6.3.2.1p4: a function designator's decay is suppressed
-                       under sizeof — `sizeof(f)` is `sizeof(function)` (a
-                       constraint violation, §6.5.3.4p1); recover the type. */
-                    ASTNode *fnode = strmap_get(ctx->globals, id->name);
-                    op_type = func_sig_of(fnode)->func_type;
-                }
-                else if (id->decl && type_is_array(id->decl->type))
-                {
-                    op_type = id->decl->type;
-                }
-            }
-            else if (se->operand->kind == AST_COMPOUND_LITERAL &&
-                     type_is_array(ast_as(ASTCompoundLiteral, se->operand)->type))
-            {
-                /* `sizeof((int[]){...})`: a compound literal does not decay
-                   either (§6.5.2.5p4 note) — the array type survives. */
-                op_type = ast_as(ASTCompoundLiteral, se->operand)->type;
-            }
-            /* sizeof on a function type is a constraint violation
-               (§6.5.3.4p1); a function designator reaches here *undecayed*
-               only as a direct sizeof operand (identifiers decay elsewhere). */
-            if (op_type->kind == TYPE_VOID)
-            {
-                sem_error(node->loc, "sizeof(void) is invalid");
-                ctx->error = true;
-                return NULL;
-            }
-            if (type_is_function(op_type))
-            {
-                sem_error(node->loc, "invalid application of 'sizeof' to a function type");
-                ctx->error = true;
-                return NULL;
-            }
-            if (type_is_record(op_type) && !type_is_complete(op_type))
-            {
-                sem_error(node->loc, "sizeof of incomplete type");
-                ctx->error = true;
-                return NULL;
-            }
-            se->size_value = type_sizeof(op_type);
-            node->expr_type = type_ulong();
-            return node->expr_type;
-        }
+            return expr_done(check_sizeof_expr(ast_as(ASTSizeofExpr, node), ctx), node);
         case AST_SIZEOF_TYPE:
-        {
-            ASTSizeofType *st = ast_as(ASTSizeofType, node);
-            if (st->type->kind == TYPE_VOID)
-            {
-                sem_error(node->loc, "sizeof(void) is invalid");
-                ctx->error = true;
-                return NULL;
-            }
-            if (type_is_record(st->type) && !type_is_complete(st->type))
-            {
-                sem_error(node->loc, "sizeof of incomplete type");
-                ctx->error = true;
-                return NULL;
-            }
-            st->size_value = type_sizeof(st->type);
-            node->expr_type = type_ulong();
-            return node->expr_type;
-        }
+            return expr_done(check_sizeof_type(ast_as(ASTSizeofType, node), ctx), node);
         case AST_ALIGNOF_EXPR:
-        {
-            ASTAlignofExpr *ae = ast_as(ASTAlignofExpr, node);
-            if (!check_expr(ae->operand, ctx))
-            {
-                return NULL;
-            }
-            Type *op_type = ae->operand->expr_type;
-            /* §6.3.2.1p3: array-to-pointer decay is suppressed for the direct
-               operand of _Alignof, so `_Alignof(arr)` is the element
-               alignment (arrays align as their element type). */
-            if (ae->operand->kind == AST_IDENT)
-            {
-                ASTVarDecl *decl = ast_as(ASTIdent, ae->operand)->decl;
-                if (decl && type_is_array(decl->type))
-                {
-                    op_type = decl->type;
-                }
-            }
-            /* §6.5.3.4p2 constraint: the operand type shall not be a function
-               type or an incomplete type. A void or array-of-void lvalue is
-               already caught by check_expr; functions don't exist as rvalues
-               here. */
-            if (op_type->kind == TYPE_VOID)
-            {
-                sem_error(node->loc, "_Alignof(void) is invalid");
-                ctx->error = true;
-                return NULL;
-            }
-            if (!type_is_complete(op_type))
-            {
-                sem_error(node->loc, "_Alignof of incomplete type");
-                ctx->error = true;
-                return NULL;
-            }
-            ae->align_value = type_alignof(op_type);
-            node->expr_type = type_ulong();
-            return node->expr_type;
-        }
+            return expr_done(check_alignof_expr(ast_as(ASTAlignofExpr, node), ctx), node);
         case AST_ALIGNOF_TYPE:
-        {
-            ASTAlignofType *at = ast_as(ASTAlignofType, node);
-            if (at->type->kind == TYPE_VOID)
-            {
-                sem_error(node->loc, "_Alignof(void) is invalid");
-                ctx->error = true;
-                return NULL;
-            }
-            if (!type_is_complete(at->type))
-            {
-                sem_error(node->loc, "_Alignof of incomplete type");
-                ctx->error = true;
-                return NULL;
-            }
-            at->align_value = type_alignof(at->type);
-            node->expr_type = type_ulong();
-            return node->expr_type;
-        }
+            return expr_done(check_alignof_type(ast_as(ASTAlignofType, node), ctx), node);
         case AST_STRING_LITERAL:
-        {
-            ASTStringLiteral *sl = ast_as(ASTStringLiteral, node);
-            node->expr_type = type_decay(type_array(type_char(), sl->length + 1));
-            return node->expr_type;
-        }
+            return expr_done(check_string_literal(ast_as(ASTStringLiteral, node), ctx), node);
         case AST_MEMBER_ACCESS:
-            if (!check_member_access(ast_as(ASTMemberAccess, node), ctx))
-            {
-                return NULL;
-            }
-            return node->expr_type;
+            return expr_done(check_member_access(ast_as(ASTMemberAccess, node), ctx), node);
         case AST_CAST_EXPR:
-            if (!check_cast_expr(ast_as(ASTCastExpr, node), ctx))
-            {
-                return NULL;
-            }
-            return node->expr_type;
+            return expr_done(check_cast_expr(ast_as(ASTCastExpr, node), ctx), node);
         case AST_VA_ARG_EXPR:
-            if (!check_va_arg_expr(ast_as(ASTVaArgExpr, node), ctx))
-            {
-                return NULL;
-            }
-            return node->expr_type;
+            return expr_done(check_va_arg_expr(ast_as(ASTVaArgExpr, node), ctx), node);
         case AST_COMPOUND_LITERAL:
-            if (!check_compound_literal(ast_as(ASTCompoundLiteral, node), ctx))
-            {
-                return NULL;
-            }
-            return node->expr_type;
+            return expr_done(check_compound_literal(ast_as(ASTCompoundLiteral, node), ctx), node);
         default:
             sem_error(node->loc, "unsupported expression kind %s", ast_kind_name(node->kind));
             ctx->error = true;
@@ -1180,39 +1149,12 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
            literal, or an address constant into init; everything else is
            rejected. Lists / char arrays get a plan; the serializer emits the
            bytes. */
-        if (var_decl->init)
+        if (var_decl->init && plan_var_initializer(ctx, var_decl) == PLAN_ERROR)
         {
-            bool handled;
-            if (!plan_var_aggregate_init(ctx, var_decl, &handled))
-            {
-                return false;
-            }
-            if (!handled)
-            {
-                if (var_decl->init->kind == AST_UNARY_EXPR || var_decl->init->kind == AST_IDENT)
-                {
-                    if (!plan_ptr_initializer(ctx, var_decl))
-                    {
-                        return false;
-                    }
-                }
-                else if (!type_is_ptr(var_decl->type) ||
-                         type_deref(var_decl->type)->kind != TYPE_CHAR)
-                {
-                    sem_error(var_decl->base.loc,
-                              "string-literal initializer requires a 'char *' variable");
-                    ctx->error = true;
-                    return false;
-                }
-            }
+            return false;
         }
-        if (var_decl->has_const_init &&
-            (var_decl->type->kind == TYPE_ARRAY || type_is_record(var_decl->type)))
+        if (!check_aggregate_const_init(var_decl, ctx))
         {
-            sem_error(var_decl->base.loc,
-                      "aggregate '%s' must be initialized with a brace-enclosed list",
-                      var_decl->name);
-            ctx->error = true;
             return false;
         }
     }
@@ -1289,8 +1231,8 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
             return false;
         }
     }
-    /* D12.7: a `[]` array with no initializer (or an incomplete record/array
-       element) stays incomplete — rejected after completion would have run. */
+    /* A `[]` array with no initializer (or an incomplete record/array element)
+       stays incomplete — rejected after completion would have run. */
     if (!type_is_complete(var_decl->type))
     {
         sem_error(var_decl->base.loc, "variable '%s' has incomplete type", var_decl->name);
@@ -1305,8 +1247,7 @@ static bool check_expression_statement(ASTExprStmt *expr_stmt, SemanticCtx *ctx)
     return check_expr(expr_stmt->expr, ctx);
 }
 
-/* ---- initializer-list planner (C11 §6.7.9, D12.5) ----
-
+/* ---- initializer-list planner (C11 §6.7.9) ----
    Flattens a brace-enclosed initializer tree into offset-targeted writes on
    the object being initialized. A cursor of aggregate frames walks the
    subobjects in initialization order; brace elision falls out of the descent:
@@ -1319,7 +1260,7 @@ typedef struct
     Type *agg; /* array / struct / union type this frame iterates */
     u32 next;  /* next child index to consume within `agg` */
     u32 base;  /* absolute byte offset of this aggregate in the object */
-    bool grow; /* root `[]` array: unbounded cursor, tracked (D12.7) */
+    bool grow; /* root `[]` array: unbounded cursor */
 } PlanFrame;
 
 static bool is_aggregate_type(Type *t)
@@ -1328,7 +1269,7 @@ static bool is_aggregate_type(Type *t)
     return type_is_array(t) || type_is_record(t);
 }
 
-static u32 aggr_nchildren(const PlanFrame *fr)
+static u32 plan_frame_nchildren(const PlanFrame *fr)
 {
     Type *agg = type_unqual(fr->agg);
     if (type_is_array(agg))
@@ -1343,7 +1284,7 @@ static u32 aggr_nchildren(const PlanFrame *fr)
     return (u32) vec_size(agg->record.fields);
 }
 
-static bool aggr_child(const PlanFrame *fr, Type **cty, u32 *coff)
+static bool plan_frame_child(const PlanFrame *fr, Type **cty, u32 *coff)
 {
     Type *agg = type_unqual(fr->agg);
     u32 idx = fr->next;
@@ -1371,7 +1312,7 @@ static bool aggr_child(const PlanFrame *fr, Type **cty, u32 *coff)
 }
 
 /* Walk the fields of `agg` looking for `name`; returns its index on success. */
-static bool aggr_field_index(Type *agg, const char *name, u32 *out)
+static bool record_field_index(Type *agg, const char *name, u32 *out)
 {
     agg = type_unqual(agg);
     size_t nf = vec_size(agg->record.fields);
@@ -1393,7 +1334,7 @@ static void cursor_advance(Vec *stack)
     {
         PlanFrame *top = (PlanFrame *) vec_last(stack);
         top->next++;
-        if (top->next < aggr_nchildren(top))
+        if (top->next < plan_frame_nchildren(top))
         {
             return;
         }
@@ -1423,8 +1364,8 @@ static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type)
     return plan;
 }
 
-/* Validate + record a scalar write (initialization bypasses the §9 write gate,
-   so const targets are fine — D12.10). */
+/* Validate + record a scalar write (initialization bypasses the write gate,
+   so const targets are fine). */
 static bool plan_scalar_write(SemanticCtx *ctx, InitPlan *plan, Type *target, u32 offset,
                               ASTNode *value, Loc loc)
 {
@@ -1462,8 +1403,8 @@ static bool resolve_designator_path(SemanticCtx *ctx, InitPlan *plan, Type *t, u
                 return false;
             }
             /* Only the outermost declared-against `[]` array may take an
-               out-of-range designator (it sizes the array, D12.7). Inner
-               brackets stay bounded. */
+               out-of-range designator (it sizes the array). Inner brackets stay
+               bounded. */
             bool grow = plan->grow_array && cur_ty->arr.length == 0;
             if (dd->index < 0 || (!grow && (u64) dd->index >= cur_ty->arr.length))
             {
@@ -1484,31 +1425,28 @@ static bool resolve_designator_path(SemanticCtx *ctx, InitPlan *plan, Type *t, u
         }
         else if (type_is_record(cur_ty))
         {
-            if (dd->kind != ND_INDEX)
-            {
-                u32 fidx;
-                if (!aggr_field_index(cur_ty, dd->field, &fidx))
-                {
-                    sem_error(loc, "no member named '%s' in '%s'", dd->field, cur_ty->record.tag);
-                    ctx->error = true;
-                    return false;
-                }
-                RecordField *f = (RecordField *) vec_get(cur_ty->record.fields, fidx);
-                PlanFrame *fr = arena_alloc(ctx->arena, sizeof(PlanFrame), _Alignof(PlanFrame));
-                fr->agg = cur_ty;
-                fr->base = cur_off;
-                fr->next = fidx;
-                fr->grow = false;
-                vec_push(path, fr);
-                cur_off = cur_off + f->offset;
-                cur_ty = type_unqual(f->type);
-            }
-            else
+            if (dd->kind == ND_INDEX)
             {
                 sem_error(loc, "array designator used on a non-array object");
                 ctx->error = true;
                 return false;
             }
+            u32 fidx;
+            if (!record_field_index(cur_ty, dd->field, &fidx))
+            {
+                sem_error(loc, "no member named '%s' in '%s'", dd->field, cur_ty->record.tag);
+                ctx->error = true;
+                return false;
+            }
+            RecordField *f = (RecordField *) vec_get(cur_ty->record.fields, fidx);
+            PlanFrame *fr = arena_alloc(ctx->arena, sizeof(PlanFrame), _Alignof(PlanFrame));
+            fr->agg = cur_ty;
+            fr->base = cur_off;
+            fr->next = fidx;
+            fr->grow = false;
+            vec_push(path, fr);
+            cur_off = cur_off + f->offset;
+            cur_ty = type_unqual(f->type);
         }
         else
         {
@@ -1558,6 +1496,128 @@ static bool plan_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *cty, u32 
     return plan_scalar_write(ctx, plan, cty, coff, value, loc);
 }
 
+/* §6.7.9p14: a character array may be initialized by a character string
+   literal, braced or not — `char s[5] = "hi"` and `char s[5] = {"hi"}` both
+   fill the array; an unsized target infers strlen+1 from the string. The
+   terminating NUL is stored *if there is room* (`char s[2] = "hi"` drops it,
+   `char s[3] = "hi"` keeps it); only `strlen > size` is an error. The emission
+   clamps the copy length to the array size (ir_builder) so the NUL is dropped
+   there. */
+static PlanResult plan_char_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *t,
+                                          ASTInitList *list, InitElem *e, u32 base_off)
+{
+    if (e->design || e->value->kind != AST_STRING_LITERAL)
+    {
+        return PLAN_NONE; /* not this special form; fall through */
+    }
+    ASTStringLiteral *sl = ast_as(ASTStringLiteral, e->value);
+    u64 need = sl->length + 1;
+    if (t->arr.length == 0)
+    {
+        if (!plan->grow_array)
+        {
+            sem_error(list->base.loc, "array has incomplete type");
+            ctx->error = true;
+            return PLAN_ERROR;
+        }
+        plan->inferred_len = need;
+        /* The write's type carries only the copy length (strlen+1); recording it
+           as the yet-to-be-completed type is safe because plan_brace_list
+           resizes the object afterwards. */
+        plan_new_write(ctx, plan, base_off, t, e->value, true);
+        return PLAN_HANDLED;
+    }
+    if (sl->length > t->arr.length)
+    {
+        sem_error(e->loc, "initializer-string for array of chars is too long");
+        ctx->error = true;
+        return PLAN_ERROR;
+    }
+    plan_new_write(ctx, plan, base_off, t, e->value, true);
+    return PLAN_HANDLED;
+}
+
+/* Consume one list element: rebind the cursor via its designator (if any),
+   then plan the clause — a nested brace list, a string fill, or a scalar with
+   brace elision (drilling to the leaf subobject). `stackp` may be replaced by a
+   designator path; the cursor is advanced once the clause consumes its target. */
+static bool plan_elem(SemanticCtx *ctx, InitPlan *plan, Type *t, InitElem *e, u32 base_off,
+                      Vec **stackp)
+{
+    Vec *stack = *stackp;
+    if (e->design)
+    {
+        Vec *path = vec_new(ctx->arena);
+        Type *dt;
+        u32 doff;
+        if (!resolve_designator_path(ctx, plan, t, base_off, e->design, path, &dt, &doff, e->loc))
+        {
+            return false;
+        }
+        stack = path;
+        *stackp = stack;
+    }
+    if (vec_size(stack) == 0)
+    {
+        sem_error(e->loc, "excess elements in %s initializer",
+                  type_is_array(t) ? "array" : "struct/union");
+        ctx->error = true;
+        return false;
+    }
+    PlanFrame *top = (PlanFrame *) vec_last(stack);
+    Type *cty;
+    u32 coff;
+    if (!plan_frame_child(top, &cty, &coff))
+    {
+        sem_error(e->loc, "excess elements in %s initializer",
+                  type_is_array(t) ? "array" : "struct/union");
+        ctx->error = true;
+        return false;
+    }
+    if (e->value->kind == AST_INIT_LIST)
+    {
+        if (!plan_list(ctx, plan, cty, ast_as(ASTInitList, e->value), coff))
+        {
+            return false;
+        }
+        cursor_advance(stack);
+        return true;
+    }
+    if (e->value->kind == AST_STRING_LITERAL)
+    {
+        if (!plan_string_clause(ctx, plan, cty, coff, e->value, e->loc))
+        {
+            return false;
+        }
+        cursor_advance(stack);
+        return true;
+    }
+    /* Scalar clause with brace elision: drill to the leaf subobject. */
+    while (is_aggregate_type(cty))
+    {
+        PlanFrame *fr = arena_alloc(ctx->arena, sizeof(PlanFrame), _Alignof(PlanFrame));
+        fr->agg = cty;
+        fr->base = coff;
+        fr->next = 0;
+        fr->grow = false;
+        vec_push(stack, fr);
+        top = (PlanFrame *) vec_last(stack);
+        if (!plan_frame_child(top, &cty, &coff))
+        {
+            sem_error(e->loc, "excess elements in %s initializer",
+                      type_is_array(t) ? "array" : "struct/union");
+            ctx->error = true;
+            return false;
+        }
+    }
+    if (!plan_scalar_write(ctx, plan, cty, coff, e->value, e->loc))
+    {
+        return false;
+    }
+    cursor_advance(stack);
+    return true;
+}
+
 static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *list, u32 base_off)
 {
     t = type_unqual(t);
@@ -1567,42 +1627,16 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
         return true; /* `{}`: zero-init, nothing to write */
     }
 
-    /* §6.7.9p14: a character array may be initialized by a character string
-       literal, braced or not — `char s[5] = "hi"` and `char s[5] = {"hi"}`
-       both fill the array; an unsized target infers strlen+1 from the string.
-       The terminating NUL is stored *if there is room*: `char s[2] = "hi"`
-       drops it (2 chars, no room), `char s[3] = "hi"` keeps it. The only
-       error is `strlen > size` (`char s[1] = "hi"`). The emission clamps the
-       copy length to the array size (ir_builder) so the NUL is dropped there. */
     if (type_is_array(t) && type_array_elem(t)->kind == TYPE_CHAR && nel == 1)
     {
         InitElem *e = (InitElem *) vec_get(list->elems, 0);
-        if (!e->design && e->value->kind == AST_STRING_LITERAL)
+        PlanResult r = plan_char_string_clause(ctx, plan, t, list, e, base_off);
+        if (r == PLAN_ERROR)
         {
-            ASTStringLiteral *sl = ast_as(ASTStringLiteral, e->value);
-            u64 need = sl->length + 1;
-            if (t->arr.length == 0)
-            {
-                if (!plan->grow_array)
-                {
-                    sem_error(list->base.loc, "array has incomplete type");
-                    ctx->error = true;
-                    return false;
-                }
-                plan->inferred_len = need;
-                /* The write's type is used only for the copy length (strlen+1),
-                   so recording it against the yet-to-be-completed type is safe:
-                   completion in plan_brace_list resizes the object afterwards. */
-                plan_new_write(ctx, plan, base_off, t, e->value, true);
-                return true;
-            }
-            if (sl->length > t->arr.length)
-            {
-                sem_error(e->loc, "initializer-string for array of chars is too long");
-                ctx->error = true;
-                return false;
-            }
-            plan_new_write(ctx, plan, base_off, t, e->value, true);
+            return false;
+        }
+        if (r == PLAN_HANDLED)
+        {
             return true;
         }
     }
@@ -1628,7 +1662,7 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
     if (type_is_array(t) && t->arr.length == 0)
     {
         /* A `[]` rank may only be the outermost, declared-against target:
-           it grows from its initializer (D12.7). Inner empty brackets error. */
+           it grows from its initializer. Inner empty brackets error. */
         if (!plan->grow_array)
         {
             sem_error(list->base.loc, "array has incomplete type");
@@ -1648,87 +1682,15 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
     for (size_t i = 0; i < nel; i++)
     {
         InitElem *e = (InitElem *) vec_get(list->elems, i);
-
-        if (e->design)
+        if (!plan_elem(ctx, plan, t, e, base_off, &stack))
         {
-            Vec *path = vec_new(ctx->arena);
-            Type *dt;
-            u32 doff;
-            if (!resolve_designator_path(ctx, plan, t, base_off, e->design, path, &dt, &doff,
-                                         e->loc))
-            {
-                return false;
-            }
-            stack = path;
-        }
-
-        if (vec_size(stack) == 0)
-        {
-            sem_error(e->loc, "excess elements in %s initializer",
-                      type_is_array(t) ? "array" : "struct/union");
-            ctx->error = true;
             return false;
         }
-
-        PlanFrame *top = (PlanFrame *) vec_last(stack);
-        Type *cty;
-        u32 coff;
-        if (!aggr_child(top, &cty, &coff))
-        {
-            sem_error(e->loc, "excess elements in %s initializer",
-                      type_is_array(t) ? "array" : "struct/union");
-            ctx->error = true;
-            return false;
-        }
-
-        if (e->value->kind == AST_INIT_LIST)
-        {
-            if (!plan_list(ctx, plan, cty, ast_as(ASTInitList, e->value), coff))
-            {
-                return false;
-            }
-            cursor_advance(stack);
-        }
-        else if (e->value->kind == AST_STRING_LITERAL)
-        {
-            if (!plan_string_clause(ctx, plan, cty, coff, e->value, e->loc))
-            {
-                return false;
-            }
-            cursor_advance(stack);
-        }
-        else
-        {
-            /* Scalar clause with brace elision: drill to the leaf subobject. */
-            while (is_aggregate_type(cty))
-            {
-                PlanFrame *fr = arena_alloc(ctx->arena, sizeof(PlanFrame), _Alignof(PlanFrame));
-                fr->agg = cty;
-                fr->base = coff;
-                fr->next = 0;
-                fr->grow = false;
-                vec_push(stack, fr);
-                top = (PlanFrame *) vec_last(stack);
-                if (!aggr_child(top, &cty, &coff))
-                {
-                    sem_error(e->loc, "excess elements in %s initializer",
-                              type_is_array(t) ? "array" : "struct/union");
-                    ctx->error = true;
-                    return false;
-                }
-            }
-            if (!plan_scalar_write(ctx, plan, cty, coff, e->value, e->loc))
-            {
-                return false;
-            }
-            cursor_advance(stack);
-        }
-
         /* The growable root's cursor (after the clause) is the inferred length: a
            boundary position (`root.next`) counts fully-consumed elements; a
            cursor still inside the current element — a deeper frame remains on
            the stack — counts `root.next + 1` (a partially-filled row is one
-           element, §6.7.9p22 / D12.7). */
+           element, §6.7.9p22). */
         if (plan->grow_array && vec_size(stack) > 0)
         {
             PlanFrame *rf = (PlanFrame *) vec_get(stack, 0);
@@ -1779,14 +1741,14 @@ static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
 /* `int *p = &g;` or `int *p = &(type){...};` (block static or file scope): a
    bare address constant in pointer position. The value type-checks against
    the pointer target; the IR serializer turns it into one 8-byte relocation
-   write (§6.6p9, D12.8/D12.9 — a compound literal is an address constant). */
+   write (§6.6p9 — a compound literal is an address constant). */
 static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
 {
     if (vd->init->kind != AST_UNARY_EXPR)
     {
         if (vd->init->kind == AST_IDENT)
         {
-            /* A bare function designator (`fp = f;`, D16.1): an address
+            /* A bare function designator (`fp = f;`): an address
                constant whose reloc the IR serializer emits. The parser only
                lets function names reach here as values; plan_scalar_write
                resolves the designator (is_func) via check_expr. */
@@ -1824,9 +1786,9 @@ static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
 }
 
 /* Run the planner over a brace-list initializer, completing a declared-against
-   `[]` array *through* `type_out` first (D12.7 — the fresh type is built from
-   the planner's inferred length; the interned 0-length type is never mutated,
-   P3). Shared by var declarations and compound literals (D12.9). Returns false
+   `[]` array *through* `type_out` first (the fresh type is built from the
+   planner's inferred length; the interned 0-length type is never mutated).
+   Shared by var declarations and compound literals. Returns false
    on error. */
 static bool plan_brace_list(SemanticCtx *ctx, Type **type_out, ASTNode *init, InitPlan **plan_out)
 {
@@ -1848,8 +1810,8 @@ static bool plan_brace_list(SemanticCtx *ctx, Type **type_out, ASTNode *init, In
 }
 
 /* Build the initializer plan for a brace list or char-array string, completing
-   a declared-against `[]` array first (D12.7). `*handled` is set when
-   `vd->init` matched one of these forms. Returns false on error. */
+   a declared-against `[]` array first. `*handled` is set when `vd->init`
+   matched one of these forms. Returns false on error. */
 static bool plan_var_aggregate_init(SemanticCtx *ctx, ASTVarDecl *vd, bool *handled)
 {
     *handled = false;
@@ -1871,11 +1833,53 @@ static bool plan_var_aggregate_init(SemanticCtx *ctx, ASTVarDecl *vd, bool *hand
     return true;
 }
 
-/* A compound literal `(type){ ... }` (C11 §6.5.2.5, D12.9). Check the
-   target type, run the planner against the list (completing `[]`), and set the
-   node's lowering plan. The node is an lvalue whose type is the *declared*
-   type (qualifiers intact: `(const struct S){...}` is a const lvalue);
-   initialization itself bypasses the §9 write gate. */
+/* A declaration initializer that folded to a scalar constant cannot initialize
+   an aggregate: its init must be a brace list (§6.7.9p2). */
+static bool check_aggregate_const_init(ASTVarDecl *vd, SemanticCtx *ctx)
+{
+    if (vd->has_const_init && (vd->type->kind == TYPE_ARRAY || type_is_record(vd->type)))
+    {
+        sem_error(vd->base.loc, "aggregate '%s' must be initialized with a brace-enclosed list",
+                  vd->name);
+        ctx->error = true;
+        return false;
+    }
+    return true;
+}
+
+/* Plan a declaration's initializer when it is an aggregate, a string, or an
+   address constant; scalar initializers return PLAN_NONE and are checked as
+   ordinary expressions by the caller. Shared by file- and block-scope (static)
+   declarations so both see the same forms. */
+static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
+{
+    bool handled;
+    if (!plan_var_aggregate_init(ctx, vd, &handled))
+    {
+        return PLAN_ERROR;
+    }
+    if (handled)
+    {
+        return PLAN_HANDLED;
+    }
+    if (vd->init->kind == AST_UNARY_EXPR || vd->init->kind == AST_IDENT)
+    {
+        return plan_ptr_initializer(ctx, vd) ? PLAN_HANDLED : PLAN_ERROR;
+    }
+    if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_CHAR)
+    {
+        sem_error(vd->base.loc, "string-literal initializer requires a 'char *' variable");
+        ctx->error = true;
+        return PLAN_ERROR;
+    }
+    return PLAN_NONE;
+}
+
+/* A compound literal `(type){ ... }` (C11 §6.5.2.5). Check the target type,
+   run the planner against the list (completing `[]`), and set the node's
+   lowering plan. The node is an lvalue of the *declared* type (qualifiers
+   intact: `(const struct S){...}` is a const lvalue); initialization itself
+   bypasses the write gate. */
 static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx)
 {
     Type *ty = type_unqual(cl->type);
@@ -1899,25 +1903,6 @@ static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx)
     return true;
 }
 
-static bool check_compound_statement(ASTCompoundStmt *compound_stmt, SemanticCtx *ctx,
-                                     Type *ret_type)
-{
-    push_scope(ctx);
-    bool ok = true;
-    size_t nstmts = vec_size(compound_stmt->stmts);
-    for (size_t i = 0; i < nstmts; i++)
-    {
-        ASTNode *stmt = (ASTNode *) vec_get(compound_stmt->stmts, i);
-        if (!check_stmt(stmt, ctx, ret_type))
-        {
-            ok = false;
-            break;
-        }
-    }
-    pop_scope(ctx);
-    return ok;
-}
-
 static bool check_statement_list(Vec *stmts, SemanticCtx *ctx, Type *ret_type)
 {
     size_t nstmts = vec_size(stmts);
@@ -1929,6 +1914,15 @@ static bool check_statement_list(Vec *stmts, SemanticCtx *ctx, Type *ret_type)
         }
     }
     return true;
+}
+
+static bool check_compound_statement(ASTCompoundStmt *compound_stmt, SemanticCtx *ctx,
+                                     Type *ret_type)
+{
+    push_scope(ctx);
+    bool ok = check_statement_list(compound_stmt->stmts, ctx, ret_type);
+    pop_scope(ctx);
+    return ok;
 }
 
 static bool check_if_statement(ASTIfStmt *if_stmt, SemanticCtx *ctx, Type *ret_type)
@@ -2291,11 +2285,9 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     }
     if (type_is_ptr(tt) || type_is_ptr(te))
     {
-        /* §6.5.15p6: both operands are pointers to compatible types (or one is
-           a null pointer constant). The result picks the pointer side — the
-           common case is a function-pointer or data-pointer ternary; decayed
-           function designators reach here as identical ptr-to-function types
-           (D16.1). */
+        /* §6.5.15p6: both operands are pointers to compatible types (or one is a
+           null pointer constant). The result picks the pointer side — the
+           common case is a function-pointer or data-pointer ternary. */
         ternary->base.expr_type = type_rvalue(type_is_ptr(tt) ? tt : te);
         return true;
     }
@@ -2443,31 +2435,17 @@ static bool setup_function_params(ASTFuncDef *func_def, SemanticCtx *ctx)
     return true;
 }
 
-static bool check_function_body(ASTFuncDef *func_def, SemanticCtx *ctx)
-{
-    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, func_def->body);
-    size_t nstmts = vec_size(body->stmts);
-    for (size_t i = 0; i < nstmts; i++)
-    {
-        ASTNode *stmt = (ASTNode *) vec_get(body->stmts, i);
-        if (!check_stmt(stmt, ctx, func_def->sig.ret_type))
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-/* Forward declaration for recursive statement traversal. */
+/* Statement walkers: labels may be referenced before they are defined (goto
+   can jump forward), so a function's labels are collected before its body is
+   checked. Duplicate labels are reported here, once. */
 static void collect_labels(ASTNode *node, SemanticCtx *ctx);
 
-static void collect_labels_compound(ASTCompoundStmt *cs, SemanticCtx *ctx)
+static void collect_labels_statements(Vec *stmts, SemanticCtx *ctx)
 {
-    size_t n = vec_size(cs->stmts);
+    size_t n = vec_size(stmts);
     for (size_t i = 0; i < n; i++)
     {
-        ASTNode *stmt = (ASTNode *) vec_get(cs->stmts, i);
-        collect_labels(stmt, ctx);
+        collect_labels((ASTNode *) vec_get(stmts, i), ctx);
     }
 }
 
@@ -2480,7 +2458,7 @@ static void collect_labels(ASTNode *node, SemanticCtx *ctx)
     switch (node->kind)
     {
         case AST_COMPOUND_STMT:
-            collect_labels_compound(ast_as(ASTCompoundStmt, node), ctx);
+            collect_labels_statements(ast_as(ASTCompoundStmt, node)->stmts, ctx);
             break;
         case AST_IF_STMT:
         {
@@ -2490,23 +2468,14 @@ static void collect_labels(ASTNode *node, SemanticCtx *ctx)
             break;
         }
         case AST_WHILE_STMT:
-        {
-            ASTWhileStmt *ws = ast_as(ASTWhileStmt, node);
-            collect_labels(ws->body, ctx);
+            collect_labels(ast_as(ASTWhileStmt, node)->body, ctx);
             break;
-        }
         case AST_DO_WHILE_STMT:
-        {
-            ASTDoWhileStmt *ds = ast_as(ASTDoWhileStmt, node);
-            collect_labels(ds->body, ctx);
+            collect_labels(ast_as(ASTDoWhileStmt, node)->body, ctx);
             break;
-        }
         case AST_FOR_STMT:
-        {
-            ASTForStmt *fs = ast_as(ASTForStmt, node);
-            collect_labels(fs->body, ctx);
+            collect_labels(ast_as(ASTForStmt, node)->body, ctx);
             break;
-        }
         case AST_LABEL_STMT:
         {
             ASTLabelStmt *ls = ast_as(ASTLabelStmt, node);
@@ -2523,39 +2492,22 @@ static void collect_labels(ASTNode *node, SemanticCtx *ctx)
             break;
         }
         case AST_SWITCH_STMT:
-        {
-            ASTSwitchStmt *sw = ast_as(ASTSwitchStmt, node);
-            collect_labels(sw->body, ctx);
+            collect_labels(ast_as(ASTSwitchStmt, node)->body, ctx);
             break;
-        }
         case AST_CASE_STMT:
-        {
-            ASTCaseStmt *cs2 = ast_as(ASTCaseStmt, node);
-            size_t n2 = vec_size(cs2->stmts);
-            for (size_t i2 = 0; i2 < n2; i2++)
-            {
-                collect_labels((ASTNode *) vec_get(cs2->stmts, i2), ctx);
-            }
+            collect_labels_statements(ast_as(ASTCaseStmt, node)->stmts, ctx);
             break;
-        }
         case AST_DEFAULT_STMT:
-        {
-            ASTDefaultStmt *ds2 = ast_as(ASTDefaultStmt, node);
-            size_t n2 = vec_size(ds2->stmts);
-            for (size_t i2 = 0; i2 < n2; i2++)
-            {
-                collect_labels((ASTNode *) vec_get(ds2->stmts, i2), ctx);
-            }
+            collect_labels_statements(ast_as(ASTDefaultStmt, node)->stmts, ctx);
             break;
-        }
         default:
             break;
     }
 }
 
-/* The interned function type of a definition (D15.1): the return type and the
-   parameter types unqualified — top-level qualifiers are ignored for
-   function-type compatibility (§6.7.6.3p15) — plus the variadic bit. */
+/* Check one function definition body, with a fresh label table and loop depth.
+   Top-level parameter qualifiers are ignored for function-type compatibility
+   (§6.7.6.3p15). */
 static bool check_func(ASTNode *node, SemanticCtx *ctx)
 {
     ASSERT(node->kind == AST_FUNC_DEF);
@@ -2567,11 +2519,11 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
     ctx->labels = strmap_new(ctx->arena);
 
     push_scope(ctx);
-    ctx->func_params = fn->sig.params;
+    ctx->fn_params = fn->sig.params;
     if (!setup_function_params(fn, ctx))
     {
         pop_scope(ctx);
-        ctx->func_params = NULL;
+        ctx->fn_params = NULL;
         ctx->loop_depth = saved_loop_depth;
         ctx->labels = saved_labels;
         return false;
@@ -2582,7 +2534,8 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
        so collect them before checking the function body. */
     collect_labels(fn->body, ctx);
 
-    bool result = check_function_body(fn, ctx);
+    bool result =
+        check_statement_list(ast_as(ASTCompoundStmt, fn->body)->stmts, ctx, fn->sig.ret_type);
     if (ctx->error)
     {
         /* An error was reported (e.g. duplicate label during collection);
@@ -2591,18 +2544,16 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
     }
 
     pop_scope(ctx);
-    ctx->func_params = NULL;
+    ctx->fn_params = NULL;
     ctx->loop_depth = saved_loop_depth;
     ctx->labels = saved_labels;
     return result;
 }
 
-/* Pass 1: Collect all file-scope variables, enforcing linkage rules (D8.3):
-   repeated tentative/extern declarations merge; two definitions with a
-   constant initializer collide. */
-/* Validate and register one file-scope variable declaration. The most-
-   defined declaration wins: a definition replaces an extern-only
-   declaration; an initialized definition replaces a tentative one. */
+/* Validate and register one file-scope variable declaration. Repeated
+   tentative/extern declarations merge; the most-defined declaration wins (a
+   definition replaces an extern-only one; an initialized definition replaces a
+   tentative one); two definitions collide. */
 static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
 {
     if (strmap_get(ctx->globals, vd->name))
@@ -2625,42 +2576,20 @@ static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
     }
     if (vd->init)
     {
-        /* Initializer lists are flattened by the planner (completing a
-           `[]` array per D12.7); char arrays take a string literal
-           byte-fill; bare `char *` pointers keep the .data string-address
-           relocation (D12.6/D12.8). */
-        bool handled;
-        if (!plan_var_aggregate_init(ctx, vd, &handled))
+        /* Initializer lists are flattened by the planner (completing a `[]`
+           array per §6.7.9); char arrays take a string literal byte-fill;
+           bare `char *` pointers keep the .data string-address relocation. */
+        if (plan_var_initializer(ctx, vd) == PLAN_ERROR)
         {
             return false;
         }
-        if (!handled)
-        {
-            if (vd->init->kind == AST_UNARY_EXPR || vd->init->kind == AST_IDENT)
-            {
-                if (!plan_ptr_initializer(ctx, vd))
-                {
-                    return false;
-                }
-            }
-            else if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_CHAR)
-            {
-                sem_error(vd->base.loc, "string-literal initializer requires a 'char *' variable");
-                ctx->error = true;
-                return false;
-            }
-        }
     }
-    if (vd->has_const_init && (vd->type->kind == TYPE_ARRAY || type_is_record(vd->type)))
+    if (!check_aggregate_const_init(vd, ctx))
     {
-        sem_error(vd->base.loc, "aggregate '%s' must be initialized with a brace-enclosed list",
-                  vd->name);
-        ctx->error = true;
         return false;
     }
-    /* D12.7: a file-scope `[]` array left without an initializer stays
-       incomplete. `extern int a[];` declares (not defines) an incomplete
-       array and is legal. */
+    /* A file-scope `[]` array left without an initializer stays incomplete;
+       `extern int a[];` declares (not defines) it and is legal. */
     if (vd->storage != SC_EXTERN && type_is_array(vd->type) && !type_is_complete(vd->type))
     {
         sem_error(vd->base.loc, "variable '%s' has incomplete type", vd->name);
@@ -2718,7 +2647,7 @@ static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
     return true;
 }
 
-static bool collect_global_variables(ASTProgram *prog, SemanticCtx *ctx)
+static bool register_globals(ASTProgram *prog, SemanticCtx *ctx)
 {
     size_t ndecls = vec_size(prog->decls);
     for (size_t i = 0; i < ndecls; i++)
@@ -2748,7 +2677,7 @@ static bool collect_global_variables(ASTProgram *prog, SemanticCtx *ctx)
     return true;
 }
 
-/* Pass 0: check file-scope `_Static_assert`s before anything else. */
+/* Check file-scope `_Static_assert`s before anything else. */
 static bool check_file_scope_asserts(ASTProgram *prog, SemanticCtx *ctx)
 {
     size_t ndecls = vec_size(prog->decls);
@@ -2767,8 +2696,9 @@ static bool check_file_scope_asserts(ASTProgram *prog, SemanticCtx *ctx)
     return true;
 }
 
-/* Pass 2: Collect all function definitions */
-static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
+/* Register every function definition and prototype: intern its function type,
+   merge/reject against any prior same-named entry. */
+static bool register_functions(ASTProgram *prog, SemanticCtx *ctx)
 {
     size_t ndecls = vec_size(prog->decls);
     for (size_t i = 0; i < ndecls; i++)
@@ -2806,11 +2736,13 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
                 sem_error(decl->loc, "%s declaration of '%s' follows %s declaration",
                           fn->storage == SC_STATIC ? "static" : "non-static", fn->name,
                           pfn->storage == SC_STATIC ? "static" : "non-static");
+                ctx->error = true;
                 return false;
             }
             if (func_node_defined(prev) && func_node_defined(decl))
             {
                 sem_error(decl->loc, "redefinition of '%s'", fn->name);
+                ctx->error = true;
                 return false;
             }
             /* §6.7.6.3: a repeat declaration must be *compatible*. The
@@ -2819,6 +2751,7 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
             if (pfn->func_type != fn->func_type)
             {
                 sem_error(decl->loc, "conflicting types for '%s'", fn->name);
+                ctx->error = true;
                 return false;
             }
             /* A definition upgrades a prior prototype: keep the definition in
@@ -2834,6 +2767,7 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
             if (strmap_get(ctx->global_vars, fn->name))
             {
                 sem_error(decl->loc, "redefinition of '%s'", fn->name);
+                ctx->error = true;
                 return false;
             }
             strmap_set(ctx->globals, fn->name, decl);
@@ -2842,7 +2776,7 @@ static bool collect_function_definitions(ASTProgram *prog, SemanticCtx *ctx)
     return true;
 }
 
-/* Pass 3: Check each function body */
+/* Check every function body; each gets its own scope, labels, and loop depth. */
 static bool check_function_bodies(ASTProgram *prog, SemanticCtx *ctx)
 {
     size_t ndecls = vec_size(prog->decls);
@@ -2892,16 +2826,16 @@ ASTNode *semantic_check(ASTNode *ast, Arena *arena)
         return NULL;
     }
 
-    /* Functions are collected before globals (D16.1) so that file-scope
-       initializers may reference function designators — their signatures are
-       guaranteed present when global plans are built. Name collisions in
-       either direction are caught by the other pass's reverse map check. */
-    if (!collect_function_definitions(prog, &ctx))
+    /* Functions are registered before globals so that file-scope initializers may
+       reference function designators — their signatures are guaranteed present
+       when global plans are built. Name collisions in either direction are
+       caught by the other pass's reverse-map check. */
+    if (!register_functions(prog, &ctx))
     {
         return NULL;
     }
 
-    if (!collect_global_variables(prog, &ctx))
+    if (!register_globals(prog, &ctx))
     {
         return NULL;
     }
