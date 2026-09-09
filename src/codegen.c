@@ -2,6 +2,7 @@
 #include "util/assert.h"
 #include "util/bytebuf.h"
 #include "util/hashmap.h"
+#include "util/types.h"
 #include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
@@ -27,7 +28,8 @@ typedef struct
     const char **targets;  /* nentries block labels, index = value − min */
 } SwitchTableRec;
 
-/* Per-function frame: vreg i at slot (i+1)*8 below %rbp; variadic funcs add a 176-byte SysV save area. */
+/* Per-function frame: vreg i at slot (i+1)*8 below %rbp; variadic funcs add a 176-byte SysV save
+ * area. */
 typedef struct
 {
     u32 frame_size;    /* total frame size below %rbp, rounded up to 16 (ABI) */
@@ -112,7 +114,8 @@ typedef enum
     CC_G
 } CondCode;
 
-/* Opcode and prefix bytes used by the encoder; values taking a register nibble in the low 3 bits are named *_BASE. */
+/* Opcode and prefix bytes used by the encoder; values taking a register nibble in the low 3 bits
+ * are named *_BASE. */
 typedef enum
 {
     X86_TWO_BYTE_ESC = 0x0F,
@@ -304,7 +307,8 @@ static X86Operand lowered_operand(CodegenCtx *ctx, IrOperand op, u8 reg)
     return xop_from_operand(op);
 }
 
-/* Lowered value width: addresses are 8 bytes; a materialized immediate counts as 4 (mov-imm32sx). */
+/* Lowered value width: addresses are 8 bytes; a materialized immediate counts as 4 (mov-imm32sx).
+ */
 static u8 operand_width(CodegenCtx *ctx, IrOperand op)
 {
     if (op.is_global || op.is_func)
@@ -533,7 +537,8 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
             bytebuf_append_i8(buf, (i8) rhs.u.imm);
             return;
         }
-        /* Byte ops use `op r8, r/m8` (mem opcode − 1); AL/CL only, no REX, a memory RHS is loaded to %cl first. */
+        /* Byte ops use `op r8, r/m8` (mem opcode − 1); AL/CL only, no REX, a memory RHS is loaded
+         * to %cl first. */
         if (rhs.kind == XOP_MEM)
         {
             emit_mov_byte(buf, xop_reg(R_ECX), rhs);
@@ -564,7 +569,8 @@ static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
     }
     if (rhs.kind == XOP_REG)
     {
-        /* `%reg op= reg` form: RHS is a global/function address lowered into a register (cf. lowered_operand). */
+        /* `%reg op= reg` form: RHS is a global/function address lowered into a register (cf.
+         * lowered_operand). */
         emit_os16(buf, width);
         bytebuf_append(buf, rex(width == 8, dst_reg >= 8, false, rhs.u.reg >= 8));
         if (s->mem_0f)
@@ -757,7 +763,8 @@ static void emit_call_reg(ByteBuf *buf, u8 reg)
 /* IR lowering                                                         */
 /* ------------------------------------------------------------------ */
 
-/* Scratch: lower_* may clobber R_EAX/R_ECX/R_EDX, so the allocator must not schedule live ranges across one lowering. */
+/* Scratch: lower_* may clobber R_EAX/R_ECX/R_EDX, so the allocator must not schedule live ranges
+ * across one lowering. */
 typedef void (*LowerFn)(IrInstr *in, CodegenCtx *ctx);
 
 static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src);
@@ -915,7 +922,7 @@ static const u8 abi_arg_regs[6] = {R_EDI, R_ESI, R_EDX, R_ECX, R_R8, R_R9};
 static void lower_call(IrInstr *in, CodegenCtx *ctx)
 {
     u32 nargs = in->extra.call.nargs;
-    u32 n_stack = (nargs > 6) ? (nargs - 6) : 0;
+    u32 n_stack = MAX(nargs, 6) - 6;
     u32 pad = (n_stack % 2) * 8;
     u32 total_stack = n_stack * 8 + pad;
 
@@ -932,7 +939,7 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
         emit_mov(ctx->buf, 8, xop_mem(x86_mem_rsp((i32) (i - 6) * 8)), xop_reg(R_EAX));
     }
 
-    u32 n_reg_args = nargs < 6 ? nargs : 6;
+    u32 n_reg_args = MIN(nargs, 6);
     for (i32 i = (i32) n_reg_args - 1; i >= 0; i--)
     {
         IrOperand arg = in->extra.call.args[i];
@@ -941,7 +948,8 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
         emit_mov(ctx->buf, w, xop_reg(abi_arg_regs[i]), xop_reg(R_EAX));
     }
 
-    /* SysV: variadic callees get the vector count in %al; no floats yet, so emit 0 here, after the arg loads clobber %eax. */
+    /* SysV: variadic callees get the vector count in %al; no floats yet, so emit 0 here, after the
+     * arg loads clobber %eax. */
     if (in->extra.call.is_variadic)
     {
         emit_xor_eax_eax(ctx->buf);
@@ -949,7 +957,8 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
 
     if (in->extra.call.is_indirect)
     {
-        /* Indirect call: load the callee pointer into %r11 (caller-saved, not an arg register) and `call *%r11`. */
+        /* Indirect call: load the callee pointer into %r11 (caller-saved, not an arg register) and
+         * `call *%r11`. */
         emit_mov(ctx->buf, 8, xop_reg(R_R11), lowered_operand(ctx, in->extra.call.callee, R_R11));
         emit_call_reg(ctx->buf, R_R11);
     }
@@ -970,7 +979,8 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
     }
 }
 
-/* va_start: record the four va_list fields; the GP regs were spilled by emit_prologue, so this only stores addresses and constants. */
+/* va_start: record the four va_list fields; the GP regs were spilled by emit_prologue, so this only
+ * stores addresses and constants. */
 static void lower_va_start(IrInstr *in, CodegenCtx *ctx)
 {
     (void) load_ptr(ctx, in->ops[0]);                                 /* ap -> %rax */
@@ -987,7 +997,8 @@ static void lower_va_start(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, 8, xop_mem(x86_mem_rax(16)), xop_reg(R_EDX));
 }
 
-/* va_arg: GP-then-overflow walk; all slots are 8 bytes and gp_offset is a multiple of 8 below 48, so a signed compare is exact. */
+/* va_arg: GP-then-overflow walk; all slots are 8 bytes and gp_offset is a multiple of 8 below 48,
+ * so a signed compare is exact. */
 static void lower_va_arg(IrInstr *in, CodegenCtx *ctx)
 {
     ByteBuf *b = ctx->buf;
@@ -1058,10 +1069,12 @@ static void lower_brcond(IrInstr *in, CodegenCtx *ctx)
     emit_jmp(ctx->buf, in->extra.brcond.true_label, ctx->block_patches, ctx->arena);
 }
 
-/* Jump table only when the case range stays small (range+1 ≤ JT_MAX_RANGE entries); sparse switches use the compare-chain. */
+/* Jump table only when the case range stays small (range+1 ≤ JT_MAX_RANGE entries); sparse switches
+ * use the compare-chain. */
 #define JT_MAX_RANGE 256
 
-/* Load the control value into %rax at its exact 64-bit semantic value (sign/zero-extend narrow sources). */
+/* Load the control value into %rax at its exact 64-bit semantic value (sign/zero-extend narrow
+ * sources). */
 static void emit_switch_control(CodegenCtx *ctx, IrOperand src)
 {
     u8 w = operand_width(ctx, src);
@@ -1082,11 +1095,13 @@ static void emit_switch_control(CodegenCtx *ctx, IrOperand src)
     /* w==4 unsigned: mov %eax already zero-extends into %rax */
 }
 
-/* Bounds-check %rax to [min,max], subtract min, then jump through the full-range table (gaps → default). */
+/* Bounds-check %rax to [min,max], subtract min, then jump through the full-range table (gaps →
+ * default). */
 static void emit_switch_table(CodegenCtx *ctx, IrSwitchCase *cases, u32 n, i64 min, i64 max,
                               const char *default_label)
 {
-    /* The wrap-around subtraction is exact because the bounds checks give index < 2^63; negative ranges need signed ordering. */
+    /* The wrap-around subtraction is exact because the bounds checks give index < 2^63; negative
+     * ranges need signed ordering. */
     u8 below_cc = min < 0 ? CC_L : CC_B;
     u8 above_cc = min < 0 ? CC_G : CC_A;
     u64 range = (u64) max - (u64) min;
@@ -1099,9 +1114,9 @@ static void emit_switch_table(CodegenCtx *ctx, IrSwitchCase *cases, u32 n, i64 m
     emit_jcc(ctx->buf, above_cc, default_label, ctx->block_patches, ctx->arena);
     emit_reg_reg(ctx->buf, arith_specs[OP_SUB].mem, R_EAX, R_ECX); /* sub %rax, %rcx */
 
-    /* lea %rdx,[rip+disp32] patched once the table offset is known; RIP-relative entries need no relocations. */
-    emit_lea(ctx->buf, R_EDX,
-             (X86Mem) {.base = NO_REG, .index = NO_REG, .scale = 1, .disp = 0});
+    /* lea %rdx,[rip+disp32] patched once the table offset is known; RIP-relative entries need no
+     * relocations. */
+    emit_lea(ctx->buf, R_EDX, (X86Mem) {.base = NO_REG, .index = NO_REG, .scale = 1, .disp = 0});
     size_t disp_field_off = bytebuf_len(ctx->buf) - 4;
 
     emit_mov(ctx->buf, 8, xop_reg(R_EAX),
@@ -1139,8 +1154,8 @@ static void lower_switch(IrInstr *in, CodegenCtx *ctx)
         i64 min = cases[0].val, max = cases[0].val;
         for (u32 i = 1; i < n; i++)
         {
-            min = cases[i].val < min ? cases[i].val : min;
-            max = cases[i].val > max ? cases[i].val : max;
+            min = MIN(cases[i].val, min);
+            max = MAX(cases[i].val, max);
         }
         /* u64 wrap subtraction gives the true range for |range| < 2^63. */
         u64 range = (u64) max - (u64) min;
@@ -1254,7 +1269,8 @@ static void lower_zext(IrInstr *in, CodegenCtx *ctx)
     {
         u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
         emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
-        /* A 4-byte source needs no MOVZX: writing EAX zero-extends to RAX, and 0F B7 only zero-extends 16 bits. */
+        /* A 4-byte source needs no MOVZX: writing EAX zero-extends to RAX, and 0F B7 only
+         * zero-extends 16 bits. */
         if (sw < 4)
         {
             emit_movzx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
@@ -1280,7 +1296,8 @@ static void lower_sext(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
-/* `mov reg, imm32sx` (C7 /0): the zero-extension-free encoding GNU ld relocates with R_X86_64_32S. */
+/* `mov reg, imm32sx` (C7 /0): the zero-extension-free encoding GNU ld relocates with R_X86_64_32S.
+ */
 static void emit_addr_mov_imm32(ByteBuf *buf, u8 reg)
 {
     bytebuf_append(buf, rex(true, false, false, reg >= 8));
@@ -1395,23 +1412,8 @@ static void lower_gep(IrInstr *in, CodegenCtx *ctx)
 
 static void lower_alloca(IrInstr *in, CodegenCtx *ctx)
 {
-    i64 size = in->ops[0].u.imm;
-    i64 aligned = (size + 15) & ~15;
-    ByteBuf *b = ctx->buf;
-    if (aligned <= 127)
-    {
-        bytebuf_append(b, X86_REX_W);
-        bytebuf_append(b, X86_GROUP1_IMM8SX);
-        bytebuf_append(b, modrm(3, 5, R_ESP));
-        bytebuf_append(b, (u8) aligned);
-    }
-    else
-    {
-        bytebuf_append(b, X86_REX_W);
-        bytebuf_append(b, X86_GROUP1_IMM32);
-        bytebuf_append(b, modrm(3, 5, R_ESP));
-        bytebuf_append_u32(b, (u32) aligned);
-    }
+    i64 aligned = (in->ops[0].u.imm + 15) & ~15;
+    emit_binop_rhs(ctx->buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(aligned));
     emit_mov(ctx->buf, 8, xop_reg(R_EDX), xop_reg(R_ESP));
     emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
 }
@@ -1427,9 +1429,10 @@ static void lower_memcpy(IrInstr *in, CodegenCtx *ctx)
     bytebuf_append(ctx->buf, X86_MOVSB);
 }
 
-/* True for the ten icmp predicates; designated initializers keep this order-independent from IR_OPCODES. */
+/* True for the ten icmp predicates; designated initializers keep this order-independent from
+ * IR_OPCODES. */
 static const bool is_icmp_op_table[OP_ICMP_SGE + 1] = {
-    [OP_ICMP_EQ] = true,  [OP_ICMP_NE] = true, [OP_ICMP_ULT] = true, [OP_ICMP_ULE] = true,
+    [OP_ICMP_EQ] = true,  [OP_ICMP_NE] = true,  [OP_ICMP_ULT] = true, [OP_ICMP_ULE] = true,
     [OP_ICMP_UGT] = true, [OP_ICMP_UGE] = true, [OP_ICMP_SLT] = true, [OP_ICMP_SLE] = true,
     [OP_ICMP_SGT] = true, [OP_ICMP_SGE] = true,
 };
@@ -1532,7 +1535,8 @@ static FrameInfo frame_plan(IrFunction *f)
     u32 total = (max_vreg + 1) * 8;
     if (f->is_variadic)
     {
-        /* SysV register save area below the vreg slots (48 GP + 128-byte xmm reservation); the prologue spills into it. */
+        /* SysV register save area below the vreg slots (48 GP + 128-byte xmm reservation); the
+         * prologue spills into it. */
         fr.save_area_off = total + 176;
         total = fr.save_area_off;
     }
@@ -1540,11 +1544,12 @@ static FrameInfo frame_plan(IrFunction *f)
     return fr;
 }
 
-/* Move incoming args into their param vreg slots; stack args (7+) sit at 16+(i-6)*8(%rbp), routed through %eax. */
+/* Move incoming args into their param vreg slots; stack args (7+) sit at 16+(i-6)*8(%rbp), routed
+ * through %eax. */
 static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod)
 {
     size_t nparams = vec_size(f->params);
-    size_t n_reg = nparams < 6 ? nparams : 6;
+    size_t n_reg = MIN(nparams, 6);
     for (size_t i = 0; i < n_reg; i++)
     {
         IrParam *p = (IrParam *) vec_get(f->params, i);
@@ -1568,7 +1573,8 @@ static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, FrameInfo 
     /* The frame always holds at least one 8-byte vreg slot, so it's ≥ 16. */
     emit_binop_rhs(buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(fr->frame_size));
 
-    /* Spill the six GP arg registers here, before emit_param_shuffle's %eax scratch for stack args (mov reg→[mem] never clobbers the source). */
+    /* Spill the six GP arg registers here, before emit_param_shuffle's %eax scratch for stack args
+     * (mov reg→[mem] never clobbers the source). */
     if (f->is_variadic)
     {
         for (size_t i = 0; i < 6; i++)
@@ -1622,7 +1628,8 @@ static void collect_phi_copies(IrFunction *f, CodegenCtx *ctx)
     }
 }
 
-/* Lower a PHI source into vreg `dst`; global/func addresses materialize as 8-byte addresses, else at the value's own width. */
+/* Lower a PHI source into vreg `dst`; global/func addresses materialize as 8-byte addresses, else
+ * at the value's own width. */
 static void emit_phi_copy(CodegenCtx *ctx, IrOperand src, u32 dst_vreg)
 {
     if (src.is_global)
@@ -1735,33 +1742,25 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         emit_block((IrBlock *) vec_get(f->blocks, bi), bi, &ctx);
     }
 
-    /* Append jump tables after the function body; entries store target−table_base so runtime resolves table_base + entry, with no relocations. */
+    /* Append jump tables after the function body; entries store target−table_base so runtime
+     * resolves table_base + entry, with no relocations. */
     size_t nst = vec_size(ctx.switch_tables);
     if (nst > 0)
     {
         bytebuf_align(buf, 8);
     }
-    size_t *table_off = arena_alloc(arena, (nst ? nst : 1) * sizeof(size_t), sizeof(size_t));
-    size_t table_cursor = bytebuf_len(buf);
     for (size_t t = 0; t < nst; t++)
     {
         SwitchTableRec *rec = (SwitchTableRec *) vec_get(ctx.switch_tables, t);
-        table_off[t] = table_cursor;
-        table_cursor += (size_t) rec->nentries * 8;
-    }
-    for (size_t t = 0; t < nst; t++)
-    {
-        SwitchTableRec *rec = (SwitchTableRec *) vec_get(ctx.switch_tables, t);
+        size_t table_off = bytebuf_len(buf);
         for (u32 i = 0; i < rec->nentries; i++)
         {
             IrBlock *target = strmap_get(ctx.label_to_block, rec->targets[i]);
             ASSERT(target != NULL && "switch case targets a real block");
             size_t ti = (size_t) u64map_get(ctx.block_to_index, (u64) (uintptr_t) target);
-            i64 entry = (i64) ctx.block_offsets[ti] - (i64) table_off[t];
-            bytebuf_append_u64(buf, (u64) entry);
+            bytebuf_append_u64(buf, (u64) ((i64) ctx.block_offsets[ti] - (i64) table_off));
         }
-        i32 rel = (i32) ((i64) table_off[t] - (i64) (rec->disp_field_off + 4));
-        bytebuf_poke_u32(buf, rec->disp_field_off, (u32) rel);
+        patch_rel32(buf, rec->disp_field_off, table_off);
     }
 
     resolve_block_patches(&ctx);
@@ -1824,7 +1823,8 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena)
             CodegenFunc *target = find_codegen_func(cm, site->target);
             if (!target)
             {
-                /* Call to a declaration-only extern: leave rel32 as 0 and let elf.c emit an SHN_UNDEF symbol + R_X86_64_PLT32 relocation. */
+                /* Call to a declaration-only extern: leave rel32 as 0 and let elf.c emit an
+                 * SHN_UNDEF symbol + R_X86_64_PLT32 relocation. */
                 ExternCall *ec = arena_alloc(arena, sizeof(ExternCall), sizeof(void *));
                 ec->name = site->target;
                 ec->text_offset = cf->offset + site->offset;

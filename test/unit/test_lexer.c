@@ -216,7 +216,7 @@ TEST(lexer, line_comment_to_eof)
 {
     /* A `//` comment runs to the end of input (no trailing newline). */
     Arena *a = arena_new();
-    LexResult res = lex("t", "int x; // trailing", a);
+    LexResult res = lex("t", "int x // trailing", a);
     Token *t = res.tokens;
     EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 3);
