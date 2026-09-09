@@ -5,8 +5,7 @@
 #include "util/types.h"
 #include "util/vec.h"
 
-/* X-macro for IR opcodes. Append only.
-   ICMP predicates are separate opcodes so IrInstr needs no predicate field. */
+/* IR opcode X-macro; append only. ICMP predicates are separate opcodes for a flat IrInstr. */
 #define IR_OPCODES(X)                                                                              \
     X(OP_RET)                                                                                      \
     X(OP_ADD)                                                                                      \
@@ -62,11 +61,7 @@ typedef enum
 
 #define NO_VREG 0xFFFFFFFFU
 
-/* IrOperand: immediate, virtual register, global, or function reference.
-   The union is named `u` so every arm is explicit at every use site.
-   `is_func` (D16.1) is a function *designator*: the operand's value is the
-   address of the named function (mirrors is_global, whose value is the
-   address of the named object). */
+/* Immediate, vreg, global, or function-address value; the is_* flag selects the `u` arm. */
 typedef struct
 {
     bool is_imm;
@@ -77,30 +72,29 @@ typedef struct
         u32 vreg;
         i64 imm;
         u32 global_index;
-        const char *func_name; /* valid when is_func */
+        const char *func_name; /* function designator's name, valid when is_func */
     } u;
 } IrOperand;
 
-/* One entry per predecessor block. */
+/* One phi entry, holding the value arriving from a named predecessor block. */
 typedef struct
 {
     IrOperand val;
     const char *label;
 } IrPhiEntry;
 
-/* SWITCH case: value → target block label. */
+/* A SWITCH case: a case value mapping to a target block label. */
 typedef struct
 {
     i64 val;
     const char *label;
 } IrSwitchCase;
 
-/* Extended payloads for variable-arity instructions.
-   Only the field matching the opcode is valid. */
+/* Payloads for variable-arity instructions; only the `extra` arm matching the opcode is valid. */
 typedef struct
 {
     u32 nentries;
-    u32 nfilled; /* tracks ir_phi_add_entry calls; verified by test_ir_builder */
+    u32 nfilled; /* ir_phi_add_entry call count, verified by test_ir_builder */
     IrPhiEntry *entries;
 } IrPhiPayload;
 
@@ -116,10 +110,9 @@ typedef struct
     u32 nargs;
     IrOperand *args;
     const char *name;
-    bool is_variadic; /* callee is a variadic function (SysV %al at the call) */
-    bool is_indirect; /* D16.4: callee is an operand value, not a named symbol */
-    IrOperand callee; /* indirect-call target (a function pointer), when
-                         is_indirect */
+    bool is_variadic; /* the callee is variadic; the call site zeroes %al */
+    bool is_indirect; /* the callee is an operand value, not a named symbol */
+    IrOperand callee; /* the indirect-call target, when is_indirect */
 } IrCallPayload;
 
 typedef struct
@@ -133,10 +126,7 @@ typedef struct
     const char *target_label;
 } IrBrPayload;
 
-/* IR instruction.
-   Fixed operands in ops[3] cover unary/binary/ternary needs.
-   Variable-arity ops (phi, switch, call) use the typed `extra` union.
-   Steering-locked shape: do not change without design discussion. */
+/* Fixed operands in ops[3] cover unary/binary/ternary ops; variable-arity ops use `extra`. */
 typedef struct IrInstr IrInstr;
 struct IrInstr
 {
@@ -162,7 +152,7 @@ struct IrBlock
     Vec *instrs;         /* Vec<IrInstr*> */
     Vec *preds;          /* Vec<IrBlock*> — predecessor blocks */
     bool sealed;         /* all predecessors known? */
-    bool is_loop_header; /* block is a loop header (back edge added later) */
+    bool is_loop_header; /* block is a loop header (back edges added later) */
 };
 
 typedef struct IrParam IrParam;
@@ -185,8 +175,7 @@ struct IrFunction
     bool is_variadic; /* trailing unnamed args beyond the named params (C11 §6.7.6.3p8) */
 };
 
-/* IrGlobal variable / data record.
-   init_data == NULL and init_len == 0 → .bss */
+/* init_data == NULL && init_len == 0 → .bss */
 typedef enum
 {
     IR_SECTION_DATA,
@@ -194,8 +183,7 @@ typedef enum
     IR_SECTION_BSS,
 } IrSection;
 
-/* ELF-ish symbol linkage. Strings and static vars are local; default file-scope
-   vars are global; extern vars are undefined, resolved at link. */
+/* ELF-ish linkage: strings/statics are local, file-scope vars global, extern vars undefined. */
 typedef enum
 {
     IR_LINK_LOCAL,
@@ -203,16 +191,13 @@ typedef enum
     IR_LINK_EXTERN,
 } IrLinkage;
 
-/* One relocation site inside a global's init bytes: the 8 zero bytes at
-   `offset` (a pointer-typed subobject) are patched with the address of global
-   index `target` (D12.8). Same encoding as the old single-reloc path, which is
-   simply `{0, target}`. */
+/* A pointer-typed 8-byte slot in a global's init_data, relocated to a symbol's address. */
 typedef struct GlobalReloc GlobalReloc;
 struct GlobalReloc
 {
     u32 offset;            /* byte offset into init_data */
-    int target;            /* global index whose address is written here (when !is_func) */
-    bool is_func;          /* D16.1: the address written is a *function*'s */
+    int target;            /* global index whose address is written here; -1 when is_func */
+    bool is_func;          /* the address written is a function's */
     const char *func_name; /* the referenced function, when is_func */
 };
 
@@ -226,12 +211,10 @@ struct IrGlobal
     u32 align;
     IrSection section;
     IrLinkage linkage;
-    Vec *relocs; /* Vec<GlobalReloc*> — address constants patched by
-                    .rela.data/.rela.rodata R_X86_64_64, or NULL */
+    Vec *relocs; /* Vec<GlobalReloc*>, NULL when there are no address constants to relocate */
 };
 
-/* An IrModule owns all IR data for a compilation unit.
-   Vreg ids are dense and module-wide; the width tables are indexed by vreg. */
+/* Owns all IR for one compilation unit; vreg ids are dense and module-wide. */
 typedef struct IrModule IrModule;
 struct IrModule
 {
@@ -261,8 +244,7 @@ IrInstr *ir_emit_ret(IrBlock *bb, IrOperand val);
 IrInstr *ir_emit_unreachable(IrBlock *bb);
 IrInstr *ir_emit_ret_void(IrBlock *bb);
 
-/* Binary (arith, shifts, icmp predicates) and unary ops: the opcode carries
-   the operation, so adding an opcode needs no new emitter. */
+/* The opcode carries the operation, so adding one needs no new emitter. */
 IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOperand rhs);
 IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src);
 IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOperand *args);
