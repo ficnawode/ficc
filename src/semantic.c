@@ -49,7 +49,8 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd);
 static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type);
 static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx);
 
-static void sem_error(Loc loc, const char *fmt, ...)
+/* Report a diagnostic, mark the context failed, and return false  */
+static bool sem_error(SemanticCtx *ctx, Loc loc, const char *fmt, ...)
 {
     fprintf(stderr, "%s:%u:%u: [semantic] error: ", loc.file, loc.line, loc.col);
     va_list args;
@@ -57,6 +58,8 @@ static void sem_error(Loc loc, const char *fmt, ...)
     vfprintf(stderr, fmt, args);
     va_end(args);
     fprintf(stderr, "\n");
+    ctx->error = true;
+    return false;
 }
 
 /* C11 §6.2.5p21: scalar types are arithmetic and pointer types. Records,
@@ -74,9 +77,7 @@ static bool check_value_used(ASTNode *node, SemanticCtx *ctx)
 {
     if (node->expr_type && node->expr_type->kind == TYPE_VOID)
     {
-        sem_error(node->loc, "void value not ignored as it ought to be");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, node->loc, "void value not ignored as it ought to be");
     }
     return true;
 }
@@ -153,9 +154,7 @@ static bool check_identifier_expr(ASTIdent *ident, SemanticCtx *ctx)
         ident->base.expr_type = type_ptr(func_sig_of(fnode)->func_type);
         return true;
     }
-    sem_error(ident->base.loc, "undeclared identifier '%s'", ident->name);
-    ctx->error = true;
-    return false;
+    return sem_error(ctx, ident->base.loc, "undeclared identifier '%s'", ident->name);
 }
 
 /* One bool per BinOpKind: comparison operators (==, !=, <, >, <=, >=). */
@@ -247,21 +246,15 @@ static bool check_modifiable_lvalue(ASTNode *lhs, SemanticCtx *ctx)
                      (lhs->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, lhs)->op == UN_DEREF);
     if (!is_lvalue)
     {
-        sem_error(lhs->loc, "lvalue required as left operand of assignment");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, lhs->loc, "lvalue required as left operand of assignment");
     }
     if (lvalue_is_array(lhs))
     {
-        sem_error(lhs->loc, "array type is not a modifiable lvalue");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, lhs->loc, "array type is not a modifiable lvalue");
     }
     if (type_is_const(lhs->expr_type))
     {
-        sem_error(lhs->loc, "assignment to const-qualified lvalue (read-only object)");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, lhs->loc, "assignment to const-qualified lvalue (read-only object)");
     }
     return true;
 }
@@ -277,14 +270,12 @@ static Type *check_assign_expr(ASTBinaryExpr *be, Type *lt, Type *rt, SemanticCt
     }
     if (type_is_ptr(lt) && type_is_ptr(rt) && !type_assignable(lt, rt))
     {
-        sem_error(be->base.loc, "incompatible pointer types in assignment");
-        ctx->error = true;
+        sem_error(ctx, be->base.loc, "incompatible pointer types in assignment");
         return NULL;
     }
     if ((type_is_record(lt) || type_is_record(rt)) && !type_assignable(lt, rt))
     {
-        sem_error(be->base.loc, "incompatible types in struct/union assignment");
-        ctx->error = true;
+        sem_error(ctx, be->base.loc, "incompatible types in struct/union assignment");
         return NULL;
     }
     return type_rvalue(lt);
@@ -301,16 +292,14 @@ static Type *check_compound_assign_expr(ASTBinaryExpr *be, Type *lt, Type *rt, S
     bool is_ptr_add_sub = be->op == BIN_ADD_ASSIGN || be->op == BIN_SUB_ASSIGN;
     if (type_is_ptr(lt) && (!is_ptr_add_sub || type_is_ptr(rt)))
     {
-        sem_error(be->base.loc,
+        sem_error(ctx, be->base.loc,
                   "invalid operands to compound assignment (pointer allowed only with "
                   "'+=' / '-=' and an integer operand)");
-        ctx->error = true;
         return NULL;
     }
     if (!type_is_ptr(lt) && !type_is_integer(rt))
     {
-        sem_error(be->base.loc, "invalid operands to compound assignment");
-        ctx->error = true;
+        sem_error(ctx, be->base.loc, "invalid operands to compound assignment");
         return NULL;
     }
     return type_rvalue(lt);
@@ -353,9 +342,7 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     }
     if (binary_expr->op != BIN_ASSIGN && (type_is_record(lt) || type_is_record(rt)))
     {
-        sem_error(binary_expr->base.loc, "invalid operands to operator (record type)");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, binary_expr->base.loc, "invalid operands to operator (record type)");
     }
     Type *result;
     BinOpKind op = binary_expr->op;
@@ -405,8 +392,7 @@ static Type *check_address_of(ASTNode *operand, SemanticCtx *ctx)
         }
         if (!id->decl)
         {
-            sem_error(operand->loc, "cannot take address of this expression");
-            ctx->error = true;
+            sem_error(ctx, operand->loc, "cannot take address of this expression");
             return NULL;
         }
         return type_ptr(type_decay(id->decl->type));
@@ -418,8 +404,7 @@ static Type *check_address_of(ASTNode *operand, SemanticCtx *ctx)
         Type *ty = ast_as(ASTCompoundLiteral, operand)->type;
         return type_ptr(type_decay(ty));
     }
-    sem_error(operand->loc, "cannot take address of this expression");
-    ctx->error = true;
+    sem_error(ctx, operand->loc, "cannot take address of this expression");
     return NULL;
 }
 
@@ -443,9 +428,7 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
     {
         if (!type_is_ptr(op_type))
         {
-            sem_error(unary_expr->base.loc, "cannot dereference non-pointer type");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, unary_expr->base.loc, "cannot dereference non-pointer type");
         }
         /* The pointee type carries the const (const int* -> const int). */
         unary_expr->base.expr_type = type_deref(op_type);
@@ -463,15 +446,12 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
     }
     if (op_type->kind == TYPE_VOID)
     {
-        sem_error(unary_expr->base.loc, "void value not ignored as it ought to be");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, unary_expr->base.loc, "void value not ignored as it ought to be");
     }
     if (type_is_record(op_type))
     {
-        sem_error(unary_expr->base.loc, "invalid operand of record type to unary operator");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, unary_expr->base.loc,
+                         "invalid operand of record type to unary operator");
     }
     unary_expr->base.expr_type = type_promote(type_rvalue(op_type));
     return true;
@@ -491,10 +471,9 @@ static bool check_incdec_expr(ASTIncDecExpr *incdec, SemanticCtx *ctx)
     Type *t = operand->expr_type;
     if (!type_is_integer(t) && !type_is_ptr(t))
     {
-        sem_error(incdec->base.loc, "invalid operand to '%s' (arithmetic or pointer type required)",
-                  incdec->is_inc ? "++" : "--");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, incdec->base.loc,
+                         "invalid operand to '%s' (arithmetic or pointer type required)",
+                         incdec->is_inc ? "++" : "--");
     }
     /* §6.5.2.4p3/p4: the result is an rvalue of the operand's type (never an
        lvalue). */
@@ -514,9 +493,7 @@ static bool builtin_check_va_list_arg(ASTNode *arg, SemanticCtx *ctx)
     Type *t = type_decay(arg->expr_type);
     if (!type_is_ptr(t) || type_deref(t) != type_array_elem(type_va_list()))
     {
-        sem_error(arg->loc, "argument must be a __builtin_va_list");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, arg->loc, "argument must be a __builtin_va_list");
     }
     return true;
 }
@@ -531,10 +508,8 @@ static bool check_va_builtin(ASTCallExpr *call_expr, SemanticCtx *ctx)
     {
         if (got != 2)
         {
-            sem_error(call_expr->base.loc, "'__builtin_va_start' expects 2 arguments, got %zu",
-                      got);
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, call_expr->base.loc,
+                             "'__builtin_va_start' expects 2 arguments, got %zu", got);
         }
         if (!builtin_check_va_list_arg((ASTNode *) vec_get(call_expr->args, 0), ctx))
         {
@@ -561,19 +536,17 @@ static bool check_va_builtin(ASTCallExpr *call_expr, SemanticCtx *ctx)
         }
         if (!is_param)
         {
-            sem_error(last->loc,
-                      "'__builtin_va_start' second argument must be a parameter of the function");
-            ctx->error = true;
-            return false;
+            return sem_error(
+                ctx, last->loc,
+                "'__builtin_va_start' second argument must be a parameter of the function");
         }
     }
     else
     {
         if (got != 1)
         {
-            sem_error(call_expr->base.loc, "'__builtin_va_end' expects 1 argument, got %zu", got);
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, call_expr->base.loc,
+                             "'__builtin_va_end' expects 1 argument, got %zu", got);
         }
         if (!builtin_check_va_list_arg((ASTNode *) vec_get(call_expr->args, 0), ctx))
         {
@@ -595,10 +568,8 @@ static bool check_va_arg_expr(ASTVaArgExpr *va, SemanticCtx *ctx)
     Type *t = type_rvalue(va->type);
     if (t->kind == TYPE_VOID || type_is_record(t) || type_is_array(t))
     {
-        sem_error(va->base.loc,
-                  "'__builtin_va_arg' argument type cannot be void, a record, or an array");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, va->base.loc,
+                         "'__builtin_va_arg' argument type cannot be void, a record, or an array");
     }
     va->base.expr_type = t;
     return true;
@@ -633,18 +604,15 @@ static bool check_call_args(ASTCallExpr *call_expr, Type *ret_type, Vec *param_t
            legal. */
         if (got < expected)
         {
-            sem_error(call_expr->base.loc, "function '%s' expects at least %zu arguments, got %zu",
-                      callee_name, expected, got);
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, call_expr->base.loc,
+                             "function '%s' expects at least %zu arguments, got %zu", callee_name,
+                             expected, got);
         }
     }
     else if (expected != got)
     {
-        sem_error(call_expr->base.loc, "function '%s' expects %zu arguments, got %zu", callee_name,
-                  expected, got);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, call_expr->base.loc, "function '%s' expects %zu arguments, got %zu",
+                         callee_name, expected, got);
     }
 
     size_t nargs = vec_size(call_expr->args);
@@ -668,9 +636,7 @@ static bool check_call_args(ASTCallExpr *call_expr, Type *ret_type, Vec *param_t
         }
         if (!type_assignable((Type *) vec_get(param_types, i), arg->expr_type))
         {
-            sem_error(arg->loc, "incompatible argument type for parameter %zu", i + 1);
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, arg->loc, "incompatible argument type for parameter %zu", i + 1);
         }
     }
     /* The function value is an unqualified rvalue even for a const return
@@ -733,14 +699,11 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
             call_expr->callee = NULL;
             return check_indirect_call(call_expr, ctx);
         }
-        sem_error(call_expr->base.loc, "called object '%s' is not a function or function pointer",
-                  call_expr->callee);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, call_expr->base.loc,
+                         "called object '%s' is not a function or function pointer",
+                         call_expr->callee);
     }
-    sem_error(call_expr->base.loc, "undeclared function '%s'", call_expr->callee);
-    ctx->error = true;
-    return false;
+    return sem_error(ctx, call_expr->base.loc, "undeclared function '%s'", call_expr->callee);
 }
 
 static bool check_indirect_call(ASTCallExpr *call_expr, SemanticCtx *ctx)
@@ -757,9 +720,7 @@ static bool check_indirect_call(ASTCallExpr *call_expr, SemanticCtx *ctx)
     }
     if (!type_is_ptr(ct) || type_deref(ct)->kind != TYPE_FUNC)
     {
-        sem_error(callee->loc, "called object is not a function or function pointer");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, callee->loc, "called object is not a function or function pointer");
     }
     Type *fn = type_deref(ct);
     return check_call_args(call_expr, fn->func.ret, fn->func.params, fn->func.is_variadic, "<>",
@@ -784,15 +745,11 @@ static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx)
     }
     if (!is_scalar_type(target))
     {
-        sem_error(ce->base.loc, "conversion to non-scalar type requested");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, ce->base.loc, "conversion to non-scalar type requested");
     }
     if (!is_scalar_type(op))
     {
-        sem_error(ce->base.loc, "invalid cast of non-scalar type");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, ce->base.loc, "invalid cast of non-scalar type");
     }
     /* A cast is never an lvalue; a qualified target equals the unqualified one
        (§6.5.4p4): top-level const drops, pointee qualifiers survive. */
@@ -812,9 +769,7 @@ static bool check_member_access(ASTMemberAccess *ma, SemanticCtx *ctx)
     {
         if (!type_is_ptr(obj_type))
         {
-            sem_error(ma->base.loc, "cannot use '->' on non-pointer type");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, ma->base.loc, "cannot use '->' on non-pointer type");
         }
         record_type = type_deref(obj_type);
     }
@@ -824,22 +779,17 @@ static bool check_member_access(ASTMemberAccess *ma, SemanticCtx *ctx)
     }
     if (!type_is_record(record_type))
     {
-        sem_error(ma->base.loc, "member access on non-struct/union type");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, ma->base.loc, "member access on non-struct/union type");
     }
     if (!type_is_complete(record_type))
     {
-        sem_error(ma->base.loc, "member access on incomplete type '%s'", record_type->record.tag);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, ma->base.loc, "member access on incomplete type '%s'",
+                         record_type->record.tag);
     }
     Type *field_type = type_record_field(record_type, ma->member);
     if (!field_type)
     {
-        sem_error(ma->base.loc, "no member named '%s'", ma->member);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, ma->base.loc, "no member named '%s'", ma->member);
     }
     /* §6.5.2.3p4: a const-qualified object (or pointer to one) yields const members;
        array members take the qualifier on the element, so `s.a[i]` writes and the
@@ -889,9 +839,7 @@ static bool check_subscript_expr(ASTSubscriptExpr *se, SemanticCtx *ctx)
     Type *ptr_type = type_decay(se->array->expr_type);
     if (!type_is_ptr(ptr_type))
     {
-        sem_error(node->loc, "subscripted value is not a pointer or array");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, node->loc, "subscripted value is not a pointer or array");
     }
     node->expr_type = type_deref(ptr_type);
     return true;
@@ -928,21 +876,15 @@ static bool check_sizeof_expr(ASTSizeofExpr *se, SemanticCtx *ctx)
     }
     if (op_type->kind == TYPE_VOID)
     {
-        sem_error(node->loc, "sizeof(void) is invalid");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, node->loc, "sizeof(void) is invalid");
     }
     if (type_is_function(op_type))
     {
-        sem_error(node->loc, "invalid application of 'sizeof' to a function type");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, node->loc, "invalid application of 'sizeof' to a function type");
     }
     if (type_is_record(op_type) && !type_is_complete(op_type))
     {
-        sem_error(node->loc, "sizeof of incomplete type");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, node->loc, "sizeof of incomplete type");
     }
     se->size_value = type_sizeof(op_type);
     node->expr_type = type_ulong();
@@ -954,15 +896,11 @@ static bool check_sizeof_type(ASTSizeofType *st, SemanticCtx *ctx)
     ASTNode *node = &st->base;
     if (st->type->kind == TYPE_VOID)
     {
-        sem_error(node->loc, "sizeof(void) is invalid");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, node->loc, "sizeof(void) is invalid");
     }
     if (type_is_record(st->type) && !type_is_complete(st->type))
     {
-        sem_error(node->loc, "sizeof of incomplete type");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, node->loc, "sizeof of incomplete type");
     }
     st->size_value = type_sizeof(st->type);
     node->expr_type = type_ulong();
@@ -989,15 +927,11 @@ static bool check_alignof_expr(ASTAlignofExpr *ae, SemanticCtx *ctx)
     }
     if (op_type->kind == TYPE_VOID)
     {
-        sem_error(node->loc, "_Alignof(void) is invalid");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, node->loc, "_Alignof(void) is invalid");
     }
     if (!type_is_complete(op_type))
     {
-        sem_error(node->loc, "_Alignof of incomplete type");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, node->loc, "_Alignof of incomplete type");
     }
     ae->align_value = type_alignof(op_type);
     node->expr_type = type_ulong();
@@ -1009,15 +943,11 @@ static bool check_alignof_type(ASTAlignofType *at, SemanticCtx *ctx)
     ASTNode *node = &at->base;
     if (at->type->kind == TYPE_VOID)
     {
-        sem_error(node->loc, "_Alignof(void) is invalid");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, node->loc, "_Alignof(void) is invalid");
     }
     if (!type_is_complete(at->type))
     {
-        sem_error(node->loc, "_Alignof of incomplete type");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, node->loc, "_Alignof of incomplete type");
     }
     at->align_value = type_alignof(at->type);
     node->expr_type = type_ulong();
@@ -1063,8 +993,7 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
         case AST_COMPOUND_LITERAL:
             return expr_done(check_compound_literal(ast_as(ASTCompoundLiteral, node), ctx), node);
         default:
-            sem_error(node->loc, "unsupported expression kind %s", ast_kind_name(node->kind));
-            ctx->error = true;
+            sem_error(ctx, node->loc, "unsupported expression kind %s", ast_kind_name(node->kind));
             return NULL;
     }
 }
@@ -1075,18 +1004,14 @@ static bool check_return_stmt(ASTReturnStmt *return_stmt, SemanticCtx *ctx, Type
     {
         if (return_stmt->expr)
         {
-            sem_error(return_stmt->base.loc, "void function should not return a value");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, return_stmt->base.loc, "void function should not return a value");
         }
     }
     else
     {
         if (!return_stmt->expr)
         {
-            sem_error(return_stmt->base.loc, "non-void function must return a value");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, return_stmt->base.loc, "non-void function must return a value");
         }
     }
     if (return_stmt->expr && !check_expr(return_stmt->expr, ctx))
@@ -1100,18 +1025,14 @@ static bool check_return_stmt(ASTReturnStmt *return_stmt, SemanticCtx *ctx, Type
     Type *expr_type = return_stmt->expr ? type_decay(return_stmt->expr->expr_type) : NULL;
     if (return_stmt->expr && type_is_record(ret_type) && !type_assignable(ret_type, expr_type))
     {
-        sem_error(return_stmt->base.loc,
-                  "returning a value incompatible with struct/union return type '%s'",
-                  ret_type->record.tag);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, return_stmt->base.loc,
+                         "returning a value incompatible with struct/union return type '%s'",
+                         ret_type->record.tag);
     }
     if (return_stmt->expr && type_is_ptr(ret_type) && type_is_ptr(expr_type) &&
         !type_assignable(ret_type, expr_type))
     {
-        sem_error(return_stmt->base.loc, "incompatible pointer type in return");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, return_stmt->base.loc, "incompatible pointer type in return");
     }
 
     return true;
@@ -1124,24 +1045,19 @@ static bool check_block_extern(ASTVarDecl *var_decl, SemanticCtx *ctx)
 {
     if (var_decl->init)
     {
-        sem_error(var_decl->base.loc, "'%s' has both 'extern' and an initializer", var_decl->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, var_decl->base.loc, "'%s' has both 'extern' and an initializer",
+                         var_decl->name);
     }
     if (strmap_get(ctx->globals, var_decl->name))
     {
-        sem_error(var_decl->base.loc, "'%s' redeclared as different kind of symbol",
-                  var_decl->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, var_decl->base.loc, "'%s' redeclared as different kind of symbol",
+                         var_decl->name);
     }
     ASTVarDecl *existing = strmap_get(ctx->global_vars, var_decl->name);
     if (existing && existing->storage == SC_STATIC)
     {
-        sem_error(var_decl->base.loc, "extern declaration of '%s' follows static declaration",
-                  var_decl->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, var_decl->base.loc,
+                         "extern declaration of '%s' follows static declaration", var_decl->name);
     }
     if (!existing)
     {
@@ -1170,17 +1086,13 @@ static bool check_auto_initializer(ASTVarDecl *var_decl, SemanticCtx *ctx)
     Type *init_type = var_decl->init->expr_type;
     if (type_is_record(var_decl->type) && !type_assignable(var_decl->type, init_type))
     {
-        sem_error(var_decl->base.loc, "invalid initializer for struct/union type '%s'",
-                  var_decl->type->record.tag);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, var_decl->base.loc, "invalid initializer for struct/union type '%s'",
+                         var_decl->type->record.tag);
     }
     if (type_is_ptr(var_decl->type) && !type_assignable(var_decl->type, init_type))
     {
-        sem_error(var_decl->base.loc, "incompatible pointer type in initializer for '%s'",
-                  var_decl->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, var_decl->base.loc,
+                         "incompatible pointer type in initializer for '%s'", var_decl->name);
     }
     return true;
 }
@@ -1189,15 +1101,11 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
 {
     if (scope_top_lookup(ctx, var_decl->name))
     {
-        sem_error(var_decl->base.loc, "redeclaration of '%s'", var_decl->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, var_decl->base.loc, "redeclaration of '%s'", var_decl->name);
     }
     if (var_decl->type->kind == TYPE_VOID)
     {
-        sem_error(var_decl->base.loc, "variable '%s' has void type", var_decl->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, var_decl->base.loc, "variable '%s' has void type", var_decl->name);
     }
     if (var_decl->storage == SC_STATIC)
     {
@@ -1226,9 +1134,8 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
        stays incomplete — rejected after completion would have run. */
     if (!type_is_complete(var_decl->type))
     {
-        sem_error(var_decl->base.loc, "variable '%s' has incomplete type", var_decl->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, var_decl->base.loc, "variable '%s' has incomplete type",
+                         var_decl->name);
     }
     return true;
 }
@@ -1370,9 +1277,7 @@ static bool plan_scalar_write(SemanticCtx *ctx, InitPlan *plan, Type *target, u3
     }
     if (!type_assignable(target, value->expr_type))
     {
-        sem_error(loc, "incompatible type in initializer (target type differs)");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, loc, "incompatible type in initializer (target type differs)");
     }
     plan_new_write(ctx, plan, offset, target, value, false);
     return true;
@@ -1389,9 +1294,8 @@ static bool resolve_designator_path(SemanticCtx *ctx, InitPlan *plan, Type *t, u
         {
             if (dd->kind != ND_INDEX)
             {
-                sem_error(loc, "field designator '.%s' used on an array object", dd->field);
-                ctx->error = true;
-                return false;
+                return sem_error(ctx, loc, "field designator '.%s' used on an array object",
+                                 dd->field);
             }
             /* Only the outermost declared-against `[]` array may take an
                out-of-range designator (it sizes the array). Inner brackets stay
@@ -1399,10 +1303,8 @@ static bool resolve_designator_path(SemanticCtx *ctx, InitPlan *plan, Type *t, u
             bool grow = plan->grow_array && cur_ty->arr.length == 0;
             if (dd->index < 0 || (!grow && (u64) dd->index >= cur_ty->arr.length))
             {
-                sem_error(loc, "array designator index %lld is out of bounds",
-                          (long long) dd->index);
-                ctx->error = true;
-                return false;
+                return sem_error(ctx, loc, "array designator index %lld is out of bounds",
+                                 (long long) dd->index);
             }
             PlanFrame *fr = arena_alloc(ctx->arena, sizeof(PlanFrame), _Alignof(PlanFrame));
             fr->agg = cur_ty;
@@ -1418,16 +1320,13 @@ static bool resolve_designator_path(SemanticCtx *ctx, InitPlan *plan, Type *t, u
         {
             if (dd->kind == ND_INDEX)
             {
-                sem_error(loc, "array designator used on a non-array object");
-                ctx->error = true;
-                return false;
+                return sem_error(ctx, loc, "array designator used on a non-array object");
             }
             u32 fidx;
             if (!record_field_index(cur_ty, dd->field, &fidx))
             {
-                sem_error(loc, "no member named '%s' in '%s'", dd->field, cur_ty->record.tag);
-                ctx->error = true;
-                return false;
+                return sem_error(ctx, loc, "no member named '%s' in '%s'", dd->field,
+                                 cur_ty->record.tag);
             }
             RecordField *f = (RecordField *) vec_get(cur_ty->record.fields, fidx);
             PlanFrame *fr = arena_alloc(ctx->arena, sizeof(PlanFrame), _Alignof(PlanFrame));
@@ -1441,9 +1340,7 @@ static bool resolve_designator_path(SemanticCtx *ctx, InitPlan *plan, Type *t, u
         }
         else
         {
-            sem_error(loc, "cannot apply a designator to a scalar object");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, loc, "cannot apply a designator to a scalar object");
         }
     }
     *out_ty = cur_ty;
@@ -1463,22 +1360,16 @@ static bool plan_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *cty, u32 
     {
         if (cty->arr.length == 0)
         {
-            sem_error(loc, "array has incomplete type");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, loc, "array has incomplete type");
         }
         if (type_array_elem(cty)->kind != TYPE_CHAR)
         {
-            sem_error(loc, "string literal only initializes a char array");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, loc, "string literal only initializes a char array");
         }
         ASTStringLiteral *sl = ast_as(ASTStringLiteral, value);
         if (sl->length > cty->arr.length)
         {
-            sem_error(loc, "initializer-string for array of chars is too long");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, loc, "initializer-string for array of chars is too long");
         }
         plan_new_write(ctx, plan, coff, cty, value, true);
         return true;
@@ -1503,8 +1394,7 @@ static PlanResult plan_char_string_clause(SemanticCtx *ctx, InitPlan *plan, Type
     {
         if (!plan->grow_array)
         {
-            sem_error(list->base.loc, "array has incomplete type");
-            ctx->error = true;
+            sem_error(ctx, list->base.loc, "array has incomplete type");
             return PLAN_ERROR;
         }
         plan->inferred_len = need;
@@ -1516,8 +1406,7 @@ static PlanResult plan_char_string_clause(SemanticCtx *ctx, InitPlan *plan, Type
     }
     if (sl->length > t->arr.length)
     {
-        sem_error(e->loc, "initializer-string for array of chars is too long");
-        ctx->error = true;
+        sem_error(ctx, e->loc, "initializer-string for array of chars is too long");
         return PLAN_ERROR;
     }
     plan_new_write(ctx, plan, base_off, t, e->value, true);
@@ -1545,20 +1434,16 @@ static bool plan_elem(SemanticCtx *ctx, InitPlan *plan, Type *t, InitElem *e, u3
     }
     if (vec_size(stack) == 0)
     {
-        sem_error(e->loc, "excess elements in %s initializer",
-                  type_is_array(t) ? "array" : "struct/union");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, e->loc, "excess elements in %s initializer",
+                         type_is_array(t) ? "array" : "struct/union");
     }
     PlanFrame *top = (PlanFrame *) vec_last(stack);
     Type *cty;
     u32 coff;
     if (!plan_frame_child(top, &cty, &coff))
     {
-        sem_error(e->loc, "excess elements in %s initializer",
-                  type_is_array(t) ? "array" : "struct/union");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, e->loc, "excess elements in %s initializer",
+                         type_is_array(t) ? "array" : "struct/union");
     }
     if (e->value->kind == AST_INIT_LIST)
     {
@@ -1590,10 +1475,8 @@ static bool plan_elem(SemanticCtx *ctx, InitPlan *plan, Type *t, InitElem *e, u3
         top = (PlanFrame *) vec_last(stack);
         if (!plan_frame_child(top, &cty, &coff))
         {
-            sem_error(e->loc, "excess elements in %s initializer",
-                      type_is_array(t) ? "array" : "struct/union");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, e->loc, "excess elements in %s initializer",
+                             type_is_array(t) ? "array" : "struct/union");
         }
     }
     if (!plan_scalar_write(ctx, plan, cty, coff, e->value, e->loc))
@@ -1631,16 +1514,12 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
     {
         if (nel != 1)
         {
-            sem_error(list->base.loc, "excess elements in scalar initializer");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, list->base.loc, "excess elements in scalar initializer");
         }
         InitElem *e = (InitElem *) vec_get(list->elems, 0);
         if (e->design)
         {
-            sem_error(e->loc, "cannot use a designator with a scalar initializer");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, e->loc, "cannot use a designator with a scalar initializer");
         }
         return plan_scalar_write(ctx, plan, t, base_off, e->value, e->loc);
     }
@@ -1651,9 +1530,7 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
            it grows from its initializer. Inner empty brackets error. */
         if (!plan->grow_array)
         {
-            sem_error(list->base.loc, "array has incomplete type");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, list->base.loc, "array has incomplete type");
         }
     }
 
@@ -1700,21 +1577,15 @@ static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
     ASTStringLiteral *sl = ast_as(ASTStringLiteral, vd->init);
     if (type_array_len(arr) == 0)
     {
-        sem_error(vd->base.loc, "array '%s' has incomplete type", vd->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, vd->base.loc, "array '%s' has incomplete type", vd->name);
     }
     if (type_array_elem(arr)->kind != TYPE_CHAR)
     {
-        sem_error(vd->base.loc, "string-literal initializer requires a 'char' array");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, vd->base.loc, "string-literal initializer requires a 'char' array");
     }
     if (sl->length > type_array_len(arr))
     {
-        sem_error(vd->base.loc, "initializer-string for array of chars is too long");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, vd->base.loc, "initializer-string for array of chars is too long");
     }
     InitPlan *plan = init_plan_new(ctx, arr);
     plan_new_write(ctx, plan, 0, arr, vd->init, true);
@@ -1818,10 +1689,8 @@ static bool check_aggregate_const_init(ASTVarDecl *vd, SemanticCtx *ctx)
 {
     if (vd->has_const_init && (vd->type->kind == TYPE_ARRAY || type_is_record(vd->type)))
     {
-        sem_error(vd->base.loc, "aggregate '%s' must be initialized with a brace-enclosed list",
-                  vd->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, vd->base.loc,
+                         "aggregate '%s' must be initialized with a brace-enclosed list", vd->name);
     }
     return true;
 }
@@ -1846,8 +1715,7 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
     }
     if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_CHAR)
     {
-        sem_error(vd->base.loc, "string-literal initializer requires a 'char *' variable");
-        ctx->error = true;
+        sem_error(ctx, vd->base.loc, "string-literal initializer requires a 'char *' variable");
         return PLAN_ERROR;
     }
     return PLAN_NONE;
@@ -1860,15 +1728,11 @@ static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx)
     Type *ty = type_unqual(cl->type);
     if (ty->kind == TYPE_VOID)
     {
-        sem_error(cl->base.loc, "conversion to non-scalar type requested");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, cl->base.loc, "conversion to non-scalar type requested");
     }
     if (type_is_record(ty) && !type_is_complete(ty))
     {
-        sem_error(cl->base.loc, "compound literal of incomplete type");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, cl->base.loc, "compound literal of incomplete type");
     }
     if (!plan_brace_list(ctx, &cl->type, cl->init, &cl->plan))
     {
@@ -2127,9 +1991,7 @@ static bool check_switch_statement(ASTSwitchStmt *sw, SemanticCtx *ctx, Type *re
     }
     if (!type_is_integer(type_rvalue(sw->cond->expr_type)))
     {
-        sem_error(sw->cond->loc, "switch condition must have integer type");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, sw->cond->loc, "switch condition must have integer type");
     }
 
     SwitchSem sem = {.values = u64map_new(ctx->arena),
@@ -2147,9 +2009,7 @@ static bool check_case_statement(ASTCaseStmt *cs, SemanticCtx *ctx, Type *ret_ty
 {
     if (ctx->switch_depth == 0)
     {
-        sem_error(cs->base.loc, "'case' label not within a switch statement");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, cs->base.loc, "'case' label not within a switch statement");
     }
     SwitchSem *sem = (SwitchSem *) vec_last(ctx->switch_sem_stack);
     if (!cs->value_known)
@@ -2158,18 +2018,14 @@ static bool check_case_statement(ASTCaseStmt *cs, SemanticCtx *ctx, Type *ret_ty
            `case sizeof(x):`). Resolve types/sizes, then evaluate now. */
         if (!check_expr(cs->expr, ctx) || !fold_integer_constant(cs->expr, &cs->value))
         {
-            sem_error(cs->base.loc, "case label is not an integer constant expression");
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, cs->base.loc, "case label is not an integer constant expression");
         }
         cs->value_known = true;
     }
     cs->value = type_reduce_int(sem->promoted_cond, cs->value);
     if (u64map_get(sem->values, (u64) cs->value))
     {
-        sem_error(cs->base.loc, "duplicate case value");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, cs->base.loc, "duplicate case value");
     }
     u64map_set(sem->values, (u64) cs->value, (void *) 1);
     return check_statement_list(cs->stmts, ctx, ret_type);
@@ -2179,16 +2035,12 @@ static bool check_default_statement(ASTDefaultStmt *ds, SemanticCtx *ctx, Type *
 {
     if (ctx->switch_depth == 0)
     {
-        sem_error(ds->base.loc, "'default' label not within a switch statement");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, ds->base.loc, "'default' label not within a switch statement");
     }
     SwitchSem *sem = (SwitchSem *) vec_last(ctx->switch_sem_stack);
     if (sem->has_default)
     {
-        sem_error(ds->base.loc, "multiple default labels in one switch");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, ds->base.loc, "multiple default labels in one switch");
     }
     sem->has_default = true;
     return check_statement_list(ds->stmts, ctx, ret_type);
@@ -2199,9 +2051,7 @@ static bool check_break_statement(ASTBreakStmt *break_stmt, SemanticCtx *ctx)
     (void) break_stmt;
     if (ctx->loop_depth == 0 && ctx->switch_depth == 0)
     {
-        sem_error(break_stmt->base.loc, "'break' not within a loop or switch");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, break_stmt->base.loc, "'break' not within a loop or switch");
     }
     return true;
 }
@@ -2211,9 +2061,7 @@ static bool check_continue_statement(ASTContinueStmt *continue_stmt, SemanticCtx
     (void) continue_stmt;
     if (ctx->loop_depth == 0)
     {
-        sem_error(continue_stmt->base.loc, "'continue' outside of loop");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, continue_stmt->base.loc, "'continue' outside of loop");
     }
     return true;
 }
@@ -2222,9 +2070,7 @@ static bool check_goto_statement(ASTGotoStmt *goto_stmt, SemanticCtx *ctx)
 {
     if (!strmap_get(ctx->labels, goto_stmt->label))
     {
-        sem_error(goto_stmt->base.loc, "undefined label '%s'", goto_stmt->label);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, goto_stmt->base.loc, "undefined label '%s'", goto_stmt->label);
     }
     return true;
 }
@@ -2253,9 +2099,7 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     Type *te = type_decay(type_rvalue(ternary->else_expr->expr_type));
     if (type_is_record(tt) || type_is_record(te))
     {
-        sem_error(ternary->base.loc, "conditional operator on record type");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, ternary->base.loc, "conditional operator on record type");
     }
     if (type_is_ptr(tt) || type_is_ptr(te))
     {
@@ -2275,9 +2119,7 @@ static bool check_typedef_decl(ASTTypedefDecl *td, SemanticCtx *ctx)
 {
     if (td->type->kind == TYPE_FUNC)
     {
-        sem_error(td->base.loc, "typedef of a function type is not supported");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, td->base.loc, "typedef of a function type is not supported");
     }
     (void) ctx;
     return true;
@@ -2296,16 +2138,12 @@ static bool check_static_assert(ASTStaticAssert *sa, SemanticCtx *ctx)
     i64 value;
     if (!fold_integer_constant(sa->expr, &value))
     {
-        sem_error(sa->base.loc,
-                  "static assertion expression is not an integer constant expression");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, sa->base.loc,
+                         "static assertion expression is not an integer constant expression");
     }
     if (value == 0)
     {
-        sem_error(sa->base.loc, "static assertion failed: %s", sa->msg);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, sa->base.loc, "static assertion failed: %s", sa->msg);
     }
     return true;
 }
@@ -2370,9 +2208,8 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
         case AST_LABEL_STMT:
             return check_label_statement(ast_as(ASTLabelStmt, node), ctx, ret_type);
         default:
-            sem_error(node->loc, "unsupported statement kind %s", ast_kind_name(node->kind));
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, node->loc, "unsupported statement kind %s",
+                             ast_kind_name(node->kind));
     }
 }
 
@@ -2386,15 +2223,11 @@ static bool setup_function_params(ASTFuncDef *func_def, SemanticCtx *ctx)
         ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(func_def->sig.params, i));
         if (scope_top_lookup(ctx, param->name))
         {
-            sem_error(param->base.loc, "redeclaration of parameter '%s'", param->name);
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, param->base.loc, "redeclaration of parameter '%s'", param->name);
         }
         if (param->type->kind == TYPE_VOID)
         {
-            sem_error(param->base.loc, "parameter '%s' has void type", param->name);
-            ctx->error = true;
-            return false;
+            return sem_error(ctx, param->base.loc, "parameter '%s' has void type", param->name);
         }
         param->is_block_scope = true;
         strmap_set(current_scope(ctx), param->name, param);
@@ -2448,8 +2281,7 @@ static void collect_labels(ASTNode *node, SemanticCtx *ctx)
             ASTLabelStmt *ls = ast_as(ASTLabelStmt, node);
             if (strmap_get(ctx->labels, ls->label))
             {
-                sem_error(ls->base.loc, "redefinition of label '%s'", ls->label);
-                ctx->error = true;
+                sem_error(ctx, ls->base.loc, "redefinition of label '%s'", ls->label);
             }
             else
             {
@@ -2527,24 +2359,19 @@ static bool merge_global_var(ASTVarDecl *vd, ASTVarDecl *existing, SemanticCtx *
 {
     if ((existing->storage == SC_STATIC) != (vd->storage == SC_STATIC))
     {
-        sem_error(vd->base.loc, "%s declaration of '%s' follows %s declaration",
-                  vd->storage == SC_STATIC ? "static" : "non-static", vd->name,
-                  existing->storage == SC_STATIC ? "static" : "non-static");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, vd->base.loc, "%s declaration of '%s' follows %s declaration",
+                         vd->storage == SC_STATIC ? "static" : "non-static", vd->name,
+                         existing->storage == SC_STATIC ? "static" : "non-static");
     }
     if (type_unqual(existing->type) == type_unqual(vd->type) &&
         type_is_const(existing->type) != type_is_const(vd->type))
     {
-        sem_error(vd->base.loc, "conflicting type qualifiers in declaration of '%s'", vd->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, vd->base.loc, "conflicting type qualifiers in declaration of '%s'",
+                         vd->name);
     }
     if (existing->has_const_init && vd->has_const_init)
     {
-        sem_error(vd->base.loc, "redefinition of '%s'", vd->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, vd->base.loc, "redefinition of '%s'", vd->name);
     }
     return true;
 }
@@ -2570,21 +2397,15 @@ static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
 {
     if (strmap_get(ctx->globals, vd->name))
     {
-        sem_error(vd->base.loc, "redefinition of '%s' as a global variable", vd->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, vd->base.loc, "redefinition of '%s' as a global variable", vd->name);
     }
     if (vd->type->kind == TYPE_VOID)
     {
-        sem_error(vd->base.loc, "variable '%s' has void type", vd->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, vd->base.loc, "variable '%s' has void type", vd->name);
     }
     if (type_is_record(vd->type) && !type_is_complete(vd->type))
     {
-        sem_error(vd->base.loc, "variable '%s' has incomplete type", vd->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, vd->base.loc, "variable '%s' has incomplete type", vd->name);
     }
     if (vd->init)
     {
@@ -2604,9 +2425,7 @@ static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
        `extern int a[];` declares (not defines) it and is legal. */
     if (vd->storage != SC_EXTERN && type_is_array(vd->type) && !type_is_complete(vd->type))
     {
-        sem_error(vd->base.loc, "variable '%s' has incomplete type", vd->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, vd->base.loc, "variable '%s' has incomplete type", vd->name);
     }
 
     /* C11 §6.9.2p2: a declaration with an initializer is a definition even
@@ -2686,23 +2505,17 @@ static bool merge_function_decl(ASTNode *decl, ASTNode *prev, SemanticCtx *ctx)
     FuncSig *pfn = func_sig_of(prev);
     if ((pfn->storage == SC_STATIC) != (fn->storage == SC_STATIC))
     {
-        sem_error(decl->loc, "%s declaration of '%s' follows %s declaration",
-                  fn->storage == SC_STATIC ? "static" : "non-static", fn->name,
-                  pfn->storage == SC_STATIC ? "static" : "non-static");
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, decl->loc, "%s declaration of '%s' follows %s declaration",
+                         fn->storage == SC_STATIC ? "static" : "non-static", fn->name,
+                         pfn->storage == SC_STATIC ? "static" : "non-static");
     }
     if (func_node_defined(prev) && func_node_defined(decl))
     {
-        sem_error(decl->loc, "redefinition of '%s'", fn->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, decl->loc, "redefinition of '%s'", fn->name);
     }
     if (pfn->func_type != fn->func_type)
     {
-        sem_error(decl->loc, "conflicting types for '%s'", fn->name);
-        ctx->error = true;
-        return false;
+        return sem_error(ctx, decl->loc, "conflicting types for '%s'", fn->name);
     }
     if (!func_node_defined(prev) && func_node_defined(decl))
     {
@@ -2737,8 +2550,8 @@ static bool register_functions(ASTProgram *prog, SemanticCtx *ctx)
         }
         if (decl->kind != AST_FUNC_DEF && decl->kind != AST_FUNC_DECL)
         {
-            sem_error(decl->loc, "expected function definition or prototype at top level");
-            return false;
+            return sem_error(ctx, decl->loc,
+                             "expected function definition or prototype at top level");
         }
         FuncSig *fn = func_sig_of(decl);
         fn->func_type = build_func_type(fn, ctx);
@@ -2754,9 +2567,7 @@ static bool register_functions(ASTProgram *prog, SemanticCtx *ctx)
         {
             if (strmap_get(ctx->global_vars, fn->name))
             {
-                sem_error(decl->loc, "redefinition of '%s'", fn->name);
-                ctx->error = true;
-                return false;
+                return sem_error(ctx, decl->loc, "redefinition of '%s'", fn->name);
             }
             strmap_set(ctx->globals, fn->name, decl);
         }
@@ -2790,13 +2601,6 @@ ASTNode *semantic_check(ASTNode *ast, Arena *arena)
         return NULL;
     }
 
-    if (ast->kind != AST_PROGRAM)
-    {
-        sem_error(ast->loc, "expected program at top level");
-        return NULL;
-    }
-
-    ASTProgram *prog = ast_as(ASTProgram, ast);
     SemanticCtx ctx = {
         .arena = arena,
         .globals = strmap_new(arena),
@@ -2808,6 +2612,14 @@ ASTNode *semantic_check(ASTNode *ast, Arena *arena)
         .switch_sem_stack = vec_new(arena),
         .error = false,
     };
+
+    if (ast->kind != AST_PROGRAM)
+    {
+        sem_error(&ctx, ast->loc, "expected program at top level");
+        return NULL;
+    }
+
+    ASTProgram *prog = ast_as(ASTProgram, ast);
 
     if (!check_file_scope_asserts(prog, &ctx))
     {
