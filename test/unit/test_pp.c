@@ -745,3 +745,202 @@ TEST(pp, paste_at_end_is_error)
     EXPECT_EQ(pp->error_count, 1);
     arena_free(a);
 }
+
+TEST(pp, variadic_splices_tail)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(...) __VA_ARGS__\nF(1,2)\n");
+    EXPECT_EQ(vec_size(pp->out), 4);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    expect_out(pp, 1, TOK_PP_PUNCT, ",");
+    expect_out(pp, 2, TOK_PP_NUMBER, "2");
+    arena_free(a);
+}
+
+TEST(pp, variadic_named_then_unused_tail)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a, ...) a\nF(1,2,3)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    arena_free(a);
+}
+
+TEST(pp, variadic_stringize_lines_up_commas)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define S(...) #__VA_ARGS__\nS(1,2)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_STRING, "\"1,2\"");
+    arena_free(a);
+}
+
+TEST(pp, variadic_gnu_comma_drop)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a, ...) a, ##__VA_ARGS__\nF(1)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    arena_free(a);
+}
+
+TEST(pp, variadic_gnu_comma_kept_with_tail)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a, ...) a, ##__VA_ARGS__\nF(1,2)\n");
+    EXPECT_EQ(vec_size(pp->out), 4);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    expect_out(pp, 1, TOK_PP_PUNCT, ",");
+    expect_out(pp, 2, TOK_PP_NUMBER, "2");
+    arena_free(a);
+}
+
+TEST(pp, variadic_gnu_comma_kept_for_present_empty)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a, ...) a, ##__VA_ARGS__\nF(1,)\n");
+    EXPECT_EQ(vec_size(pp->out), 3);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    expect_out(pp, 1, TOK_PP_PUNCT, ",");
+    arena_free(a);
+}
+
+TEST(pp, variadic_standard_paste_uses_raw_tail)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a, ...) a##__VA_ARGS__\nF(1,2)\nF(1)\n");
+    EXPECT_EQ(vec_size(pp->out), 4);
+    expect_out(pp, 0, TOK_PP_NUMBER, "12");
+    expect_out(pp, 1, TOK_PP_TRIVIA_NL, "\n");
+    expect_out(pp, 2, TOK_PP_NUMBER, "1");
+    expect_out(pp, 3, TOK_PP_TRIVIA_NL, "\n");
+    arena_free(a);
+}
+
+TEST(pp, variadic_tail_is_expanded)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define M 42\n#define F(a, ...) a,__VA_ARGS__\nF(1,M)\n");
+    EXPECT_EQ(vec_size(pp->out), 4);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    expect_out(pp, 1, TOK_PP_PUNCT, ",");
+    expect_out(pp, 2, TOK_PP_NUMBER, "42");
+    arena_free(a);
+}
+
+TEST(pp, named_variadic_alias)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(args...) args\nF(1,2)\n");
+    EXPECT_EQ(vec_size(pp->out), 4);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    expect_out(pp, 1, TOK_PP_PUNCT, ",");
+    expect_out(pp, 2, TOK_PP_NUMBER, "2");
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, va_args_in_object_like_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define X __VA_ARGS__\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, variadic_too_few_arguments_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(a,b,...) x\nF(1)\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, line_directive_sets_presumed_loc)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#line 100\nx\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    EXPECT_EQ(out_tok(pp, 0)->loc.line, 100);
+    EXPECT_EQ(out_tok(pp, 0)->loc.col, 1);
+    arena_free(a);
+}
+
+TEST(pp, line_directive_with_filename)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#line 100 \"foo.c\"\nx\n");
+    EXPECT_EQ(out_tok(pp, 0)->loc.line, 100);
+    EXPECT_STR_EQ(out_tok(pp, 0)->loc.file, "foo.c");
+    arena_free(a);
+}
+
+TEST(pp, line_directive_macro_operand)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define N 50\n#line N\nx\n");
+    EXPECT_EQ(out_tok(pp, 0)->loc.line, 50);
+    arena_free(a);
+}
+
+TEST(pp, line_directive_advances_per_newline)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#line 10\nx\ny\n");
+    EXPECT_EQ(vec_size(pp->out), 4);
+    EXPECT_EQ(out_tok(pp, 0)->loc.line, 10);
+    EXPECT_EQ(out_tok(pp, 2)->loc.line, 11);
+    arena_free(a);
+}
+
+TEST(pp, linemarker_accepted)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "# 300 \"bar.c\" 2\nx\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    EXPECT_EQ(out_tok(pp, 0)->loc.line, 300);
+    EXPECT_STR_EQ(out_tok(pp, 0)->loc.file, "bar.c");
+    EXPECT_EQ(pp->warning_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, line_directive_missing_number_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#line\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, error_directive_is_fatal_but_keeps_scanning)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#error boom\n#warning oops\nx\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    EXPECT_EQ(pp->warning_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, warning_directive_is_nonfatal)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#warning careful\nx\n");
+    EXPECT_EQ(pp->warning_count, 1);
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "x");
+    arena_free(a);
+}
+
+TEST(pp, error_directive_expands_message)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define MSG boom\n#error MSG\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}

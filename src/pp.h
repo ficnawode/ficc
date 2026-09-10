@@ -13,6 +13,8 @@ struct PpIncludeFrame
     const char *file;
     Vec *tokens;
     size_t cursor;
+    u32 presumed_line;
+    const char *presumed_file;
 };
 
 typedef enum
