@@ -28,6 +28,62 @@ typedef enum
 #undef PP_ENUM_ENTRY
 } PpKind;
 
+/* Punctuator identity (C11 §6.4.6), resolved from its spelling at scan time
+   so neither the pp nor the finalizer re-matches spellings. Digraphs map to
+   their primary's id. PP_PUNCT_NONE is the default for non-punctuators. */
+typedef enum
+{
+    PP_PUNCT_NONE,
+    PP_PUNCT_HASH,
+    PP_PUNCT_HASHHASH,
+    PP_PUNCT_LBRACKET,
+    PP_PUNCT_RBRACKET,
+    PP_PUNCT_LPAREN,
+    PP_PUNCT_RPAREN,
+    PP_PUNCT_LBRACE,
+    PP_PUNCT_RBRACE,
+    PP_PUNCT_DOT,
+    PP_PUNCT_ELLIPSIS,
+    PP_PUNCT_ARROW,
+    PP_PUNCT_PLUS,
+    PP_PUNCT_PLUS_PLUS,
+    PP_PUNCT_PLUS_ASSIGN,
+    PP_PUNCT_MINUS,
+    PP_PUNCT_MINUS_MINUS,
+    PP_PUNCT_MINUS_ASSIGN,
+    PP_PUNCT_STAR,
+    PP_PUNCT_STAR_ASSIGN,
+    PP_PUNCT_SLASH,
+    PP_PUNCT_SLASH_ASSIGN,
+    PP_PUNCT_PERCENT,
+    PP_PUNCT_PERCENT_ASSIGN,
+    PP_PUNCT_TILDE,
+    PP_PUNCT_BANG,
+    PP_PUNCT_NE,
+    PP_PUNCT_ASSIGN,
+    PP_PUNCT_EQ,
+    PP_PUNCT_LT,
+    PP_PUNCT_GT,
+    PP_PUNCT_LE,
+    PP_PUNCT_GE,
+    PP_PUNCT_SHL,
+    PP_PUNCT_SHR,
+    PP_PUNCT_SHL_ASSIGN,
+    PP_PUNCT_SHR_ASSIGN,
+    PP_PUNCT_AMP,
+    PP_PUNCT_AMP_ASSIGN,
+    PP_PUNCT_ANDAND,
+    PP_PUNCT_CARET,
+    PP_PUNCT_CARET_ASSIGN,
+    PP_PUNCT_PIPE,
+    PP_PUNCT_PIPE_ASSIGN,
+    PP_PUNCT_OROR,
+    PP_PUNCT_QUESTION,
+    PP_PUNCT_COLON,
+    PP_PUNCT_SEMI,
+    PP_PUNCT_COMMA,
+} PpPunct;
+
 typedef struct PpToken
 {
     PpKind kind;
@@ -36,6 +92,7 @@ typedef struct PpToken
     u32 len;
     bool has_newline;
     u32 param_idx;
+    PpPunct punct;
 } PpToken;
 
 /* Translation phases 1-2: trigraph replacement and backslash-newline

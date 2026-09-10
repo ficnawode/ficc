@@ -603,12 +603,6 @@ static void finalize_error(FinalizeCtx *ctx, Loc loc, const char *msg)
     ctx->error_count++;
 }
 
-static bool finalize_spelling_is(const PpToken *tok, const char *spelling)
-{
-    size_t len = strlen(spelling);
-    return tok->len == len && strncmp(tok->spell, spelling, len) == 0;
-}
-
 /* Appends token, merging it into the previous token when both are adjacent
    string literals (C11 §5.1.1.2 phase 6). */
 static void finalize_push_token(FinalizeCtx *ctx, Token token)
@@ -644,79 +638,158 @@ static void finalize_ident(FinalizeCtx *ctx, const PpToken *tok)
                         (Token) {.kind = keyword_kind(buf), .loc = tok->loc, .payload.str = buf});
 }
 
-typedef struct FinalPunct FinalPunct;
-struct FinalPunct
-{
-    const char *spelling;
-    TokenKind kind;
-};
-
-/* The digraphs `<% %> <: :>` normalize to their bracket equivalents; `#`,
-   `##` and `%:` have no TokenKind (C11 §6.4.6). */
-static const FinalPunct FINAL_PUNCTS[] = {
-    {"...", TOK_ELLIPSIS},
-    {"<<=", TOK_SHL_ASSIGN},
-    {">>=", TOK_SHR_ASSIGN},
-    {"->", TOK_ARROW},
-    {"++", TOK_PLUS_PLUS},
-    {"--", TOK_MINUS_MINUS},
-    {"<<", TOK_SHL},
-    {">>", TOK_SHR},
-    {"<=", TOK_LE},
-    {">=", TOK_GE},
-    {"==", TOK_EQ},
-    {"!=", TOK_NE},
-    {"&&", TOK_LOG_AND},
-    {"||", TOK_LOG_OR},
-    {"*=", TOK_STAR_ASSIGN},
-    {"/=", TOK_SLASH_ASSIGN},
-    {"%=", TOK_PERCENT_ASSIGN},
-    {"+=", TOK_PLUS_ASSIGN},
-    {"-=", TOK_MINUS_ASSIGN},
-    {"&=", TOK_BW_AND_ASSIGN},
-    {"^=", TOK_BW_XOR_ASSIGN},
-    {"|=", TOK_BW_OR_ASSIGN},
-    {"<:", TOK_LBRACKET},
-    {":>", TOK_RBRACKET},
-    {"<%", TOK_LBRACE},
-    {"%>", TOK_RBRACE},
-    {"[", TOK_LBRACKET},
-    {"]", TOK_RBRACKET},
-    {"(", TOK_LPAREN},
-    {")", TOK_RPAREN},
-    {"{", TOK_LBRACE},
-    {"}", TOK_RBRACE},
-    {".", TOK_DOT},
-    {"&", TOK_BW_AND},
-    {"*", TOK_STAR},
-    {"+", TOK_PLUS},
-    {"-", TOK_MINUS},
-    {"~", TOK_TILDE},
-    {"!", TOK_NOT},
-    {"/", TOK_SLASH},
-    {"%", TOK_PERCENT},
-    {"<", TOK_LT},
-    {">", TOK_GT},
-    {"^", TOK_BW_XOR},
-    {"|", TOK_BW_OR},
-    {"?", TOK_QUESTION},
-    {":", TOK_COLON},
-    {";", TOK_SEMI},
-    {"=", TOK_ASSIGN},
-    {",", TOK_COMMA},
-};
-
+/* Maps a pp punctuator id to the parser's token kind. `#`/`##` have no
+   TokenKind and must never reach the finalizer (C11 §6.4.6). */
 static void finalize_punct(FinalizeCtx *ctx, const PpToken *tok)
 {
-    for (size_t i = 0; i < sizeof(FINAL_PUNCTS) / sizeof(FINAL_PUNCTS[0]); i++)
+    TokenKind kind;
+    switch (tok->punct)
     {
-        if (finalize_spelling_is(tok, FINAL_PUNCTS[i].spelling))
-        {
-            finalize_push_token(ctx, (Token) {.kind = FINAL_PUNCTS[i].kind, .loc = tok->loc});
+        case PP_PUNCT_NONE:
+        case PP_PUNCT_HASH:
+        case PP_PUNCT_HASHHASH:
+            finalize_error(ctx, tok->loc, "stray '#' in program");
             return;
-        }
+        case PP_PUNCT_LBRACKET:
+            kind = TOK_LBRACKET;
+            break;
+        case PP_PUNCT_RBRACKET:
+            kind = TOK_RBRACKET;
+            break;
+        case PP_PUNCT_LPAREN:
+            kind = TOK_LPAREN;
+            break;
+        case PP_PUNCT_RPAREN:
+            kind = TOK_RPAREN;
+            break;
+        case PP_PUNCT_LBRACE:
+            kind = TOK_LBRACE;
+            break;
+        case PP_PUNCT_RBRACE:
+            kind = TOK_RBRACE;
+            break;
+        case PP_PUNCT_DOT:
+            kind = TOK_DOT;
+            break;
+        case PP_PUNCT_ELLIPSIS:
+            kind = TOK_ELLIPSIS;
+            break;
+        case PP_PUNCT_ARROW:
+            kind = TOK_ARROW;
+            break;
+        case PP_PUNCT_PLUS:
+            kind = TOK_PLUS;
+            break;
+        case PP_PUNCT_PLUS_PLUS:
+            kind = TOK_PLUS_PLUS;
+            break;
+        case PP_PUNCT_PLUS_ASSIGN:
+            kind = TOK_PLUS_ASSIGN;
+            break;
+        case PP_PUNCT_MINUS:
+            kind = TOK_MINUS;
+            break;
+        case PP_PUNCT_MINUS_MINUS:
+            kind = TOK_MINUS_MINUS;
+            break;
+        case PP_PUNCT_MINUS_ASSIGN:
+            kind = TOK_MINUS_ASSIGN;
+            break;
+        case PP_PUNCT_STAR:
+            kind = TOK_STAR;
+            break;
+        case PP_PUNCT_STAR_ASSIGN:
+            kind = TOK_STAR_ASSIGN;
+            break;
+        case PP_PUNCT_SLASH:
+            kind = TOK_SLASH;
+            break;
+        case PP_PUNCT_SLASH_ASSIGN:
+            kind = TOK_SLASH_ASSIGN;
+            break;
+        case PP_PUNCT_PERCENT:
+            kind = TOK_PERCENT;
+            break;
+        case PP_PUNCT_PERCENT_ASSIGN:
+            kind = TOK_PERCENT_ASSIGN;
+            break;
+        case PP_PUNCT_TILDE:
+            kind = TOK_TILDE;
+            break;
+        case PP_PUNCT_BANG:
+            kind = TOK_NOT;
+            break;
+        case PP_PUNCT_NE:
+            kind = TOK_NE;
+            break;
+        case PP_PUNCT_ASSIGN:
+            kind = TOK_ASSIGN;
+            break;
+        case PP_PUNCT_EQ:
+            kind = TOK_EQ;
+            break;
+        case PP_PUNCT_LT:
+            kind = TOK_LT;
+            break;
+        case PP_PUNCT_GT:
+            kind = TOK_GT;
+            break;
+        case PP_PUNCT_LE:
+            kind = TOK_LE;
+            break;
+        case PP_PUNCT_GE:
+            kind = TOK_GE;
+            break;
+        case PP_PUNCT_SHL:
+            kind = TOK_SHL;
+            break;
+        case PP_PUNCT_SHR:
+            kind = TOK_SHR;
+            break;
+        case PP_PUNCT_SHL_ASSIGN:
+            kind = TOK_SHL_ASSIGN;
+            break;
+        case PP_PUNCT_SHR_ASSIGN:
+            kind = TOK_SHR_ASSIGN;
+            break;
+        case PP_PUNCT_AMP:
+            kind = TOK_BW_AND;
+            break;
+        case PP_PUNCT_AMP_ASSIGN:
+            kind = TOK_BW_AND_ASSIGN;
+            break;
+        case PP_PUNCT_ANDAND:
+            kind = TOK_LOG_AND;
+            break;
+        case PP_PUNCT_CARET:
+            kind = TOK_BW_XOR;
+            break;
+        case PP_PUNCT_CARET_ASSIGN:
+            kind = TOK_BW_XOR_ASSIGN;
+            break;
+        case PP_PUNCT_PIPE:
+            kind = TOK_BW_OR;
+            break;
+        case PP_PUNCT_PIPE_ASSIGN:
+            kind = TOK_BW_OR_ASSIGN;
+            break;
+        case PP_PUNCT_OROR:
+            kind = TOK_LOG_OR;
+            break;
+        case PP_PUNCT_QUESTION:
+            kind = TOK_QUESTION;
+            break;
+        case PP_PUNCT_COLON:
+            kind = TOK_COLON;
+            break;
+        case PP_PUNCT_SEMI:
+            kind = TOK_SEMI;
+            break;
+        case PP_PUNCT_COMMA:
+            kind = TOK_COMMA;
+            break;
     }
-    finalize_error(ctx, tok->loc, "stray '#' in program");
+    finalize_push_token(ctx, (Token) {.kind = kind, .loc = tok->loc});
 }
 
 /* Decodes one escape at *pp, advancing it; end bounds the spelling. Numeric

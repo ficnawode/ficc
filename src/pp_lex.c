@@ -182,21 +182,80 @@ static bool pp_number_start(char c, char next)
     return is_digit(c) || (c == '.' && is_digit(next));
 }
 
-/* Longest first for max munch (C11 §6.4.6, including digraphs). */
-static const char *const PP_PUNCTS[] = {
-    "%:%:", "...", "<<=", ">>=", "->", "++", "--", "<<", ">>", "<=", ">=", "==", "!=", "&&",
-    "||",   "*=",  "/=",  "%=",  "+=", "-=", "&=", "^=", "|=", "##", "<:", ":>", "<%", "%>",
-    "%:",   "[",   "]",   "(",   ")",  "{",  "}",  ".",  "&",  "*",  "+",  "-",  "~",  "!",
-    "/",    "%",   "<",   ">",   "^",  "|",  "?",  ":",  ";",  "=",  ",",  "#",
+typedef struct PpPunctSpelling PpPunctSpelling;
+struct PpPunctSpelling
+{
+    const char *spelling;
+    PpPunct punct;
 };
 
-static u32 pp_punct_len(const char *p)
+/* Longest first for max munch (C11 §6.4.6, including digraphs). Digraphs map
+   to their primary punctuator's id. */
+static const PpPunctSpelling PP_PUNCTS[] = {
+    {"%:%:", PP_PUNCT_HASHHASH},
+    {"...", PP_PUNCT_ELLIPSIS},
+    {"<<=", PP_PUNCT_SHL_ASSIGN},
+    {">>=", PP_PUNCT_SHR_ASSIGN},
+    {"->", PP_PUNCT_ARROW},
+    {"++", PP_PUNCT_PLUS_PLUS},
+    {"--", PP_PUNCT_MINUS_MINUS},
+    {"<<", PP_PUNCT_SHL},
+    {">>", PP_PUNCT_SHR},
+    {"<=", PP_PUNCT_LE},
+    {">=", PP_PUNCT_GE},
+    {"==", PP_PUNCT_EQ},
+    {"!=", PP_PUNCT_NE},
+    {"&&", PP_PUNCT_ANDAND},
+    {"||", PP_PUNCT_OROR},
+    {"*=", PP_PUNCT_STAR_ASSIGN},
+    {"/=", PP_PUNCT_SLASH_ASSIGN},
+    {"%=", PP_PUNCT_PERCENT_ASSIGN},
+    {"+=", PP_PUNCT_PLUS_ASSIGN},
+    {"-=", PP_PUNCT_MINUS_ASSIGN},
+    {"&=", PP_PUNCT_AMP_ASSIGN},
+    {"^=", PP_PUNCT_CARET_ASSIGN},
+    {"|=", PP_PUNCT_PIPE_ASSIGN},
+    {"##", PP_PUNCT_HASHHASH},
+    {"<:", PP_PUNCT_LBRACKET},
+    {":>", PP_PUNCT_RBRACKET},
+    {"<%", PP_PUNCT_LBRACE},
+    {"%>", PP_PUNCT_RBRACE},
+    {"%:", PP_PUNCT_HASH},
+    {"[", PP_PUNCT_LBRACKET},
+    {"]", PP_PUNCT_RBRACKET},
+    {"(", PP_PUNCT_LPAREN},
+    {")", PP_PUNCT_RPAREN},
+    {"{", PP_PUNCT_LBRACE},
+    {"}", PP_PUNCT_RBRACE},
+    {".", PP_PUNCT_DOT},
+    {"&", PP_PUNCT_AMP},
+    {"*", PP_PUNCT_STAR},
+    {"+", PP_PUNCT_PLUS},
+    {"-", PP_PUNCT_MINUS},
+    {"~", PP_PUNCT_TILDE},
+    {"!", PP_PUNCT_BANG},
+    {"/", PP_PUNCT_SLASH},
+    {"%", PP_PUNCT_PERCENT},
+    {"<", PP_PUNCT_LT},
+    {">", PP_PUNCT_GT},
+    {"^", PP_PUNCT_CARET},
+    {"|", PP_PUNCT_PIPE},
+    {"?", PP_PUNCT_QUESTION},
+    {":", PP_PUNCT_COLON},
+    {";", PP_PUNCT_SEMI},
+    {"=", PP_PUNCT_ASSIGN},
+    {",", PP_PUNCT_COMMA},
+    {"#", PP_PUNCT_HASH},
+};
+
+static u32 pp_punct_match(const char *p, PpPunct *out)
 {
     for (size_t i = 0; i < sizeof(PP_PUNCTS) / sizeof(PP_PUNCTS[0]); i++)
     {
-        size_t len = strlen(PP_PUNCTS[i]);
-        if (strncmp(p, PP_PUNCTS[i], len) == 0)
+        size_t len = strlen(PP_PUNCTS[i].spelling);
+        if (strncmp(p, PP_PUNCTS[i].spelling, len) == 0)
         {
+            *out = PP_PUNCTS[i].punct;
             return (u32) len;
         }
     }
@@ -242,13 +301,17 @@ static void scanner_advance(SoupScannerCtx *ctx)
     ctx->p++;
 }
 
-static void scanner_push(SoupScannerCtx *ctx, PpKind kind, const char *spell, u32 len, Loc loc,
-                         bool has_newline)
+static PpToken pp_token(PpKind kind, const char *spell, u32 len, Loc loc, bool has_newline)
 {
-    PpToken *tok = arena_alloc(ctx->arena, sizeof(PpToken), sizeof(void *));
-    *tok = (PpToken) {
+    return (PpToken) {
         .kind = kind, .loc = loc, .spell = spell, .len = len, .has_newline = has_newline};
-    vec_push(ctx->tokens, tok);
+}
+
+static void scanner_push(SoupScannerCtx *ctx, PpToken token)
+{
+    PpToken *slot = arena_alloc(ctx->arena, sizeof(PpToken), sizeof(void *));
+    *slot = token;
+    vec_push(ctx->tokens, slot);
 }
 
 static void scan_ws(SoupScannerCtx *ctx)
@@ -259,7 +322,7 @@ static void scan_ws(SoupScannerCtx *ctx)
     {
         scanner_advance(ctx);
     }
-    scanner_push(ctx, TOK_PP_TRIVIA_WS, start, (u32) (ctx->p - start), loc, false);
+    scanner_push(ctx, pp_token(TOK_PP_TRIVIA_WS, start, (u32) (ctx->p - start), loc, false));
 }
 
 static void scan_nl(SoupScannerCtx *ctx)
@@ -267,7 +330,7 @@ static void scan_nl(SoupScannerCtx *ctx)
     Loc loc = scanner_loc(ctx);
     const char *start = ctx->p;
     scanner_advance(ctx);
-    scanner_push(ctx, TOK_PP_TRIVIA_NL, start, 1, loc, true);
+    scanner_push(ctx, pp_token(TOK_PP_TRIVIA_NL, start, 1, loc, true));
 }
 
 static void scan_block_comment(SoupScannerCtx *ctx)
@@ -294,7 +357,8 @@ static void scan_block_comment(SoupScannerCtx *ctx)
     {
         scanner_error(ctx, "unterminated comment");
     }
-    scanner_push(ctx, TOK_PP_TRIVIA_COMMENT, start, (u32) (ctx->p - start), loc, has_newline);
+    scanner_push(ctx,
+                 pp_token(TOK_PP_TRIVIA_COMMENT, start, (u32) (ctx->p - start), loc, has_newline));
 }
 
 static void scan_line_comment(SoupScannerCtx *ctx)
@@ -307,7 +371,7 @@ static void scan_line_comment(SoupScannerCtx *ctx)
     {
         scanner_advance(ctx);
     }
-    scanner_push(ctx, TOK_PP_TRIVIA_COMMENT, start, (u32) (ctx->p - start), loc, false);
+    scanner_push(ctx, pp_token(TOK_PP_TRIVIA_COMMENT, start, (u32) (ctx->p - start), loc, false));
 }
 
 static void scan_ident(SoupScannerCtx *ctx)
@@ -318,7 +382,7 @@ static void scan_ident(SoupScannerCtx *ctx)
     {
         scanner_advance(ctx);
     }
-    scanner_push(ctx, TOK_PP_IDENT, start, (u32) (ctx->p - start), loc, false);
+    scanner_push(ctx, pp_token(TOK_PP_IDENT, start, (u32) (ctx->p - start), loc, false));
 }
 
 static bool scan_literal(SoupScannerCtx *ctx)
@@ -357,7 +421,7 @@ static bool scan_literal(SoupScannerCtx *ctx)
         scanner_error(ctx, kind == TOK_PP_STRING ? "unterminated string literal"
                                                  : "unterminated character constant");
     }
-    scanner_push(ctx, kind, start, (u32) (ctx->p - start), loc, false);
+    scanner_push(ctx, pp_token(kind, start, (u32) (ctx->p - start), loc, false));
     return true;
 }
 
@@ -384,10 +448,10 @@ static void scan_number(SoupScannerCtx *ctx)
             break;
         }
     }
-    scanner_push(ctx, TOK_PP_NUMBER, start, (u32) (ctx->p - start), loc, false);
+    scanner_push(ctx, pp_token(TOK_PP_NUMBER, start, (u32) (ctx->p - start), loc, false));
 }
 
-static void scan_punct(SoupScannerCtx *ctx, u32 len)
+static void scan_punct(SoupScannerCtx *ctx, u32 len, PpPunct punct)
 {
     Loc loc = scanner_loc(ctx);
     const char *start = ctx->p;
@@ -395,7 +459,9 @@ static void scan_punct(SoupScannerCtx *ctx, u32 len)
     {
         scanner_advance(ctx);
     }
-    scanner_push(ctx, TOK_PP_PUNCT, start, len, loc, false);
+    PpToken token = pp_token(TOK_PP_PUNCT, start, len, loc, false);
+    token.punct = punct;
+    scanner_push(ctx, token);
 }
 
 static void scan_other(SoupScannerCtx *ctx)
@@ -403,7 +469,7 @@ static void scan_other(SoupScannerCtx *ctx)
     Loc loc = scanner_loc(ctx);
     const char *start = ctx->p;
     scanner_advance(ctx);
-    scanner_push(ctx, TOK_PP_OTHER, start, 1, loc, false);
+    scanner_push(ctx, pp_token(TOK_PP_OTHER, start, 1, loc, false));
 }
 
 Vec *pp_lex(const char *file, const char *src, Arena *arena)
@@ -449,10 +515,11 @@ Vec *pp_lex(const char *file, const char *src, Arena *arena)
         }
         else
         {
-            u32 len = pp_punct_len(ctx.p);
+            PpPunct punct;
+            u32 len = pp_punct_match(ctx.p, &punct);
             if (len > 0)
             {
-                scan_punct(&ctx, len);
+                scan_punct(&ctx, len, punct);
             }
             else
             {
@@ -461,7 +528,7 @@ Vec *pp_lex(const char *file, const char *src, Arena *arena)
         }
     }
 
-    scanner_push(&ctx, TOK_PP_EOF, ctx.p, 0, scanner_loc(&ctx), false);
+    scanner_push(&ctx, pp_token(TOK_PP_EOF, ctx.p, 0, scanner_loc(&ctx), false));
 
     if (ctx.error_count > 0)
     {

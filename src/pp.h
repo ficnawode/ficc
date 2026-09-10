@@ -15,6 +15,22 @@ struct PpIncludeFrame
     size_t cursor;
 };
 
+typedef enum
+{
+    MACRO_OBJ,
+    MACRO_FUNC,
+} MacroKind;
+
+typedef struct Macro Macro;
+struct Macro
+{
+    const char *name;
+    MacroKind kind;
+    bool expanding;
+    Loc loc;
+    Vec *body;
+};
+
 typedef struct Pp Pp;
 struct Pp
 {

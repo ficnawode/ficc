@@ -164,3 +164,185 @@ TEST(pp, lex_error_propagates)
     EXPECT_NULL(pp_preprocess(pp, "<test>", "abc\\"));
     arena_free(a);
 }
+
+TEST(pp, object_macro_substitution)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define X 42\nX\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "42");
+    expect_out(pp, 1, TOK_PP_TRIVIA_NL, "\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_EQ(pp->warning_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, nested_object_macros)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define A B\n#define B 1\nA\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    arena_free(a);
+}
+
+TEST(pp, macro_body_keeps_all_tokens)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define ADD 1 + 2\nADD\n");
+    EXPECT_EQ(vec_size(pp->out), 4);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    expect_out(pp, 1, TOK_PP_PUNCT, "+");
+    expect_out(pp, 2, TOK_PP_NUMBER, "2");
+    expect_out(pp, 3, TOK_PP_TRIVIA_NL, "\n");
+    arena_free(a);
+}
+
+TEST(pp, empty_macro_expands_to_nothing)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define E\nx E y\n");
+    EXPECT_EQ(vec_size(pp->out), 5);
+    expect_out(pp, 0, TOK_PP_IDENT, "x");
+    expect_out(pp, 3, TOK_PP_IDENT, "y");
+    arena_free(a);
+}
+
+TEST(pp, recursive_macro_terminates)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define A A A\nA\n");
+    EXPECT_EQ(vec_size(pp->out), 3);
+    expect_out(pp, 0, TOK_PP_IDENT, "A");
+    expect_out(pp, 1, TOK_PP_IDENT, "A");
+    expect_out(pp, 2, TOK_PP_TRIVIA_NL, "\n");
+    arena_free(a);
+}
+
+TEST(pp, self_referential_macro_yields_one)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define X X\nX\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "X");
+    expect_out(pp, 1, TOK_PP_TRIVIA_NL, "\n");
+    arena_free(a);
+}
+
+TEST(pp, indirect_recursion_is_hidden)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define A B\n#define B A\nA\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "A");
+    arena_free(a);
+}
+
+TEST(pp, redefinition_identical_is_ok)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define X 1 + 2\n#define X 1+2\nX\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_EQ(vec_size(pp->out), 4);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    arena_free(a);
+}
+
+TEST(pp, redefinition_mismatch_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define X 1\n#define X 2\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, undef_restores_identifier)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define X 1\n#undef X\nX\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "X");
+    expect_out(pp, 1, TOK_PP_TRIVIA_NL, "\n");
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, undef_undefined_is_noop)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#undef Y\nx\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "x");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_EQ(pp->warning_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, define_missing_name_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, define_non_identifier_name_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define 1 x\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, undef_missing_name_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#undef\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, function_like_macro_is_inert)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(x) x\nF\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "F");
+    expect_out(pp, 1, TOK_PP_TRIVIA_NL, "\n");
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, object_vs_function_like_mismatch_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F 1\n#define F(x) x\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, function_like_then_object_mismatch_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(x) x\n#define F 1\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, object_like_paren_body_has_space)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F (x)\nF\n");
+    EXPECT_EQ(vec_size(pp->out), 4);
+    expect_out(pp, 0, TOK_PP_PUNCT, "(");
+    expect_out(pp, 1, TOK_PP_IDENT, "x");
+    expect_out(pp, 2, TOK_PP_PUNCT, ")");
+    expect_out(pp, 3, TOK_PP_TRIVIA_NL, "\n");
+    arena_free(a);
+}

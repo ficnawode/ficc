@@ -188,15 +188,23 @@ TEST(pp_lex, unterminated_block_comment_is_error)
 TEST(pp_lex, digraph_spellings)
 {
     Arena *a = arena_new();
-    static const char *const DIGRAPHS[] = {"<:", ":>", "<%", "%>", "%:", "%:%:"};
+    static const struct
+    {
+        const char *spelling;
+        PpPunct punct;
+    } CASES[] = {
+        {"<:", PP_PUNCT_LBRACKET}, {":>", PP_PUNCT_RBRACKET}, {"<%", PP_PUNCT_LBRACE},
+        {"%>", PP_PUNCT_RBRACE},   {"%:", PP_PUNCT_HASH},     {"%:%:", PP_PUNCT_HASHHASH},
+    };
     Vec *toks = pp_lex("<test>", "<: :> <% %> %: %:%:", a);
     EXPECT_NOTNULL(toks);
     EXPECT_EQ(vec_size(toks), 12);
-    for (size_t i = 0; i < sizeof(DIGRAPHS) / sizeof(DIGRAPHS[0]); i++)
+    for (size_t i = 0; i < sizeof(CASES) / sizeof(CASES[0]); i++)
     {
         PpToken *t = tok(toks, i * 2);
         EXPECT_EQ(t->kind, TOK_PP_PUNCT);
-        EXPECT_TRUE(spell_is(t, DIGRAPHS[i]));
+        EXPECT_TRUE(spell_is(t, CASES[i].spelling));
+        EXPECT_EQ(t->punct, CASES[i].punct);
     }
     arena_free(a);
 }
@@ -208,9 +216,11 @@ TEST(pp_lex, hash_and_paste_are_punct)
     EXPECT_NOTNULL(toks);
     EXPECT_EQ(tok(toks, 0)->kind, TOK_PP_PUNCT);
     EXPECT_TRUE(spell_is(tok(toks, 0), "#"));
+    EXPECT_EQ(tok(toks, 0)->punct, PP_PUNCT_HASH);
     EXPECT_EQ(tok(toks, 1)->kind, TOK_PP_TRIVIA_WS);
     EXPECT_EQ(tok(toks, 2)->kind, TOK_PP_PUNCT);
     EXPECT_TRUE(spell_is(tok(toks, 2), "##"));
+    EXPECT_EQ(tok(toks, 2)->punct, PP_PUNCT_HASHHASH);
     arena_free(a);
 }
 
@@ -220,8 +230,11 @@ TEST(pp_lex, punct_matched_longest_first)
     Vec *toks = pp_lex("<test>", "<<= << <", a);
     EXPECT_NOTNULL(toks);
     EXPECT_TRUE(spell_is(tok(toks, 0), "<<="));
+    EXPECT_EQ(tok(toks, 0)->punct, PP_PUNCT_SHL_ASSIGN);
     EXPECT_TRUE(spell_is(tok(toks, 2), "<<"));
+    EXPECT_EQ(tok(toks, 2)->punct, PP_PUNCT_SHL);
     EXPECT_TRUE(spell_is(tok(toks, 4), "<"));
+    EXPECT_EQ(tok(toks, 4)->punct, PP_PUNCT_LT);
     arena_free(a);
 }
 
