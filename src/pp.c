@@ -1,5 +1,7 @@
 #include "pp.h"
 
+#include "util/bytebuf.h"
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -151,7 +153,7 @@ Pp *pp_new(Arena *arena)
 
 void pp_free(Pp *pp)
 {
-    (void) pp;
+    arena_free(pp->arena);
 }
 
 static void pp_push_include(Pp *pp, const char *file, Vec *tokens)
@@ -371,6 +373,25 @@ static Vec *pp_mark_params(Pp *pp, Vec *body, Vec *params, bool variadic)
     return marked;
 }
 
+/* Every `#` in a function-like replacement must be followed by a parameter
+   (C11 §6.10.3.2). */
+static bool pp_check_hashes(Pp *pp, Vec *body)
+{
+    for (size_t i = 0; i < vec_size(body); i++)
+    {
+        PpToken *t = vec_get(body, i);
+        if (t->kind == TOK_PP_PUNCT && t->punct == PP_PUNCT_HASH)
+        {
+            if (i + 1 >= vec_size(body) || ((PpToken *) vec_get(body, i + 1))->kind != TOK_PP_PARAM)
+            {
+                pp_error(pp, t->loc, "'#' is not followed by a macro parameter");
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
                       Loc directive_loc)
 {
@@ -420,6 +441,10 @@ static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t 
         param_count = (u32) vec_size(params);
         body = pp_mark_params(pp, pp_collect_body(pp, frame, close + 1, end), params, variadic);
         if (!body)
+        {
+            return;
+        }
+        if (!pp_check_hashes(pp, body))
         {
             return;
         }
@@ -584,16 +609,74 @@ static bool pp_collect_args(Pp *pp, PpToken *name, Macro *macro, TokList *lparen
     return false;
 }
 
-/* Replaces body parameter markers with prescanned argument tokens; both body
-   and argument tokens get the invocation's hide set. */
-static TokList *pp_subst(Pp *pp, Macro *macro, Vec *args, Hideset *new_hs, Loc inv_loc)
+/* Stringizes a raw argument (§6.10.3.2): strips outer whitespace, collapses
+   interior whitespace runs to one space, and quotes `"`/`\`. */
+static PpToken *pp_stringize(Pp *pp, Vec *raw, Loc loc)
+{
+    ByteBuf buf;
+    bytebuf_init(&buf, pp->arena);
+    bytebuf_append(&buf, '"');
+
+    bool seen_token = false;
+    bool pending_space = false;
+    for (size_t i = 0; i < vec_size(raw); i++)
+    {
+        PpToken *t = vec_get(raw, i);
+        if (pp_is_trivia(t))
+        {
+            pending_space = seen_token;
+            continue;
+        }
+        if (pending_space)
+        {
+            bytebuf_append(&buf, ' ');
+            pending_space = false;
+        }
+        seen_token = true;
+        for (u32 j = 0; j < t->len; j++)
+        {
+            char c = t->spell[j];
+            if (c == '"' || c == '\\')
+            {
+                bytebuf_append(&buf, '\\');
+            }
+            bytebuf_append(&buf, c);
+        }
+    }
+    bytebuf_append(&buf, '"');
+    bytebuf_append(&buf, '\0');
+
+    PpToken *tok = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
+    *tok = (PpToken) {.kind = TOK_PP_STRING,
+                      .loc = loc,
+                      .spell = (const char *) bytebuf_data(&buf),
+                      .len = (u32) (bytebuf_len(&buf) - 1)};
+    return tok;
+}
+
+/* Replaces body parameter markers with prescanned argument tokens; `#` before
+   a marker stringizes the raw argument instead. All substituted tokens get the
+   invocation's hide set. */
+static TokList *pp_subst(Pp *pp, Macro *macro, Vec *raw_args, Vec *args, Hideset *new_hs,
+                         Loc inv_loc)
 {
     TokList *head = NULL;
     TokList **tail = &head;
     for (size_t i = 0; i < vec_size(macro->body); i++)
     {
         PpToken *bt = vec_get(macro->body, i);
-        if (bt->kind == TOK_PP_PARAM && args && bt->param_idx < vec_size(args))
+        if (bt->kind == TOK_PP_PUNCT && bt->punct == PP_PUNCT_HASH && raw_args &&
+            i + 1 < vec_size(macro->body) &&
+            ((PpToken *) vec_get(macro->body, i + 1))->kind == TOK_PP_PARAM)
+        {
+            PpToken *next = vec_get(macro->body, i + 1);
+            Vec *raw = vec_get(raw_args, next->param_idx);
+            *tail = list_cons(pp->arena, pp_stringize(pp, raw, inv_loc), NULL);
+            tail = &(*tail)->next;
+            i++; /* consume the parameter */
+            continue;
+        }
+        else if (bt->kind == TOK_PP_PARAM && args && bt->param_idx < vec_size(args))
         {
             Vec *arg = vec_get(args, bt->param_idx);
             for (size_t j = 0; j < vec_size(arg); j++)
@@ -647,7 +730,7 @@ static TokList *pp_expand_list(Pp *pp, TokList *ts)
         if (macro->kind == MACRO_OBJ)
         {
             Hideset *new_hs = hs_add(pp->arena, t->hide, macro);
-            ts = list_concat(pp->arena, pp_subst(pp, macro, NULL, new_hs, t->loc), ts->next);
+            ts = list_concat(pp->arena, pp_subst(pp, macro, NULL, NULL, new_hs, t->loc), ts->next);
             continue;
         }
 
@@ -689,7 +772,8 @@ static TokList *pp_expand_list(Pp *pp, TokList *ts)
 
         Vec *expanded = pp_prescan_args(pp, args.args);
         Hideset *new_hs = hs_add(pp->arena, args.hs, macro);
-        ts = list_concat(pp->arena, pp_subst(pp, macro, expanded, new_hs, t->loc), args.after);
+        ts = list_concat(pp->arena, pp_subst(pp, macro, args.args, expanded, new_hs, t->loc),
+                         args.after);
     }
     return out;
 }

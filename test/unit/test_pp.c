@@ -576,3 +576,69 @@ TEST(pp, function_macro_redefinition_param_rename_is_ok)
     expect_out(pp, 1, TOK_PP_NUMBER, "2");
     arena_free(a);
 }
+
+TEST(pp, stringize_basic)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define STR(x) #x\nSTR(abc)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_STRING, "\"abc\"");
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, stringize_collapses_whitespace)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define STR(x) #x\nSTR(a  b)\n");
+    expect_out(pp, 0, TOK_PP_STRING, "\"a b\"");
+    arena_free(a);
+}
+
+TEST(pp, stringize_comment_becomes_space)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define STR(x) #x\nSTR(a/*c*/b)\n");
+    expect_out(pp, 0, TOK_PP_STRING, "\"a b\"");
+    arena_free(a);
+}
+
+TEST(pp, stringize_escapes_quotes_and_backslashes)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define STR(x) #x\nSTR(\"q\\z\")\n");
+    PpToken *t = out_tok(pp, 0);
+    EXPECT_EQ(t->kind, TOK_PP_STRING);
+    EXPECT_EQ(t->len, 10);
+    EXPECT_EQ(t->spell[1], '\\');
+    EXPECT_EQ(t->spell[2], '"');
+    EXPECT_EQ(t->spell[4], '\\');
+    EXPECT_EQ(t->spell[5], '\\');
+    EXPECT_EQ(t->spell[8], '"');
+    arena_free(a);
+}
+
+TEST(pp, stringize_empty_argument)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define STR(x) #x\nSTR()\n");
+    expect_out(pp, 0, TOK_PP_STRING, "\"\"");
+    arena_free(a);
+}
+
+TEST(pp, stringize_double_level)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define STR(x) #x\n#define XSTR(x) STR(x)\nXSTR(BAR)\n");
+    expect_out(pp, 0, TOK_PP_STRING, "\"BAR\"");
+    arena_free(a);
+}
+
+TEST(pp, stringize_not_followed_by_param_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(x) a # b\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}

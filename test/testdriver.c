@@ -27,13 +27,15 @@ int tc_run_shell(const char *cmd)
 
 ASTNode *tc_parse(const char *src, Arena *arena)
 {
-    Pp *pp = pp_new(arena);
+    Pp *pp = pp_new(arena_new());
     Vec *soup = pp_preprocess(pp, "<test>", src);
     if (!soup)
     {
+        pp_free(pp);
         return NULL;
     }
     LexResult lexed = lex_finalize(soup, arena);
+    pp_free(pp);
     if (!lexed.tokens)
     {
         return NULL;

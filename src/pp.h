@@ -52,10 +52,11 @@ struct Pp
     u32 warning_count;
 };
 
-/* Returns a new arena-allocated pp context with empty state. */
+/* Returns a new pp context backed by its own arena; pp_free releases it. */
 Pp *pp_new(Arena *arena);
 
-/* Releases nothing; the arena owns all pp state. */
+/* Releases the pp arena (normalized source, soup, macros). The pp output is
+   only needed until lex_finalize has run. */
 void pp_free(Pp *pp);
 
 /* Runs translation phase 4 over src. Returns the output soup (also stored as
