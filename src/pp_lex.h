@@ -84,6 +84,8 @@ typedef enum
     PP_PUNCT_COMMA,
 } PpPunct;
 
+typedef struct Hideset Hideset;
+
 typedef struct PpToken
 {
     PpKind kind;
@@ -93,6 +95,7 @@ typedef struct PpToken
     bool has_newline;
     u32 param_idx;
     PpPunct punct;
+    Hideset *hide;
 } PpToken;
 
 /* Translation phases 1-2: trigraph replacement and backslash-newline

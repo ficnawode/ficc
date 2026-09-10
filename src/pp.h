@@ -26,9 +26,10 @@ struct Macro
 {
     const char *name;
     MacroKind kind;
-    bool expanding;
     Loc loc;
     Vec *body;
+    u32 param_count;
+    bool variadic;
 };
 
 typedef struct Pp Pp;

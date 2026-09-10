@@ -346,3 +346,233 @@ TEST(pp, object_like_paren_body_has_space)
     expect_out(pp, 3, TOK_PP_TRIVIA_NL, "\n");
     arena_free(a);
 }
+
+TEST(pp, function_macro_basic)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a) a\nF(1)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    expect_out(pp, 1, TOK_PP_TRIVIA_NL, "\n");
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, function_macro_two_params)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a,b) a b\nF(1,2)\n");
+    EXPECT_EQ(vec_size(pp->out), 3);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    expect_out(pp, 1, TOK_PP_NUMBER, "2");
+    arena_free(a);
+}
+
+TEST(pp, function_macro_not_invoked_is_ident)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a) a\nF\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "F");
+    arena_free(a);
+}
+
+TEST(pp, function_macro_prescans_argument)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define A B\n#define B(x) x\nA(1)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    arena_free(a);
+}
+
+TEST(pp, function_macro_self_nested_argument)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a) a\nF(F(2))\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "2");
+    arena_free(a);
+}
+
+TEST(pp, function_macro_blue_paint_argument)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a) a\n#define G F\nF(G)(2)\n");
+    EXPECT_EQ(vec_size(pp->out), 5);
+    expect_out(pp, 0, TOK_PP_IDENT, "F");
+    expect_out(pp, 1, TOK_PP_PUNCT, "(");
+    expect_out(pp, 2, TOK_PP_NUMBER, "2");
+    expect_out(pp, 3, TOK_PP_PUNCT, ")");
+    arena_free(a);
+}
+
+TEST(pp, function_macro_blue_paint_object_alias)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a) a\n#define G F\nG(G)(1)\n");
+    EXPECT_EQ(vec_size(pp->out), 5);
+    expect_out(pp, 0, TOK_PP_IDENT, "F");
+    expect_out(pp, 1, TOK_PP_PUNCT, "(");
+    expect_out(pp, 2, TOK_PP_NUMBER, "1");
+    expect_out(pp, 3, TOK_PP_PUNCT, ")");
+    expect_out(pp, 4, TOK_PP_TRIVIA_NL, "\n");
+    arena_free(a);
+}
+
+TEST(pp, function_macro_argument_producing_macro_invokes)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define ID(x) x\n#define A B\n#define B(x) x\nID(A)(1)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    arena_free(a);
+}
+
+TEST(pp, function_macro_hide_set_across_body)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a) a\n#define G x G\nF(G)\n");
+    EXPECT_EQ(vec_size(pp->out), 3);
+    expect_out(pp, 0, TOK_PP_IDENT, "x");
+    expect_out(pp, 1, TOK_PP_IDENT, "G");
+    arena_free(a);
+}
+
+TEST(pp, function_macro_comma_inside_parens)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a,b) a b\nF((1,2), 3)\n");
+    EXPECT_EQ(vec_size(pp->out), 7);
+    expect_out(pp, 0, TOK_PP_PUNCT, "(");
+    expect_out(pp, 1, TOK_PP_NUMBER, "1");
+    expect_out(pp, 2, TOK_PP_PUNCT, ",");
+    expect_out(pp, 3, TOK_PP_NUMBER, "2");
+    expect_out(pp, 4, TOK_PP_PUNCT, ")");
+    expect_out(pp, 5, TOK_PP_NUMBER, "3");
+    arena_free(a);
+}
+
+TEST(pp, function_macro_empty_argument)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a) a\nF()\n");
+    EXPECT_EQ(vec_size(pp->out), 1);
+    expect_out(pp, 0, TOK_PP_TRIVIA_NL, "\n");
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, function_macro_zero_params)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F() 99\nF()\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "99");
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, function_macro_multiline_arguments)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a) a\nF(\n42\n)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "42");
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, function_macro_nested_reuse)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define f(a) a\n#define g(a,b) a b\ng(f(1),f(2))\n");
+    EXPECT_EQ(vec_size(pp->out), 3);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    expect_out(pp, 1, TOK_PP_NUMBER, "2");
+    arena_free(a);
+}
+
+TEST(pp, function_macro_arity_too_few_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(a,b) a b\nF(1)\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, function_macro_arity_too_many_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(a) a\nF(1,2)\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, function_macro_unterminated_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(a) a\nF(1\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, function_macro_duplicate_param_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(a,a) a\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, function_macro_ellipsis_not_last_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(a, ..., b) a\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, function_macro_missing_close_paren_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(a\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, function_macro_variadic_parses)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a, ...) a\nF(1,2,3)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, va_args_without_variadic_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(a) __VA_ARGS__\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, function_macro_redefinition_param_rename_is_ok)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define F(a,b) a b\n#define F(x,y) x y\nF(1,2)\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_EQ(vec_size(pp->out), 3);
+    expect_out(pp, 0, TOK_PP_NUMBER, "1");
+    expect_out(pp, 1, TOK_PP_NUMBER, "2");
+    arena_free(a);
+}
