@@ -403,6 +403,14 @@ Type *type_func(Type *ret, Vec *params, bool is_variadic)
             return cached;
         }
     }
+    /* The cached Type must outlive the caller's arena: build the parameter
+       list in the pool so no interned entry points into transient storage. */
+    Vec *pool_params = vec_new(type_arena);
+    size_t nparams = vec_size(params);
+    for (size_t i = 0; i < nparams; i++)
+    {
+        vec_push(pool_params, (Type *) vec_get(params, i));
+    }
     Type *t = arena_alloc(type_arena, sizeof(Type), _Alignof(Type));
     t->kind = TYPE_FUNC;
     t->width = 0;
@@ -411,7 +419,7 @@ Type *type_func(Type *ret, Vec *params, bool is_variadic)
     t->qualifiers = 0;
     t->unqual_base = NULL;
     t->func.ret = ret;
-    t->func.params = params;
+    t->func.params = pool_params;
     t->func.is_variadic = is_variadic;
     u64map_set(func_cache, key, t);
     return t;

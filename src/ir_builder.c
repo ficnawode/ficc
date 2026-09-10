@@ -101,6 +101,7 @@ typedef struct FuncBuilder FuncBuilder;
 struct FuncBuilder
 {
     IrModule *mod;
+    IrFunction *f;        /* the function being lowered */
     U64Map *block_locals; /* (u64)IrBlock* -> BlockLocals* */
     Vec *loop_stack;      /* Vec<LoopContext*> */
     Vec *switch_stack;    /* Vec<SwitchCtx*> */
@@ -121,23 +122,18 @@ static u32 var_global_index(FuncBuilder *ctx, ASTVarDecl *decl);
 static IrOperand build_phi(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb);
 static IrInstr *emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries);
 static void fill_phi_entries(FuncBuilder *ctx, IrBlock *bb, ASTVarDecl *var, IrInstr *phi);
-static IrBlock *label_block(FuncBuilder *ctx, IrFunction *f, const char *name);
-static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
-static IrBlock *emit_init_plan(IrFunction *f, IrBlock *bb, IrOperand base, InitPlan *plan,
-                               FuncBuilder *ctx);
+static IrBlock *label_block(FuncBuilder *ctx, const char *name);
+static ExprResult build_expr(FuncBuilder *ctx, ASTNode *node, IrBlock *bb);
+static IrBlock *emit_init_plan(FuncBuilder *ctx, IrBlock *bb, IrOperand base, InitPlan *plan);
 static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrMap *global_map,
                                 U64Map *static_map, Arena *arena);
-static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
-static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
-static ExprResult build_subscript_expr(ASTSubscriptExpr *se, IrFunction *f, IrBlock *bb,
-                                       FuncBuilder *ctx);
-static ExprResult build_string_literal_expr(ASTStringLiteral *sl, IrFunction *f, IrBlock *bb,
-                                            FuncBuilder *ctx);
-static ExprResult build_member_lvalue(ASTMemberAccess *ma, IrFunction *f, IrBlock *bb,
-                                      FuncBuilder *ctx);
-static ExprResult build_member_access_expr(ASTMemberAccess *ma, IrFunction *f, IrBlock *bb,
-                                           FuncBuilder *ctx);
-static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx);
+static ExprResult build_deref_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *bb);
+static ExprResult build_addr_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *bb);
+static ExprResult build_subscript_expr(FuncBuilder *ctx, ASTSubscriptExpr *se, IrBlock *bb);
+static ExprResult build_string_literal_expr(FuncBuilder *ctx, ASTStringLiteral *sl, IrBlock *bb);
+static ExprResult build_member_lvalue(FuncBuilder *ctx, ASTMemberAccess *ma, IrBlock *bb);
+static ExprResult build_member_access_expr(FuncBuilder *ctx, ASTMemberAccess *ma, IrBlock *bb);
+static IrBlock *build_stmt(FuncBuilder *ctx, ASTNode *node, IrBlock *bb);
 
 static void ir_error(ASTNode *node, const char *fmt, ...)
 {
@@ -486,17 +482,21 @@ static ExprResult expr_result(IrOperand value, IrBlock *bb)
     return r;
 }
 
-static ExprResult build_int_literal_expr(ASTIntLiteral *lit, IrFunction *f, IrBlock *bb,
-                                         FuncBuilder *ctx)
+static ExprResult expr_void(IrBlock *bb)
 {
-    (void) f;
-    (void) ctx;
-    return expr_result(ir_operand_imm(lit->value), bb);
+    return expr_result(ir_operand_imm(0), bb);
 }
 
-static ExprResult build_ident_expr(ASTIdent *id, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+/* Load the value at an address and wrap it as an expression. */
+static ExprResult load_value(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *type)
 {
-    (void) f;
+    u32 dst = alloc_vreg_from_type(ctx, type);
+    ir_emit_load(bb, dst, addr);
+    return expr_result(ir_operand_vreg(dst), bb);
+}
+
+static ExprResult build_ident_expr(FuncBuilder *ctx, ASTIdent *id, IrBlock *bb)
+{
     if (id->is_func)
     {
         /* A function designator (§6.3.2.1p4) is its address: no load. */
@@ -517,22 +517,19 @@ static ExprResult build_ident_expr(ASTIdent *id, IrFunction *f, IrBlock *bb, Fun
         {
             return expr_result(addr, bb);
         }
-        u32 dst = alloc_vreg_from_type(ctx, g->type);
-        ir_emit_load(bb, dst, addr);
-        return expr_result(ir_operand_vreg(dst), bb);
+        return load_value(ctx, bb, addr, g->type);
     }
-    return expr_result(ir_operand_imm(0), bb);
+    return expr_void(bb);
 }
 
-static ExprResult build_short_circuit(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
-                                      FuncBuilder *ctx)
+static ExprResult build_short_circuit(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlock *bb)
 {
     bool is_or = be->op == BIN_LOG_OR;
-    ExprResult left = build_expr(be->left, f, bb, ctx);
-    IrBlock *true_bb = new_block(f, is_or ? "lor_true" : "land_true");
-    IrBlock *false_bb = new_block(f, is_or ? "lor_false" : "land_false");
-    IrBlock *right_bb = new_block(f, is_or ? "lor_rhs" : "land_rhs");
-    IrBlock *merge_bb = new_block(f, is_or ? "lor_merge" : "land_merge");
+    ExprResult left = build_expr(ctx, be->left, bb);
+    IrBlock *true_bb = new_block(ctx->f, is_or ? "lor_true" : "land_true");
+    IrBlock *false_bb = new_block(ctx->f, is_or ? "lor_false" : "land_false");
+    IrBlock *right_bb = new_block(ctx->f, is_or ? "lor_rhs" : "land_rhs");
+    IrBlock *merge_bb = new_block(ctx->f, is_or ? "lor_merge" : "land_merge");
 
     if (is_or)
     {
@@ -543,7 +540,7 @@ static ExprResult build_short_circuit(ASTBinaryExpr *be, IrFunction *f, IrBlock 
         cond_jump(left.block, left.value, right_bb, false_bb);
     }
 
-    ExprResult right = build_expr(be->right, f, right_bb, ctx);
+    ExprResult right = build_expr(ctx, be->right, right_bb);
     cond_jump(right.block, right.value, true_bb, false_bb);
 
     jump(true_bb, merge_bb);
@@ -564,24 +561,23 @@ static ExprResult build_short_circuit(ASTBinaryExpr *be, IrFunction *f, IrBlock 
     return expr_result(ir_operand_vreg(dst), merge_bb);
 }
 
-static ExprResult build_ternary_expr(ASTTernaryExpr *te, IrFunction *f, IrBlock *bb,
-                                     FuncBuilder *ctx)
+static ExprResult build_ternary_expr(FuncBuilder *ctx, ASTTernaryExpr *te, IrBlock *bb)
 {
-    ExprResult cond = build_expr(te->cond, f, bb, ctx);
+    ExprResult cond = build_expr(ctx, te->cond, bb);
 
-    IrBlock *then_bb = new_block(f, "tern_then");
-    IrBlock *else_bb = new_block(f, "tern_else");
-    IrBlock *merge_bb = new_block(f, "tern_merge");
+    IrBlock *then_bb = new_block(ctx->f, "tern_then");
+    IrBlock *else_bb = new_block(ctx->f, "tern_else");
+    IrBlock *merge_bb = new_block(ctx->f, "tern_merge");
 
     cond_jump(cond.block, cond.value, then_bb, else_bb);
 
-    ExprResult then_val = build_expr(te->then_expr, f, then_bb, ctx);
+    ExprResult then_val = build_expr(ctx, te->then_expr, then_bb);
     if (!is_terminated(then_val.block))
     {
         jump(then_val.block, merge_bb);
     }
 
-    ExprResult else_val = build_expr(te->else_expr, f, else_bb, ctx);
+    ExprResult else_val = build_expr(ctx, te->else_expr, else_bb);
     if (!is_terminated(else_val.block))
     {
         jump(else_val.block, merge_bb);
@@ -598,11 +594,10 @@ static ExprResult build_ternary_expr(ASTTernaryExpr *te, IrFunction *f, IrBlock 
 }
 
 /* Element address of a subscript: index promoted to long, GEP'd by size. */
-static ExprResult build_subscript_addr(ASTSubscriptExpr *se, IrFunction *f, IrBlock *bb,
-                                       FuncBuilder *ctx)
+static ExprResult build_subscript_addr(FuncBuilder *ctx, ASTSubscriptExpr *se, IrBlock *bb)
 {
-    ExprResult base = build_expr(se->array, f, bb, ctx);
-    ExprResult index = build_expr(se->index, f, base.block, ctx);
+    ExprResult base = build_expr(ctx, se->array, bb);
+    ExprResult index = build_expr(ctx, se->index, base.block);
     bb = index.block;
     Type *elem = type_deref(type_decay(node_type(se->array)));
     IrOperand idx = promote_to(ctx, bb, index.value, node_type(se->index), type_long());
@@ -628,7 +623,7 @@ static LvalueResult mem_lvalue(IrOperand addr, Type *type, IrBlock *bb)
 
 /* Lower a write target into an lvalue slot. The address is computed exactly
    once; operators never re-evaluate it. */
-static LvalueResult build_lvalue_slot(ASTNode *target, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static LvalueResult build_lvalue_slot(FuncBuilder *ctx, ASTNode *target, IrBlock *bb)
 {
     switch (target->kind)
     {
@@ -661,7 +656,7 @@ static LvalueResult build_lvalue_slot(ASTNode *target, IrFunction *f, IrBlock *b
         case AST_MEMBER_ACCESS:
         {
             ASTMemberAccess *ma = ast_as(ASTMemberAccess, target);
-            ExprResult lv = build_member_lvalue(ma, f, bb, ctx);
+            ExprResult lv = build_member_lvalue(ctx, ma, bb);
             return mem_lvalue(lv.value, ma->field_type, lv.block);
         }
         case AST_UNARY_EXPR:
@@ -669,7 +664,7 @@ static LvalueResult build_lvalue_slot(ASTNode *target, IrFunction *f, IrBlock *b
             ASTUnaryExpr *ue = ast_as(ASTUnaryExpr, target);
             if (ue->op == UN_DEREF)
             {
-                ExprResult ptr = build_expr(ue->operand, f, bb, ctx);
+                ExprResult ptr = build_expr(ctx, ue->operand, bb);
                 return mem_lvalue(ptr.value, node_type(target), ptr.block);
             }
             break;
@@ -677,7 +672,7 @@ static LvalueResult build_lvalue_slot(ASTNode *target, IrFunction *f, IrBlock *b
         case AST_SUBSCRIPT_EXPR:
         {
             ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, target);
-            ExprResult addr = build_subscript_addr(se, f, bb, ctx);
+            ExprResult addr = build_subscript_addr(ctx, se, bb);
             return mem_lvalue(addr.value, type_deref(type_decay(node_type(se->array))), addr.block);
         }
         default:
@@ -718,21 +713,21 @@ static IrBlock *store_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot, Ir
     return bb;
 }
 
-static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_assign_expr(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlock *bb)
 {
-    LvalueResult lv = build_lvalue_slot(be->left, f, bb, ctx);
+    LvalueResult lv = build_lvalue_slot(ctx, be->left, bb);
     if (lv.failed)
     {
-        return expr_result(ir_operand_imm(0), lv.block);
+        return expr_void(lv.block);
     }
     bb = lv.block;
-    ExprResult right = build_expr(be->right, f, bb, ctx);
+    ExprResult right = build_expr(ctx, be->right, bb);
     bb = right.block;
     Type *lhs_type = lv.slot.type;
     if (type_is_array(lhs_type))
     {
         ir_error(&be->base, "array is not assignable");
-        return expr_result(ir_operand_imm(0), bb);
+        return expr_void(bb);
     }
     if (type_is_record(lhs_type))
     {
@@ -747,12 +742,12 @@ static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
 
 /* `++`/`--`: load old, step (pointers GEP by pointee size, arithmetic
    promotes/adjusts/rewraps), store; postfix yields old, prefix new. */
-static ExprResult build_incdec_expr(ASTIncDecExpr *ie, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_incdec_expr(FuncBuilder *ctx, ASTIncDecExpr *ie, IrBlock *bb)
 {
-    LvalueResult lv = build_lvalue_slot(ie->operand, f, bb, ctx);
+    LvalueResult lv = build_lvalue_slot(ctx, ie->operand, bb);
     if (lv.failed)
     {
-        return expr_result(ir_operand_imm(0), lv.block);
+        return expr_void(lv.block);
     }
     bb = lv.block;
     Type *t = lv.slot.type;
@@ -815,7 +810,7 @@ static BinOpKind plain_op(BinOpKind op)
 
 /* Usual-arithmetic promotions: pointer operands convert the non-pointer side
    to the pointer type; shift counts promote independently (§6.5.9p4/§6.5.7). */
-static void promote_binop_operands(BinOpKind op, FuncBuilder *ctx, IrBlock *bb, IrOperand *lhs,
+static void promote_binop_operands(FuncBuilder *ctx, BinOpKind op, IrBlock *bb, IrOperand *lhs,
                                    IrOperand *rhs, Type **lt, Type **rt)
 {
     if (!is_comparison_op(op) && !is_shift_op(op) && !is_divrem_op(op))
@@ -897,8 +892,8 @@ static IrOpcode arith_opcode(BinOpKind op, Type *lt)
     return opcode;
 }
 
-static ArithResult lower_arith_into(ArithSpec spec, IrOperand lval, IrOperand rval, IrBlock *bb,
-                                    FuncBuilder *ctx)
+static ArithResult lower_arith_into(FuncBuilder *ctx, ArithSpec spec, IrOperand lval,
+                                    IrOperand rval, IrBlock *bb)
 {
     ArithResult ar;
     ar.value = ir_operand_imm(0);
@@ -927,7 +922,7 @@ static ArithResult lower_arith_into(ArithSpec spec, IrOperand lval, IrOperand rv
     IrOperand rhs = rval;
     Type *lt = spec.lt;
     Type *rt = spec.rt;
-    promote_binop_operands(spec.op, ctx, bb, &lhs, &rhs, &lt, &rt);
+    promote_binop_operands(ctx, spec.op, bb, &lhs, &rhs, &lt, &rt);
 
     IrOpcode opcode = arith_opcode(spec.op, lt);
     if (opcode == 0)
@@ -941,35 +936,33 @@ static ArithResult lower_arith_into(ArithSpec spec, IrOperand lval, IrOperand rv
     return ar;
 }
 
-static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
-                                         FuncBuilder *ctx)
+static ExprResult build_arith_binop_expr(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlock *bb)
 {
-    ExprResult left = build_expr(be->left, f, bb, ctx);
-    ExprResult right = build_expr(be->right, f, left.block, ctx);
+    ExprResult left = build_expr(ctx, be->left, bb);
+    ExprResult right = build_expr(ctx, be->right, left.block);
 
     ArithSpec spec = {.op = be->op,
                       .lt = type_decay(node_type(be->left)),
                       .rt = type_decay(node_type(be->right)),
                       .result_type = node_type((ASTNode *) be),
                       .node = (ASTNode *) be};
-    ArithResult ar = lower_arith_into(spec, left.value, right.value, right.block, ctx);
+    ArithResult ar = lower_arith_into(ctx, spec, left.value, right.value, right.block);
     return expr_result(ar.value, ar.block);
 }
 
 /* Compound assignment (§6.5.16.2): load once, run the plain op's lowering,
    rewrap to the LHS type, store, and yield the new value. */
-static ExprResult build_compound_assign(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
-                                        FuncBuilder *ctx)
+static ExprResult build_compound_assign(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlock *bb)
 {
-    LvalueResult lv = build_lvalue_slot(be->left, f, bb, ctx);
+    LvalueResult lv = build_lvalue_slot(ctx, be->left, bb);
     if (lv.failed)
     {
-        return expr_result(ir_operand_imm(0), lv.block);
+        return expr_void(lv.block);
     }
     bb = lv.block;
     Type *lt = lv.slot.type;
     IrOperand cur = load_lvalue(ctx, bb, &lv.slot);
-    ExprResult right = build_expr(be->right, f, bb, ctx);
+    ExprResult right = build_expr(ctx, be->right, bb);
     bb = right.block;
     Type *rt = type_decay(node_type(be->right));
 
@@ -980,7 +973,7 @@ static ExprResult build_compound_assign(ASTBinaryExpr *be, IrFunction *f, IrBloc
                           type_is_ptr(lt) ? lt : type_common(type_promote(lt), type_promote(rt)),
                       .node = (ASTNode *) be};
 
-    ArithResult ar = lower_arith_into(spec, cur, right.value, bb, ctx);
+    ArithResult ar = lower_arith_into(ctx, spec, cur, right.value, bb);
     bb = ar.block;
 
     IrOperand newv = promote_to(ctx, bb, ar.value, ar.result_type, lt);
@@ -988,18 +981,18 @@ static ExprResult build_compound_assign(ASTBinaryExpr *be, IrFunction *f, IrBloc
     return expr_result(newv, bb);
 }
 
-static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_unary_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *bb)
 {
     switch (ue->op)
     {
         case UN_DEREF:
-            return build_deref_expr(ue, f, bb, ctx);
+            return build_deref_expr(ctx, ue, bb);
         case UN_ADDR:
-            return build_addr_expr(ue, f, bb, ctx);
+            return build_addr_expr(ctx, ue, bb);
         default:
             break;
     }
-    ExprResult src = build_expr(ue->operand, f, bb, ctx);
+    ExprResult src = build_expr(ctx, ue->operand, bb);
     Type *result_type = node_type((ASTNode *) ue);
     u32 dst = alloc_vreg_from_type(ctx, result_type);
     if (ue->op == UN_LOG_NOT)
@@ -1017,21 +1010,19 @@ static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
 }
 
 /* An anonymous object whose slot is allocated and plan-applied (§6.5.2.5). */
-static ExprResult compound_literal_slot(ASTCompoundLiteral *cl, IrFunction *f, IrBlock *bb,
-                                        FuncBuilder *ctx)
+static ExprResult compound_literal_slot(FuncBuilder *ctx, ASTCompoundLiteral *cl, IrBlock *bb)
 {
     u32 slot = alloc_vreg_from_type(ctx, type_ptr(cl->type));
     ir_emit_alloca(bb, slot, cl->type->size);
-    bb = emit_init_plan(f, bb, ir_operand_vreg(slot), cl->plan, ctx);
+    bb = emit_init_plan(ctx, bb, ir_operand_vreg(slot), cl->plan);
     return expr_result(ir_operand_vreg(slot), bb);
 }
 
 /* §6.5.2.5 compound literal: yield the slot address (memory) or a loaded
    scalar. */
-static ExprResult build_compound_literal_expr(ASTCompoundLiteral *cl, IrFunction *f, IrBlock *bb,
-                                              FuncBuilder *ctx)
+static ExprResult build_compound_literal_expr(FuncBuilder *ctx, ASTCompoundLiteral *cl, IrBlock *bb)
 {
-    ExprResult slot = compound_literal_slot(cl, f, bb, ctx);
+    ExprResult slot = compound_literal_slot(ctx, cl, bb);
     bb = slot.block;
     Type *ty = type_unqual(cl->type);
     if (type_is_memory(ty))
@@ -1040,23 +1031,21 @@ static ExprResult build_compound_literal_expr(ASTCompoundLiteral *cl, IrFunction
     }
     if (ty->kind == TYPE_VOID)
     {
-        return expr_result(ir_operand_imm(0), bb);
+        return expr_void(bb);
     }
-    u32 dst = alloc_vreg_from_type(ctx, ty);
-    ir_emit_load(bb, dst, slot.value);
-    return expr_result(ir_operand_vreg(dst), bb);
+    return load_value(ctx, bb, slot.value, ty);
 }
 
 /* §6.5.4 cast: `(void)` discards; integer/pointer converts via promote_to;
    pointer→pointer is a reinterpretation, so no instruction. */
-static ExprResult build_cast_expr(ASTCastExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_cast_expr(FuncBuilder *ctx, ASTCastExpr *ce, IrBlock *bb)
 {
-    ExprResult src = build_expr(ce->operand, f, bb, ctx);
+    ExprResult src = build_expr(ctx, ce->operand, bb);
     bb = src.block;
     Type *target = ce->target_type;
     if (target->kind == TYPE_VOID)
     {
-        return expr_result(ir_operand_imm(0), bb);
+        return expr_void(bb);
     }
     Type *src_type = node_type(ce->operand);
     if (type_is_ptr(target) && type_is_ptr(src_type))
@@ -1068,9 +1057,9 @@ static ExprResult build_cast_expr(ASTCastExpr *ce, IrFunction *f, IrBlock *bb, F
 
 /* `__builtin_va_arg`: OP_VA_ARG reads the full 8-byte slot (the backends
    advance ap), then promote_to converts to the requested type. */
-static ExprResult build_va_arg_expr(ASTVaArgExpr *va, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_va_arg_expr(FuncBuilder *ctx, ASTVaArgExpr *va, IrBlock *bb)
 {
-    ExprResult ap = build_expr(va->ap, f, bb, ctx);
+    ExprResult ap = build_expr(ctx, va->ap, bb);
     Type *target = type_rvalue(va->type);
     u32 raw = alloc_vreg_from_type(ctx, type_long());
     ir_emit_va_arg(ap.block, raw, ap.value);
@@ -1080,35 +1069,35 @@ static ExprResult build_va_arg_expr(ASTVaArgExpr *va, IrFunction *f, IrBlock *bb
 
 /* va_start/va_end record ap and the offset; the register spill lives in the
    backends. */
-static ExprResult build_va_builtin(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_va_builtin(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *bb)
 {
     if (strcmp(ce->callee, "__builtin_va_start") == 0)
     {
-        ExprResult ap = build_expr((ASTNode *) vec_get(ce->args, 0), f, bb, ctx);
-        (void) build_expr((ASTNode *) vec_get(ce->args, 1), f, ap.block, ctx);
-        i64 n_params = (i64) vec_size(f->params);
+        ExprResult ap = build_expr(ctx, (ASTNode *) vec_get(ce->args, 0), bb);
+        (void) build_expr(ctx, (ASTNode *) vec_get(ce->args, 1), ap.block);
+        i64 n_params = (i64) vec_size(ctx->f->params);
         i64 gp = n_params * 8 < 48 ? n_params * 8 : 48;
         i64 skip = n_params > 6 ? (n_params - 6) * 8 : 0;
         ir_emit_va_start(ap.block, ap.value, skip, gp);
-        return expr_result(ir_operand_imm(0), ap.block);
+        return expr_void(ap.block);
     }
     if (strcmp(ce->callee, "__builtin_va_end") == 0)
     {
-        ExprResult ap = build_expr((ASTNode *) vec_get(ce->args, 0), f, bb, ctx);
+        ExprResult ap = build_expr(ctx, (ASTNode *) vec_get(ce->args, 0), bb);
         ir_emit_va_end(ap.block, ap.value);
-        return expr_result(ir_operand_imm(0), ap.block);
+        return expr_void(ap.block);
     }
     ir_error((ASTNode *) ce, "unknown builtin '%s'", ce->callee);
     ctx->failed = true;
-    return expr_result(ir_operand_imm(0), bb);
+    return expr_void(bb);
 }
 
 /* Lower one call argument: record args are copied into a fresh temp and passed
    by pointer; the rest convert to the parameter's type. */
-static IrBlock *lower_call_arg(FuncBuilder *ctx, IrFunction *f, ASTNode *arg, Type *param_type,
-                               IrBlock *bb, IrOperand *out)
+static IrBlock *lower_call_arg(FuncBuilder *ctx, ASTNode *arg, Type *param_type, IrBlock *bb,
+                               IrOperand *out)
 {
-    ExprResult arg_res = build_expr(arg, f, bb, ctx);
+    ExprResult arg_res = build_expr(ctx, arg, bb);
     bb = arg_res.block;
     Type *arg_type = arg->expr_type;
     if (type_is_record(arg_type))
@@ -1135,7 +1124,7 @@ static Type *call_param_type(Type *callee_type, size_t i, Type *arg_type)
     return callee_type->func.is_variadic ? type_promote(arg_type) : arg_type;
 }
 
-static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_call_expr(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *bb)
 {
     /* Resolve the callee: a named function (direct) or a runtime value
        (indirect). */
@@ -1144,7 +1133,7 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
     bool indirect = ce->callee_expr != NULL;
     if (indirect)
     {
-        ExprResult cres = build_expr(ce->callee_expr, f, bb, ctx);
+        ExprResult cres = build_expr(ctx, ce->callee_expr, bb);
         bb = cres.block;
         indirect_callee = cres.value;
         callee_type = node_type(ce->callee_expr);
@@ -1162,7 +1151,7 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
         {
             /* A compiler builtin; a user definition with the same name wins
                and never reaches this branch. */
-            return build_va_builtin(ce, f, bb, ctx);
+            return build_va_builtin(ctx, ce, bb);
         }
     }
     ASSERT(callee_type->kind == TYPE_FUNC);
@@ -1189,7 +1178,7 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
     {
         ASTNode *arg = (ASTNode *) vec_get(ce->args, i);
         u32 slot = sret ? i + 1 : i;
-        bb = lower_call_arg(ctx, f, arg, call_param_type(callee_type, i, arg->expr_type), bb,
+        bb = lower_call_arg(ctx, arg, call_param_type(callee_type, i, arg->expr_type), bb,
                             &args[slot]);
     }
 
@@ -1221,9 +1210,9 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
     return expr_result(dst == NO_VREG ? ir_operand_imm(0) : ir_operand_vreg(dst), bb);
 }
 
-static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_deref_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *bb)
 {
-    ExprResult ptr_res = build_expr(ue->operand, f, bb, ctx);
+    ExprResult ptr_res = build_expr(ctx, ue->operand, bb);
     Type *result_type = node_type((ASTNode *) ue);
     if (type_is_function(result_type))
     {
@@ -1236,15 +1225,13 @@ static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
     }
     if (result_type->kind == TYPE_VOID)
     {
-        /* `void*` deref: no load and no value (semantic rejects using it). */
-        return expr_result(ir_operand_imm(0), ptr_res.block);
+        /* `void*` deref: no load and no value. */
+        return expr_void(ptr_res.block);
     }
-    u32 dst = alloc_vreg_from_type(ctx, result_type);
-    ir_emit_load(ptr_res.block, dst, ptr_res.value);
-    return expr_result(ir_operand_vreg(dst), ptr_res.block);
+    return load_value(ctx, ptr_res.block, ptr_res.value, result_type);
 }
 
-static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_addr_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *bb)
 {
     ASTNode *operand = ue->operand;
     switch (operand->kind)
@@ -1255,17 +1242,17 @@ static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, 
             if (inner->op == UN_DEREF)
             {
                 /* `&*p`: the address of the pointed-to object is just p. */
-                return build_expr(inner->operand, f, bb, ctx);
+                return build_expr(ctx, inner->operand, bb);
             }
             break;
         }
         case AST_SUBSCRIPT_EXPR:
-            return build_subscript_addr(ast_as(ASTSubscriptExpr, operand), f, bb, ctx);
+            return build_subscript_addr(ctx, ast_as(ASTSubscriptExpr, operand), bb);
         case AST_MEMBER_ACCESS:
-            return build_member_lvalue(ast_as(ASTMemberAccess, operand), f, bb, ctx);
+            return build_member_lvalue(ctx, ast_as(ASTMemberAccess, operand), bb);
         case AST_COMPOUND_LITERAL:
             /* The slot address without the load — the point of `&`. */
-            return compound_literal_slot(ast_as(ASTCompoundLiteral, operand), f, bb, ctx);
+            return compound_literal_slot(ctx, ast_as(ASTCompoundLiteral, operand), bb);
         case AST_IDENT:
         {
             ASTIdent *id = ast_as(ASTIdent, operand);
@@ -1293,30 +1280,25 @@ static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, 
             break;
     }
     /* Arrays decay to a pointer in build_expr; other operands build their value. */
-    return build_expr(operand, f, bb, ctx);
+    return build_expr(ctx, operand, bb);
 }
 
-static ExprResult build_subscript_expr(ASTSubscriptExpr *se, IrFunction *f, IrBlock *bb,
-                                       FuncBuilder *ctx)
+static ExprResult build_subscript_expr(FuncBuilder *ctx, ASTSubscriptExpr *se, IrBlock *bb)
 {
-    ExprResult addr = build_subscript_addr(se, f, bb, ctx);
+    ExprResult addr = build_subscript_addr(ctx, se, bb);
     bb = addr.block;
     Type *elem = type_deref(type_decay(node_type(se->array)));
     if (type_is_memory(elem) || elem->kind == TYPE_VOID)
     {
         return addr;
     }
-    u32 dst = alloc_vreg_from_type(ctx, elem);
-    ir_emit_load(bb, dst, addr.value);
-    return expr_result(ir_operand_vreg(dst), bb);
+    return load_value(ctx, bb, addr.value, elem);
 }
 
 /* sizeof/alignof are compile-time constants resolved by semantic (§6.5.3.4);
    the expression value is that constant. */
-static ExprResult build_size_const(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_size_const(ASTNode *node, IrBlock *bb)
 {
-    (void) f;
-    (void) ctx;
     switch (node->kind)
     {
         case AST_SIZEOF_TYPE:
@@ -1329,7 +1311,7 @@ static ExprResult build_size_const(ASTNode *node, IrFunction *f, IrBlock *bb, Fu
             return expr_result(ir_operand_imm((i64) ast_as(ASTAlignofExpr, node)->align_value), bb);
         default:
             ir_error(node, "unsupported size expression");
-            return expr_result(ir_operand_imm(0), bb);
+            return expr_void(bb);
     }
 }
 
@@ -1376,6 +1358,91 @@ static const u8 *encode_object_bytes(Arena *arena, i64 value, Type *type)
     return encode_const_bytes(arena, value, (u32) type->size);
 }
 
+static bool fold_unary_constant(ASTUnaryExpr *u, i64 v, i64 *out)
+{
+    switch (u->op)
+    {
+        case UN_NEG:
+            *out = -v;
+            return true;
+        case UN_BIT_NOT:
+            *out = ~v;
+            return true;
+        case UN_LOG_NOT:
+            *out = !v;
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool fold_binary_constant(ASTBinaryExpr *b, i64 l, i64 r, i64 *out)
+{
+    switch (b->op)
+    {
+        case BIN_ADD:
+            *out = l + r;
+            return true;
+        case BIN_SUB:
+            *out = l - r;
+            return true;
+        case BIN_MUL:
+            *out = l * r;
+            return true;
+        case BIN_DIV:
+        case BIN_REM:
+            if (r == 0)
+            {
+                return false;
+            }
+            *out = b->op == BIN_DIV ? l / r : l % r;
+            return true;
+        case BIN_SHL:
+        case BIN_SHR:
+            if (r < 0 || r > 63)
+            {
+                return false;
+            }
+            *out = b->op == BIN_SHL ? l << r : l >> r;
+            return true;
+        case BIN_AND:
+            *out = l & r;
+            return true;
+        case BIN_OR:
+            *out = l | r;
+            return true;
+        case BIN_XOR:
+            *out = l ^ r;
+            return true;
+        case BIN_LOG_AND:
+            *out = l && r;
+            return true;
+        case BIN_LOG_OR:
+            *out = l || r;
+            return true;
+        case BIN_EQ:
+            *out = l == r;
+            return true;
+        case BIN_NE:
+            *out = l != r;
+            return true;
+        case BIN_LT:
+            *out = l < r;
+            return true;
+        case BIN_GT:
+            *out = l > r;
+            return true;
+        case BIN_LE:
+            *out = l <= r;
+            return true;
+        case BIN_GE:
+            *out = l >= r;
+            return true;
+        default:
+            return false;
+    }
+}
+
 /* Fold a constant expression (§6.6); semantic already resolved sizeof/alignof.
    Returns false when not constant. */
 static bool fold_constant_ir(ASTNode *node, i64 *out)
@@ -1397,20 +1464,7 @@ static bool fold_constant_ir(ASTNode *node, i64 *out)
             {
                 return false;
             }
-            switch (u->op)
-            {
-                case UN_NEG:
-                    *out = -v;
-                    return true;
-                case UN_BIT_NOT:
-                    *out = ~v;
-                    return true;
-                case UN_LOG_NOT:
-                    *out = !v;
-                    return true;
-                default:
-                    return false;
-            }
+            return fold_unary_constant(u, v, out);
         }
         case AST_BINARY_EXPR:
         {
@@ -1420,69 +1474,7 @@ static bool fold_constant_ir(ASTNode *node, i64 *out)
             {
                 return false;
             }
-            switch (b->op)
-            {
-                case BIN_ADD:
-                    *out = l + r;
-                    return true;
-                case BIN_SUB:
-                    *out = l - r;
-                    return true;
-                case BIN_MUL:
-                    *out = l * r;
-                    return true;
-                case BIN_DIV:
-                case BIN_REM:
-                    if (r == 0)
-                    {
-                        return false;
-                    }
-                    *out = b->op == BIN_DIV ? l / r : l % r;
-                    return true;
-                case BIN_SHL:
-                case BIN_SHR:
-                    if (r < 0 || r > 63)
-                    {
-                        return false;
-                    }
-                    *out = b->op == BIN_SHL ? l << r : l >> r;
-                    return true;
-                case BIN_AND:
-                    *out = l & r;
-                    return true;
-                case BIN_OR:
-                    *out = l | r;
-                    return true;
-                case BIN_XOR:
-                    *out = l ^ r;
-                    return true;
-                case BIN_LOG_AND:
-                    *out = l && r;
-                    return true;
-                case BIN_LOG_OR:
-                    *out = l || r;
-                    return true;
-                case BIN_EQ:
-                    *out = l == r;
-                    return true;
-                case BIN_NE:
-                    *out = l != r;
-                    return true;
-                case BIN_LT:
-                    *out = l < r;
-                    return true;
-                case BIN_GT:
-                    *out = l > r;
-                    return true;
-                case BIN_LE:
-                    *out = l <= r;
-                    return true;
-                case BIN_GE:
-                    *out = l >= r;
-                    return true;
-                default:
-                    return false;
-            }
+            return fold_binary_constant(b, l, r, out);
         }
         case AST_TERNARY_EXPR:
         {
@@ -1592,62 +1584,77 @@ static u32 emit_file_scope_compound(ASTCompoundLiteral *cl, IrModule *mod, Arena
     return idx;
 }
 
+/* An `&expr` address constant: an anonymous compound literal, a function
+   designator, or the address of a global / block-scope static. */
+static int serializer_addr_target(ASTNode *operand, IrModule *mod, StrMap *global_map,
+                                  U64Map *static_map, Arena *arena, const char **out_func)
+{
+    switch (operand->kind)
+    {
+        case AST_COMPOUND_LITERAL:
+            /* `&(type){...}` serializes the literal's anonymous object. */
+            return (int) emit_file_scope_compound(ast_as(ASTCompoundLiteral, operand), mod, arena,
+                                                  global_map, static_map);
+        case AST_IDENT:
+        {
+            ASTIdent *id = ast_as(ASTIdent, operand);
+            if (id->is_func)
+            {
+                /* `&f` is the designator's address, a function reloc. */
+                *out_func = id->name;
+                return -2;
+            }
+            ASTVarDecl *decl = id->decl;
+            if (!decl)
+            {
+                return -1;
+            }
+            if (decl->is_block_scope)
+            {
+                u32 *p = decl->storage == SC_STATIC && static_map
+                             ? u64map_get(static_map, (u64) (uintptr_t) decl)
+                             : NULL;
+                return p ? (int) *p : -1;
+            }
+            u32 *p = strmap_get(global_map, decl->name);
+            return p ? (int) *p : -1;
+        }
+        default:
+            return -1;
+    }
+}
+
 static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
                                    U64Map *static_map, Arena *arena, const char **out_func)
 {
     *out_func = NULL;
-    if (value->kind == AST_STRING_LITERAL)
+    switch (value->kind)
     {
-        return (int) ir_add_string_global(ast_as(ASTStringLiteral, value), mod, arena);
-    }
-    if (value->kind == AST_IDENT)
-    {
-        /* A bare function designator names its address: `int (*fp)(int) = f;` */
-        ASTIdent *id = ast_as(ASTIdent, value);
-        if (id->is_func)
+        case AST_STRING_LITERAL:
+            return (int) ir_add_string_global(ast_as(ASTStringLiteral, value), mod, arena);
+        case AST_IDENT:
         {
-            *out_func = id->name;
-            return -2; /* function-address relocation */
+            /* A bare function designator names its address: `int (*fp)(int) = f;` */
+            ASTIdent *id = ast_as(ASTIdent, value);
+            if (id->is_func)
+            {
+                *out_func = id->name;
+                return -2; /* function-address relocation */
+            }
+            break;
         }
-    }
-    if (value->kind == AST_UNARY_EXPR)
-    {
-        ASTUnaryExpr *u = ast_as(ASTUnaryExpr, value);
-        if (u->op == UN_ADDR)
+        case AST_UNARY_EXPR:
         {
-            if (u->operand->kind == AST_COMPOUND_LITERAL)
+            ASTUnaryExpr *u = ast_as(ASTUnaryExpr, value);
+            if (u->op == UN_ADDR)
             {
-                /* `&(type){...}` serializes the literal's anonymous object. */
-                return (int) emit_file_scope_compound(ast_as(ASTCompoundLiteral, u->operand), mod,
-                                                      arena, global_map, static_map);
+                return serializer_addr_target(u->operand, mod, global_map, static_map, arena,
+                                              out_func);
             }
-            if (u->operand->kind == AST_IDENT)
-            {
-                ASTIdent *id = ast_as(ASTIdent, u->operand);
-                if (id->is_func)
-                {
-                    /* `&f` is the designator's address, a function reloc. */
-                    *out_func = id->name;
-                    return -2;
-                }
-                ASTVarDecl *decl = id->decl;
-                if (!decl)
-                {
-                    return -1;
-                }
-                if (decl->is_block_scope)
-                {
-                    if (decl->storage == SC_STATIC && static_map)
-                    {
-                        u32 *p = u64map_get(static_map, (u64) (uintptr_t) decl);
-                        return p ? (int) *p : -1;
-                    }
-                    return -1; /* block-scope auto: not an address constant */
-                }
-                u32 *p = strmap_get(global_map, decl->name);
-                return p ? (int) *p : -1;
-            }
+            break;
         }
+        default:
+            break;
     }
     return -1;
 }
@@ -1850,8 +1857,7 @@ static u32 ir_add_zero_blob(IrModule *mod, Arena *arena, u32 size)
 
 /* Apply an InitPlan at `base`: zero-fill the object, then each write as a
    scalar OP_STORE or char-array OP_MEMCPY, GEP'd by the write's offset. */
-static IrBlock *emit_init_plan(IrFunction *f, IrBlock *bb, IrOperand base, InitPlan *plan,
-                               FuncBuilder *ctx)
+static IrBlock *emit_init_plan(FuncBuilder *ctx, IrBlock *bb, IrOperand base, InitPlan *plan)
 {
     if (plan->total_size > 0)
     {
@@ -1877,7 +1883,7 @@ static IrBlock *emit_init_plan(IrFunction *f, IrBlock *bb, IrOperand base, InitP
         }
         else
         {
-            ExprResult val = build_expr(w->value, f, bb, ctx);
+            ExprResult val = build_expr(ctx, w->value, bb);
             bb = val.block;
             IrOperand o = promote_to(ctx, bb, val.value, node_type(w->value), w->type);
             ir_emit_store(bb, o, ir_operand_vreg(addr), w->type->size);
@@ -1886,29 +1892,25 @@ static IrBlock *emit_init_plan(IrFunction *f, IrBlock *bb, IrOperand base, InitP
     return bb;
 }
 
-static ExprResult build_string_literal_expr(ASTStringLiteral *sl, IrFunction *f, IrBlock *bb,
-                                            FuncBuilder *ctx)
+static ExprResult build_string_literal_expr(FuncBuilder *ctx, ASTStringLiteral *sl, IrBlock *bb)
 {
-    (void) f;
     u32 idx = ir_add_string_global(sl, ctx->mod, ctx->mod->arena);
     return expr_result(ir_operand_global(idx), bb);
 }
 
 /* Member address: both `.` and `->` GEP the object pointer by field_offset. */
-static ExprResult build_member_lvalue(ASTMemberAccess *ma, IrFunction *f, IrBlock *bb,
-                                      FuncBuilder *ctx)
+static ExprResult build_member_lvalue(FuncBuilder *ctx, ASTMemberAccess *ma, IrBlock *bb)
 {
-    ExprResult obj = build_expr(ma->object, f, bb, ctx);
+    ExprResult obj = build_expr(ctx, ma->object, bb);
     bb = obj.block;
     u32 addr = alloc_vreg_from_type(ctx, type_ptr(ma->field_type));
     ir_emit_gep(bb, addr, obj.value, ir_operand_imm(1), ma->field_offset);
     return expr_result(ir_operand_vreg(addr), bb);
 }
 
-static ExprResult build_member_access_expr(ASTMemberAccess *ma, IrFunction *f, IrBlock *bb,
-                                           FuncBuilder *ctx)
+static ExprResult build_member_access_expr(FuncBuilder *ctx, ASTMemberAccess *ma, IrBlock *bb)
 {
-    ExprResult lv = build_member_lvalue(ma, f, bb, ctx);
+    ExprResult lv = build_member_lvalue(ctx, ma, bb);
     if (type_is_memory(ma->field_type))
     {
         return lv;
@@ -1916,80 +1918,78 @@ static ExprResult build_member_access_expr(ASTMemberAccess *ma, IrFunction *f, I
     if (ma->field_type->kind == TYPE_VOID)
     {
         /* A `void`-typed field has no loading width; cf. build_deref_expr. */
-        return expr_result(ir_operand_imm(0), lv.block);
+        return expr_void(lv.block);
     }
-    u32 dst = alloc_vreg_from_type(ctx, ma->field_type);
-    ir_emit_load(lv.block, dst, lv.value);
-    return expr_result(ir_operand_vreg(dst), lv.block);
+    return load_value(ctx, lv.block, lv.value, ma->field_type);
 }
 
-static ExprResult build_binary_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_binary_expr(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlock *bb)
 {
     if (plain_op(be->op) != be->op)
     {
         /* Not its own plain form: a compound assignment. */
-        return build_compound_assign(be, f, bb, ctx);
+        return build_compound_assign(ctx, be, bb);
     }
     switch (be->op)
     {
         case BIN_COMMA:
         {
             /* §6.5.17: evaluate the left and discard it, return the right. */
-            ExprResult left = build_expr(be->left, f, bb, ctx);
-            return build_expr(be->right, f, left.block, ctx);
+            ExprResult left = build_expr(ctx, be->left, bb);
+            return build_expr(ctx, be->right, left.block);
         }
         case BIN_LOG_AND:
         case BIN_LOG_OR:
-            return build_short_circuit(be, f, bb, ctx);
+            return build_short_circuit(ctx, be, bb);
         case BIN_ASSIGN:
-            return build_assign_expr(be, f, bb, ctx);
+            return build_assign_expr(ctx, be, bb);
         default:
-            return build_arith_binop_expr(be, f, bb, ctx);
+            return build_arith_binop_expr(ctx, be, bb);
     }
 }
 
-static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static ExprResult build_expr(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
 {
     switch (node->kind)
     {
         case AST_INT_LITERAL:
-            return build_int_literal_expr(ast_as(ASTIntLiteral, node), f, bb, ctx);
+            return expr_result(ir_operand_imm(ast_as(ASTIntLiteral, node)->value), bb);
         case AST_IDENT:
-            return build_ident_expr(ast_as(ASTIdent, node), f, bb, ctx);
+            return build_ident_expr(ctx, ast_as(ASTIdent, node), bb);
         case AST_BINARY_EXPR:
-            return build_binary_expr(ast_as(ASTBinaryExpr, node), f, bb, ctx);
+            return build_binary_expr(ctx, ast_as(ASTBinaryExpr, node), bb);
         case AST_UNARY_EXPR:
-            return build_unary_expr(ast_as(ASTUnaryExpr, node), f, bb, ctx);
+            return build_unary_expr(ctx, ast_as(ASTUnaryExpr, node), bb);
         case AST_INCDEC_EXPR:
-            return build_incdec_expr(ast_as(ASTIncDecExpr, node), f, bb, ctx);
+            return build_incdec_expr(ctx, ast_as(ASTIncDecExpr, node), bb);
         case AST_CALL_EXPR:
-            return build_call_expr(ast_as(ASTCallExpr, node), f, bb, ctx);
+            return build_call_expr(ctx, ast_as(ASTCallExpr, node), bb);
         case AST_TERNARY_EXPR:
-            return build_ternary_expr(ast_as(ASTTernaryExpr, node), f, bb, ctx);
+            return build_ternary_expr(ctx, ast_as(ASTTernaryExpr, node), bb);
         case AST_SUBSCRIPT_EXPR:
-            return build_subscript_expr(ast_as(ASTSubscriptExpr, node), f, bb, ctx);
+            return build_subscript_expr(ctx, ast_as(ASTSubscriptExpr, node), bb);
         case AST_SIZEOF_EXPR:
         case AST_SIZEOF_TYPE:
         case AST_ALIGNOF_EXPR:
         case AST_ALIGNOF_TYPE:
-            return build_size_const(node, f, bb, ctx);
+            return build_size_const(node, bb);
         case AST_STRING_LITERAL:
-            return build_string_literal_expr(ast_as(ASTStringLiteral, node), f, bb, ctx);
+            return build_string_literal_expr(ctx, ast_as(ASTStringLiteral, node), bb);
         case AST_MEMBER_ACCESS:
-            return build_member_access_expr(ast_as(ASTMemberAccess, node), f, bb, ctx);
+            return build_member_access_expr(ctx, ast_as(ASTMemberAccess, node), bb);
         case AST_CAST_EXPR:
-            return build_cast_expr(ast_as(ASTCastExpr, node), f, bb, ctx);
+            return build_cast_expr(ctx, ast_as(ASTCastExpr, node), bb);
         case AST_VA_ARG_EXPR:
-            return build_va_arg_expr(ast_as(ASTVaArgExpr, node), f, bb, ctx);
+            return build_va_arg_expr(ctx, ast_as(ASTVaArgExpr, node), bb);
         case AST_COMPOUND_LITERAL:
-            return build_compound_literal_expr(ast_as(ASTCompoundLiteral, node), f, bb, ctx);
+            return build_compound_literal_expr(ctx, ast_as(ASTCompoundLiteral, node), bb);
         default:
             ir_error(node, "unsupported expression kind %s", ast_kind_name(node->kind));
-            return expr_result(ir_operand_imm(0), bb);
+            return expr_void(bb);
     }
 }
 
-static void collect_labels(ASTNode *node, IrFunction *f, FuncBuilder *ctx)
+static void collect_labels(FuncBuilder *ctx, ASTNode *node)
 {
     if (!node)
     {
@@ -2001,8 +2001,8 @@ static void collect_labels(ASTNode *node, IrFunction *f, FuncBuilder *ctx)
         case AST_LABEL_STMT:
         {
             ASTLabelStmt *ls = ast_as(ASTLabelStmt, node);
-            label_block(ctx, f, ls->label);
-            collect_labels(ls->stmt, f, ctx);
+            label_block(ctx, ls->label);
+            collect_labels(ctx, ls->stmt);
             break;
         }
         case AST_COMPOUND_STMT:
@@ -2012,39 +2012,39 @@ static void collect_labels(ASTNode *node, IrFunction *f, FuncBuilder *ctx)
             for (size_t i = 0; i < n; i++)
             {
                 ASTNode *stmt = (ASTNode *) vec_get(cs->stmts, i);
-                collect_labels(stmt, f, ctx);
+                collect_labels(ctx, stmt);
             }
             break;
         }
         case AST_IF_STMT:
         {
             ASTIfStmt *is = ast_as(ASTIfStmt, node);
-            collect_labels(is->then_branch, f, ctx);
-            collect_labels(is->else_branch, f, ctx);
+            collect_labels(ctx, is->then_branch);
+            collect_labels(ctx, is->else_branch);
             break;
         }
         case AST_WHILE_STMT:
         {
             ASTWhileStmt *ws = ast_as(ASTWhileStmt, node);
-            collect_labels(ws->body, f, ctx);
+            collect_labels(ctx, ws->body);
             break;
         }
         case AST_DO_WHILE_STMT:
         {
             ASTDoWhileStmt *ds = ast_as(ASTDoWhileStmt, node);
-            collect_labels(ds->body, f, ctx);
+            collect_labels(ctx, ds->body);
             break;
         }
         case AST_FOR_STMT:
         {
             ASTForStmt *fs = ast_as(ASTForStmt, node);
-            collect_labels(fs->body, f, ctx);
+            collect_labels(ctx, fs->body);
             break;
         }
         case AST_SWITCH_STMT:
         {
             ASTSwitchStmt *sw = ast_as(ASTSwitchStmt, node);
-            collect_labels(sw->body, f, ctx);
+            collect_labels(ctx, sw->body);
             break;
         }
         case AST_CASE_STMT:
@@ -2053,7 +2053,7 @@ static void collect_labels(ASTNode *node, IrFunction *f, FuncBuilder *ctx)
             size_t n = vec_size(cs->stmts);
             for (size_t i = 0; i < n; i++)
             {
-                collect_labels((ASTNode *) vec_get(cs->stmts, i), f, ctx);
+                collect_labels(ctx, (ASTNode *) vec_get(cs->stmts, i));
             }
             break;
         }
@@ -2063,7 +2063,7 @@ static void collect_labels(ASTNode *node, IrFunction *f, FuncBuilder *ctx)
             size_t n = vec_size(ds->stmts);
             for (size_t i = 0; i < n; i++)
             {
-                collect_labels((ASTNode *) vec_get(ds->stmts, i), f, ctx);
+                collect_labels(ctx, (ASTNode *) vec_get(ds->stmts, i));
             }
             break;
         }
@@ -2072,12 +2072,12 @@ static void collect_labels(ASTNode *node, IrFunction *f, FuncBuilder *ctx)
     }
 }
 
-static IrBlock *label_block(FuncBuilder *ctx, IrFunction *f, const char *name)
+static IrBlock *label_block(FuncBuilder *ctx, const char *name)
 {
     IrBlock *label_bb = (IrBlock *) strmap_get(ctx->goto_labels, name);
     if (!label_bb)
     {
-        label_bb = ir_func_add_block(f, name);
+        label_bb = ir_func_add_block(ctx->f, name);
         label_bb->is_loop_header = true;
         strmap_set(ctx->goto_labels, name, label_bb);
     }
@@ -2086,7 +2086,7 @@ static IrBlock *label_block(FuncBuilder *ctx, IrFunction *f, const char *name)
     return label_bb;
 }
 
-static IrBlock *build_stmt_sequence(Vec *stmts, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_stmt_sequence(FuncBuilder *ctx, Vec *stmts, IrBlock *bb)
 {
     size_t n = vec_size(stmts);
     for (size_t i = 0; i < n; i++)
@@ -2094,32 +2094,31 @@ static IrBlock *build_stmt_sequence(Vec *stmts, IrFunction *f, IrBlock *bb, Func
         ASTNode *stmt = (ASTNode *) vec_get(stmts, i);
         if (is_terminated(bb))
         {
-            IrBlock *unreach = new_block(f, "unreach");
-            bb = build_stmt(stmt, f, unreach, ctx);
+            IrBlock *unreach = new_block(ctx->f, "unreach");
+            bb = build_stmt(ctx, stmt, unreach);
         }
         else
         {
-            bb = build_stmt(stmt, f, bb, ctx);
+            bb = build_stmt(ctx, stmt, bb);
         }
     }
     return bb;
 }
 
-static IrBlock *build_compound_stmt(ASTCompoundStmt *cs, IrFunction *f, IrBlock *bb,
-                                    FuncBuilder *ctx)
+static IrBlock *build_compound_stmt(FuncBuilder *ctx, ASTCompoundStmt *cs, IrBlock *bb)
 {
-    return build_stmt_sequence(cs->stmts, f, bb, ctx);
+    return build_stmt_sequence(ctx, cs->stmts, bb);
 }
 
-static void build_cond_branch(ASTNode *branch_stmt, IrFunction *f, IrBlock *branch_bb,
-                              IrBlock *merge_bb, FuncBuilder *ctx)
+static void build_cond_branch(FuncBuilder *ctx, ASTNode *branch_stmt, IrBlock *branch_bb,
+                              IrBlock *merge_bb)
 {
     seal_block(ctx, branch_bb);
 
     IrBlock *end = branch_bb;
     if (branch_stmt)
     {
-        end = build_stmt(branch_stmt, f, branch_bb, ctx);
+        end = build_stmt(ctx, branch_stmt, branch_bb);
     }
     if (!is_terminated(end))
     {
@@ -2127,38 +2126,38 @@ static void build_cond_branch(ASTNode *branch_stmt, IrFunction *f, IrBlock *bran
     }
 }
 
-static IrBlock *build_if_stmt(ASTIfStmt *is, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_if_stmt(FuncBuilder *ctx, ASTIfStmt *is, IrBlock *bb)
 {
-    ExprResult cond = build_expr(is->cond, f, bb, ctx);
+    ExprResult cond = build_expr(ctx, is->cond, bb);
     bb = cond.block;
 
-    IrBlock *then_bb = new_block(f, "then");
-    IrBlock *else_bb = new_block(f, "else");
-    IrBlock *merge_bb = new_block(f, "merge");
+    IrBlock *then_bb = new_block(ctx->f, "then");
+    IrBlock *else_bb = new_block(ctx->f, "else");
+    IrBlock *merge_bb = new_block(ctx->f, "merge");
 
     cond_jump(bb, cond.value, then_bb, else_bb);
 
-    build_cond_branch(is->then_branch, f, then_bb, merge_bb, ctx);
-    build_cond_branch(is->else_branch, f, else_bb, merge_bb, ctx);
+    build_cond_branch(ctx, is->then_branch, then_bb, merge_bb);
+    build_cond_branch(ctx, is->else_branch, else_bb, merge_bb);
     seal_block(ctx, merge_bb);
     return merge_bb;
 }
 
-static IrBlock *build_loop_body(ASTNode *body_node, IrFunction *f, LoopBlocks *lb, FuncBuilder *ctx)
+static IrBlock *build_loop_body(FuncBuilder *ctx, ASTNode *body_node, LoopBlocks *lb)
 {
     LoopContext lc = {.continue_target = lb->latch, .exit = lb->exit};
     vec_push(ctx->loop_stack, &lc);
-    IrBlock *end = build_stmt(body_node, f, lb->body, ctx);
+    IrBlock *end = build_stmt(ctx, body_node, lb->body);
     vec_pop(ctx->loop_stack);
     return end;
 }
 
-static IrBlock *finish_loop(ASTNode *cond_node, IrFunction *f, LoopBlocks *lb, FuncBuilder *ctx)
+static IrBlock *finish_loop(FuncBuilder *ctx, ASTNode *cond_node, LoopBlocks *lb)
 {
     IrBlock *h = lb->header;
     if (cond_node)
     {
-        ExprResult c = build_expr(cond_node, f, h, ctx);
+        ExprResult c = build_expr(ctx, cond_node, h);
         h = c.block;
         ir_emit_brcond(h, c.value, lb->body->label, lb->exit->label);
     }
@@ -2180,55 +2179,54 @@ static void backedge(IrBlock *body_end, LoopBlocks *lb)
     }
 }
 
-static IrBlock *build_while_stmt(ASTWhileStmt *ws, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_while_stmt(FuncBuilder *ctx, ASTWhileStmt *ws, IrBlock *bb)
 {
-    IrBlock *header_bb = new_block(f, "while_header");
-    IrBlock *body_bb = new_block(f, "while_body");
-    IrBlock *exit_bb = new_block(f, "while_exit");
+    IrBlock *header_bb = new_block(ctx->f, "while_header");
+    IrBlock *body_bb = new_block(ctx->f, "while_body");
+    IrBlock *exit_bb = new_block(ctx->f, "while_exit");
     header_bb->is_loop_header = true;
     LoopBlocks lb = {header_bb, body_bb, header_bb, exit_bb};
 
     jump(bb, lb.header);
     declare_pred(lb.body, lb.header);
-    backedge(build_loop_body(ws->body, f, &lb, ctx), &lb);
+    backedge(build_loop_body(ctx, ws->body, &lb), &lb);
 
-    return finish_loop(ws->cond, f, &lb, ctx);
+    return finish_loop(ctx, ws->cond, &lb);
 }
 
-static IrBlock *build_do_while_stmt(ASTDoWhileStmt *ds, IrFunction *f, IrBlock *bb,
-                                    FuncBuilder *ctx)
+static IrBlock *build_do_while_stmt(FuncBuilder *ctx, ASTDoWhileStmt *ds, IrBlock *bb)
 {
-    IrBlock *body_bb = new_block(f, "do_body");
-    IrBlock *header_bb = new_block(f, "do_header");
-    IrBlock *exit_bb = new_block(f, "do_exit");
+    IrBlock *body_bb = new_block(ctx->f, "do_body");
+    IrBlock *header_bb = new_block(ctx->f, "do_header");
+    IrBlock *exit_bb = new_block(ctx->f, "do_exit");
     header_bb->is_loop_header = true;
     LoopBlocks lb = {header_bb, body_bb, header_bb, exit_bb};
 
     jump(bb, lb.body);
     declare_pred(lb.body, lb.header);
-    backedge(build_loop_body(ds->body, f, &lb, ctx), &lb);
+    backedge(build_loop_body(ctx, ds->body, &lb), &lb);
     seal_block(ctx, lb.body);
 
-    return finish_loop(ds->cond, f, &lb, ctx);
+    return finish_loop(ctx, ds->cond, &lb);
 }
 
-static IrBlock *build_for_stmt(ASTForStmt *fs, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_for_stmt(FuncBuilder *ctx, ASTForStmt *fs, IrBlock *bb)
 {
     if (fs->init)
     {
-        bb = build_stmt(fs->init, f, bb, ctx);
+        bb = build_stmt(ctx, fs->init, bb);
     }
 
-    IrBlock *header_bb = new_block(f, "for_header");
-    IrBlock *body_bb = new_block(f, "for_body");
-    IrBlock *latch_bb = new_block(f, "for_latch");
-    IrBlock *exit_bb = new_block(f, "for_exit");
+    IrBlock *header_bb = new_block(ctx->f, "for_header");
+    IrBlock *body_bb = new_block(ctx->f, "for_body");
+    IrBlock *latch_bb = new_block(ctx->f, "for_latch");
+    IrBlock *exit_bb = new_block(ctx->f, "for_exit");
     header_bb->is_loop_header = true;
     LoopBlocks lb = {header_bb, body_bb, latch_bb, exit_bb};
 
     jump(bb, lb.header);
     declare_pred(lb.body, lb.header);
-    backedge(build_loop_body(fs->body, f, &lb, ctx), &lb);
+    backedge(build_loop_body(ctx, fs->body, &lb), &lb);
 
     /* Seal the latch before the post-expression so post reads see sealed
        predecessors. */
@@ -2236,7 +2234,7 @@ static IrBlock *build_for_stmt(ASTForStmt *fs, IrFunction *f, IrBlock *bb, FuncB
 
     if (fs->post)
     {
-        ExprResult post = build_expr(fs->post, f, lb.latch, ctx);
+        ExprResult post = build_expr(ctx, fs->post, lb.latch);
         lb.latch = post.block;
     }
     if (!is_terminated(lb.latch))
@@ -2244,53 +2242,48 @@ static IrBlock *build_for_stmt(ASTForStmt *fs, IrFunction *f, IrBlock *bb, FuncB
         jump(lb.latch, lb.header);
     }
 
-    return finish_loop(fs->cond, f, &lb, ctx);
+    return finish_loop(ctx, fs->cond, &lb);
 }
 
-static IrBlock *build_break_stmt(ASTBreakStmt *bs, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_break_stmt(FuncBuilder *ctx, ASTBreakStmt *bs, IrBlock *bb)
 {
     (void) bs;
-    (void) f;
     ASSERT(vec_size(ctx->loop_stack) > 0);
     LoopContext *loop = (LoopContext *) vec_last(ctx->loop_stack);
     jump(bb, loop->exit);
     return bb;
 }
 
-static IrBlock *build_continue_stmt(ASTContinueStmt *cs, IrFunction *f, IrBlock *bb,
-                                    FuncBuilder *ctx)
+static IrBlock *build_continue_stmt(FuncBuilder *ctx, ASTContinueStmt *cs, IrBlock *bb)
 {
     (void) cs;
-    (void) f;
     ASSERT(vec_size(ctx->loop_stack) > 0);
     LoopContext *loop = (LoopContext *) vec_last(ctx->loop_stack);
     jump(bb, loop->continue_target);
     return bb;
 }
 
-static IrBlock *build_goto_stmt(ASTGotoStmt *gs, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_goto_stmt(FuncBuilder *ctx, ASTGotoStmt *gs, IrBlock *bb)
 {
-    (void) f;
     IrBlock *target = (IrBlock *) strmap_get(ctx->goto_labels, gs->label);
     ASSERT(target != NULL);
     jump(bb, target);
     return bb;
 }
 
-static IrBlock *build_label_stmt(ASTLabelStmt *ls, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_label_stmt(FuncBuilder *ctx, ASTLabelStmt *ls, IrBlock *bb)
 {
-    IrBlock *label_bb = label_block(ctx, f, ls->label);
+    IrBlock *label_bb = label_block(ctx, ls->label);
     if (!is_terminated(bb))
     {
         jump(bb, label_bb);
     }
-    return build_stmt(ls->stmt, f, label_bb, ctx);
+    return build_stmt(ctx, ls->stmt, label_bb);
 }
 
 /* Collect case/default labels in source order, creating their blocks up front
    so the dispatch can target them. Nested switches are the inner builder's. */
-static void collect_switch(ASTNode *node, IrFunction *f, FuncBuilder *ctx, SwitchCtx *sc,
-                           Vec *cases)
+static void collect_switch(FuncBuilder *ctx, ASTNode *node, SwitchCtx *sc, Vec *cases)
 {
     if (!node)
     {
@@ -2304,7 +2297,7 @@ static void collect_switch(ASTNode *node, IrFunction *f, FuncBuilder *ctx, Switc
             SwitchCase *c = arena_alloc(ctx->mod->arena, sizeof(SwitchCase), sizeof(void *));
             c->value = cs->value;
             c->stmts = cs->stmts;
-            c->bb = new_block(f, "switch_case");
+            c->bb = new_block(ctx->f, "switch_case");
             vec_push(cases, c);
             u64map_set(sc->case_blocks, (u64) cs->value, c->bb);
             /* Grouped labels (`case 1: case 2:`) arrive as nested ASTCaseStmt:
@@ -2312,19 +2305,19 @@ static void collect_switch(ASTNode *node, IrFunction *f, FuncBuilder *ctx, Switc
             size_t ns = vec_size(cs->stmts);
             for (size_t i = 0; i < ns; i++)
             {
-                collect_switch((ASTNode *) vec_get(cs->stmts, i), f, ctx, sc, cases);
+                collect_switch(ctx, (ASTNode *) vec_get(cs->stmts, i), sc, cases);
             }
             break;
         }
         case AST_DEFAULT_STMT:
         {
             ASTDefaultStmt *ds = ast_as(ASTDefaultStmt, node);
-            sc->default_bb = new_block(f, "switch_default");
+            sc->default_bb = new_block(ctx->f, "switch_default");
             sc->default_stmts = ds->stmts;
             size_t ns = vec_size(ds->stmts);
             for (size_t i = 0; i < ns; i++)
             {
-                collect_switch((ASTNode *) vec_get(ds->stmts, i), f, ctx, sc, cases);
+                collect_switch(ctx, (ASTNode *) vec_get(ds->stmts, i), sc, cases);
             }
             break;
         }
@@ -2334,37 +2327,37 @@ static void collect_switch(ASTNode *node, IrFunction *f, FuncBuilder *ctx, Switc
             size_t n = vec_size(cs->stmts);
             for (size_t i = 0; i < n; i++)
             {
-                collect_switch((ASTNode *) vec_get(cs->stmts, i), f, ctx, sc, cases);
+                collect_switch(ctx, (ASTNode *) vec_get(cs->stmts, i), sc, cases);
             }
             break;
         }
         case AST_IF_STMT:
         {
             ASTIfStmt *is = ast_as(ASTIfStmt, node);
-            collect_switch(is->then_branch, f, ctx, sc, cases);
-            collect_switch(is->else_branch, f, ctx, sc, cases);
+            collect_switch(ctx, is->then_branch, sc, cases);
+            collect_switch(ctx, is->else_branch, sc, cases);
             break;
         }
         case AST_WHILE_STMT:
-            collect_switch(ast_as(ASTWhileStmt, node)->body, f, ctx, sc, cases);
+            collect_switch(ctx, ast_as(ASTWhileStmt, node)->body, sc, cases);
             break;
         case AST_DO_WHILE_STMT:
-            collect_switch(ast_as(ASTDoWhileStmt, node)->body, f, ctx, sc, cases);
+            collect_switch(ctx, ast_as(ASTDoWhileStmt, node)->body, sc, cases);
             break;
         case AST_FOR_STMT:
-            collect_switch(ast_as(ASTForStmt, node)->body, f, ctx, sc, cases);
+            collect_switch(ctx, ast_as(ASTForStmt, node)->body, sc, cases);
             break;
         case AST_LABEL_STMT:
-            collect_switch(ast_as(ASTLabelStmt, node)->stmt, f, ctx, sc, cases);
+            collect_switch(ctx, ast_as(ASTLabelStmt, node)->stmt, sc, cases);
             break;
         default:
             break;
     }
 }
 
-static IrBlock *build_switch_stmt(ASTSwitchStmt *ss, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_switch_stmt(FuncBuilder *ctx, ASTSwitchStmt *ss, IrBlock *bb)
 {
-    ExprResult cond = build_expr(ss->cond, f, bb, ctx);
+    ExprResult cond = build_expr(ctx, ss->cond, bb);
     bb = cond.block;
 
     Type *cond_type = node_type(ss->cond);
@@ -2372,10 +2365,10 @@ static IrBlock *build_switch_stmt(ASTSwitchStmt *ss, IrFunction *f, IrBlock *bb,
     IrOperand cv = promote_to(ctx, bb, cond.value, cond_type, promoted);
 
     SwitchCtx sc = {.case_blocks = u64map_new(ctx->mod->arena),
-                    .exit_bb = new_block(f, "switch_exit")};
+                    .exit_bb = new_block(ctx->f, "switch_exit")};
 
     Vec *cases = vec_new(ctx->mod->arena);
-    collect_switch(ss->body, f, ctx, &sc, cases);
+    collect_switch(ctx, ss->body, &sc, cases);
 
     /* One OP_SWITCH carries every case; the backend picks table vs chain, and the
        dispatch block preds every case/exit block. */
@@ -2404,7 +2397,7 @@ static IrBlock *build_switch_stmt(ASTSwitchStmt *ss, IrFunction *f, IrBlock *bb,
 
     /* Walk the body as ordinary statements; `case`/`default` labels land in their
            pre-created blocks, giving exact C fall-through semantics. */
-    IrBlock *end = build_stmt(ss->body, f, bb, ctx);
+    IrBlock *end = build_stmt(ctx, ss->body, bb);
 
     vec_pop(ctx->switch_stack);
     vec_pop(ctx->loop_stack);
@@ -2419,7 +2412,7 @@ static IrBlock *build_switch_stmt(ASTSwitchStmt *ss, IrFunction *f, IrBlock *bb,
 
 /* Fallback path only for case labels nested inside inner blocks of a switch
    body (the parser's normalize_case_groups handles the top level). */
-static IrBlock *build_case_stmt(ASTCaseStmt *cs, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_case_stmt(FuncBuilder *ctx, ASTCaseStmt *cs, IrBlock *bb)
 {
     SwitchCtx *sc = (SwitchCtx *) vec_last(ctx->switch_stack);
     IrBlock *case_bb = u64map_get(sc->case_blocks, (u64) cs->value);
@@ -2428,10 +2421,10 @@ static IrBlock *build_case_stmt(ASTCaseStmt *cs, IrFunction *f, IrBlock *bb, Fun
     {
         jump(bb, case_bb);
     }
-    return build_stmt_sequence(cs->stmts, f, case_bb, ctx);
+    return build_stmt_sequence(ctx, cs->stmts, case_bb);
 }
 
-static IrBlock *build_default_stmt(ASTDefaultStmt *ds, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_default_stmt(FuncBuilder *ctx, ASTDefaultStmt *ds, IrBlock *bb)
 {
     SwitchCtx *sc = (SwitchCtx *) vec_last(ctx->switch_stack);
     ASSERT(sc->default_bb != NULL);
@@ -2439,22 +2432,22 @@ static IrBlock *build_default_stmt(ASTDefaultStmt *ds, IrFunction *f, IrBlock *b
     {
         jump(bb, sc->default_bb);
     }
-    return build_stmt_sequence(ds->stmts, f, sc->default_bb, ctx);
+    return build_stmt_sequence(ctx, ds->stmts, sc->default_bb);
 }
 
-static IrBlock *build_return_stmt(ASTReturnStmt *ret, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_return_stmt(FuncBuilder *ctx, ASTReturnStmt *ret, IrBlock *bb)
 {
     if (ret->expr)
     {
-        ExprResult val = build_expr(ret->expr, f, bb, ctx);
-        if (type_is_record(f->ret_type))
+        ExprResult val = build_expr(ctx, ret->expr, bb);
+        if (type_is_record(ctx->f->ret_type))
         {
             ir_emit_memcpy(val.block, ir_operand_vreg(ctx->sret_vreg), val.value,
-                           f->ret_type->size);
+                           ctx->f->ret_type->size);
             ir_emit_ret(val.block, ir_operand_vreg(ctx->sret_vreg));
             return val.block;
         }
-        val.value = promote_to(ctx, val.block, val.value, node_type(ret->expr), f->ret_type);
+        val.value = promote_to(ctx, val.block, val.value, node_type(ret->expr), ctx->f->ret_type);
         ir_emit_ret(val.block, val.value);
         return val.block;
     }
@@ -2462,7 +2455,7 @@ static IrBlock *build_return_stmt(ASTReturnStmt *ret, IrFunction *f, IrBlock *bb
     return bb;
 }
 
-static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_var_decl_stmt(FuncBuilder *ctx, ASTVarDecl *vd, IrBlock *bb)
 {
     if (vd->storage == SC_STATIC)
     {
@@ -2497,11 +2490,11 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
         ir_emit_alloca(bb, dst, vd->type->size);
         if (vd->plan)
         {
-            bb = emit_init_plan(f, bb, ir_operand_vreg(dst), vd->plan, ctx);
+            bb = emit_init_plan(ctx, bb, ir_operand_vreg(dst), vd->plan);
         }
         else if (vd->init)
         {
-            ExprResult init = build_expr(vd->init, f, bb, ctx);
+            ExprResult init = build_expr(ctx, vd->init, bb);
             bb = init.block;
             ir_emit_memcpy(bb, ir_operand_vreg(dst), init.value, vd->type->size);
         }
@@ -2516,14 +2509,14 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
         if (vd->plan->writes && vec_size(vd->plan->writes) > 0)
         {
             InitWrite *w = (InitWrite *) vec_get(vd->plan->writes, 0);
-            ExprResult init = build_expr(w->value, f, bb, ctx);
+            ExprResult init = build_expr(ctx, w->value, bb);
             bb = init.block;
             val = promote_to(ctx, bb, init.value, node_type(w->value), vd->type);
         }
     }
     else if (vd->init)
     {
-        ExprResult init = build_expr(vd->init, f, bb, ctx);
+        ExprResult init = build_expr(ctx, vd->init, bb);
         bb = init.block;
         val = promote_to(ctx, bb, init.value, node_type(vd->init), vd->type);
     }
@@ -2531,28 +2524,28 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
     return bb;
 }
 
-static IrBlock *build_expr_stmt(ASTExprStmt *es, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_expr_stmt(FuncBuilder *ctx, ASTExprStmt *es, IrBlock *bb)
 {
-    ExprResult res = build_expr(es->expr, f, bb, ctx);
+    ExprResult res = build_expr(ctx, es->expr, bb);
     return res.block;
 }
 
-static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+static IrBlock *build_stmt(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
 {
     switch (node->kind)
     {
         case AST_RETURN_STMT:
-            return build_return_stmt(ast_as(ASTReturnStmt, node), f, bb, ctx);
+            return build_return_stmt(ctx, ast_as(ASTReturnStmt, node), bb);
         case AST_VAR_DECL:
-            return build_var_decl_stmt(ast_as(ASTVarDecl, node), f, bb, ctx);
+            return build_var_decl_stmt(ctx, ast_as(ASTVarDecl, node), bb);
         case AST_DECL_LIST:
         {
             ASTDeclList *dl = ast_as(ASTDeclList, node);
             size_t n = vec_size(dl->decls);
             for (size_t i = 0; i < n; i++)
             {
-                bb = build_var_decl_stmt(ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, i)), f,
-                                         bb, ctx);
+                bb = build_var_decl_stmt(ctx, ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, i)),
+                                         bb);
             }
             return bb;
         }
@@ -2565,40 +2558,40 @@ static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilde
             /* Checked in the semantic pass; emits nothing. */
             return bb;
         case AST_EXPR_STMT:
-            return build_expr_stmt(ast_as(ASTExprStmt, node), f, bb, ctx);
+            return build_expr_stmt(ctx, ast_as(ASTExprStmt, node), bb);
         case AST_COMPOUND_STMT:
-            return build_compound_stmt(ast_as(ASTCompoundStmt, node), f, bb, ctx);
+            return build_compound_stmt(ctx, ast_as(ASTCompoundStmt, node), bb);
         case AST_IF_STMT:
-            return build_if_stmt(ast_as(ASTIfStmt, node), f, bb, ctx);
+            return build_if_stmt(ctx, ast_as(ASTIfStmt, node), bb);
         case AST_WHILE_STMT:
-            return build_while_stmt(ast_as(ASTWhileStmt, node), f, bb, ctx);
+            return build_while_stmt(ctx, ast_as(ASTWhileStmt, node), bb);
         case AST_DO_WHILE_STMT:
-            return build_do_while_stmt(ast_as(ASTDoWhileStmt, node), f, bb, ctx);
+            return build_do_while_stmt(ctx, ast_as(ASTDoWhileStmt, node), bb);
         case AST_FOR_STMT:
-            return build_for_stmt(ast_as(ASTForStmt, node), f, bb, ctx);
+            return build_for_stmt(ctx, ast_as(ASTForStmt, node), bb);
         case AST_BREAK_STMT:
-            return build_break_stmt(ast_as(ASTBreakStmt, node), f, bb, ctx);
+            return build_break_stmt(ctx, ast_as(ASTBreakStmt, node), bb);
         case AST_CONTINUE_STMT:
-            return build_continue_stmt(ast_as(ASTContinueStmt, node), f, bb, ctx);
+            return build_continue_stmt(ctx, ast_as(ASTContinueStmt, node), bb);
         case AST_GOTO_STMT:
-            return build_goto_stmt(ast_as(ASTGotoStmt, node), f, bb, ctx);
+            return build_goto_stmt(ctx, ast_as(ASTGotoStmt, node), bb);
         case AST_LABEL_STMT:
-            return build_label_stmt(ast_as(ASTLabelStmt, node), f, bb, ctx);
+            return build_label_stmt(ctx, ast_as(ASTLabelStmt, node), bb);
         case AST_SWITCH_STMT:
-            return build_switch_stmt(ast_as(ASTSwitchStmt, node), f, bb, ctx);
+            return build_switch_stmt(ctx, ast_as(ASTSwitchStmt, node), bb);
         case AST_CASE_STMT:
-            return build_case_stmt(ast_as(ASTCaseStmt, node), f, bb, ctx);
+            return build_case_stmt(ctx, ast_as(ASTCaseStmt, node), bb);
         case AST_DEFAULT_STMT:
-            return build_default_stmt(ast_as(ASTDefaultStmt, node), f, bb, ctx);
+            return build_default_stmt(ctx, ast_as(ASTDefaultStmt, node), bb);
         default:
             ir_error(node, "unsupported statement kind %s", ast_kind_name(node->kind));
             return bb;
     }
 }
 
-static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlock *entry)
+static void setup_params(FuncBuilder *ctx, ASTFuncDef *ast, IrBlock *entry)
 {
-    f->is_variadic = ast->sig.is_variadic;
+    ctx->f->is_variadic = ast->sig.is_variadic;
     ctx->sret_vreg = NO_VREG;
     if (type_is_record(ast->sig.ret_type))
     {
@@ -2608,7 +2601,7 @@ static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlo
         p->name = "__sret";
         p->type = type_ptr(ast->sig.ret_type);
         p->vreg = vreg;
-        vec_push(f->params, p);
+        vec_push(ctx->f->params, p);
         ctx->sret_vreg = vreg;
     }
 
@@ -2623,26 +2616,26 @@ static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlo
         p->name = param->name;
         p->type = ssa_type;
         p->vreg = vreg;
-        vec_push(f->params, p);
+        vec_push(ctx->f->params, p);
         write_variable(ctx, param, entry, ir_operand_vreg(vreg));
     }
 }
 
-static void seal_all_blocks(FuncBuilder *ctx, IrFunction *f)
+static void seal_all_blocks(FuncBuilder *ctx)
 {
-    size_t nblocks = vec_size(f->blocks);
+    size_t nblocks = vec_size(ctx->f->blocks);
     for (size_t i = 0; i < nblocks; i++)
     {
-        IrBlock *bb = (IrBlock *) vec_get(f->blocks, i);
+        IrBlock *bb = (IrBlock *) vec_get(ctx->f->blocks, i);
         seal_block(ctx, bb);
     }
 }
 
-static void finish_func(IrFunction *f, IrBlock *exit, FuncBuilder *ctx)
+static void finish_func(FuncBuilder *ctx, IrBlock *exit)
 {
     if (!is_terminated(exit))
     {
-        if (f->ret_type->kind == TYPE_VOID)
+        if (ctx->f->ret_type->kind == TYPE_VOID)
         {
             ir_emit_ret_void(exit);
         }
@@ -2651,15 +2644,15 @@ static void finish_func(IrFunction *f, IrBlock *exit, FuncBuilder *ctx)
             ir_emit_unreachable(exit);
         }
     }
-    seal_all_blocks(ctx, f);
+    seal_all_blocks(ctx);
 }
 
 /* Pre-pass: record address-taken autos so their slot allocas exist before
    lowering (reads/writes go through memory before the `&` is visited). */
-static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx);
-static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx);
+static void mark_addr_taken_expr(FuncBuilder *ctx, ASTNode *node);
+static void mark_addr_taken_stmt(FuncBuilder *ctx, ASTNode *node);
 
-static void spill_addr_ident(ASTVarDecl *decl, FuncBuilder *ctx)
+static void spill_addr_ident(FuncBuilder *ctx, ASTVarDecl *decl)
 {
     if (decl && is_spillable_var(decl) && !spill_slot(ctx, decl))
     {
@@ -2668,7 +2661,7 @@ static void spill_addr_ident(ASTVarDecl *decl, FuncBuilder *ctx)
     }
 }
 
-static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
+static void mark_addr_taken_expr(FuncBuilder *ctx, ASTNode *node)
 {
     if (!node)
     {
@@ -2681,30 +2674,30 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
             ASTUnaryExpr *ue = ast_as(ASTUnaryExpr, node);
             if (ue->op == UN_ADDR && ue->operand->kind == AST_IDENT)
             {
-                spill_addr_ident(ast_as(ASTIdent, ue->operand)->decl, ctx);
+                spill_addr_ident(ctx, ast_as(ASTIdent, ue->operand)->decl);
             }
-            mark_addr_taken_expr(ue->operand, ctx);
+            mark_addr_taken_expr(ctx, ue->operand);
             break;
         }
         case AST_INCDEC_EXPR:
         {
             /* Descend: nested `&x` must still spill (`0[&c]`, `&*(&c)++`). */
-            mark_addr_taken_expr(ast_as(ASTIncDecExpr, node)->operand, ctx);
+            mark_addr_taken_expr(ctx, ast_as(ASTIncDecExpr, node)->operand);
             break;
         }
         case AST_BINARY_EXPR:
         {
             ASTBinaryExpr *be = ast_as(ASTBinaryExpr, node);
-            mark_addr_taken_expr(be->left, ctx);
-            mark_addr_taken_expr(be->right, ctx);
+            mark_addr_taken_expr(ctx, be->left);
+            mark_addr_taken_expr(ctx, be->right);
             break;
         }
         case AST_TERNARY_EXPR:
         {
             ASTTernaryExpr *te = ast_as(ASTTernaryExpr, node);
-            mark_addr_taken_expr(te->cond, ctx);
-            mark_addr_taken_expr(te->then_expr, ctx);
-            mark_addr_taken_expr(te->else_expr, ctx);
+            mark_addr_taken_expr(ctx, te->cond);
+            mark_addr_taken_expr(ctx, te->then_expr);
+            mark_addr_taken_expr(ctx, te->else_expr);
             break;
         }
         case AST_CALL_EXPR:
@@ -2713,25 +2706,25 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
             size_t n = vec_size(ce->args);
             for (size_t i = 0; i < n; i++)
             {
-                mark_addr_taken_expr((ASTNode *) vec_get(ce->args, i), ctx);
+                mark_addr_taken_expr(ctx, (ASTNode *) vec_get(ce->args, i));
             }
             break;
         }
         case AST_SUBSCRIPT_EXPR:
         {
             ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, node);
-            mark_addr_taken_expr(se->array, ctx);
-            mark_addr_taken_expr(se->index, ctx);
+            mark_addr_taken_expr(ctx, se->array);
+            mark_addr_taken_expr(ctx, se->index);
             break;
         }
         case AST_SIZEOF_EXPR:
-            mark_addr_taken_expr(ast_as(ASTSizeofExpr, node)->operand, ctx);
+            mark_addr_taken_expr(ctx, ast_as(ASTSizeofExpr, node)->operand);
             break;
         case AST_MEMBER_ACCESS:
-            mark_addr_taken_expr(ast_as(ASTMemberAccess, node)->object, ctx);
+            mark_addr_taken_expr(ctx, ast_as(ASTMemberAccess, node)->object);
             break;
         case AST_CAST_EXPR:
-            mark_addr_taken_expr(ast_as(ASTCastExpr, node)->operand, ctx);
+            mark_addr_taken_expr(ctx, ast_as(ASTCastExpr, node)->operand);
             break;
         case AST_ALIGNOF_EXPR:
         case AST_ALIGNOF_TYPE:
@@ -2739,7 +2732,7 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
             break;
         case AST_COMPOUND_LITERAL:
             /* The literal's init list may carry `&x` — those autos must spill. */
-            mark_addr_taken_expr(ast_as(ASTCompoundLiteral, node)->init, ctx);
+            mark_addr_taken_expr(ctx, ast_as(ASTCompoundLiteral, node)->init);
             break;
         case AST_INIT_LIST:
         {
@@ -2748,7 +2741,7 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
             for (size_t i = 0; i < n; i++)
             {
                 InitElem *e = (InitElem *) vec_get(il->elems, i);
-                mark_addr_taken_expr(e->value, ctx);
+                mark_addr_taken_expr(ctx, e->value);
             }
             break;
         }
@@ -2757,7 +2750,7 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
     }
 }
 
-static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx)
+static void mark_addr_taken_stmt(FuncBuilder *ctx, ASTNode *node)
 {
     if (!node)
     {
@@ -2766,13 +2759,13 @@ static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx)
     switch (node->kind)
     {
         case AST_RETURN_STMT:
-            mark_addr_taken_expr(ast_as(ASTReturnStmt, node)->expr, ctx);
+            mark_addr_taken_expr(ctx, ast_as(ASTReturnStmt, node)->expr);
             break;
         case AST_VAR_DECL:
-            mark_addr_taken_expr(ast_as(ASTVarDecl, node)->init, ctx);
+            mark_addr_taken_expr(ctx, ast_as(ASTVarDecl, node)->init);
             break;
         case AST_EXPR_STMT:
-            mark_addr_taken_expr(ast_as(ASTExprStmt, node)->expr, ctx);
+            mark_addr_taken_expr(ctx, ast_as(ASTExprStmt, node)->expr);
             break;
         case AST_DECL_LIST:
         {
@@ -2780,8 +2773,8 @@ static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx)
             size_t n = vec_size(dl->decls);
             for (size_t i = 0; i < n; i++)
             {
-                mark_addr_taken_expr(ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, i))->init,
-                                     ctx);
+                mark_addr_taken_expr(ctx,
+                                     ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, i))->init);
             }
             break;
         }
@@ -2791,49 +2784,49 @@ static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx)
             size_t n = vec_size(cs->stmts);
             for (size_t i = 0; i < n; i++)
             {
-                mark_addr_taken_stmt((ASTNode *) vec_get(cs->stmts, i), ctx);
+                mark_addr_taken_stmt(ctx, (ASTNode *) vec_get(cs->stmts, i));
             }
             break;
         }
         case AST_IF_STMT:
         {
             ASTIfStmt *is = ast_as(ASTIfStmt, node);
-            mark_addr_taken_expr(is->cond, ctx);
-            mark_addr_taken_stmt(is->then_branch, ctx);
-            mark_addr_taken_stmt(is->else_branch, ctx);
+            mark_addr_taken_expr(ctx, is->cond);
+            mark_addr_taken_stmt(ctx, is->then_branch);
+            mark_addr_taken_stmt(ctx, is->else_branch);
             break;
         }
         case AST_WHILE_STMT:
         {
             ASTWhileStmt *ws = ast_as(ASTWhileStmt, node);
-            mark_addr_taken_expr(ws->cond, ctx);
-            mark_addr_taken_stmt(ws->body, ctx);
+            mark_addr_taken_expr(ctx, ws->cond);
+            mark_addr_taken_stmt(ctx, ws->body);
             break;
         }
         case AST_DO_WHILE_STMT:
         {
             ASTDoWhileStmt *ds = ast_as(ASTDoWhileStmt, node);
-            mark_addr_taken_stmt(ds->body, ctx);
-            mark_addr_taken_expr(ds->cond, ctx);
+            mark_addr_taken_stmt(ctx, ds->body);
+            mark_addr_taken_expr(ctx, ds->cond);
             break;
         }
         case AST_FOR_STMT:
         {
             ASTForStmt *fs = ast_as(ASTForStmt, node);
-            mark_addr_taken_stmt(fs->init, ctx);
-            mark_addr_taken_expr(fs->cond, ctx);
-            mark_addr_taken_expr(fs->post, ctx);
-            mark_addr_taken_stmt(fs->body, ctx);
+            mark_addr_taken_stmt(ctx, fs->init);
+            mark_addr_taken_expr(ctx, fs->cond);
+            mark_addr_taken_expr(ctx, fs->post);
+            mark_addr_taken_stmt(ctx, fs->body);
             break;
         }
         case AST_LABEL_STMT:
-            mark_addr_taken_stmt(ast_as(ASTLabelStmt, node)->stmt, ctx);
+            mark_addr_taken_stmt(ctx, ast_as(ASTLabelStmt, node)->stmt);
             break;
         case AST_SWITCH_STMT:
         {
             ASTSwitchStmt *sw = ast_as(ASTSwitchStmt, node);
-            mark_addr_taken_expr(sw->cond, ctx);
-            mark_addr_taken_stmt(sw->body, ctx);
+            mark_addr_taken_expr(ctx, sw->cond);
+            mark_addr_taken_stmt(ctx, sw->body);
             break;
         }
         case AST_CASE_STMT:
@@ -2842,7 +2835,7 @@ static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx)
             size_t n = vec_size(cs->stmts);
             for (size_t i = 0; i < n; i++)
             {
-                mark_addr_taken_stmt((ASTNode *) vec_get(cs->stmts, i), ctx);
+                mark_addr_taken_stmt(ctx, (ASTNode *) vec_get(cs->stmts, i));
             }
             break;
         }
@@ -2852,7 +2845,7 @@ static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx)
             size_t n = vec_size(ds->stmts);
             for (size_t i = 0; i < n; i++)
             {
-                mark_addr_taken_stmt((ASTNode *) vec_get(ds->stmts, i), ctx);
+                mark_addr_taken_stmt(ctx, (ASTNode *) vec_get(ds->stmts, i));
             }
             break;
         }
@@ -2884,6 +2877,7 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
     }
 
     FuncBuilder ctx = {.mod = mod,
+                       .f = func,
                        .block_locals = u64map_new(mod->arena),
                        .loop_stack = vec_new(mod->arena),
                        .switch_stack = vec_new(mod->arena),
@@ -2896,21 +2890,88 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
                        .sret_vreg = NO_VREG};
 
     /* Pre-create blocks for all labels so gotos can target them. */
-    collect_labels(func_ast->body, func, &ctx);
+    collect_labels(&ctx, func_ast->body);
 
     /* Collect address-taken autos, hoist their slot allocas into the entry block,
            then wire params (address-taken params store into the existing slots). */
-    mark_addr_taken_stmt(func_ast->body, &ctx);
+    mark_addr_taken_stmt(&ctx, func_ast->body);
     emit_spill_allocas(&ctx, entry);
 
-    setup_params(&ctx, func, func_ast, entry);
+    setup_params(&ctx, func_ast, entry);
 
     ASTCompoundStmt *body = (ASTCompoundStmt *) func_ast->body;
-    entry = build_stmt_sequence(body->stmts, func, entry, &ctx);
+    entry = build_stmt_sequence(&ctx, body->stmts, entry);
 
-    finish_func(func, entry, &ctx);
+    finish_func(&ctx, entry);
 
     return !ctx.failed;
+}
+
+/* Seed func_types with every defined/prototyped function so calls resolve
+   their signature. A prototype makes no IrFunction — the ELF side emits the
+   SHN_UNDEF symbol. */
+static void register_func_type(ASTNode *decl, StrMap *func_types)
+{
+    Type *func_type = NULL;
+    const char *fname = NULL;
+    if (decl->kind == AST_FUNC_DEF)
+    {
+        ASTFuncDef *fn = ast_as(ASTFuncDef, decl);
+        func_type = fn->sig.func_type;
+        fname = fn->sig.name;
+    }
+    else if (decl->kind == AST_FUNC_DECL)
+    {
+        ASTFuncDecl *fd = ast_as(ASTFuncDecl, decl);
+        func_type = fd->sig.func_type;
+        fname = fd->sig.name;
+    }
+    if (func_type && fname)
+    {
+        strmap_set(func_types, fname, func_type);
+    }
+}
+
+/* Emit one global per declarator; false when any fails to serialize. */
+static bool emit_file_globals(ASTNode *decl, IrModule *mod, Arena *arena, StrMap *global_map)
+{
+    if (decl->kind == AST_VAR_DECL)
+    {
+        return emit_global_decl(ast_as(ASTVarDecl, decl), mod, arena, global_map, NULL) != NO_VREG;
+    }
+    if (decl->kind == AST_DECL_LIST)
+    {
+        /* An init-declarator list at file scope: one global per declarator. */
+        ASTDeclList *dl = ast_as(ASTDeclList, decl);
+        size_t n = vec_size(dl->decls);
+        for (size_t j = 0; j < n; j++)
+        {
+            ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, j));
+            if (emit_global_decl(vd, mod, arena, global_map, NULL) == NO_VREG)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/* The declaration kinds that produce no function IR. */
+static bool is_toplevel_declaration(ASTNode *decl)
+{
+    switch (decl->kind)
+    {
+        case AST_STRUCT_DECL:
+        case AST_ENUM_DECL:
+        case AST_VAR_DECL:
+        case AST_TYPEDEF_DECL:
+        case AST_DECL_LIST:
+        case AST_STATIC_ASSERT:
+        case AST_FUNC_DECL:
+            return true;
+        default:
+            return false;
+    }
 }
 
 IrModule *ir_build_module(ASTNode *ast, Arena *arena)
@@ -2923,68 +2984,23 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
     ASTProgram *prog = (ASTProgram *) ast;
 
     StrMap *func_types = strmap_new(arena);
+    StrMap *global_map = strmap_new(arena);
+    IrModule *mod = ir_module_new(arena);
+
     size_t ndecls = vec_size(prog->decls);
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
-        Type *func_type = NULL;
-        const char *fname = NULL;
-        if (decl->kind == AST_FUNC_DEF)
+        register_func_type(decl, func_types);
+        if (!emit_file_globals(decl, mod, arena, global_map))
         {
-            ASTFuncDef *fn = ast_as(ASTFuncDef, decl);
-            func_type = fn->sig.func_type;
-            fname = fn->sig.name;
-        }
-        else if (decl->kind == AST_FUNC_DECL)
-        {
-            /* A prototype also seeds func_types so calls resolve; the ELF side
-               makes the SHN_UNDEF symbol. */
-            ASTFuncDecl *fd = ast_as(ASTFuncDecl, decl);
-            func_type = fd->sig.func_type;
-            fname = fd->sig.name;
-        }
-        if (func_type && fname)
-        {
-            strmap_set(func_types, fname, func_type);
-        }
-    }
-
-    IrModule *mod = ir_module_new(arena);
-    StrMap *global_map = strmap_new(arena);
-    for (size_t i = 0; i < ndecls; i++)
-    {
-        ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
-        if (decl->kind == AST_VAR_DECL)
-        {
-            ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
-            if (emit_global_decl(vd, mod, arena, global_map, NULL) == NO_VREG)
-            {
-                return NULL;
-            }
-        }
-        else if (decl->kind == AST_DECL_LIST)
-        {
-            /* An init-declarator list at file scope: one global per
-               declarator. */
-            ASTDeclList *dl = ast_as(ASTDeclList, decl);
-            size_t n = vec_size(dl->decls);
-            for (size_t j = 0; j < n; j++)
-            {
-                ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, j));
-                if (emit_global_decl(vd, mod, arena, global_map, NULL) == NO_VREG)
-                {
-                    return NULL;
-                }
-            }
+            return NULL;
         }
     }
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
-        if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL ||
-            decl->kind == AST_VAR_DECL || decl->kind == AST_TYPEDEF_DECL ||
-            decl->kind == AST_DECL_LIST || decl->kind == AST_STATIC_ASSERT ||
-            decl->kind == AST_FUNC_DECL)
+        if (is_toplevel_declaration(decl))
         {
             continue;
         }
