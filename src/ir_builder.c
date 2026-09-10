@@ -555,13 +555,11 @@ static ExprResult build_short_circuit(ASTBinaryExpr *be, IrFunction *f, IrBlock 
     seal_block(ctx, false_bb);
     seal_block(ctx, true_bb);
 
-    /* The merge block is sealed so future reads produce PHIs. */
-    merge_bb->sealed = true;
-
     u32 dst = alloc_vreg_from_type(ctx, type_int());
     IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, ir_operand_imm(1), true_bb);
     ir_phi_add_entry(phi, ir_operand_imm(0), false_bb);
+    seal_block(ctx, merge_bb);
 
     return expr_result(ir_operand_vreg(dst), merge_bb);
 }
@@ -594,7 +592,7 @@ static ExprResult build_ternary_expr(ASTTernaryExpr *te, IrFunction *f, IrBlock 
     IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, then_val.value, then_val.block);
     ir_phi_add_entry(phi, else_val.value, else_val.block);
-    merge_bb->sealed = true;
+    seal_block(ctx, merge_bb);
 
     return expr_result(ir_operand_vreg(dst), merge_bb);
 }
@@ -992,13 +990,14 @@ static ExprResult build_compound_assign(ASTBinaryExpr *be, IrFunction *f, IrBloc
 
 static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
-    if (ue->op == UN_DEREF)
+    switch (ue->op)
     {
-        return build_deref_expr(ue, f, bb, ctx);
-    }
-    if (ue->op == UN_ADDR)
-    {
-        return build_addr_expr(ue, f, bb, ctx);
+        case UN_DEREF:
+            return build_deref_expr(ue, f, bb, ctx);
+        case UN_ADDR:
+            return build_addr_expr(ue, f, bb, ctx);
+        default:
+            break;
     }
     ExprResult src = build_expr(ue->operand, f, bb, ctx);
     Type *result_type = node_type((ASTNode *) ue);
@@ -1017,25 +1016,34 @@ static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
     return expr_result(ir_operand_vreg(dst), src.block);
 }
 
-/* §6.5.2.5 compound literal: allocate, zero-fill + apply the plan, then yield
-   the slot address (memory) or a loaded scalar. */
-static ExprResult build_compound_literal_expr(ASTCompoundLiteral *cl, IrFunction *f, IrBlock *bb,
-                                              FuncBuilder *ctx)
+/* An anonymous object whose slot is allocated and plan-applied (§6.5.2.5). */
+static ExprResult compound_literal_slot(ASTCompoundLiteral *cl, IrFunction *f, IrBlock *bb,
+                                        FuncBuilder *ctx)
 {
     u32 slot = alloc_vreg_from_type(ctx, type_ptr(cl->type));
     ir_emit_alloca(bb, slot, cl->type->size);
     bb = emit_init_plan(f, bb, ir_operand_vreg(slot), cl->plan, ctx);
+    return expr_result(ir_operand_vreg(slot), bb);
+}
+
+/* §6.5.2.5 compound literal: yield the slot address (memory) or a loaded
+   scalar. */
+static ExprResult build_compound_literal_expr(ASTCompoundLiteral *cl, IrFunction *f, IrBlock *bb,
+                                              FuncBuilder *ctx)
+{
+    ExprResult slot = compound_literal_slot(cl, f, bb, ctx);
+    bb = slot.block;
     Type *ty = type_unqual(cl->type);
     if (type_is_memory(ty))
     {
-        return expr_result(ir_operand_vreg(slot), bb);
+        return slot;
     }
     if (ty->kind == TYPE_VOID)
     {
         return expr_result(ir_operand_imm(0), bb);
     }
     u32 dst = alloc_vreg_from_type(ctx, ty);
-    ir_emit_load(bb, dst, ir_operand_vreg(slot));
+    ir_emit_load(bb, dst, slot.value);
     return expr_result(ir_operand_vreg(dst), bb);
 }
 
@@ -1239,51 +1247,52 @@ static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
 static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     ASTNode *operand = ue->operand;
-    if (operand->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, operand)->op == UN_DEREF)
+    switch (operand->kind)
     {
-        return build_expr(ast_as(ASTUnaryExpr, operand)->operand, f, bb, ctx);
-    }
-    if (operand->kind == AST_SUBSCRIPT_EXPR)
-    {
-        return build_subscript_addr(ast_as(ASTSubscriptExpr, operand), f, bb, ctx);
-    }
-    if (operand->kind == AST_MEMBER_ACCESS)
-    {
-        return build_member_lvalue(ast_as(ASTMemberAccess, operand), f, bb, ctx);
-    }
-    if (operand->kind == AST_COMPOUND_LITERAL)
-    {
-        /* `&(struct S){...}`: the anonymous object's slot address, built and
-           initialized inline — but not loaded (the point of `&`). */
-        ASTCompoundLiteral *cl = ast_as(ASTCompoundLiteral, operand);
-        u32 slot = alloc_vreg_from_type(ctx, type_ptr(cl->type));
-        ir_emit_alloca(bb, slot, cl->type->size);
-        bb = emit_init_plan(f, bb, ir_operand_vreg(slot), cl->plan, ctx);
-        return expr_result(ir_operand_vreg(slot), bb);
-    }
-    if (operand->kind == AST_IDENT)
-    {
-        ASTIdent *id = ast_as(ASTIdent, operand);
-        if (id->is_func)
+        case AST_UNARY_EXPR:
         {
-            /* `&f` = the function's address, identical to the designator. */
-            return expr_result(ir_operand_func(id->name), bb);
+            ASTUnaryExpr *inner = ast_as(ASTUnaryExpr, operand);
+            if (inner->op == UN_DEREF)
+            {
+                /* `&*p`: the address of the pointed-to object is just p. */
+                return build_expr(inner->operand, f, bb, ctx);
+            }
+            break;
         }
-        ASTVarDecl *decl = id->decl;
-        ASSERT(decl != NULL);
-        u32 midx = var_global_index(ctx, decl);
-        if (midx != NO_VREG)
+        case AST_SUBSCRIPT_EXPR:
+            return build_subscript_addr(ast_as(ASTSubscriptExpr, operand), f, bb, ctx);
+        case AST_MEMBER_ACCESS:
+            return build_member_lvalue(ast_as(ASTMemberAccess, operand), f, bb, ctx);
+        case AST_COMPOUND_LITERAL:
+            /* The slot address without the load — the point of `&`. */
+            return compound_literal_slot(ast_as(ASTCompoundLiteral, operand), f, bb, ctx);
+        case AST_IDENT:
         {
-            return expr_result(ir_operand_global(midx), bb);
+            ASTIdent *id = ast_as(ASTIdent, operand);
+            if (id->is_func)
+            {
+                /* `&f` is the function's address, identical to the designator. */
+                return expr_result(ir_operand_func(id->name), bb);
+            }
+            ASTVarDecl *decl = id->decl;
+            ASSERT(decl != NULL);
+            u32 midx = var_global_index(ctx, decl);
+            if (midx != NO_VREG)
+            {
+                return expr_result(ir_operand_global(midx), bb);
+            }
+            /* `&x` of an address-taken auto is its spill slot address. */
+            IrOperand *slot = spill_slot(ctx, decl);
+            if (slot)
+            {
+                return expr_result(*slot, bb);
+            }
+            break;
         }
-        /* `&x` of an address-taken auto is its spill slot address. */
-        IrOperand *slot = spill_slot(ctx, decl);
-        if (slot)
-        {
-            return expr_result(*slot, bb);
-        }
+        default:
+            break;
     }
-    /* &x for array: build_expr already decays to pointer */
+    /* Arrays decay to a pointer in build_expr; other operands build their value. */
     return build_expr(operand, f, bb, ctx);
 }
 
@@ -1302,34 +1311,26 @@ static ExprResult build_subscript_expr(ASTSubscriptExpr *se, IrFunction *f, IrBl
     return expr_result(ir_operand_vreg(dst), bb);
 }
 
-static ExprResult build_sizeof_expr(ASTSizeofExpr *se, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
+/* sizeof/alignof are compile-time constants resolved by semantic (§6.5.3.4);
+   the expression value is that constant. */
+static ExprResult build_size_const(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     (void) f;
     (void) ctx;
-    return expr_result(ir_operand_imm((i64) se->size_value), bb);
-}
-
-static ExprResult build_sizeof_type(ASTSizeofType *st, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
-{
-    (void) f;
-    (void) ctx;
-    return expr_result(ir_operand_imm((i64) st->size_value), bb);
-}
-
-static ExprResult build_alignof_expr(ASTAlignofExpr *ae, IrFunction *f, IrBlock *bb,
-                                     FuncBuilder *ctx)
-{
-    (void) f;
-    (void) ctx;
-    return expr_result(ir_operand_imm((i64) ae->align_value), bb);
-}
-
-static ExprResult build_alignof_type(ASTAlignofType *at, IrFunction *f, IrBlock *bb,
-                                     FuncBuilder *ctx)
-{
-    (void) f;
-    (void) ctx;
-    return expr_result(ir_operand_imm((i64) at->align_value), bb);
+    switch (node->kind)
+    {
+        case AST_SIZEOF_TYPE:
+            return expr_result(ir_operand_imm((i64) ast_as(ASTSizeofType, node)->size_value), bb);
+        case AST_SIZEOF_EXPR:
+            return expr_result(ir_operand_imm((i64) ast_as(ASTSizeofExpr, node)->size_value), bb);
+        case AST_ALIGNOF_TYPE:
+            return expr_result(ir_operand_imm((i64) ast_as(ASTAlignofType, node)->align_value), bb);
+        case AST_ALIGNOF_EXPR:
+            return expr_result(ir_operand_imm((i64) ast_as(ASTAlignofExpr, node)->align_value), bb);
+        default:
+            ir_error(node, "unsupported size expression");
+            return expr_result(ir_operand_imm(0), bb);
+    }
 }
 
 static u32 global_index_of(FuncBuilder *ctx, const char *name)
@@ -1924,25 +1925,27 @@ static ExprResult build_member_access_expr(ASTMemberAccess *ma, IrFunction *f, I
 
 static ExprResult build_binary_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
-    if (be->op == BIN_COMMA)
+    if (plain_op(be->op) != be->op)
     {
-        /* §6.5.17: evaluate the left and discard it, return the right. */
-        ExprResult left = build_expr(be->left, f, bb, ctx);
-        return build_expr(be->right, f, left.block, ctx);
-    }
-    if (be->op == BIN_LOG_AND || be->op == BIN_LOG_OR)
-    {
-        return build_short_circuit(be, f, bb, ctx);
-    }
-    if (be->op == BIN_ASSIGN)
-    {
-        return build_assign_expr(be, f, bb, ctx);
-    }
-    if (be->op >= BIN_ADD_ASSIGN && be->op <= BIN_XOR_ASSIGN)
-    {
+        /* Not its own plain form: a compound assignment. */
         return build_compound_assign(be, f, bb, ctx);
     }
-    return build_arith_binop_expr(be, f, bb, ctx);
+    switch (be->op)
+    {
+        case BIN_COMMA:
+        {
+            /* §6.5.17: evaluate the left and discard it, return the right. */
+            ExprResult left = build_expr(be->left, f, bb, ctx);
+            return build_expr(be->right, f, left.block, ctx);
+        }
+        case BIN_LOG_AND:
+        case BIN_LOG_OR:
+            return build_short_circuit(be, f, bb, ctx);
+        case BIN_ASSIGN:
+            return build_assign_expr(be, f, bb, ctx);
+        default:
+            return build_arith_binop_expr(be, f, bb, ctx);
+    }
 }
 
 static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
@@ -1966,13 +1969,10 @@ static ExprResult build_expr(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuil
         case AST_SUBSCRIPT_EXPR:
             return build_subscript_expr(ast_as(ASTSubscriptExpr, node), f, bb, ctx);
         case AST_SIZEOF_EXPR:
-            return build_sizeof_expr(ast_as(ASTSizeofExpr, node), f, bb, ctx);
         case AST_SIZEOF_TYPE:
-            return build_sizeof_type(ast_as(ASTSizeofType, node), f, bb, ctx);
         case AST_ALIGNOF_EXPR:
-            return build_alignof_expr(ast_as(ASTAlignofExpr, node), f, bb, ctx);
         case AST_ALIGNOF_TYPE:
-            return build_alignof_type(ast_as(ASTAlignofType, node), f, bb, ctx);
+            return build_size_const(node, f, bb, ctx);
         case AST_STRING_LITERAL:
             return build_string_literal_expr(ast_as(ASTStringLiteral, node), f, bb, ctx);
         case AST_MEMBER_ACCESS:
