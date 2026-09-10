@@ -17,6 +17,13 @@ static bool spell_is(const PpToken *t, const char *spelling)
     return t->len == strlen(spelling) && strncmp(t->spell, spelling, t->len) == 0;
 }
 
+static void expect_token(Vec *toks, size_t i, PpKind kind, const char *spelling)
+{
+    PpToken *t = tok(toks, i);
+    EXPECT_EQ(t->kind, kind);
+    EXPECT_TRUE(spell_is(t, spelling));
+}
+
 static void expect_trigraph(Arena *a, char marker, const char *expected)
 {
     char src[4] = {'?', '?', marker, '\0'};
@@ -301,4 +308,156 @@ TEST(pp_kind_name, names_each_kind)
     EXPECT_STR_EQ(pp_kind_name(TOK_PP_OTHER), "TOK_PP_OTHER");
     EXPECT_STR_EQ(pp_kind_name(TOK_PP_HEADER_NAME), "TOK_PP_HEADER_NAME");
     EXPECT_STR_EQ(pp_kind_name(TOK_PP_PARAM), "TOK_PP_PARAM");
+}
+
+TEST(pp_lex, plain_string_literal)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", "\"abc\"", a);
+    EXPECT_NOTNULL(toks);
+    EXPECT_EQ(vec_size(toks), 2);
+    expect_token(toks, 0, TOK_PP_STRING, "\"abc\"");
+    arena_free(a);
+}
+
+TEST(pp_lex, prefixed_string_literals)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", "L\"a\" u8\"b\" u\"c\" U\"d\"", a);
+    EXPECT_NOTNULL(toks);
+    EXPECT_EQ(vec_size(toks), 8);
+    expect_token(toks, 0, TOK_PP_STRING, "L\"a\"");
+    expect_token(toks, 2, TOK_PP_STRING, "u8\"b\"");
+    expect_token(toks, 4, TOK_PP_STRING, "u\"c\"");
+    expect_token(toks, 6, TOK_PP_STRING, "U\"d\"");
+    arena_free(a);
+}
+
+TEST(pp_lex, string_escapes_kept_raw)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", "\"\\x41\\n\" \"\\u1234\"", a);
+    EXPECT_NOTNULL(toks);
+    expect_token(toks, 0, TOK_PP_STRING, "\"\\x41\\n\"");
+    expect_token(toks, 2, TOK_PP_STRING, "\"\\u1234\"");
+    arena_free(a);
+}
+
+TEST(pp_lex, string_escaped_quote_does_not_end_literal)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", "\"a\\\"b\"", a);
+    EXPECT_NOTNULL(toks);
+    EXPECT_EQ(vec_size(toks), 2);
+    expect_token(toks, 0, TOK_PP_STRING, "\"a\\\"b\"");
+    arena_free(a);
+}
+
+TEST(pp_lex, unterminated_string_is_error)
+{
+    Arena *a = arena_new();
+    EXPECT_NULL(pp_lex("<test>", "\"abc", a));
+    EXPECT_NULL(pp_lex("<test>", "\"abc\nx\"", a));
+    arena_free(a);
+}
+
+TEST(pp_lex, char_literals_and_escapes)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", "'a' '\\n'", a);
+    EXPECT_NOTNULL(toks);
+    expect_token(toks, 0, TOK_PP_CHAR, "'a'");
+    expect_token(toks, 2, TOK_PP_CHAR, "'\\n'");
+    arena_free(a);
+}
+
+TEST(pp_lex, multi_char_constant_is_one_token)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", "'ab'", a);
+    EXPECT_NOTNULL(toks);
+    EXPECT_EQ(vec_size(toks), 2);
+    expect_token(toks, 0, TOK_PP_CHAR, "'ab'");
+    arena_free(a);
+}
+
+TEST(pp_lex, prefixed_char_literals)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", "L'a' u'b' U'c'", a);
+    EXPECT_NOTNULL(toks);
+    EXPECT_EQ(vec_size(toks), 6);
+    expect_token(toks, 0, TOK_PP_CHAR, "L'a'");
+    expect_token(toks, 2, TOK_PP_CHAR, "u'b'");
+    expect_token(toks, 4, TOK_PP_CHAR, "U'c'");
+    arena_free(a);
+}
+
+TEST(pp_lex, unterminated_char_is_error)
+{
+    Arena *a = arena_new();
+    EXPECT_NULL(pp_lex("<test>", "'a", a));
+    EXPECT_NULL(pp_lex("<test>", "'a\nb'", a));
+    arena_free(a);
+}
+
+TEST(pp_lex, char_adjacent_to_ident)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", "x'a'", a);
+    EXPECT_NOTNULL(toks);
+    EXPECT_EQ(vec_size(toks), 3);
+    expect_token(toks, 0, TOK_PP_IDENT, "x");
+    expect_token(toks, 1, TOK_PP_CHAR, "'a'");
+    arena_free(a);
+}
+
+TEST(pp_lex, prefix_without_quote_is_ident)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", "Labc u8 lu", a);
+    EXPECT_NOTNULL(toks);
+    expect_token(toks, 0, TOK_PP_IDENT, "Labc");
+    expect_token(toks, 2, TOK_PP_IDENT, "u8");
+    expect_token(toks, 4, TOK_PP_IDENT, "lu");
+    arena_free(a);
+}
+
+TEST(pp_lex, pp_numbers)
+{
+    Arena *a = arena_new();
+    static const char *const NUMBERS[] = {"0x1p-3", ".5",   "1e+5", "5.",     "123abc",
+                                          "1e-",    "1..2", "0xFF", "1.5e-3", "42"};
+    for (size_t i = 0; i < sizeof(NUMBERS) / sizeof(NUMBERS[0]); i++)
+    {
+        Vec *toks = pp_lex("<test>", NUMBERS[i], a);
+        EXPECT_NOTNULL(toks);
+        EXPECT_EQ(vec_size(toks), 2);
+        expect_token(toks, 0, TOK_PP_NUMBER, NUMBERS[i]);
+    }
+    arena_free(a);
+}
+
+TEST(pp_lex, dot_is_punct_but_dot_digit_is_number)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", ". ... .5", a);
+    EXPECT_NOTNULL(toks);
+    expect_token(toks, 0, TOK_PP_PUNCT, ".");
+    expect_token(toks, 2, TOK_PP_PUNCT, "...");
+    expect_token(toks, 4, TOK_PP_NUMBER, ".5");
+    arena_free(a);
+}
+
+TEST(pp_lex, angle_quotes_are_not_header_names)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", "<foo.h>", a);
+    EXPECT_NOTNULL(toks);
+    expect_token(toks, 0, TOK_PP_PUNCT, "<");
+    expect_token(toks, 1, TOK_PP_IDENT, "foo");
+    expect_token(toks, 2, TOK_PP_PUNCT, ".");
+    expect_token(toks, 3, TOK_PP_IDENT, "h");
+    expect_token(toks, 4, TOK_PP_PUNCT, ">");
+    arena_free(a);
 }

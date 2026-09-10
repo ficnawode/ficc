@@ -137,6 +137,11 @@ static bool is_hspace(char c)
     return c == ' ' || c == '\t' || c == '\v' || c == '\f' || c == '\r';
 }
 
+static bool is_digit(char c)
+{
+    return c >= '0' && c <= '9';
+}
+
 static bool is_ident_start(char c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
@@ -144,7 +149,37 @@ static bool is_ident_start(char c)
 
 static bool is_ident_char(char c)
 {
-    return is_ident_start(c) || (c >= '0' && c <= '9');
+    return is_ident_start(c) || is_digit(c);
+}
+
+/* Returns true when p begins a (possibly prefixed) string or char literal;
+   prefix_len excludes the opening quote, quote receives it. */
+static bool pp_literal_start(const char *p, u32 *prefix_len, char *quote)
+{
+    if (*p == '"' || *p == '\'')
+    {
+        *prefix_len = 0;
+        *quote = *p;
+        return true;
+    }
+    if (p[0] == 'u' && p[1] == '8' && (p[2] == '"' || p[2] == '\''))
+    {
+        *prefix_len = 2;
+        *quote = p[2];
+        return true;
+    }
+    if ((p[0] == 'L' || p[0] == 'u' || p[0] == 'U') && (p[1] == '"' || p[1] == '\''))
+    {
+        *prefix_len = 1;
+        *quote = p[1];
+        return true;
+    }
+    return false;
+}
+
+static bool pp_number_start(char c, char next)
+{
+    return is_digit(c) || (c == '.' && is_digit(next));
 }
 
 /* Longest first for max munch (C11 §6.4.6, including digraphs). */
@@ -286,6 +321,72 @@ static void scan_ident(SoupScannerCtx *ctx)
     scanner_push(ctx, TOK_PP_IDENT, start, (u32) (ctx->p - start), loc, false);
 }
 
+static bool scan_literal(SoupScannerCtx *ctx)
+{
+    u32 prefix_len;
+    char quote;
+    if (!pp_literal_start(ctx->p, &prefix_len, &quote))
+    {
+        return false;
+    }
+
+    Loc loc = scanner_loc(ctx);
+    const char *start = ctx->p;
+    for (u32 i = 0; i < prefix_len + 1; i++)
+    {
+        scanner_advance(ctx);
+    }
+    while (*ctx->p && *ctx->p != quote && *ctx->p != '\n')
+    {
+        if (*ctx->p == '\\' && ctx->p[1] != '\0')
+        {
+            scanner_advance(ctx);
+            scanner_advance(ctx);
+            continue;
+        }
+        scanner_advance(ctx);
+    }
+
+    PpKind kind = quote == '"' ? TOK_PP_STRING : TOK_PP_CHAR;
+    if (*ctx->p == quote)
+    {
+        scanner_advance(ctx);
+    }
+    else
+    {
+        scanner_error(ctx, kind == TOK_PP_STRING ? "unterminated string literal"
+                                                 : "unterminated character constant");
+    }
+    scanner_push(ctx, kind, start, (u32) (ctx->p - start), loc, false);
+    return true;
+}
+
+static void scan_number(SoupScannerCtx *ctx)
+{
+    Loc loc = scanner_loc(ctx);
+    const char *start = ctx->p;
+    scanner_advance(ctx);
+    while (*ctx->p)
+    {
+        char c = *ctx->p;
+        if ((c == 'e' || c == 'E' || c == 'p' || c == 'P') &&
+            (ctx->p[1] == '+' || ctx->p[1] == '-'))
+        {
+            scanner_advance(ctx);
+            scanner_advance(ctx);
+        }
+        else if (is_ident_char(c) || c == '.')
+        {
+            scanner_advance(ctx);
+        }
+        else
+        {
+            break;
+        }
+    }
+    scanner_push(ctx, TOK_PP_NUMBER, start, (u32) (ctx->p - start), loc, false);
+}
+
 static void scan_punct(SoupScannerCtx *ctx, u32 len)
 {
     Loc loc = scanner_loc(ctx);
@@ -318,6 +419,10 @@ Vec *pp_lex(const char *file, const char *src, Arena *arena)
 
     while (*ctx.p)
     {
+        if (scan_literal(&ctx))
+        {
+            continue;
+        }
         if (is_hspace(*ctx.p))
         {
             scan_ws(&ctx);
@@ -333,6 +438,10 @@ Vec *pp_lex(const char *file, const char *src, Arena *arena)
         else if (ctx.p[0] == '/' && ctx.p[1] == '/')
         {
             scan_line_comment(&ctx);
+        }
+        else if (pp_number_start(ctx.p[0], ctx.p[1]))
+        {
+            scan_number(&ctx);
         }
         else if (is_ident_start(*ctx.p))
         {
