@@ -26,20 +26,18 @@ struct ExprResult
     IrBlock *block;
 };
 
-/* A lowered lvalue target (D13.5): the single representation through which
-   plain assignment, compound assignment, and `++`/`--` address storage.
-   - LV_IDENT_SSA: a block-scope auto scalar/pointer, resolved through
-     read_variable/write_variable (the SSA stack if not spilled, the alloca
-     slot store if address-taken).
-   - LV_MEM: an explicit address operand (global, block static, spilled auto's
-     slot, member GEP, deref, subscript GEP, or a record/array SSA pointer). */
+/* A lowered lvalue target: the one representation through which plain
+   assignment, compound assignment, and `++`/`--` address storage. Either an
+   SSA slot (block-scope scalar, via read/write_variable) or an explicit
+   address operand for globals, statics, spilled autos, member GEPs, derefs,
+   subscript GEPs, and record/array storage pointers. */
 typedef struct LvalueSlot LvalueSlot;
 struct LvalueSlot
 {
-    ASTVarDecl *decl; /* LV_IDENT_SSA */
-    bool is_ssa;      /* true: block-scope auto (SSA or spilled); false: memory */
-    IrOperand addr;   /* memory address (only when !is_ssa) */
-    Type *type;       /* the lvalue's type */
+    ASTVarDecl *decl; /* SSA target (when is_ssa) */
+    bool is_ssa;
+    IrOperand addr; /* memory address (when !is_ssa) */
+    Type *type;
 };
 
 typedef struct LvalueResult LvalueResult;
@@ -50,10 +48,9 @@ struct LvalueResult
     bool failed;
 };
 
-/* The inputs to the shared arithmetic lowering (D13.5): the (plain) operator,
-   the operand types, the type of the emitted result vreg, and a node for
-   diagnostics. Consumed by plain binary expressions and compound assignment,
-   which differ only in converting the result back to the LHS type. */
+/* Shared arithmetic-lowering inputs: the plain operator, operand types, the
+   result width, and a node for diagnostics. Plain binaries and compound
+   assignment differ only in converting the result back to the LHS type. */
 typedef struct
 {
     BinOpKind op;
@@ -169,8 +166,8 @@ static u32 alloc_vreg_from_type(FuncBuilder *ctx, Type *type)
     return ir_alloc_vreg(ctx->mod, width, type_is_signed(type));
 }
 
-/* Records and arrays are memory, not SSA values: their SSA slot holds a
-   pointer (width 8) to their storage. */
+/* Records/arrays are memory, not SSA values: their SSA slot is a pointer to
+   their storage. */
 static Type *var_ssa_type(Type *t)
 {
     if (type_is_record(t))
@@ -197,12 +194,8 @@ static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *
     u8 tgt_w = target_type->width / 8;
     if (target_type->kind == TYPE_BOOL && src_type->kind != TYPE_BOOL)
     {
-        /* §6.3.1.2: conversion to _Bool turns any nonzero value into 1. Emit
-           (val != 0) at the source width — the same ICMP_NE shape lower_icmp
-           and eval_icmp already lower for comparisons, so this is correct in
-           both backends by construction — then TRUNC to the 1-byte _Bool
-           storage width (the (char)x cast shape). A width-1 source needs no
-           trunc; its icmp result is already 0/1. */
+        /* §6.3.1.2: _Bool stores (val != 0) — an ICMP_NE at the source width,
+           TRUNC'd to the byte when the source is wider than 1. */
         u32 cmp = alloc_vreg_from_type(ctx, src_type);
         ir_emit_binop(bb, OP_ICMP_NE, cmp, val, ir_operand_imm(0));
         if (src_w == 1)
@@ -256,8 +249,7 @@ static bool is_divrem_op(BinOpKind op)
 
 static u32 alloc_phi_vreg(FuncBuilder *ctx, ASTVarDecl *var)
 {
-    /* Arrays are stored as a decayed pointer in SSA; records are stored as a
-       pointer to their storage; allocate the phi slot with that width. */
+    /* A phi slot holds the var's SSA shape: a decayed/pointed value. */
     return alloc_vreg_for_var(ctx, var->type);
 }
 
@@ -313,12 +305,10 @@ static void declare_pred(IrBlock *bb, IrBlock *pred)
     vec_push(bb->preds, pred);
 }
 
-/* --- scalar address-of spill machinery (Phase 9b) ---
-   A block-scope auto whose address is taken becomes memory-resident: it gets a
-   function-entry `OP_ALLOCA` slot whose address is stored in `spill_slots`,
-   and every read/write goes through `OP_LOAD`/`OP_STORE` — bypassing the Braun
-   SSA stack entirely, exactly like globals. Loads see current memory, so loops
-   and CFG merges stay correct with no PHIs. */
+/* --- scalar address-of spill machinery ---
+   An address-taken block-scope auto becomes memory-resident: a function-entry
+   OP_ALLOCA slot (keyed in spill_slots) that every read/write loads/stores,
+   bypassing the SSA stack — loads see current memory, so no PHIs are needed. */
 
 static bool is_spillable_var(ASTVarDecl *decl)
 {
@@ -331,9 +321,8 @@ static IrOperand *spill_slot(FuncBuilder *ctx, ASTVarDecl *var)
     return u64map_get(ctx->spill_slots, (u64) (uintptr_t) var);
 }
 
-/* Emit one alloca per address-taken auto into the function entry block and
-   record the slot address. Allocas are hoisted first so slot addresses are
-   invariant and dominate every use. */
+/* Allocate each address-taken auto's slot in the entry block: hoisted so slot
+   addresses are invariant and dominate every use. */
 static void emit_spill_allocas(FuncBuilder *ctx, IrBlock *entry)
 {
     size_t n = vec_size(ctx->spilled);
@@ -372,43 +361,36 @@ static IrOperand resolve_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb
     IrOperand val;
     if (npreds == 0)
     {
-        /* No predecessors: undefined (semantic already checked) */
+        /* Undefined value; semantic already rejected the use. */
         val = ir_operand_imm(0);
     }
     else if (npreds == 1 && !bb->is_loop_header)
     {
-        /* Single predecessor and not a loop header: no PHI needed. Read the value
-           from the predecessor. For an unsealed predecessor this creates a
-           placeholder that will be filled when that block is sealed. */
+        /* Single predecessor, no merge: reuse its value. An unsealed
+           predecessor yields a placeholder filled when it is sealed. */
         IrBlock *pred = (IrBlock *) vec_get(bb->preds, 0);
         val = read_variable(ctx, var, pred);
     }
-    else if (bb->sealed && !bb->is_loop_header)
+    else if (bb->is_loop_header && bb->sealed)
     {
-        /* Sealed non-loop block with multiple predecessors: build a PHI now. */
-        val = build_phi(ctx, var, bb);
-    }
-    else if (bb->sealed)
-    {
-        /* Sealed loop header reached after it was sealed (e.g. a value flows
-           out of a switch nested in the loop and resolves up to the header
-           only after the loop finished building). Its predecessors are final,
-           so build the PHI now. Register it in the block's locals before
-           filling so a cycle back through this block terminates (the same
-           strategy the unsealed placeholder path uses). */
-        u32 nentries = (u32) vec_size(bb->preds);
+        /* A loop header is sealed only after the body is built, so a value
+           resolving here then (e.g. out of a nested switch) has final
+           predecessors. Register the PHI before filling so a cycle back
+           through this block terminates. */
         u32 dst = alloc_phi_vreg(ctx, var);
-        IrInstr *phi = emit_phi_at_start(bb, dst, nentries);
+        IrInstr *phi = emit_phi_at_start(bb, dst, (u32) npreds);
         u64map_set(bl->locals, (u64) (uintptr_t) var, box_operand(ctx, ir_operand_vreg(dst)));
         fill_phi_entries(ctx, bb, var, phi);
         val = ir_operand_vreg(dst);
     }
+    else if (bb->sealed)
+    {
+        val = build_phi(ctx, var, bb);
+    }
     else
     {
-        /* Unsealed block with multiple predecessors, or a loop header: create a
-           placeholder PHI that will be filled when the block is sealed. Loop
-           headers are pre-emptively treated as merge points because their back
-           edge is added after the body is built. */
+        /* Unsealed merge (or a loop header before sealing): record a
+           placeholder PHI filled when the block is sealed. */
         u32 dst = alloc_phi_vreg(ctx, var);
         PendingPhi *ip = arena_alloc(ctx->mod->arena, sizeof(PendingPhi), sizeof(void *));
         ip->var = var;
@@ -489,7 +471,7 @@ static void seal_block(FuncBuilder *ctx, IrBlock *bb)
 static const IrOpcode binop_ir[] = {
     [BIN_ADD] = OP_ADD, [BIN_SUB] = OP_SUB, [BIN_MUL] = OP_MUL, [BIN_AND] = OP_AND,
     [BIN_OR] = OP_OR,   [BIN_XOR] = OP_XOR, [BIN_SHL] = OP_SHL, [BIN_SHR] = OP_ASHR,
-    /* BIN_EQ..BIN_GE, BIN_DIV, BIN_REM resolved in build_arith_binop_expr */
+    /* BIN_EQ..BIN_GE, BIN_DIV, BIN_REM, BIN_SHR are filled in by arith_opcode */
 };
 
 static const IrOpcode unary_opcodes[] = {
@@ -527,8 +509,7 @@ static ExprResult build_ident_expr(ASTIdent *id, IrFunction *f, IrBlock *bb, Fun
     (void) f;
     if (id->is_func)
     {
-        /* A function designator (§6.3.2.1p4) is its address; like a global,
-           the operand itself carries that value (no load). */
+        /* A function designator (§6.3.2.1p4) is its address: no load. */
         return expr_result(ir_operand_func(id->name), bb);
     }
     ASTVarDecl *decl = id->decl;
@@ -591,8 +572,7 @@ static ExprResult build_short_circuit(ASTBinaryExpr *be, IrFunction *f, IrBlock 
     jump(true_bb, merge_bb);
     jump(false_bb, merge_bb);
 
-    /* Seal the short-circuit blocks before the merge so that values flowing
-       into the merge come from sealed predecessors. */
+    /* Seal branches first so merge inputs come from sealed preds. */
     seal_block(ctx, left.block);
     seal_block(ctx, right_bb);
     seal_block(ctx, false_bb);
@@ -642,14 +622,25 @@ static ExprResult build_ternary_expr(ASTTernaryExpr *te, IrFunction *f, IrBlock 
     return expr_result(ir_operand_vreg(dst), merge_bb);
 }
 
-/* Lower the target expression of a write into a shared lvalue slot (D13.5).
-   Mirrors the old shape dispatch of build_assign_expr: IDENT (block-scope
-   autos → SSA/spill route; records & arrays are memory, their SSA value is
-   the storage pointer, so they are LV_MEM with that pointer as the address;
-   globals/statics → LV_MEM global operand), MEMBER (GEP by field_offset),
-   UN_DEREF (the pointer value), SUBSCRIPT (GEP by element size). The lvalue
-   address is computed exactly once — the operator layer never re-evaluates
-   it. */
+/* Compute the element address of a subscript. The index is promoted to long
+   and GEP'd off the decayed base by the element size. */
+static ExprResult build_subscript_addr(ASTSubscriptExpr *se, IrFunction *f, IrBlock *bb,
+                                       FuncBuilder *ctx)
+{
+    ExprResult base = build_expr(se->array, f, bb, ctx);
+    ExprResult index = build_expr(se->index, f, base.block, ctx);
+    bb = index.block;
+    Type *elem = type_deref(type_decay(node_type(se->array)));
+    IrOperand idx = promote_to(ctx, bb, index.value, node_type(se->index), type_long());
+    u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
+    ir_emit_gep(bb, addr, base.value, idx, elem->size);
+    return expr_result(ir_operand_vreg(addr), bb);
+}
+
+/* Lower a write target into a shared lvalue slot (the address is computed
+   exactly once — operators never re-evaluate it): IDENT (block-scope scalars
+   → SSA route; record/array, global, and static targets → LV_MEM), MEMBER (GEP
+   by field offset), UN_DEREF (the pointer value), SUBSCRIPT (GEP by element). */
 static LvalueResult build_lvalue_slot(ASTNode *target, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     LvalueResult lv;
@@ -669,8 +660,7 @@ static LvalueResult build_lvalue_slot(ASTNode *target, IrFunction *f, IrBlock *b
         {
             if (type_is_record(decl->type) || type_is_array(decl->type))
             {
-                /* Records/arrays live in memory; the SSA value is the storage
-                   pointer, which is the address. */
+                /* Records/arrays: the SSA value is the storage pointer. */
                 lv.slot.is_ssa = false;
                 lv.slot.addr = read_variable(ctx, decl, bb);
                 lv.slot.type = decl->type;
@@ -729,18 +719,11 @@ static LvalueResult build_lvalue_slot(ASTNode *target, IrFunction *f, IrBlock *b
     if (target->kind == AST_SUBSCRIPT_EXPR)
     {
         ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, target);
-        ExprResult base = build_expr(se->array, f, bb, ctx);
-        ExprResult index = build_expr(se->index, f, base.block, ctx);
-        bb = index.block;
-        Type *ptr_type = type_decay(node_type(se->array));
-        Type *elem = type_deref(ptr_type);
-        IrOperand idx = promote_to(ctx, bb, index.value, node_type(se->index), type_long());
-        u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
-        ir_emit_gep(bb, addr, base.value, idx, elem->size);
+        ExprResult addr = build_subscript_addr(se, f, bb, ctx);
         lv.slot.is_ssa = false;
-        lv.slot.addr = ir_operand_vreg(addr);
-        lv.slot.type = elem;
-        lv.block = bb;
+        lv.slot.addr = addr.value;
+        lv.slot.type = type_deref(type_decay(node_type(se->array)));
+        lv.block = addr.block;
         return lv;
     }
 
@@ -749,9 +732,8 @@ static LvalueResult build_lvalue_slot(ASTNode *target, IrFunction *f, IrBlock *b
     return lv;
 }
 
-/* Read the current value of a lowered lvalue (D13.5): SSA scalars come from
-   read_variable (the SSA stack, or the spill-slot load when address-taken);
-   memory targets are loaded at the slot's type width. */
+/* Read a lowered lvalue: SSA scalars via read_variable (or their spill slot);
+   memory targets loaded at the slot type's width. */
 static IrOperand load_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot)
 {
     if (slot->is_ssa)
@@ -763,9 +745,8 @@ static IrOperand load_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot)
     return ir_operand_vreg(dst);
 }
 
-/* Store a value into a lowered lvalue. Records go through OP_MEMCPY (their
-   "value" is a pointer to the source storage); scalars/pointers through
-   OP_STORE; SSA scalars through write_variable (which routes SSA vs spill). */
+/* Store into a lowered lvalue: records via OP_MEMCPY (their value is a pointer
+   to source storage); scalars via OP_STORE; SSA scalars via write_variable. */
 static IrBlock *store_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot, IrOperand val)
 {
     if (slot->is_ssa)
@@ -809,12 +790,9 @@ static ExprResult build_assign_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
     return expr_result(val, bb);
 }
 
-/* Prefix/postfix `++`/`--` (D13.5): the slot address is computed exactly
-   once; the old value is loaded (or read from the SSA stack); pointers step
-   by the pointee size through GEP, arithmetic types promote, adjust by +-1,
-   and convert back to the operand's type (char wraps via TRUNC); the new
-   value is stored. Postfix yields the pre-increment value, prefix the
-   converted-back new value. No new opcodes in either backend. */
+/* `++`/`--`: load the old value once, step it (pointers GEP by pointee size,
+   arithmetic types promote, adjust by ±1, convert back so narrow types wrap),
+   store, and yield the old (postfix) or new (prefix) value. */
 static ExprResult build_incdec_expr(ASTIncDecExpr *ie, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     LvalueResult lv = build_lvalue_slot(ie->operand, f, bb, ctx);
@@ -881,31 +859,113 @@ static BinOpKind plain_op(BinOpKind op)
     }
 }
 
+/* Promote the operands of a binary op per the usual-arithmetic conversions.
+   Pointer operands skip the integer path: the non-pointer side converts to the
+   pointer type (§6.5.9p4). Shift counts promote independently (§6.5.7); the
+   left's promoted type sets the result width. */
+static void promote_binop_operands(BinOpKind op, FuncBuilder *ctx, IrBlock *bb, IrOperand *lhs,
+                                   IrOperand *rhs, Type **lt, Type **rt)
+{
+    if (!is_comparison_op(op) && !is_shift_op(op) && !is_divrem_op(op))
+    {
+        Type *promoted = type_common(type_promote(*lt), type_promote(*rt));
+        *lhs = promote_to(ctx, bb, *lhs, *lt, promoted);
+        *lt = promoted;
+        *rhs = promote_to(ctx, bb, *rhs, *rt, promoted);
+        *rt = promoted;
+        return;
+    }
+    if (is_comparison_op(op) || is_divrem_op(op))
+    {
+        Type *promoted;
+        if (type_is_ptr(*lt) && !type_is_ptr(*rt))
+        {
+            promoted = *lt;
+        }
+        else if (type_is_ptr(*rt) && !type_is_ptr(*lt))
+        {
+            promoted = *rt;
+        }
+        else if (type_is_ptr(*lt) || type_is_ptr(*rt))
+        {
+            promoted = *lt;
+        }
+        else
+        {
+            promoted = type_common(type_promote(*lt), type_promote(*rt));
+        }
+        *lhs = promote_to(ctx, bb, *lhs, *lt, promoted);
+        *lt = promoted;
+        *rhs = promote_to(ctx, bb, *rhs, *rt, promoted);
+        *rt = promoted;
+        return;
+    }
+    /* Shifts: an unpromoted char would shift at its own width with garbage
+       high bits (`char -8 >> 1` → 124 instead of -4). */
+    *lhs = promote_to(ctx, bb, *lhs, *lt, type_promote(*lt));
+    *lt = type_promote(*lt);
+    *rhs = promote_to(ctx, bb, *rhs, *rt, type_promote(*rt));
+    *rt = type_promote(*rt);
+}
+
+/* Select the IR opcode for a promoted binary op. */
+static IrOpcode arith_opcode(BinOpKind op, Type *lt)
+{
+    IrOpcode opcode = binop_ir[op];
+    if (is_comparison_op(op))
+    {
+        bool unsig = type_is_unsigned(lt);
+        switch (op)
+        {
+            case BIN_EQ:
+                return OP_ICMP_EQ;
+            case BIN_NE:
+                return OP_ICMP_NE;
+            case BIN_LT:
+                return unsig ? OP_ICMP_ULT : OP_ICMP_SLT;
+            case BIN_GT:
+                return unsig ? OP_ICMP_UGT : OP_ICMP_SGT;
+            case BIN_LE:
+                return unsig ? OP_ICMP_ULE : OP_ICMP_SLE;
+            case BIN_GE:
+                return unsig ? OP_ICMP_UGE : OP_ICMP_SGE;
+            default:
+                return opcode;
+        }
+    }
+    if (is_divrem_op(op))
+    {
+        return type_is_unsigned(lt) ? (op == BIN_DIV ? OP_UDIV : OP_UREM)
+                                    : (op == BIN_DIV ? OP_SDIV : OP_SREM);
+    }
+    if (op == BIN_SHR)
+    {
+        return type_is_unsigned(lt) ? OP_LSHR : OP_ASHR;
+    }
+    return opcode;
+}
+
 static ArithResult lower_arith_into(ArithSpec spec, IrOperand lval, IrOperand rval, IrBlock *bb,
                                     FuncBuilder *ctx)
 {
-    BinOpKind op = spec.op;
-    Type *lt = spec.lt;
-    Type *rt = spec.rt;
     ArithResult ar;
     ar.value = ir_operand_imm(0);
     ar.block = bb;
     ar.result_type = spec.result_type;
 
-    if (type_is_ptr(lt) && (op == BIN_ADD || op == BIN_SUB) && !type_is_ptr(rt))
+    if (type_is_ptr(spec.lt) && (spec.op == BIN_ADD || spec.op == BIN_SUB) && !type_is_ptr(spec.rt))
     {
-        /* Pointer += / -= scale by the pointee size (§6.5.6p8). */
+        /* Pointer arithmetic scales by the pointee size (§6.5.6p8). */
         IrOperand lhs = lval;
-        IrOperand rhs = rval;
-        Type *elem = type_deref(lt);
-        rhs = promote_to(ctx, bb, rhs, rt, type_long());
-        if (op == BIN_SUB)
+        IrOperand rhs = promote_to(ctx, bb, rval, spec.rt, type_long());
+        if (spec.op == BIN_SUB)
         {
             u32 neg_vreg = alloc_vreg_from_type(ctx, type_long());
             ir_emit_unary(bb, OP_NEG, neg_vreg, rhs);
             rhs = ir_operand_vreg(neg_vreg);
         }
-        u32 gep_vreg = alloc_vreg_from_type(ctx, lt);
+        Type *elem = type_deref(spec.lt);
+        u32 gep_vreg = alloc_vreg_from_type(ctx, spec.lt);
         ir_emit_gep(bb, gep_vreg, lhs, rhs, elem->size);
         ar.value = ir_operand_vreg(gep_vreg);
         return ar;
@@ -913,108 +973,16 @@ static ArithResult lower_arith_into(ArithSpec spec, IrOperand lval, IrOperand rv
 
     IrOperand lhs = lval;
     IrOperand rhs = rval;
+    Type *lt = spec.lt;
+    Type *rt = spec.rt;
+    promote_binop_operands(spec.op, ctx, bb, &lhs, &rhs, &lt, &rt);
 
-    if (!is_comparison_op(op) && !is_shift_op(op) && !is_divrem_op(op))
-    {
-        Type *promoted = type_common(type_promote(lt), type_promote(rt));
-        lhs = promote_to(ctx, bb, lhs, lt, promoted);
-        lt = promoted;
-        rhs = promote_to(ctx, bb, rhs, rt, promoted);
-        rt = promoted;
-    }
-    else if (is_comparison_op(op) || is_divrem_op(op))
-    {
-        /* Pointer comparisons (`p == 0`, `p < q`) never use the integer
-           usual-arithmetic conversion: the non-pointer side is converted to
-           the pointer type (§6.5.9p4 — a null pointer constant), not run
-           through type_common (which would assert on a non-integer). */
-        Type *promoted;
-        if (type_is_ptr(lt) && !type_is_ptr(rt))
-        {
-            promoted = lt;
-        }
-        else if (type_is_ptr(rt) && !type_is_ptr(lt))
-        {
-            promoted = rt;
-        }
-        else if (type_is_ptr(lt) || type_is_ptr(rt))
-        {
-            promoted = lt;
-        }
-        else
-        {
-            promoted = type_common(type_promote(lt), type_promote(rt));
-        }
-        lhs = promote_to(ctx, bb, lhs, lt, promoted);
-        lt = promoted;
-        rhs = promote_to(ctx, bb, rhs, rt, promoted);
-        rt = promoted;
-    }
-    else
-    {
-        /* For shifts (§6.5.7), *both* operands undergo integer promotion —
-           the left operand's promoted type determines the result width, and
-           the count is only promoted. Promoting the left is required for
-           correctness on narrow types: an unpromoted char source would
-           otherwise be shifted in the backend at its own width with garbage
-           high bits (`char -8 >> 1` → 124 instead of -4). */
-        lhs = promote_to(ctx, bb, lhs, lt, type_promote(lt));
-        lt = type_promote(lt);
-        rhs = promote_to(ctx, bb, rhs, rt, type_promote(rt));
-        rt = type_promote(rt);
-    }
-
-    IrOpcode opcode = binop_ir[op];
-
-    if (is_comparison_op(op))
-    {
-        bool unsig = type_is_unsigned(lt);
-        switch (op)
-        {
-            case BIN_EQ:
-                opcode = OP_ICMP_EQ;
-                break;
-            case BIN_NE:
-                opcode = OP_ICMP_NE;
-                break;
-            case BIN_LT:
-                opcode = unsig ? OP_ICMP_ULT : OP_ICMP_SLT;
-                break;
-            case BIN_GT:
-                opcode = unsig ? OP_ICMP_UGT : OP_ICMP_SGT;
-                break;
-            case BIN_LE:
-                opcode = unsig ? OP_ICMP_ULE : OP_ICMP_SLE;
-                break;
-            case BIN_GE:
-                opcode = unsig ? OP_ICMP_UGE : OP_ICMP_SGE;
-                break;
-            default:
-                break;
-        }
-    }
-    else if (is_divrem_op(op))
-    {
-        if (type_is_unsigned(lt))
-        {
-            opcode = (op == BIN_DIV) ? OP_UDIV : OP_UREM;
-        }
-        else
-        {
-            opcode = (op == BIN_DIV) ? OP_SDIV : OP_SREM;
-        }
-    }
-    else if (op == BIN_SHR)
-    {
-        opcode = type_is_unsigned(lt) ? OP_LSHR : OP_ASHR;
-    }
-
+    IrOpcode opcode = arith_opcode(spec.op, lt);
     if (opcode == 0)
     {
         ir_error(spec.node, "unsupported binary operator");
         return ar;
     }
-
     u32 dst = alloc_vreg_from_type(ctx, spec.result_type);
     ir_emit_binop(bb, opcode, dst, lhs, rhs);
     ar.value = ir_operand_vreg(dst);
@@ -1033,11 +1001,9 @@ static ExprResult build_arith_binop_expr(ASTBinaryExpr *be, IrFunction *f, IrBlo
     return expr_result(ar.value, ar.block);
 }
 
-/* Compound assignment (D13.5, §6.5.16.2): the slot address is computed once,
-   the current value is loaded, `E1 op E2` runs through the *same* promotion
-   and opcode-selection as the plain binary operator, the result is converted
-   back to the LHS type (char/`short` wrap, §6.5.16.2p3), stored, and returned
-   as the expression value. */
+/* Compound assignment (§6.5.16.2): load once, run the plain op's promotion and
+   opcode selection, convert the result back to the LHS type (narrow types
+   wrap, §6.5.16.2p3), store, and yield the new value. */
 static ExprResult build_compound_assign(ASTBinaryExpr *be, IrFunction *f, IrBlock *bb,
                                         FuncBuilder *ctx)
 {
@@ -1095,17 +1061,13 @@ static ExprResult build_unary_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
     return expr_result(ir_operand_vreg(dst), src.block);
 }
 
-/* C11 §6.5.2.5 compound literal (D12.9): an anonymous automatic object at
-   block scope. Allocate the slot inline (the same pattern sret/record copies
-   use — no spill pre-pass), zero-fill + apply the plan's writes, and yield the
-   lvalue: the slot *address* for records/arrays (the memory convention), a
-   loaded scalar otherwise. `&(int){5}` short-circuits in build_addr_expr and
-   gets the raw slot pointer without the load. */
+/* §6.5.2.5 compound literal: an anonymous automatic object. Allocate, zero-fill
+   + apply the plan, then yield the slot address (records/arrays) or a loaded
+   scalar. `&(literal)` short-circuits in build_addr_expr. */
 static ExprResult build_compound_literal_expr(ASTCompoundLiteral *cl, IrFunction *f, IrBlock *bb,
                                               FuncBuilder *ctx)
 {
-    /* The slot vreg holds the object's *address* (w8) regardless of the object
-       type — for a scalar the value is reloaded after construction. */
+    /* The slot vreg holds the object's address; scalars reload after. */
     u32 slot = alloc_vreg_from_type(ctx, type_ptr(cl->type));
     ir_emit_alloca(bb, slot, cl->type->size);
     bb = emit_init_plan(f, bb, ir_operand_vreg(slot), cl->plan, ctx);
@@ -1123,14 +1085,9 @@ static ExprResult build_compound_literal_expr(ASTCompoundLiteral *cl, IrFunction
     return expr_result(ir_operand_vreg(dst), bb);
 }
 
-/* C11 §6.5.4 cast expression. Value conversion per the §6.3 matrix:
-   - `(void) expr`: evaluate for effects, discard (like a void call);
-   - integer↔integer / integer↔pointer / pointer↔integer: reuse `promote_to`,
-     the exact conversion the assignment/arg/return paths use, so a cast that
-     coincides with an implicit conversion is bit-identical (widening via
-     SEXT/ZEXT by the source's signedness, narrowing via OP_TRUNC);
-   - pointer→pointer: a pure re-interpretation (§6.3.2.3p1/2/4); both operands
-     are 64-bit, so the value passes through unchanged — no instruction. */
+/* §6.5.4 cast: `(void)` evaluates for effects and discards; integer and
+   pointer↔integer converts through promote_to (bit-identical to the implicit
+   path); pointer→pointer reinterprets — both are 64-bit, so no instruction. */
 static ExprResult build_cast_expr(ASTCastExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     ExprResult src = build_expr(ce->operand, f, bb, ctx);
@@ -1148,11 +1105,8 @@ static ExprResult build_cast_expr(ASTCastExpr *ce, IrFunction *f, IrBlock *bb, F
     return expr_result(promote_to(ctx, bb, src.value, src_type, target), bb);
 }
 
-/* `__builtin_va_arg(ap, type)` (D15.6/D15.7): fetch the full 8-byte slot via
-   OP_VA_ARG (which advances the ap in the backends), then convert to the
-   requested type — the stored value is already promotion-shaped, and the
-   existing promote_to path supplies TRUNC/ZEXT/SEXT, so pointers load whole and
-   narrow integers truncate to the right width. */
+/* `__builtin_va_arg`: OP_VA_ARG reads the full 8-byte slot (the backends
+   advance ap), then promote_to converts to the requested type. */
 static ExprResult build_va_arg_expr(ASTVaArgExpr *va, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     ExprResult ap = build_expr(va->ap, f, bb, ctx);
@@ -1163,13 +1117,9 @@ static ExprResult build_va_arg_expr(ASTVaArgExpr *va, IrFunction *f, IrBlock *bb
                        ap.block);
 }
 
-/* Compiler builtins __builtin_va_start/__builtin_va_end (D15.3, D15.4).
-   __builtin_va_start(ap, last): gp_offset/stack_skip are pure compile-time
-   functions of the enclosing function's named-parameter count (f->params
-   includes the __sret pseudo-param, which consumes rdi like any arg, so the
-   register-save math is exact). The register spill itself lives in the
-   backends (prologue / eval_call); this instruction only records ap + the two
-   offsets. */
+/* __builtin_va_start/__builtin_va_end: the offsets are compile-time functions
+   of f->params (the __sret pseudo-param counts like any arg); the register
+   spill lives in the backends — this just records ap and the two offsets. */
 static ExprResult build_va_builtin(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     if (strcmp(ce->callee, "__builtin_va_start") == 0)
@@ -1193,11 +1143,31 @@ static ExprResult build_va_builtin(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, 
     return expr_result(ir_operand_imm(0), bb);
 }
 
+/* Lower one call argument: record args are copied into a fresh temp and passed
+   by pointer; everything else converts to the parameter's type (the variadic
+   tail re-ranks via default promotions, §6.5.2.2p7). */
+static IrBlock *lower_call_arg(FuncBuilder *ctx, IrFunction *f, ASTNode *arg, Type *param_type,
+                               IrBlock *bb, IrOperand *out)
+{
+    ExprResult arg_res = build_expr(arg, f, bb, ctx);
+    bb = arg_res.block;
+    Type *arg_type = arg->expr_type;
+    if (type_is_record(arg_type))
+    {
+        u32 tmp = alloc_vreg_for_var(ctx, arg_type);
+        ir_emit_alloca(bb, tmp, arg_type->size);
+        ir_emit_memcpy(bb, ir_operand_vreg(tmp), arg_res.value, arg_type->size);
+        *out = ir_operand_vreg(tmp);
+        return bb;
+    }
+    *out = promote_to(ctx, bb, arg_res.value, arg_type, param_type);
+    return bb;
+}
+
 static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, FuncBuilder *ctx)
 {
     /* Resolve the callee: a named function (direct) or a runtime value
-       (indirect, D16.4 — `(*fp)(x)`, `p->hash(x)`, `fp(x)` through a
-       function-pointer variable). */
+       (indirect). */
     Type *callee_type;
     IrOperand indirect_callee = ir_operand_imm(0);
     bool indirect = ce->callee_expr != NULL;
@@ -1219,11 +1189,8 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
         callee_type = strmap_get(ctx->func_types, ce->callee);
         if (!callee_type)
         {
-            /* Compiler builtins (__builtin_va_start/__builtin_va_end): never
-               in func_types. A user
-               definition with the same name wins (semantic resolves it there
-               and this branch is unreachable for it), so the name is ours to
-               lower. */
+            /* A compiler builtin; a user definition with the same name wins
+               and never reaches this branch. */
             return build_va_builtin(ce, f, bb, ctx);
         }
     }
@@ -1232,9 +1199,8 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
     bool is_variadic = callee_type->func.is_variadic;
     size_t n_declared = vec_size(callee_type->func.params);
 
-    /* By-memory convention (D4.2): a record return is written through a hidden
-       sret pointer argument (allocated here); record arguments are copied into
-       a fresh temp and passed by pointer. Everything else is a plain value. */
+    /* By-memory convention: a record return is written through a hidden sret
+       pointer; record args pass by pointer. */
     bool sret = type_is_record(callee_ret);
     u32 nargs = (u32) vec_size(ce->args);
     u32 total_args = (sret ? 1 : 0) + nargs;
@@ -1252,22 +1218,6 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
     for (u32 i = 0; i < nargs; i++)
     {
         ASTNode *arg = (ASTNode *) vec_get(ce->args, i);
-        ExprResult arg_res = build_expr(arg, f, bb, ctx);
-        bb = arg_res.block;
-        Type *arg_type = arg->expr_type;
-        u32 slot = sret ? i + 1 : i;
-        if (type_is_record(arg_type))
-        {
-            u32 tmp = alloc_vreg_for_var(ctx, arg_type);
-            ir_emit_alloca(bb, tmp, arg_type->size);
-            ir_emit_memcpy(bb, ir_operand_vreg(tmp), arg_res.value, arg_type->size);
-            args[slot] = ir_operand_vreg(tmp);
-            continue;
-        }
-        /* The parameter type drives default argument promotions: the typed
-           signature's params (the interned function type from D15.1) for the
-           named part, then the variadic tail re-ranks char/short/_Bool to
-           int (§6.5.2.2p7). */
         Type *param_type = NULL;
         if (i < n_declared)
         {
@@ -1275,13 +1225,14 @@ static ExprResult build_call_expr(ASTCallExpr *ce, IrFunction *f, IrBlock *bb, F
         }
         else if (is_variadic)
         {
-            param_type = type_promote(arg_type);
+            param_type = type_promote(arg->expr_type);
         }
         else
         {
-            param_type = arg_type;
+            param_type = arg->expr_type;
         }
-        args[slot] = promote_to(ctx, bb, arg_res.value, arg_type, param_type);
+        u32 slot = sret ? i + 1 : i;
+        bb = lower_call_arg(ctx, f, arg, param_type, bb, &args[slot]);
     }
 
     u32 dst;
@@ -1318,8 +1269,7 @@ static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
     Type *result_type = node_type((ASTNode *) ue);
     if (type_is_function(result_type))
     {
-        /* `*fp` yields the function designator, whose value is the function's
-           address — the same pointer we already hold (§6.3.2.1p4). */
+        /* `*fp` is the designator: the address we already hold (§6.3.2.1p4). */
         return ptr_res;
     }
     if (type_is_record(result_type) || type_is_array(result_type))
@@ -1329,8 +1279,7 @@ static ExprResult build_deref_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb,
     }
     if (result_type->kind == TYPE_VOID)
     {
-        /* `*p` where p is `void*`: no load, no value. Only reachable as a
-           discarded or `(void)` operand; semantic rejects use as a value. */
+        /* `void*` deref: no load and no value (semantic rejects using it). */
         return expr_result(ir_operand_imm(0), ptr_res.block);
     }
     u32 dst = alloc_vreg_from_type(ctx, result_type);
@@ -1347,16 +1296,7 @@ static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, 
     }
     if (operand->kind == AST_SUBSCRIPT_EXPR)
     {
-        ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, operand);
-        ExprResult base = build_expr(se->array, f, bb, ctx);
-        ExprResult index = build_expr(se->index, f, base.block, ctx);
-        bb = index.block;
-        Type *ptr_type = type_decay(node_type(se->array));
-        Type *elem = type_deref(ptr_type);
-        IrOperand idx = promote_to(ctx, bb, index.value, node_type(se->index), type_long());
-        u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
-        ir_emit_gep(bb, addr, base.value, idx, elem->size);
-        return expr_result(ir_operand_vreg(addr), bb);
+        return build_subscript_addr(ast_as(ASTSubscriptExpr, operand), f, bb, ctx);
     }
     if (operand->kind == AST_MEMBER_ACCESS)
     {
@@ -1412,26 +1352,19 @@ static ExprResult build_addr_expr(ASTUnaryExpr *ue, IrFunction *f, IrBlock *bb, 
 static ExprResult build_subscript_expr(ASTSubscriptExpr *se, IrFunction *f, IrBlock *bb,
                                        FuncBuilder *ctx)
 {
-    ExprResult base = build_expr(se->array, f, bb, ctx);
-    ExprResult index = build_expr(se->index, f, base.block, ctx);
-    bb = index.block;
-    Type *ptr_type = type_decay(node_type(se->array));
-    Type *elem = type_deref(ptr_type);
-    IrOperand idx = promote_to(ctx, bb, index.value, node_type(se->index), type_long());
-    u32 addr = alloc_vreg_from_type(ctx, type_ptr(elem));
-    ir_emit_gep(bb, addr, base.value, idx, elem->size);
+    ExprResult addr = build_subscript_addr(se, f, bb, ctx);
+    bb = addr.block;
+    Type *elem = type_deref(type_decay(node_type(se->array)));
     if (type_is_record(elem) || type_is_array(elem))
     {
-        /* Record/array elements are memory: the pointer is the value. */
-        return expr_result(ir_operand_vreg(addr), bb);
+        return addr; /* record/array elements are memory: the pointer is the value */
     }
     if (elem->kind == TYPE_VOID)
     {
-        /* `p[0]` of a `void*`: no load; cf. build_deref_expr. */
-        return expr_result(ir_operand_vreg(addr), bb);
+        return addr; /* cf. build_deref_expr: no load */
     }
     u32 dst = alloc_vreg_from_type(ctx, elem);
-    ir_emit_load(bb, dst, ir_operand_vreg(addr));
+    ir_emit_load(bb, dst, addr.value);
     return expr_result(ir_operand_vreg(dst), bb);
 }
 
@@ -1499,9 +1432,8 @@ static const u8 *encode_object_bytes(Arena *arena, i64 value, Type *type)
     return encode_const_bytes(arena, value, (u32) type->size);
 }
 
-/* Fold an integer constant expression (C11 §6.6). Semantic has already run, so
-   `sizeof` nodes carry their resolved size_value. Returns false when the node
-   is not foldable or not constant. */
+/* Fold a constant expression (§6.6); semantic already resolved sizeof/alignof.
+   Returns false when not constant. */
 static bool fold_constant_ir(ASTNode *node, i64 *out)
 {
     if (!node)
@@ -1649,57 +1581,57 @@ static bool fold_constant_ir(ASTNode *node, i64 *out)
 
 static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *arena);
 
-static void ir_global_add_reloc(IrGlobal *g, u32 offset, int target, Arena *arena)
+static GlobalReloc *push_reloc(IrGlobal *g, Arena *arena)
 {
     if (!g->relocs)
     {
         g->relocs = vec_new(arena);
     }
     GlobalReloc *r = arena_alloc(arena, sizeof(GlobalReloc), _Alignof(GlobalReloc));
+    vec_push(g->relocs, r);
+    return r;
+}
+
+static void ir_global_add_reloc(IrGlobal *g, u32 offset, int target, Arena *arena)
+{
+    GlobalReloc *r = push_reloc(g, arena);
     r->offset = offset;
     r->target = target;
     r->is_func = false;
     r->func_name = NULL;
-    vec_push(g->relocs, r);
 }
 
-/* A data-side function-address relocation (D16.1): a file-scope function-
-   pointer initializer writes the function's address here. elf.c resolves it
-   against the function's symbol like the code-side R_X86_64_32S loads. */
+/* A data-side function-address relocation: elf.c resolves it against the
+   function symbol like the code-side loads. */
 static void ir_global_add_func_reloc(IrGlobal *g, u32 offset, const char *func_name, Arena *arena)
 {
-    if (!g->relocs)
-    {
-        g->relocs = vec_new(arena);
-    }
-    GlobalReloc *r = arena_alloc(arena, sizeof(GlobalReloc), _Alignof(GlobalReloc));
+    GlobalReloc *r = push_reloc(g, arena);
     r->offset = offset;
     r->target = -1;
     r->is_func = true;
     r->func_name = func_name;
-    vec_push(g->relocs, r);
 }
 
-/* Resolve an initializer leaf to the global whose address it names (an address
-   constant, §6.6p9): `&global`, `&static`, or a string literal in pointer
-   position. `static_map` may be NULL when no block-scope statics are visible.
-Returns the global index, or -2 with *out_func set for a function-address
-    relocation (D16.1), or -1 if the leaf is not an address constant. */
+static char *anon_name(Arena *arena, const char *prefix, u32 idx)
+{
+    char *buf = arena_alloc(arena, 32, 1);
+    snprintf(buf, 32, "%s_%u", prefix, idx);
+    return buf;
+}
+
+/* Resolve an initializer leaf naming an address constant (§6.6p9): `&global`,
+   `&static`, a string literal, or a function designator. Returns the global
+   index, -2 with *out_func for a function-address relocation, or -1. */
 static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
                                    U64Map *static_map, Arena *arena, const char **out_func);
 
-/* Serialize an anonymous file-scope compound literal (D12.9): `int *p =
-   &(int){5};` at file scope turns the literal into an anonymous IrGlobal whose
-   init bytes come from its plan (which may itself relocate against other
-   globals / string constants). Returns the global index, or NO_VREG on error. */
+/* An anonymous file-scope compound literal becomes an IrGlobal whose init
+   bytes come from its plan (relocating against other globals / strings). */
 static u32 emit_file_scope_compound(ASTCompoundLiteral *cl, IrModule *mod, Arena *arena,
                                     StrMap *global_map, U64Map *static_map)
 {
     IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
-    size_t name_len = 32;
-    char *name_buf = arena_alloc(arena, name_len, 1);
-    snprintf(name_buf, name_len, "__anoncl_%u", (unsigned) vec_size(mod->globals));
-    g->name = name_buf;
+    g->name = anon_name(arena, "__anoncl", (u32) vec_size(mod->globals));
     g->type = cl->type;
     g->align = cl->type->align;
     g->relocs = NULL;
@@ -1727,8 +1659,7 @@ static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global
     }
     if (value->kind == AST_IDENT)
     {
-        /* A bare function designator as an address constant (D16.1):
-           `int (*fp)(int) = f;` / a file-scope fn-ptr table. */
+        /* A bare function designator names its address: `int (*fp)(int) = f;` */
         ASTIdent *id = ast_as(ASTIdent, value);
         if (id->is_func)
         {
@@ -1743,9 +1674,7 @@ static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global
         {
             if (u->operand->kind == AST_COMPOUND_LITERAL)
             {
-                /* `&(type){...}` in an address-constant position: make the
-                   compound literal's anonymous static object (file scope or a
-                   block-scope static initializer) and relocate against it. */
+                /* `&(type){...}` serializes the literal's anonymous object. */
                 return (int) emit_file_scope_compound(ast_as(ASTCompoundLiteral, u->operand), mod,
                                                       arena, global_map, static_map);
             }
@@ -1754,7 +1683,7 @@ static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global
                 ASTIdent *id = ast_as(ASTIdent, u->operand);
                 if (id->is_func)
                 {
-                    /* `&f` — the designator's address, a function reloc. */
+                    /* `&f` is the designator's address, a function reloc. */
                     *out_func = id->name;
                     return -2;
                 }
@@ -1780,11 +1709,18 @@ static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global
     return -1;
 }
 
-/* Serialize an InitPlan into `g`'s init bytes (D12.6 file half / D12.8): the
-   buffer starts zeroed (so missing subobjects are free); scalar leaves fold to
-   their bytes; char-array-from-string copies the bytes; address leaves write 8
-   zero bytes plus a GlobalReloc. Returns false (error reported) if a leaf is
-   neither a constant nor an address constant. */
+/* String-fill length, clamped to the array size: the NUL is stored only if
+   there is room (`char s[2] = "hi"` drops it, §6.7.9p14). */
+static u32 clamped_string_len(ASTStringLiteral *sl, Type *array_type)
+{
+    u32 need = (u32) sl->length + 1;
+    u32 bound = array_type->arr.length;
+    return bound ? (need < bound ? need : bound) : need;
+}
+
+/* Serialize an InitPlan into init bytes: the buffer starts zeroed (missing
+   subobjects are free); scalar leaves fold to bytes; string fills copy in;
+   address leaves write 8 zero bytes plus a GlobalReloc. */
 static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrMap *global_map,
                                 U64Map *static_map, Arena *arena)
 {
@@ -1804,13 +1740,7 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
         if (w->is_string_fill)
         {
             ASTStringLiteral *sl = ast_as(ASTStringLiteral, w->value);
-            /* §6.7.9p14: the NUL is stored only if there is room — clamp the
-               copy to the array size (`char s[2] = "hi"` drops the NUL). */
-            u32 need = (u32) sl->length + 1;
-            u32 len = w->type->arr.length
-                          ? (need < w->type->arr.length ? need : (u32) w->type->arr.length)
-                          : need;
-            memcpy(buf + w->offset, sl->data, len);
+            memcpy(buf + w->offset, sl->data, clamped_string_len(sl, w->type));
             continue;
         }
         const char *func_name = NULL;
@@ -1847,8 +1777,7 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
     g->align = vd->type->align;
     g->relocs = NULL;
 
-    /* Const-qualified objects (top-level) are read-only: they land in
-       `.rodata` (no SHF_WRITE) even when zero-initialized — never `.bss`. */
+    /* Const-qualified objects land in `.rodata` even when zero-initialized. */
     bool is_const = type_is_const(vd->type);
 
     if (vd->storage == SC_EXTERN)
@@ -1860,8 +1789,7 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
     }
     else if (vd->plan)
     {
-        /* Aggregate lists and char-array strings carry a plan: serialize it
-           into the init bytes (D12.6 file half). */
+        /* Aggregate and string initializers serialize through their plan. */
         if (!serialize_init_plan(g, vd->plan, mod, global_map, static_map, arena))
         {
             return false;
@@ -1871,9 +1799,8 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
     }
     else if (vd->init && vd->init->kind == AST_STRING_LITERAL)
     {
-        /* char *p = "..." → 8-byte address, patched by a relocation against
-           the string symbol. Read-only pointer (`char * const p`) in
-           .rodata, plain pointer in .data. */
+        /* `char *p = "..."`: 8 zero bytes + a relocation against the string
+           symbol. */
         const char *unused_func = NULL;
         int str_idx =
             serializer_reloc_target(vd->init, mod, global_map, static_map, arena, &unused_func);
@@ -1892,9 +1819,7 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
     }
     else if (is_const)
     {
-        /* Zero / folded-0 const data still needs real bytes in `.rodata`
-           (PROGBITS): encode the zeroed object so the symbol is backed by
-           storage, unlike `.bss`. */
+        /* .rodata needs real PROGBITS bytes even for zero const data. */
         g->init_data = encode_const_bytes(arena, 0, (u32) vd->type->size);
         g->init_len = (size_t) vd->type->size;
         g->section = IR_SECTION_RODATA;
@@ -1919,8 +1844,7 @@ static u32 emit_global_decl(ASTVarDecl *vd, IrModule *mod, Arena *arena, StrMap 
     {
         return NO_VREG;
     }
-    /* fill_global may append string globals for address-constant leaves, so the
-       index must be taken after it runs. */
+    /* Index after fill_global: it may append string globals. */
     u32 idx = (u32) vec_size(mod->globals);
     vec_push(mod->globals, g);
 
@@ -1934,10 +1858,7 @@ static u32 emit_block_static(ASTVarDecl *vd, IrModule *mod, Arena *arena, U64Map
                              StrMap *global_map)
 {
     IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
-    size_t name_len = 32;
-    char *name_buf = arena_alloc(arena, name_len, 1);
-    snprintf(name_buf, name_len, "__static_%u", (unsigned) vec_size(mod->globals));
-    g->name = name_buf;
+    g->name = anon_name(arena, "__static", (u32) vec_size(mod->globals));
     if (!fill_global(g, vd, mod, global_map, static_map, arena))
     {
         return NO_VREG;
@@ -1955,10 +1876,7 @@ static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *aren
 {
     u32 idx = (u32) vec_size(mod->globals);
     IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
-    size_t name_len = 16;
-    char *name_buf = arena_alloc(arena, name_len, 1);
-    snprintf(name_buf, name_len, "__str_%u", idx);
-    g->name = name_buf;
+    g->name = anon_name(arena, "__str", idx);
     g->type = type_array(type_char(), sl->length + 1);
     g->init_data = (const u8 *) sl->data;
     g->init_len = sl->length + 1;
@@ -1970,17 +1888,13 @@ static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *aren
     return idx;
 }
 
-/* A synthesized file-scope zero blob (D12.6): block-scope aggregate
-   initializers zero-fill their alloca slot with a single OP_MEMCPY from these
-   bytes, so missing subobjects are zeroed without extra store instructions. */
+/* A synthesized file-scope zero blob: block-scope aggregate initializers
+   zero-fill their alloca slot with one OP_MEMCPY from these bytes. */
 static u32 ir_add_zero_blob(IrModule *mod, Arena *arena, u32 size)
 {
     u32 idx = (u32) vec_size(mod->globals);
     IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
-    size_t name_len = 24;
-    char *name_buf = arena_alloc(arena, name_len, 1);
-    snprintf(name_buf, name_len, "__zero_%u", idx);
-    g->name = name_buf;
+    g->name = anon_name(arena, "__zero", idx);
     g->type = type_array(type_char(), size);
     g->init_data = encode_const_bytes(arena, 0, size);
     g->init_len = size;
@@ -1992,9 +1906,8 @@ static u32 ir_add_zero_blob(IrModule *mod, Arena *arena, u32 size)
     return idx;
 }
 
-/* Apply an InitPlan to the storage pointed at by `base` (D12.6 block half):
-   zero-fill the whole object, then apply each write as a scalar OP_STORE or a
-   char-array OP_MEMCPY, GEP'd from the slot base with the write's offset. */
+/* Apply an InitPlan at `base`: zero-fill the object, then each write as a
+   scalar OP_STORE or char-array OP_MEMCPY, GEP'd by the write's offset. */
 static IrBlock *emit_init_plan(IrFunction *f, IrBlock *bb, IrOperand base, InitPlan *plan,
                                FuncBuilder *ctx)
 {
@@ -2017,13 +1930,8 @@ static IrBlock *emit_init_plan(IrFunction *f, IrBlock *bb, IrOperand base, InitP
         {
             ASTStringLiteral *sl = ast_as(ASTStringLiteral, w->value);
             u32 sidx = ir_add_string_global(sl, ctx->mod, ctx->mod->arena);
-            /* §6.7.9p14: the NUL is stored only if there is room — clamp the
-               copy to the array size (`char s[2] = "hi"` drops the NUL). */
-            u32 need = (u32) sl->length + 1;
-            u32 len = w->type->arr.length
-                          ? (need < w->type->arr.length ? need : (u32) w->type->arr.length)
-                          : need;
-            ir_emit_memcpy(bb, ir_operand_vreg(addr), ir_operand_global(sidx), len);
+            ir_emit_memcpy(bb, ir_operand_vreg(addr), ir_operand_global(sidx),
+                           clamped_string_len(sl, w->type));
         }
         else
         {
@@ -2044,10 +1952,7 @@ static ExprResult build_string_literal_expr(ASTStringLiteral *sl, IrFunction *f,
     return expr_result(ir_operand_global(idx), bb);
 }
 
-/* Compute the address (pointer) of a member. Both `.` and `->` lower to a GEP:
-   the object's SSA value is a pointer to the record (the alloca pointer for
-   `.`, the pointer value for `->`), so both GEP from that pointer by
-   field_offset. */
+/* Member address: both `.` and `->` GEP the object pointer by field_offset. */
 static ExprResult build_member_lvalue(ASTMemberAccess *ma, IrFunction *f, IrBlock *bb,
                                       FuncBuilder *ctx)
 {
@@ -2081,9 +1986,7 @@ static ExprResult build_binary_expr(ASTBinaryExpr *be, IrFunction *f, IrBlock *b
 {
     if (be->op == BIN_COMMA)
     {
-        /* §6.5.17: evaluate the left operand and discard it, then return the
-           right operand's value. The left gets no result vreg, so it cannot
-           alias into a later SSA use. */
+        /* §6.5.17: evaluate the left and discard it, return the right. */
         ExprResult left = build_expr(be->left, f, bb, ctx);
         return build_expr(be->right, f, left.block, ctx);
     }
@@ -2454,12 +2357,9 @@ static IrBlock *build_label_stmt(ASTLabelStmt *ls, IrFunction *f, IrBlock *bb, F
     return build_stmt(ls->stmt, f, label_bb, ctx);
 }
 
-/* Walk the switch body collecting case/default labels in source order. Each
-   gets a block created up front so the dispatch can branch to it; case
-   blocks are marked as merge points (multiple preds: dispatch + fall-through,
-   the latter added during body lowering). A nested `switch` is deliberately
-   NOT descended into: its labels bind to the innermost switch, which the
-   nested build_switch_stmt collects with its own context. */
+/* Collect case/default labels in source order, creating their blocks up front
+   so the dispatch can target them. A nested `switch` is not descended into:
+   its labels bind to the inner switch (its own builder collects them). */
 static void collect_switch(ASTNode *node, IrFunction *f, FuncBuilder *ctx, SwitchCtx *sc,
                            Vec *cases)
 {
@@ -2478,9 +2378,8 @@ static void collect_switch(ASTNode *node, IrFunction *f, FuncBuilder *ctx, Switc
             c->bb = new_block(f, "switch_case");
             vec_push(cases, c);
             u64map_set(sc->case_blocks, (u64) cs->value, c->bb);
-            /* Grouped labels (`case 1: case 2: ...`) and labels nested inside
-               another label's body arrive as ASTCaseStmt in this label's
-               statements; register them so the body walk can resolve them. */
+            /* Grouped labels (`case 1: case 2:`) arrive as nested ASTCaseStmt:
+               register them so the body walk can resolve them. */
             size_t ns = vec_size(cs->stmts);
             for (size_t i = 0; i < ns; i++)
             {
@@ -2552,11 +2451,9 @@ static IrBlock *build_switch_stmt(ASTSwitchStmt *ss, IrFunction *f, IrBlock *bb,
     Vec *cases = vec_new(ctx->mod->arena);
     collect_switch(ss->body, f, ctx, &sc, cases);
 
-    /* First-class switch dispatch: one OP_SWITCH carrying every case. The
-       backend chooses the lowering per switch (jump table vs compare-chain),
-       so the case structure survives to codegen. The dispatch block is a pred
-       of every case block (plus default/exit) exactly like the old chain's
-       cond_jump edges, keeping merge-point PHI bookkeeping identical. */
+    /* One OP_SWITCH carries every case; the backend picks table vs chain, and the
+       dispatch block preds every case/exit block (same PHI bookkeeping as a
+       cond_jump chain). */
     size_t n = vec_size(cases);
     IrSwitchCase *sw_cases =
         arena_alloc(ctx->mod->arena, n * sizeof(IrSwitchCase), _Alignof(IrSwitchCase));
@@ -2571,9 +2468,8 @@ static IrBlock *build_switch_stmt(ASTSwitchStmt *ss, IrFunction *f, IrBlock *bb,
     declare_pred(no_match, bb);
     ir_emit_switch(bb, cv, (u32) n, sw_cases, no_match->label);
 
-    /* `break` resolves to the switch exit via the loop stack; `continue`
-       inside a switch nested in a loop must propagate to that loop's latch
-       (continue isn't valid in a bare switch at all — semantic rejects it). */
+    /* `break` goes to the switch exit; `continue` (invalid in a bare switch)
+       propagates to the enclosing loop's latch. */
     LoopContext *outer_loop =
         vec_size(ctx->loop_stack) ? (LoopContext *) vec_last(ctx->loop_stack) : NULL;
     LoopContext lc = {.continue_target = outer_loop ? outer_loop->continue_target : NULL,
@@ -2581,10 +2477,8 @@ static IrBlock *build_switch_stmt(ASTSwitchStmt *ss, IrFunction *f, IrBlock *bb,
     vec_push(ctx->loop_stack, &lc);
     vec_push(ctx->switch_stack, &sc);
 
-    /* Walk the switch body as ordinary statements; `case`/`default` labels
-       land in their pre-created blocks (like goto labels) and the walk
-       continues from there, giving exact C fall-through semantics no matter
-       how deeply the labels are nested inside blocks/if/loops. */
+    /* Walk the body as ordinary statements; `case`/`default` labels land in their
+           pre-created blocks, giving exact C fall-through semantics. */
     IrBlock *end = build_stmt(ss->body, f, bb, ctx);
 
     vec_pop(ctx->switch_stack);
@@ -2647,53 +2541,34 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
 {
     if (vd->storage == SC_STATIC)
     {
-        /* Block-scope statics are file-backed objects: emit the IrGlobal once
-           (the loaded image already holds its constant initializer), then the
-           declaration is a no-op at runtime. */
-        if (block_static_index(ctx, vd) == NO_VREG)
+        /* Block-scope statics are file-backed: the loaded image holds their
+           constant initializer, so runtime sees a no-op. */
+        if (block_static_index(ctx, vd) == NO_VREG &&
+            emit_block_static(vd, ctx->mod, ctx->mod->arena, ctx->static_map, ctx->global_map) ==
+                NO_VREG)
         {
-            if (emit_block_static(vd, ctx->mod, ctx->mod->arena, ctx->static_map,
-                                  ctx->global_map) == NO_VREG)
-            {
-                ctx->failed = true;
-            }
+            ctx->failed = true;
         }
         return bb;
     }
     if (vd->storage == SC_EXTERN)
     {
-        /* Block-scope extern refers to an external entity: emit an undefined
-           global once (module-wide) if no file-scope declaration preceded it. */
-        if (global_index_of(ctx, vd->name) == NO_VREG)
-        {
-            if (emit_global_decl(vd, ctx->mod, ctx->mod->arena, ctx->global_map, ctx->static_map) ==
+        /* Reference the external entity: emit an undefined global once if no
+           file-scope declaration preceded it. */
+        if (global_index_of(ctx, vd->name) == NO_VREG &&
+            emit_global_decl(vd, ctx->mod, ctx->mod->arena, ctx->global_map, ctx->static_map) ==
                 NO_VREG)
-            {
-                ctx->failed = true;
-            }
+        {
+            ctx->failed = true;
         }
         return bb;
     }
 
-    if (type_is_array(vd->type))
+    if (type_is_array(vd->type) || type_is_record(vd->type))
     {
-        /* Arrays are not SSA values: allocate a stack slot and keep the
-           pointer as the variable's value. References decay to a pointer to
-           the first element; subscripting GEPs off this base. */
-        Type *ptr_type = type_decay(vd->type);
-        u32 dst = alloc_vreg_from_type(ctx, ptr_type);
-        ir_emit_alloca(bb, dst, vd->type->size);
-        if (vd->plan)
-        {
-            bb = emit_init_plan(f, bb, ir_operand_vreg(dst), vd->plan, ctx);
-        }
-        write_variable(ctx, vd, bb, ir_operand_vreg(dst));
-        return bb;
-    }
-    if (type_is_record(vd->type))
-    {
-        /* Records are memory, not SSA values: allocate a stack slot and keep
-           the pointer as the variable's value. */
+        /* Records/arrays are memory: allocate a stack slot and keep its
+           pointer as the variable's value. Plans zero-fill + write (arrays
+           always take this path); an expression init applies via memcpy. */
         u32 dst = alloc_vreg_for_var(ctx, vd->type);
         ir_emit_alloca(bb, dst, vd->type->size);
         if (vd->plan)
@@ -2709,11 +2584,11 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
         write_variable(ctx, vd, bb, ir_operand_vreg(dst));
         return bb;
     }
+
     IrOperand val = ir_operand_imm(0);
     if (vd->plan)
     {
-        /* Scalar wrapped in a braced list (`int x = {42};`): unwrap to the
-           single element value and keep the plain SSA scalar path (D12.6). */
+        /* `{expr}` around a scalar unwraps to the single element. */
         if (vd->plan->writes && vec_size(vd->plan->writes) > 0)
         {
             InitWrite *w = (InitWrite *) vec_get(vd->plan->writes, 0);
@@ -2726,8 +2601,7 @@ static IrBlock *build_var_decl_stmt(ASTVarDecl *vd, IrFunction *f, IrBlock *bb, 
     {
         ExprResult init = build_expr(vd->init, f, bb, ctx);
         bb = init.block;
-        Type *rhs_type = node_type(vd->init);
-        val = promote_to(ctx, bb, init.value, rhs_type, vd->type);
+        val = promote_to(ctx, bb, init.value, node_type(vd->init), vd->type);
     }
     write_variable(ctx, vd, bb, val);
     return bb;
@@ -2760,16 +2634,11 @@ static IrBlock *build_stmt(ASTNode *node, IrFunction *f, IrBlock *bb, FuncBuilde
         }
         case AST_STRUCT_DECL:
         case AST_ENUM_DECL:
-            /* A block-scope tag definition introduces no runtime object; the
-               parser completed the type at parse time. */
-            return bb;
         case AST_TYPEDEF_DECL:
-            /* Typedefs introduce no runtime object: parse-time only (D12.1).
-               The declaration is a no-op at IR level. */
+            /* Tag/typedef definitions are parse-time only. */
             return bb;
         case AST_STATIC_ASSERT:
-            /* Checked in the semantic pass; checked at compile time, emits
-               nothing. */
+            /* Checked in the semantic pass; emits nothing. */
             return bb;
         case AST_EXPR_STMT:
             return build_expr_stmt(ast_as(ASTExprStmt, node), f, bb, ctx);
@@ -2809,7 +2678,7 @@ static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlo
     ctx->sret_vreg = NO_VREG;
     if (type_is_record(ast->sig.ret_type))
     {
-        /* Record returns arrive through a hidden sret pointer (D4.2). */
+        /* Record returns arrive through a hidden sret pointer. */
         u32 vreg = alloc_vreg_for_var(ctx, ast->sig.ret_type);
         IrParam *p = arena_alloc(ctx->mod->arena, sizeof(IrParam), sizeof(void *));
         p->name = "__sret";
@@ -2823,7 +2692,7 @@ static void setup_params(FuncBuilder *ctx, IrFunction *f, ASTFuncDef *ast, IrBlo
     for (size_t i = 0; i < nparams; i++)
     {
         ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(ast->sig.params, i));
-        /* Struct params arrive as a pointer to the caller's copy (D4.2). */
+        /* Record params arrive as a pointer to the caller's copy. */
         Type *ssa_type = var_ssa_type(param->type);
         u32 vreg = alloc_vreg_from_type(ctx, ssa_type);
         IrParam *p = arena_alloc(ctx->mod->arena, sizeof(IrParam), sizeof(void *));
@@ -2862,9 +2731,8 @@ static void finish_func(IrFunction *f, IrBlock *exit, FuncBuilder *ctx)
 }
 
 /* Pre-pass: record every block-scope auto whose address is taken so its slot
-   alloca exists in the entry block before any lowering starts (reads/writes of
-   a spilled var must consistently go through memory, even before the `&`
-   operator itself is visited). */
+   alloca exists before any lowering (reads/writes go through memory even
+   before the `&` is visited). */
 static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx);
 static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx);
 
@@ -2893,8 +2761,7 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
         }
         case AST_INCDEC_EXPR:
         {
-            /* Descend so nested `&x` inside the operand still spills (e.g.
-               `0[&c]`; also `&*(&c)++` chains). */
+            /* Descend: nested `&x` must still spill (`0[&c]`, `&*(&c)++`). */
             mark_addr_taken_expr(ast_as(ASTIncDecExpr, node)->operand, ctx);
             break;
         }
@@ -2941,8 +2808,7 @@ static void mark_addr_taken_expr(ASTNode *node, FuncBuilder *ctx)
             break;
         case AST_ALIGNOF_EXPR:
         case AST_ALIGNOF_TYPE:
-            /* _Alignof does not evaluate its operand (§6.5.3.4p2): nothing
-               inside it is address-taken. */
+            /* _Alignof does not evaluate its operand (§6.5.3.4p2). */
             break;
         case AST_COMPOUND_LITERAL:
             /* The literal's init list may carry `&x` — those autos must spill. */
@@ -3064,8 +2930,7 @@ static void mark_addr_taken_stmt(ASTNode *node, FuncBuilder *ctx)
             break;
         }
         case AST_STATIC_ASSERT:
-            /* Compile-time check (§6.7.4): the expression is not evaluated at
-               runtime, so nothing inside it is address-taken. */
+            /* Compile-time only (§6.7.4): nothing inside is address-taken. */
             break;
         default:
             break; /* break/continue/goto: no subexpressions */
@@ -3107,9 +2972,8 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
     /* Pre-create blocks for all labels so gotos can target them. */
     collect_labels(func_ast->body, func, &ctx);
 
-    /* Collect address-taken autos, hoist their slot allocas into the entry
-       block, then wire params (address-taken params store their incoming
-       vregs into the already-existing slots). */
+    /* Collect address-taken autos, hoist their slot allocas into the entry block,
+           then wire params (address-taken params store into the existing slots). */
     mark_addr_taken_stmt(func_ast->body, &ctx);
     emit_spill_allocas(&ctx, entry);
 
@@ -3147,11 +3011,9 @@ IrModule *ir_build_module(ASTNode *ast, Arena *arena)
         }
         else if (decl->kind == AST_FUNC_DECL)
         {
-            /* A prototype (declaration-only extern) seeds func_types too, so
-               calls to functions declared but not defined in this TU resolve
-               their signature (param types, variadic bit) exactly like calls
-               to defined functions. No IrFunction is emitted for it — the
-               ELF side emits an SHN_UNDEF symbol reference. */
+            /* A prototype also seeds func_types so calls to it resolve their
+               signature; no IrFunction is emitted (the ELF side makes the
+               SHN_UNDEF symbol). */
             ASTFuncDecl *fd = ast_as(ASTFuncDecl, decl);
             func_type = fd->sig.func_type;
             fname = fd->sig.name;
