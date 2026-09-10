@@ -106,14 +106,11 @@ static void pp_line(Pp *pp, PpIncludeFrame *frame)
             break;
         }
         end++;
-        if (pp_is_trivia(tok))
+        if (tok->kind == TOK_PP_TRIVIA_NL)
         {
-            if (tok->has_newline)
-            {
-                break;
-            }
+            break;
         }
-        else if (!first)
+        if (!pp_is_trivia(tok) && !first)
         {
             first = tok;
         }

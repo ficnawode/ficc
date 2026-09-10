@@ -71,12 +71,27 @@ TEST(pp, directive_after_multiline_comment)
 {
     Arena *a = arena_new();
     Pp *pp = pp_run_text(a, "/*\n*/ #foo bar\nx\n");
-    EXPECT_EQ(vec_size(pp->out), 3);
-    EXPECT_EQ(out_tok(pp, 0)->kind, TOK_PP_TRIVIA_COMMENT);
-    EXPECT_TRUE(out_tok(pp, 0)->has_newline);
-    expect_out(pp, 1, TOK_PP_IDENT, "x");
-    expect_out(pp, 2, TOK_PP_TRIVIA_NL, "\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "x");
+    expect_out(pp, 1, TOK_PP_TRIVIA_NL, "\n");
     EXPECT_EQ(pp->warning_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, mid_line_multiline_comment_does_not_start_directive)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "x /*\n*/ #foo\n");
+    EXPECT_EQ(vec_size(pp->out), 7);
+    expect_out(pp, 0, TOK_PP_IDENT, "x");
+    expect_out(pp, 1, TOK_PP_TRIVIA_WS, " ");
+    EXPECT_EQ(out_tok(pp, 2)->kind, TOK_PP_TRIVIA_COMMENT);
+    EXPECT_TRUE(out_tok(pp, 2)->has_newline);
+    expect_out(pp, 3, TOK_PP_TRIVIA_WS, " ");
+    expect_out(pp, 4, TOK_PP_PUNCT, "#");
+    expect_out(pp, 5, TOK_PP_IDENT, "foo");
+    expect_out(pp, 6, TOK_PP_TRIVIA_NL, "\n");
+    EXPECT_EQ(pp->warning_count, 0);
     arena_free(a);
 }
 

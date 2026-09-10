@@ -4,6 +4,7 @@
 #include "type.h"
 #include "util/arena.h"
 #include "util/types.h"
+#include "util/vec.h"
 
 #define TOKEN_KINDS(X)                                                                             \
     X(TOK_EOF)                                                                                     \
@@ -131,6 +132,11 @@ struct LexResult
 /* Lex source text into a flat array of tokens.
    On lexical error, tokens is NULL and count is 0. */
 LexResult lex(const char *file, const char *src, Arena *arena);
+
+/* Translation phase 7: convert a preprocessing-token soup (trivia dropped)
+   into the parser's Token[]; merges adjacent string literals. On error,
+   tokens is NULL and count is 0. */
+LexResult lex_finalize(const Vec *soup, Arena *arena);
 
 const char *token_kind_name(TokenKind kind);
 

@@ -172,7 +172,14 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
         return 0;
     }
 
-    LexResult lexed = lex(args->input_file, src, arena);
+    Pp *pp = pp_new(arena);
+    Vec *soup = pp_preprocess(pp, args->input_file, src);
+    if (!soup)
+    {
+        fprintf(stderr, "preprocess failed\n");
+        return 1;
+    }
+    LexResult lexed = lex_finalize(soup, arena);
     if (!lexed.tokens)
     {
         fprintf(stderr, "lex failed\n");

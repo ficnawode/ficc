@@ -6,6 +6,7 @@
 #include "ir_interp.h"
 #include "lexer.h"
 #include "parser.h"
+#include "pp.h"
 #include "semantic.h"
 #include "type.h"
 
@@ -26,7 +27,13 @@ int tc_run_shell(const char *cmd)
 
 ASTNode *tc_parse(const char *src, Arena *arena)
 {
-    LexResult lexed = lex("<test>", src, arena);
+    Pp *pp = pp_new(arena);
+    Vec *soup = pp_preprocess(pp, "<test>", src);
+    if (!soup)
+    {
+        return NULL;
+    }
+    LexResult lexed = lex_finalize(soup, arena);
     if (!lexed.tokens)
     {
         return NULL;
