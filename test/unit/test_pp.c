@@ -944,3 +944,117 @@ TEST(pp, error_directive_expands_message)
     EXPECT_EQ(pp->error_count, 1);
     arena_free(a);
 }
+
+TEST(pp, ifdef_taken_when_defined)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define X 1\n#ifdef X\nint a;\n#endif\n");
+    EXPECT_EQ(vec_size(pp->out), 5);
+    expect_out(pp, 0, TOK_PP_IDENT, "int");
+    expect_out(pp, 4, TOK_PP_TRIVIA_NL, "\n");
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, ifdef_skipped_when_undefined)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#ifdef Y\nint a;\n#endif\n");
+    EXPECT_EQ(vec_size(pp->out), 0);
+    arena_free(a);
+}
+
+TEST(pp, ifndef_taken_when_undefined)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#ifndef Y\nint a;\n#endif\n");
+    EXPECT_EQ(vec_size(pp->out), 5);
+    expect_out(pp, 0, TOK_PP_IDENT, "int");
+    arena_free(a);
+}
+
+TEST(pp, else_taken_when_ifdef_false)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#ifdef Y\nint a;\n#else\nint b;\n#endif\n");
+    EXPECT_EQ(vec_size(pp->out), 5);
+    expect_out(pp, 0, TOK_PP_IDENT, "int");
+    expect_out(pp, 2, TOK_PP_IDENT, "b");
+    arena_free(a);
+}
+
+TEST(pp, nested_conditionals)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define X 1\n#ifdef X\n#ifdef Y\nint both;\n#else\nint only_x;\n"
+                            "#endif\n#endif\n");
+    EXPECT_EQ(vec_size(pp->out), 5);
+    expect_out(pp, 0, TOK_PP_IDENT, "int");
+    expect_out(pp, 2, TOK_PP_IDENT, "only_x");
+    arena_free(a);
+}
+
+TEST(pp, skipped_define_has_no_effect)
+{
+    Arena *a = arena_new();
+    Pp *pp =
+        pp_run_text(a, "#ifdef NOPE\n#define B 2\n#endif\n#ifdef B\nint has;\n#else\nint none;\n"
+                       "#endif\n");
+    EXPECT_EQ(vec_size(pp->out), 5);
+    expect_out(pp, 2, TOK_PP_IDENT, "none");
+    arena_free(a);
+}
+
+TEST(pp, skipped_region_does_not_error_on_garbage)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#ifdef NOPE\n@@@ :::\n#endif\nint ok;\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_EQ(vec_size(pp->out), 5);
+    expect_out(pp, 0, TOK_PP_IDENT, "int");
+    arena_free(a);
+}
+
+TEST(pp, skipped_region_expands_nothing)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define A 1\n#ifdef NOPE\nA\n#endif\n");
+    EXPECT_EQ(vec_size(pp->out), 0);
+    arena_free(a);
+}
+
+TEST(pp, skipped_region_preserves_line_numbers)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#ifdef NOPE\nskipme\n#endif\nint a;\n");
+    EXPECT_EQ(vec_size(pp->out), 5);
+    EXPECT_EQ(out_tok(pp, 0)->loc.line, 4);
+    arena_free(a);
+}
+
+TEST(pp, endif_without_if_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#endif\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, else_without_if_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#else\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, ifdef_missing_name_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#ifdef\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}

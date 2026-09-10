@@ -581,6 +581,97 @@ static void pp_undef(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t e
 
 static TokList *pp_expand_list(Pp *pp, TokList *ts);
 
+typedef struct CondFrame CondFrame;
+struct CondFrame
+{
+    bool parent_active;
+    bool taken;
+    bool in_else;
+};
+
+static bool pp_branch_active(Pp *pp)
+{
+    if (vec_size(pp->conds) == 0)
+    {
+        return true;
+    }
+    return ((CondFrame *) vec_last(pp->conds))->taken;
+}
+
+static bool pp_is_skipping(Pp *pp)
+{
+    return !pp_branch_active(pp);
+}
+
+static void pp_push_cond(Pp *pp, bool parent_active, bool taken)
+{
+    CondFrame *frame = arena_alloc(pp->arena, sizeof(CondFrame), sizeof(void *));
+    *frame = (CondFrame) {.parent_active = parent_active, .taken = taken, .in_else = false};
+    vec_push(pp->conds, frame);
+}
+
+static void pp_ifdef_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
+                               Loc directive_loc, bool is_ifndef)
+{
+    size_t i = start;
+    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
+    {
+        i++;
+    }
+    if (i >= end)
+    {
+        pp_error(pp, directive_loc, "#%s requires a macro name", is_ifndef ? "ifndef" : "ifdef");
+        return;
+    }
+    PpToken *name = vec_get(frame->tokens, i);
+    if (name->kind != TOK_PP_IDENT)
+    {
+        pp_error(pp, name->loc, "#%s requires a macro name", is_ifndef ? "ifndef" : "ifdef");
+        return;
+    }
+    i++;
+    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
+    {
+        i++;
+    }
+    if (i < end)
+    {
+        pp_warn(pp, ((PpToken *) vec_get(frame->tokens, i))->loc,
+                "extra tokens at end of #%s directive", is_ifndef ? "ifndef" : "ifdef");
+    }
+
+    bool defined = strmap_get(pp->macros, pp_token_name(pp, name)) != NULL;
+    bool parent_active = pp_branch_active(pp);
+    pp_push_cond(pp, parent_active, parent_active && (defined != is_ifndef));
+}
+
+static void pp_else_directive(Pp *pp, Loc directive_loc)
+{
+    if (vec_size(pp->conds) == 0)
+    {
+        pp_error(pp, directive_loc, "unexpected #else");
+        return;
+    }
+    CondFrame *top = vec_last(pp->conds);
+    if (top->in_else)
+    {
+        pp_error(pp, directive_loc, "multiple #else directives");
+        return;
+    }
+    top->in_else = true;
+    top->taken = top->parent_active && !top->taken;
+}
+
+static void pp_endif_directive(Pp *pp, Loc directive_loc)
+{
+    if (vec_size(pp->conds) == 0)
+    {
+        pp_error(pp, directive_loc, "unexpected #endif");
+        return;
+    }
+    vec_pop(pp->conds);
+}
+
 static u32 pp_count_newlines(const PpIncludeFrame *frame, size_t begin, size_t end)
 {
     u32 count = 0;
@@ -759,7 +850,35 @@ static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end
     PpToken *name = vec_get(frame->tokens, i);
     size_t name_idx = i;
     i++;
-    if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "define"))
+    if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "ifdef"))
+    {
+        pp_ifdef_directive(pp, frame, i, end, directive_loc, false);
+    }
+    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "ifndef"))
+    {
+        pp_ifdef_directive(pp, frame, i, end, directive_loc, true);
+    }
+    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "if"))
+    {
+        pp_error(pp, directive_loc, "#if is not implemented yet");
+    }
+    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "elif"))
+    {
+        pp_error(pp, directive_loc, "#elif is not implemented yet");
+    }
+    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "else"))
+    {
+        pp_else_directive(pp, directive_loc);
+    }
+    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "endif"))
+    {
+        pp_endif_directive(pp, directive_loc);
+    }
+    else if (pp_is_skipping(pp))
+    {
+        return false;
+    }
+    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "define"))
     {
         pp_define(pp, frame, i, end, directive_loc);
     }
@@ -1321,7 +1440,14 @@ static void pp_line(Pp *pp, PpIncludeFrame *frame)
         end = next_end;
     }
     frame->cursor = end;
-    pp_expand_line(pp, frame, begin, end);
+    if (pp_is_skipping(pp))
+    {
+        frame->presumed_line += pp_count_newlines(frame, begin, end);
+    }
+    else
+    {
+        pp_expand_line(pp, frame, begin, end);
+    }
 }
 
 static void pp_run(Pp *pp)
