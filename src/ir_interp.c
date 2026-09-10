@@ -5,9 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/* Interpreter diagnostics                                             */
-/* ------------------------------------------------------------------ */
+/* --- Interpreter diagnostics --- */
 
 static void interp_error(const char *fmt, ...)
 {
@@ -19,15 +17,12 @@ static void interp_error(const char *fmt, ...)
     fprintf(stderr, "\n");
 }
 
-/* ------------------------------------------------------------------ */
-/* Interpreter context                                                 */
-/* ------------------------------------------------------------------ */
+/* --- Interpreter context --- */
 
 typedef struct InterpGlobal InterpGlobal;
 struct InterpGlobal
 {
     u8 *data;
-    u64 size;
 };
 
 typedef struct InterpCtx InterpCtx;
@@ -43,9 +38,8 @@ struct InterpCtx
     StrMap *block_map; /* label -> IrBlock* */
 
     /* Per-block execution state */
-    IrBlock *current_bb; /* block currently being executed */
-    IrBlock *next_bb;    /* next block to execute (set by branch ops) */
-    IrBlock *next_pred;  /* the block that jumps to next_bb */
+    IrBlock *next_bb;   /* next block to execute (set by branch ops) */
+    IrBlock *next_pred; /* the block that jumps to next_bb */
     bool jumped;
     bool returned;
     bool error; /* set on a runtime trap (e.g. null dereference) */
@@ -57,29 +51,55 @@ struct InterpCtx
     InterpGlobal *globals;
     u32 nglobals;
 
-    /* Function pseudo-addresses (D16.1): each function gets a stable synthetic
-       "address" so a designator/`&f` value is a usable pointer within the
-       interpreter (compared, stored, passed — and, in Phase 16c, resolved back
-       to the IrFunction for an indirect call). */
+    /* Stable synthetic addresses for function designators / `&f`. */
     u64 *func_addrs;
     u32 nfuncs;
 };
 
-/* Frame: call-stack entry with register file. For a variadic callee, the
-   SysV register save area (48 GP + 128-byte xmm reservation) and the overflow
-   (stack-arg) scratch region are materialized here at call time, mirroring the
-   codegen prologue spill: va_start points its fields at them. */
+/* --- SysV x86-64 varargs ABI --- (6 GP slots + a 128-byte XMM reservation) */
+#define VA_GP_ARGS 6
+#define VA_GP_BYTES (VA_GP_ARGS * 8) /* 48 */
+#define VA_XMM_BYTES 128
+#define VA_SAVE_BYTES (VA_GP_BYTES + VA_XMM_BYTES) /* 176 */
+
+/* Call-stack entry with register file; variadic callees get va_list regions. */
 typedef struct
 {
-    IrFunction *func;
     i64 *regs;
-    u8 *va_save;     /* 176-byte register save area (GP first 48), or NULL */
-    u8 *va_overflow; /* stacked (arg-index >= 6) values, one 8-byte slot each */
+    u8 *va_save;     /* register save area (VA_SAVE_BYTES), or NULL */
+    u8 *va_overflow; /* stacked (arg-index >= VA_GP_ARGS) values, 8 bytes each */
 } Frame;
 
-/* ------------------------------------------------------------------ */
-/* Frame management                                                    */
-/* ------------------------------------------------------------------ */
+/* --- Function pseudo-addresses --- */
+
+#define FUNC_ADDR_BASE 0x400000000ULL
+
+static size_t func_index_by_name(IrModule *mod, const char *name)
+{
+    size_t n = vec_size(mod->funcs);
+    for (size_t i = 0; i < n; i++)
+    {
+        IrFunction *fn = (IrFunction *) vec_get(mod->funcs, i);
+        if (strcmp(fn->name, name) == 0)
+        {
+            return i;
+        }
+    }
+    return n;
+}
+
+static i64 func_addr(size_t index)
+{
+    return (i64) (FUNC_ADDR_BASE + (u64) index * 8);
+}
+
+static i64 func_addr_by_name(IrModule *mod, const char *name)
+{
+    size_t fi = func_index_by_name(mod, name);
+    return fi < vec_size(mod->funcs) ? func_addr(fi) : 0;
+}
+
+/* --- Frame management --- */
 
 static i64 operand_val(InterpCtx *ctx, IrOperand o, i64 *regs)
 {
@@ -94,13 +114,10 @@ static i64 operand_val(InterpCtx *ctx, IrOperand o, i64 *regs)
     }
     if (o.is_func)
     {
-        for (u32 i = 0; i < ctx->nfuncs; i++)
+        size_t i = func_index_by_name(ctx->mod, o.u.func_name);
+        if (i < ctx->nfuncs)
         {
-            IrFunction *fn = (IrFunction *) vec_get(ctx->mod->funcs, i);
-            if (strcmp(fn->name, o.u.func_name) == 0)
-            {
-                return (i64) ctx->func_addrs[i];
-            }
+            return (i64) ctx->func_addrs[i];
         }
         interp_error("undefined function '%s'", o.u.func_name);
         ctx->error = true;
@@ -127,10 +144,9 @@ static u8 *resolve_ptr(InterpCtx *ctx, IrOperand op, i64 *regs)
     return (u8 *) (uintptr_t) ptr_val;
 }
 
-static Frame *frame_new(Arena *arena, IrFunction *func, u32 nregs)
+static Frame *frame_new(Arena *arena, u32 nregs)
 {
     Frame *f = arena_alloc(arena, sizeof(Frame), sizeof(void *));
-    f->func = func;
     f->regs = arena_alloc(arena, nregs * sizeof(i64), sizeof(i64));
     memset(f->regs, 0, nregs * sizeof(i64));
     f->va_save = NULL;
@@ -138,8 +154,7 @@ static Frame *frame_new(Arena *arena, IrFunction *func, u32 nregs)
     return f;
 }
 
-/* Raw bump from the interpreter's alloca region (same arena eval_alloca uses),
-   carrying the overflow guard. */
+/* Bump from the interpreter's alloca region (shared with eval_alloca). */
 static u8 *interp_alloc(InterpCtx *ctx, u64 size)
 {
     u64 aligned = (size + 7) & ~7ULL;
@@ -153,9 +168,7 @@ static u8 *interp_alloc(InterpCtx *ctx, u64 size)
     return p;
 }
 
-/* ------------------------------------------------------------------ */
-/* Width-aware masking                                                  */
-/* ------------------------------------------------------------------ */
+/* --- Width-aware masking --- */
 
 static i64 trunc_result(i64 val, u8 width_bytes)
 {
@@ -187,7 +200,7 @@ static i64 sext_result(i64 val, u8 width_bytes)
     }
 }
 
-static void mask_vreg(InterpCtx *ctx, i64 *regs, u32 vreg)
+static void apply_vreg_width(InterpCtx *ctx, i64 *regs, u32 vreg)
 {
     ASSERT(vreg < ctx->nregs);
     u8 w = ctx->mod->widths[vreg];
@@ -195,96 +208,14 @@ static void mask_vreg(InterpCtx *ctx, i64 *regs, u32 vreg)
     regs[vreg] = is_signed ? sext_result(regs[vreg], w) : trunc_result(regs[vreg], w);
 }
 
-/* ------------------------------------------------------------------ */
-/* Eval dispatch                                                       */
-/* ------------------------------------------------------------------ */
+/* --- Eval dispatch --- */
 
 typedef i64 (*EvalFn)(IrInstr *in, InterpCtx *ctx, i64 *regs);
 
-/* Forward declarations for all eval functions */
-static i64 eval_binary(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_divrem(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_unary(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_shift(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_icmp(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_br(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_brcond(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_switch(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_ret(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_phi(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_trunc(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_zext(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_sext(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_unreachable(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_va_end(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_store(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_gep(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_alloca(IrInstr *in, InterpCtx *ctx, i64 *regs);
-static i64 eval_memcpy(IrInstr *in, InterpCtx *ctx, i64 *regs);
-
-/* Forward declaration for recursion */
+/* Forward declaration for the mutual recursion with eval_call. */
 static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *start_pred);
 
-#define EVAL_ENTRIES(X)                                                                            \
-    X(OP_ADD, eval_binary)                                                                         \
-    X(OP_SUB, eval_binary)                                                                         \
-    X(OP_MUL, eval_binary)                                                                         \
-    X(OP_AND, eval_binary)                                                                         \
-    X(OP_OR, eval_binary)                                                                          \
-    X(OP_XOR, eval_binary)                                                                         \
-    X(OP_SDIV, eval_divrem)                                                                        \
-    X(OP_SREM, eval_divrem)                                                                        \
-    X(OP_UDIV, eval_divrem)                                                                        \
-    X(OP_UREM, eval_divrem)                                                                        \
-    X(OP_NEG, eval_unary)                                                                          \
-    X(OP_NOT, eval_unary)                                                                          \
-    X(OP_SHL, eval_shift)                                                                          \
-    X(OP_ASHR, eval_shift)                                                                         \
-    X(OP_LSHR, eval_shift)                                                                         \
-    X(OP_TRUNC, eval_trunc)                                                                        \
-    X(OP_ZEXT, eval_zext)                                                                          \
-    X(OP_SEXT, eval_sext)                                                                          \
-    X(OP_ICMP_EQ, eval_icmp)                                                                       \
-    X(OP_ICMP_NE, eval_icmp)                                                                       \
-    X(OP_ICMP_ULT, eval_icmp)                                                                      \
-    X(OP_ICMP_ULE, eval_icmp)                                                                      \
-    X(OP_ICMP_UGT, eval_icmp)                                                                      \
-    X(OP_ICMP_UGE, eval_icmp)                                                                      \
-    X(OP_ICMP_SLT, eval_icmp)                                                                      \
-    X(OP_ICMP_SLE, eval_icmp)                                                                      \
-    X(OP_ICMP_SGT, eval_icmp)                                                                      \
-    X(OP_ICMP_SGE, eval_icmp)                                                                      \
-    X(OP_CALL, eval_call)                                                                          \
-    X(OP_BR, eval_br)                                                                              \
-    X(OP_BRCOND, eval_brcond)                                                                      \
-    X(OP_SWITCH, eval_switch)                                                                      \
-    X(OP_RET, eval_ret)                                                                            \
-    X(OP_PHI, eval_phi)                                                                            \
-    X(OP_UNREACHABLE, eval_unreachable)                                                            \
-    X(OP_VA_START, eval_va_start)                                                                  \
-    X(OP_VA_ARG, eval_va_arg)                                                                      \
-    X(OP_VA_END, eval_va_end)                                                                      \
-    X(OP_LOAD, eval_load)                                                                          \
-    X(OP_STORE, eval_store)                                                                        \
-    X(OP_GEP, eval_gep)                                                                            \
-    X(OP_ALLOCA, eval_alloca)                                                                      \
-    X(OP_MEMCPY, eval_memcpy)
-
-/* Dispatch table indexed by opcode; unlisted opcodes are NULL and diagnosed
-   in the block loop rather than silently misinterpreting. */
-static const EvalFn eval_fns[] = {
-#define EVAL_INIT(op, fn) [op] = fn,
-    EVAL_ENTRIES(EVAL_INIT)
-#undef EVAL_INIT
-};
-
-/* ------------------------------------------------------------------ */
-/* Eval functions                                                      */
-/* ------------------------------------------------------------------ */
+/* --- Eval functions --- */
 
 static i64 eval_binary(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
@@ -313,7 +244,7 @@ static i64 eval_binary(IrInstr *in, InterpCtx *ctx, i64 *regs)
         default:
             break;
     }
-    mask_vreg(ctx, regs, in->result);
+    apply_vreg_width(ctx, regs, in->result);
     return 0;
 }
 
@@ -327,38 +258,41 @@ static i64 eval_divrem(IrInstr *in, InterpCtx *ctx, i64 *regs)
         return 1;
     }
     i64 lhs = operand_val(ctx, in->ops[0], regs);
-    if (in->opcode == OP_SDIV)
+    switch (in->opcode)
     {
-        regs[in->result] = lhs / rhs;
+        case OP_SDIV:
+            regs[in->result] = lhs / rhs;
+            break;
+        case OP_SREM:
+            regs[in->result] = lhs % rhs;
+            break;
+        case OP_UDIV:
+            regs[in->result] = (i64) ((u64) lhs / (u64) rhs);
+            break;
+        default:
+            regs[in->result] = (i64) ((u64) lhs % (u64) rhs);
+            break;
     }
-    else if (in->opcode == OP_SREM)
-    {
-        regs[in->result] = lhs % rhs;
-    }
-    else if (in->opcode == OP_UDIV)
-    {
-        regs[in->result] = (i64) ((u64) lhs / (u64) rhs);
-    }
-    else
-    {
-        regs[in->result] = (i64) ((u64) lhs % (u64) rhs);
-    }
-    mask_vreg(ctx, regs, in->result);
+    apply_vreg_width(ctx, regs, in->result);
     return 0;
 }
 
 static i64 eval_unary(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     i64 src = operand_val(ctx, in->ops[0], regs);
-    if (in->opcode == OP_NEG)
+    switch (in->opcode)
     {
-        regs[in->result] = -src;
+        case OP_NEG:
+            regs[in->result] = -src;
+            break;
+        case OP_NOT:
+            regs[in->result] = ~src;
+            break;
+        default:
+            ASSERT(false && "eval_unary is only bound to OP_NEG/OP_NOT");
+            return 1;
     }
-    else
-    {
-        regs[in->result] = ~src;
-    }
-    mask_vreg(ctx, regs, in->result);
+    apply_vreg_width(ctx, regs, in->result);
     return 0;
 }
 
@@ -367,32 +301,31 @@ static i64 eval_shift(IrInstr *in, InterpCtx *ctx, i64 *regs)
     i64 lhs = operand_val(ctx, in->ops[0], regs);
     i64 rhs = operand_val(ctx, in->ops[1], regs);
     u8 w = ctx->mod->widths[in->result];
-    u32 limit = (w == 8) ? 64 : (u32) w * 8;
-    if (rhs < 0 || rhs >= (i64) limit)
+    u32 max_shift = (u32) w * 8;
+    if (rhs < 0 || rhs >= (i64) max_shift)
     {
         interp_error("shift by %lld is undefined", (long long) rhs);
         ASSERT(false);
         return 1;
     }
-    if (in->opcode == OP_SHL)
+    switch (in->opcode)
     {
-        regs[in->result] = lhs << rhs;
+        case OP_SHL:
+            regs[in->result] = lhs << rhs;
+            break;
+        case OP_ASHR:
+            regs[in->result] = lhs >> rhs;
+            break;
+        default:
+            regs[in->result] = (i64) ((u64) lhs >> rhs);
+            break;
     }
-    else if (in->opcode == OP_ASHR)
-    {
-        regs[in->result] = lhs >> rhs;
-    }
-    else
-    {
-        regs[in->result] = (i64) ((u64) lhs >> rhs);
-    }
-    mask_vreg(ctx, regs, in->result);
+    apply_vreg_width(ctx, regs, in->result);
     return 0;
 }
 
 static i64 eval_icmp(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    (void) ctx;
     i64 lhs = operand_val(ctx, in->ops[0], regs);
     i64 rhs = operand_val(ctx, in->ops[1], regs);
     bool cond = false;
@@ -432,12 +365,11 @@ static i64 eval_icmp(IrInstr *in, InterpCtx *ctx, i64 *regs)
             break;
     }
     regs[in->result] = cond ? 1 : 0;
-    mask_vreg(ctx, regs, in->result);
+    apply_vreg_width(ctx, regs, in->result);
     return 0;
 }
 
-/* Resolve a function pseudo-address (D16.1) back to its IrFunction for an
-   indirect call (D16.4). NULL when the pointer doesn't name any function. */
+/* Resolve a function pseudo-address back to its IrFunction; NULL if unknown. */
 static IrFunction *find_func_by_addr(InterpCtx *ctx, i64 addr)
 {
     for (u32 i = 0; i < ctx->nfuncs; i++)
@@ -450,136 +382,150 @@ static IrFunction *find_func_by_addr(InterpCtx *ctx, i64 addr)
     return NULL;
 }
 
-static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
+static void build_block_map(InterpCtx *ctx, IrFunction *func)
 {
-    IrFunction *callee;
+    ctx->block_map = strmap_new(ctx->frame_arena);
+    size_t nblocks = vec_size(func->blocks);
+    for (size_t i = 0; i < nblocks; i++)
+    {
+        IrBlock *block = (IrBlock *) vec_get(func->blocks, i);
+        strmap_set(ctx->block_map, block->label, block);
+    }
+}
+
+/* Direct/indirect callee resolution; NULL (with a diagnostic) if unknown. */
+static IrFunction *resolve_callee(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
     if (in->extra.call.is_indirect)
     {
         i64 addr = operand_val(ctx, in->extra.call.callee, regs);
-        callee = find_func_by_addr(ctx, addr);
+        IrFunction *callee = find_func_by_addr(ctx, addr);
         if (!callee)
         {
             interp_error("indirect call through an invalid function pointer");
-            return 1;
         }
+        return callee;
     }
-    else
+    IrFunction *callee = strmap_get(ctx->func_map, in->extra.call.name);
+    if (!callee)
     {
-        callee = strmap_get(ctx->func_map, in->extra.call.name);
-        if (!callee)
-        {
-            interp_error("undefined function '%s'", in->extra.call.name);
-            return 1;
-        }
+        interp_error("undefined function '%s'", in->extra.call.name);
+    }
+    return callee;
+}
+
+/* Bind named arguments into the callee frame (extras left to varargs). */
+static void bind_args(IrInstr *in, InterpCtx *ctx, i64 *regs, Frame *callee_frame,
+                      IrFunction *callee)
+{
+    size_t nparams = vec_size(callee->params);
+    for (u32 a = 0; a < in->extra.call.nargs && a < nparams; a++)
+    {
+        IrParam *p = (IrParam *) vec_get(callee->params, a);
+        i64 v = operand_val(ctx, in->extra.call.args[a], regs);
+        u8 width = ctx->mod->widths[p->vreg];
+        callee_frame->regs[p->vreg] =
+            type_is_signed(p->type) ? sext_result(v, width) : trunc_result(v, width);
+    }
+}
+
+/* Materialize a variadic callee's va_list regions like the codegen spill. */
+static bool materialize_varargs(IrInstr *in, InterpCtx *ctx, i64 *regs, Frame *callee_frame)
+{
+    u8 *save_area = interp_alloc(ctx, VA_SAVE_BYTES);
+    if (!save_area)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < VA_GP_ARGS; i++)
+    {
+        i64 v = i < in->extra.call.nargs ? operand_val(ctx, in->extra.call.args[i], regs) : 0;
+        memcpy(save_area + i * 8, &v, 8);
+    }
+    size_t overflow_count =
+        in->extra.call.nargs > VA_GP_ARGS ? (size_t) in->extra.call.nargs - VA_GP_ARGS : 0;
+    /* Always allocate one slot, matching the ABI's never-NULL overflow area. */
+    u8 *overflow_area = interp_alloc(ctx, (overflow_count ? overflow_count : 1) * 8);
+    if (!overflow_area)
+    {
+        return false;
+    }
+    for (size_t j = 0; j < overflow_count; j++)
+    {
+        i64 v = operand_val(ctx, in->extra.call.args[VA_GP_ARGS + j], regs);
+        memcpy(overflow_area + j * 8, &v, 8);
+    }
+    callee_frame->va_overflow = overflow_area;
+    callee_frame->va_save = save_area;
+    return true;
+}
+
+static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    IrFunction *callee = resolve_callee(in, ctx, regs);
+    if (!callee)
+    {
+        return 1;
     }
 
     StrMap *saved_block_map = ctx->block_map;
+    Frame *callee_frame = frame_new(ctx->frame_arena, ctx->nregs);
+    vec_push(ctx->stack, callee_frame);
 
-    Frame *callee_fr = frame_new(ctx->frame_arena, callee, ctx->nregs);
-    vec_push(ctx->stack, callee_fr);
-    size_t nparams = vec_size(callee->params);
-    for (u32 a = 0; a < in->extra.call.nargs; a++)
+    bind_args(in, ctx, regs, callee_frame, callee);
+    if (callee->is_variadic && !materialize_varargs(in, ctx, regs, callee_frame))
     {
-        /* Extra trailing args (variadic calls, Phase 15a) have no declared
-           parameter: only the named part is bound into the callee frame here.
-           The varargs save-area materialization is a later sub-phase. */
-        if (a >= nparams)
-        {
-            continue;
-        }
-        IrParam *p = (IrParam *) vec_get(callee->params, a);
-        callee_fr->regs[p->vreg] = operand_val(ctx, in->extra.call.args[a], regs);
-        u8 pw = ctx->mod->widths[p->vreg];
-        callee_fr->regs[p->vreg] = type_is_signed(p->type)
-                                       ? sext_result(callee_fr->regs[p->vreg], pw)
-                                       : trunc_result(callee_fr->regs[p->vreg], pw);
+        return 1;
     }
 
-    /* Same register-save materialization as the codegen prologue spill: a
-       variadic callee's save area captures the raw incoming register args
-       (first six) and the stacked args (index >= 6), so va_start/va_arg walk
-       identical memory in both backends. */
-    if (callee->is_variadic)
-    {
-        u8 *save = interp_alloc(ctx, 176);
-        if (!save)
-        {
-            return 1;
-        }
-        for (u32 i = 0; i < 6; i++)
-        {
-            i64 v = i < in->extra.call.nargs ? operand_val(ctx, in->extra.call.args[i], regs) : 0;
-            memcpy(save + i * 8, &v, 8);
-        }
-        size_t nstack = in->extra.call.nargs > 6 ? in->extra.call.nargs - 6 : 0;
-        /* Always allocate the overflow region (even with no stacked args,
-           matching the real ABI where overflow_arg_area is never NULL). */
-        u8 *ovf = interp_alloc(ctx, (u64) (nstack > 0 ? nstack : 1) * 8);
-        if (!ovf)
-        {
-            return 1;
-        }
-        for (size_t j = 0; j < nstack; j++)
-        {
-            i64 v = operand_val(ctx, in->extra.call.args[6 + j], regs);
-            memcpy(ovf + j * 8, &v, 8);
-        }
-        callee_fr->va_overflow = ovf;
-        callee_fr->va_save = save;
-    }
-
-    /* Build callee's block map */
-    ctx->block_map = strmap_new(ctx->frame_arena);
-    size_t nblocks = vec_size(callee->blocks);
-    for (size_t bi = 0; bi < nblocks; bi++)
-    {
-        IrBlock *blk = (IrBlock *) vec_get(callee->blocks, bi);
-        strmap_set(ctx->block_map, blk->label, blk);
-    }
-
+    build_block_map(ctx, callee);
     IrBlock *entry = (IrBlock *) vec_get(callee->blocks, 0);
-    i64 ret = run_block(ctx, callee_fr->regs, entry, NULL);
+    i64 ret = run_block(ctx, callee_frame->regs, entry, NULL);
     vec_pop(ctx->stack);
 
-    /* Callee's run_block sets returned/jumped; reset for caller's loop. */
+    /* Callee's run_block sets returned/jumped; reset for the caller's loop. */
     ctx->returned = false;
     ctx->jumped = false;
     ctx->block_map = saved_block_map;
     if (in->result != NO_VREG)
     {
         regs[in->result] = ret;
-        mask_vreg(ctx, regs, in->result);
+        apply_vreg_width(ctx, regs, in->result);
     }
     return 0;
 }
 
-/* va_start(ap, last): write the four va_list fields (D15.4/D15.5). The save
-   area and the stacked-arg region were materialized by eval_call; gp_offset/
-   stack_skip come from the instruction imm operands (compile-time functions of
-   the named-parameter count), fp_offset is the constant 48 (no xmm use). */
+/* The va_list object va_start writes / va_arg walks (SysV field layout). */
+typedef struct
+{
+    u32 gp_offset;
+    u32 fp_offset;
+    u64 overflow;
+    u64 reg_save;
+} VaFields;
+
+/* va_start(ap, last): write the four va_list fields. */
 static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    Frame *fr = (Frame *) vec_get(ctx->stack, vec_size(ctx->stack) - 1);
+    Frame *frame = (Frame *) vec_get(ctx->stack, vec_size(ctx->stack) - 1);
     u8 *ap = resolve_ptr(ctx, in->ops[0], regs);
     if (!ap)
     {
         return 1;
     }
-    u32 gp = (u32) in->ops[2].u.imm;
-    u32 skip = (u32) in->ops[1].u.imm;
-    u32 fp = 48;
-    memcpy(ap + 0, &gp, 4);
-    memcpy(ap + 4, &fp, 4);
-    u64 ovf = fr->va_overflow ? (u64) (uintptr_t) (fr->va_overflow + skip) : 0;
-    memcpy(ap + 8, &ovf, 8);
-    u64 save = (u64) (uintptr_t) fr->va_save;
-    memcpy(ap + 16, &save, 8);
+    VaFields va = {
+        .gp_offset = (u32) in->ops[2].u.imm,
+        .fp_offset = VA_GP_BYTES,
+        .overflow = frame->va_overflow
+                        ? (u64) (uintptr_t) (frame->va_overflow + (u32) in->ops[1].u.imm)
+                        : 0,
+        .reg_save = (u64) (uintptr_t) frame->va_save,
+    };
+    memcpy(ap, &va, sizeof(va));
     return 0;
 }
 
-/* __builtin_va_arg(ap, type): the GP-then-overflow walk (D15.6), identical to
-   lower_va_arg's memory sequence — read ap fields, branch, advance the field,
-   fetch the 8-byte slot into the width-8 result vreg. */
+/* __builtin_va_arg(ap, type): the GP-then-overflow walk (SysV sequence). */
 static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     u8 *ap = resolve_ptr(ctx, in->ops[0], regs);
@@ -587,29 +533,24 @@ static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs)
     {
         return 1;
     }
-    u32 gp;
-    u64 ovf;
-    u64 regs_base;
-    memcpy(&gp, ap, 4);
-    memcpy(&ovf, ap + 8, 8);
-    memcpy(&regs_base, ap + 16, 8);
+    VaFields va;
+    memcpy(&va, ap, sizeof(va));
     u64 src;
-    if (gp < 48)
+    if (va.gp_offset < VA_GP_BYTES)
     {
-        src = regs_base + gp;
-        gp += 8;
-        memcpy(ap, &gp, 4);
+        src = va.reg_save + va.gp_offset;
+        va.gp_offset += 8;
     }
     else
     {
-        src = ovf;
-        ovf += 8;
-        memcpy(ap + 8, &ovf, 8);
+        src = va.overflow;
+        va.overflow += 8;
     }
-    i64 raw;
-    memcpy(&raw, (void *) (uintptr_t) src, 8);
-    regs[in->result] = raw;
-    mask_vreg(ctx, regs, in->result);
+    i64 val;
+    memcpy(&val, (u8 *) (uintptr_t) src, 8);
+    memcpy(ap, &va, sizeof(va));
+    regs[in->result] = val;
+    apply_vreg_width(ctx, regs, in->result);
     return 0;
 }
 
@@ -622,13 +563,19 @@ static i64 eval_va_end(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-static i64 eval_br(IrInstr *in, InterpCtx *ctx, i64 *regs)
+/* Assert the jump target exists and record it for the block loop. */
+static void jump_to(InterpCtx *ctx, const char *target_label)
 {
-    (void) regs;
-    IrBlock *target = strmap_get(ctx->block_map, in->extra.br.target_label);
+    IrBlock *target = strmap_get(ctx->block_map, target_label);
     ASSERT(target != NULL && "branch target names a block the IR builder created");
     ctx->next_bb = target;
     ctx->jumped = true;
+}
+
+static i64 eval_br(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    (void) regs;
+    jump_to(ctx, in->extra.br.target_label);
     return 0;
 }
 
@@ -636,10 +583,7 @@ static i64 eval_brcond(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     i64 cond = operand_val(ctx, in->ops[0], regs);
     const char *target_label = cond ? in->extra.brcond.true_label : in->extra.brcond.false_label;
-    IrBlock *target = strmap_get(ctx->block_map, target_label);
-    ASSERT(target != NULL && "branch target names a block the IR builder created");
-    ctx->next_bb = target;
-    ctx->jumped = true;
+    jump_to(ctx, target_label);
     return 0;
 }
 
@@ -655,10 +599,7 @@ static i64 eval_switch(IrInstr *in, InterpCtx *ctx, i64 *regs)
             break;
         }
     }
-    IrBlock *target = strmap_get(ctx->block_map, target_label);
-    ASSERT(target != NULL && "switch target names a block the IR builder created");
-    ctx->next_bb = target;
-    ctx->jumped = true;
+    jump_to(ctx, target_label);
     return 0;
 }
 
@@ -686,11 +627,12 @@ static i64 eval_trunc(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     i64 src = operand_val(ctx, in->ops[0], regs);
     regs[in->result] = src;
-    mask_vreg(ctx, regs, in->result);
+    apply_vreg_width(ctx, regs, in->result);
     return 0;
 }
 
-static i64 eval_zext(IrInstr *in, InterpCtx *ctx, i64 *regs)
+/* Zero- or sign-extend to the destination width (literals are already i64). */
+static i64 eval_extend(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     i64 src = operand_val(ctx, in->ops[0], regs);
     if (in->ops[0].is_imm)
@@ -699,20 +641,18 @@ static i64 eval_zext(IrInstr *in, InterpCtx *ctx, i64 *regs)
         return 0;
     }
     u8 src_w = ctx->mod->widths[in->ops[0].u.vreg];
-    regs[in->result] = trunc_result(src, src_w);
-    return 0;
-}
-
-static i64 eval_sext(IrInstr *in, InterpCtx *ctx, i64 *regs)
-{
-    i64 src = operand_val(ctx, in->ops[0], regs);
-    if (in->ops[0].is_imm)
+    switch (in->opcode)
     {
-        regs[in->result] = src;
-        return 0;
+        case OP_SEXT:
+            regs[in->result] = sext_result(src, src_w);
+            break;
+        case OP_ZEXT:
+            regs[in->result] = trunc_result(src, src_w);
+            break;
+        default:
+            ASSERT(false && "eval_extend is only bound to OP_SEXT/OP_ZEXT");
+            return 1;
     }
-    u8 src_w = ctx->mod->widths[in->ops[0].u.vreg];
-    regs[in->result] = sext_result(src, src_w);
     return 0;
 }
 
@@ -725,6 +665,12 @@ static i64 eval_unreachable(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 1;
 }
 
+/* Copy at most one register-sized word into/out of a typed slot. */
+static void copy_word(u8 *dst, const void *src, u32 bytes)
+{
+    memcpy(dst, src, bytes > 8 ? 8 : bytes);
+}
+
 static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     u8 *addr = resolve_ptr(ctx, in->ops[0], regs);
@@ -734,9 +680,9 @@ static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs)
     }
     u8 w = ctx->mod->widths[in->result];
     i64 val = 0;
-    memcpy(&val, addr, w > 8 ? 8 : w);
+    copy_word((u8 *) &val, addr, w);
     regs[in->result] = val;
-    mask_vreg(ctx, regs, in->result);
+    apply_vreg_width(ctx, regs, in->result);
     return 0;
 }
 
@@ -749,25 +695,17 @@ static i64 eval_store(IrInstr *in, InterpCtx *ctx, i64 *regs)
         return 1;
     }
     u32 w = (u32) in->ops[2].u.imm;
-    memcpy(addr, &val, w > 8 ? 8 : w);
+    copy_word(addr, &val, w);
     return 0;
 }
 
 static i64 eval_gep(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 base_val;
-    if (in->ops[0].is_global)
-    {
-        base_val = (i64) (uintptr_t) resolve_ptr(ctx, in->ops[0], regs);
-    }
-    else
-    {
-        base_val = operand_val(ctx, in->ops[0], regs);
-    }
+    i64 base = operand_val(ctx, in->ops[0], regs);
     i64 index = operand_val(ctx, in->ops[1], regs);
     i64 stride = in->ops[2].u.imm;
-    regs[in->result] = base_val + index * stride;
-    mask_vreg(ctx, regs, in->result);
+    regs[in->result] = base + index * stride;
+    apply_vreg_width(ctx, regs, in->result);
     return 0;
 }
 
@@ -780,7 +718,7 @@ static i64 eval_alloca(IrInstr *in, InterpCtx *ctx, i64 *regs)
         return 1;
     }
     regs[in->result] = (i64) (uintptr_t) p;
-    mask_vreg(ctx, regs, in->result);
+    apply_vreg_width(ctx, regs, in->result);
     return 0;
 }
 
@@ -801,9 +739,7 @@ static i64 eval_memcpy(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* PHI evaluation                                                      */
-/* ------------------------------------------------------------------ */
+/* --- PHI evaluation --- */
 
 static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
 {
@@ -821,7 +757,7 @@ static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
             if (strcmp(in->extra.phi.entries[e].label, pred->label) == 0)
             {
                 regs[in->result] = operand_val(ctx, in->extra.phi.entries[e].val, regs);
-                mask_vreg(ctx, regs, in->result);
+                apply_vreg_width(ctx, regs, in->result);
                 found = true;
                 break;
             }
@@ -830,9 +766,61 @@ static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Block execution                                                     */
-/* ------------------------------------------------------------------ */
+/* --- Dispatch table --- */
+
+#define EVAL_ENTRIES(X)                                                                            \
+    X(OP_ADD, eval_binary)                                                                         \
+    X(OP_SUB, eval_binary)                                                                         \
+    X(OP_MUL, eval_binary)                                                                         \
+    X(OP_AND, eval_binary)                                                                         \
+    X(OP_OR, eval_binary)                                                                          \
+    X(OP_XOR, eval_binary)                                                                         \
+    X(OP_SDIV, eval_divrem)                                                                        \
+    X(OP_SREM, eval_divrem)                                                                        \
+    X(OP_UDIV, eval_divrem)                                                                        \
+    X(OP_UREM, eval_divrem)                                                                        \
+    X(OP_NEG, eval_unary)                                                                          \
+    X(OP_NOT, eval_unary)                                                                          \
+    X(OP_SHL, eval_shift)                                                                          \
+    X(OP_ASHR, eval_shift)                                                                         \
+    X(OP_LSHR, eval_shift)                                                                         \
+    X(OP_TRUNC, eval_trunc)                                                                        \
+    X(OP_ZEXT, eval_extend)                                                                        \
+    X(OP_SEXT, eval_extend)                                                                        \
+    X(OP_ICMP_EQ, eval_icmp)                                                                       \
+    X(OP_ICMP_NE, eval_icmp)                                                                       \
+    X(OP_ICMP_ULT, eval_icmp)                                                                      \
+    X(OP_ICMP_ULE, eval_icmp)                                                                      \
+    X(OP_ICMP_UGT, eval_icmp)                                                                      \
+    X(OP_ICMP_UGE, eval_icmp)                                                                      \
+    X(OP_ICMP_SLT, eval_icmp)                                                                      \
+    X(OP_ICMP_SLE, eval_icmp)                                                                      \
+    X(OP_ICMP_SGT, eval_icmp)                                                                      \
+    X(OP_ICMP_SGE, eval_icmp)                                                                      \
+    X(OP_CALL, eval_call)                                                                          \
+    X(OP_BR, eval_br)                                                                              \
+    X(OP_BRCOND, eval_brcond)                                                                      \
+    X(OP_SWITCH, eval_switch)                                                                      \
+    X(OP_RET, eval_ret)                                                                            \
+    X(OP_PHI, eval_phi)                                                                            \
+    X(OP_UNREACHABLE, eval_unreachable)                                                            \
+    X(OP_VA_START, eval_va_start)                                                                  \
+    X(OP_VA_ARG, eval_va_arg)                                                                      \
+    X(OP_VA_END, eval_va_end)                                                                      \
+    X(OP_LOAD, eval_load)                                                                          \
+    X(OP_STORE, eval_store)                                                                        \
+    X(OP_GEP, eval_gep)                                                                            \
+    X(OP_ALLOCA, eval_alloca)                                                                      \
+    X(OP_MEMCPY, eval_memcpy)
+
+/* Opcode dispatch table; unlisted opcodes are NULL and diagnosed in run_block. */
+static const EvalFn eval_fns[] = {
+#define EVAL_INIT(op, fn) [op] = fn,
+    EVAL_ENTRIES(EVAL_INIT)
+#undef EVAL_INIT
+};
+
+/* --- Block execution --- */
 
 static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *start_pred)
 {
@@ -846,7 +834,6 @@ static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *star
             eval_phis(ctx, regs, bb, pred);
         }
 
-        ctx->current_bb = bb;
         ctx->next_bb = NULL;
         ctx->next_pred = bb;
         ctx->jumped = false;
@@ -894,56 +881,109 @@ static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *star
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Function execution                                                  */
-/* ------------------------------------------------------------------ */
+/* --- Function execution --- */
 
 static i64 run_func(IrFunction *func, InterpCtx *ctx)
 {
-    Frame *fr = frame_new(ctx->frame_arena, func, ctx->nregs);
-    vec_push(ctx->stack, fr);
+    Frame *frame = frame_new(ctx->frame_arena, ctx->nregs);
+    vec_push(ctx->stack, frame);
 
-    ctx->block_map = strmap_new(ctx->frame_arena);
-    size_t nblocks = vec_size(func->blocks);
-    for (size_t bi = 0; bi < nblocks; bi++)
-    {
-        IrBlock *blk = (IrBlock *) vec_get(func->blocks, bi);
-        strmap_set(ctx->block_map, blk->label, blk);
-    }
-
+    build_block_map(ctx, func);
     IrBlock *entry = (IrBlock *) vec_get(func->blocks, 0);
-    i64 result = run_block(ctx, fr->regs, entry, NULL);
+    i64 result = run_block(ctx, frame->regs, entry, NULL);
 
     vec_pop(ctx->stack);
     return result;
 }
 
-/* ------------------------------------------------------------------ */
-/* Public entry point                                                  */
-/* ------------------------------------------------------------------ */
+/* --- Public entry point --- */
+
+#define ALLOCA_SIZE (1ULL << 20)
+
+static IrFunction *find_main(IrModule *m)
+{
+    size_t i = func_index_by_name(m, "main");
+    return i < vec_size(m->funcs) ? (IrFunction *) vec_get(m->funcs, i) : NULL;
+}
+
+static InterpGlobal *init_globals(Arena *arena, IrModule *m, u32 *out_count)
+{
+    u32 n = (u32) vec_size(m->globals);
+    *out_count = n;
+    if (n == 0)
+    {
+        return NULL;
+    }
+    InterpGlobal *globals = arena_alloc(arena, n * sizeof(InterpGlobal), _Alignof(InterpGlobal));
+    for (u32 i = 0; i < n; i++)
+    {
+        IrGlobal *ig = (IrGlobal *) vec_get(m->globals, i);
+        /* BSS globals carry no init data, so size must come from the type. */
+        u32 size = (u32) type_sizeof(ig->type);
+        globals[i].data = arena_alloc(arena, size, ig->align);
+        if (ig->init_data)
+        {
+            memcpy(globals[i].data, ig->init_data, ig->init_len);
+        }
+        else
+        {
+            memset(globals[i].data, 0, size);
+        }
+    }
+    return globals;
+}
+
+/* Patch address-constant pointer subobjects with the target's address. */
+static void apply_global_relocs(IrModule *m, InterpGlobal *globals)
+{
+    size_t nglobals = vec_size(m->globals);
+    for (size_t i = 0; i < nglobals; i++)
+    {
+        IrGlobal *global = (IrGlobal *) vec_get(m->globals, i);
+        if (!global->relocs)
+        {
+            continue;
+        }
+        size_t nrelocs = vec_size(global->relocs);
+        for (size_t r = 0; r < nrelocs; r++)
+        {
+            GlobalReloc *reloc = (GlobalReloc *) vec_get(global->relocs, r);
+            if (reloc->is_func)
+            {
+                i64 addr = func_addr_by_name(m, reloc->func_name);
+                memcpy(globals[i].data + reloc->offset, &addr, 8);
+            }
+            else
+            {
+                u64 addr = (u64) (uintptr_t) globals[reloc->target].data;
+                memcpy(globals[i].data + reloc->offset, &addr, 8);
+            }
+        }
+    }
+}
+
+static u64 *init_func_addrs(Arena *arena, size_t nfuncs)
+{
+    u64 *addrs = arena_alloc(arena, (nfuncs ? nfuncs : 1) * sizeof(u64), sizeof(u64));
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        addrs[i] = (u64) func_addr(i);
+    }
+    return addrs;
+}
 
 i64 ir_interp_run(IrModule *m)
 {
-    IrFunction *main_fn = NULL;
-    size_t nfuncs = vec_size(m->funcs);
-    for (size_t i = 0; i < nfuncs; i++)
-    {
-        IrFunction *f = (IrFunction *) vec_get(m->funcs, i);
-        if (strcmp(f->name, "main") == 0)
-        {
-            main_fn = f;
-            break;
-        }
-    }
+    IrFunction *main_fn = find_main(m);
     if (!main_fn)
     {
         interp_error("no main function found");
         return 1;
     }
 
+    size_t nfuncs = vec_size(m->funcs);
     Arena *frame_arena = arena_new();
     Vec *stack = vec_new(frame_arena);
-    u32 nregs = m->next_vreg;
     StrMap *func_map = strmap_new(frame_arena);
     for (size_t i = 0; i < nfuncs; i++)
     {
@@ -951,84 +991,18 @@ i64 ir_interp_run(IrModule *m)
         strmap_set(func_map, f->name, f);
     }
 
-    InterpGlobal *globals = NULL;
-    u32 nglobals = (u32) vec_size(m->globals);
-    if (nglobals > 0)
-    {
-        globals = arena_alloc(frame_arena, nglobals * sizeof(InterpGlobal), _Alignof(InterpGlobal));
-        for (u32 i = 0; i < nglobals; i++)
-        {
-            IrGlobal *ig = (IrGlobal *) vec_get(m->globals, i);
-            /* BSS globals carry no init data, so size must come from the type,
-               not init_len (which is 0). */
-            u32 size = (u32) type_sizeof(ig->type);
-            globals[i].size = size;
-            globals[i].data = arena_alloc(frame_arena, size, ig->align);
-            if (ig->init_data)
-            {
-                memcpy(globals[i].data, ig->init_data, ig->init_len);
-            }
-            else
-            {
-                memset(globals[i].data, 0, size);
-            }
-        }
-        /* Second pass: pointer subobjects initialized to address constants
-           (string globals, &global) hold the target's address (the ELF writer
-           patches these via .rela.data/.rela.rodata R_X86_64_64). */
-        for (u32 i = 0; i < nglobals; i++)
-        {
-            IrGlobal *ig = (IrGlobal *) vec_get(m->globals, i);
-            if (!ig->relocs)
-            {
-                continue;
-            }
-            size_t nrelocs = vec_size(ig->relocs);
-            for (size_t r = 0; r < nrelocs; r++)
-            {
-                GlobalReloc *gr = (GlobalReloc *) vec_get(ig->relocs, r);
-                if (gr->is_func)
-                {
-                    /* A function-address initializer (D16.1): write the
-                       referenced function's pseudo-address (the same stable
-                       values operand_val materializes for designators, so
-                       comparisons and indirect calls agree). */
-                    i64 addr = 0;
-                    for (size_t fi = 0; fi < vec_size(m->funcs); fi++)
-                    {
-                        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
-                        if (strcmp(f->name, gr->func_name) == 0)
-                        {
-                            addr = 0x400000000LL + (i64) fi * 8;
-                            break;
-                        }
-                    }
-                    memcpy(globals[i].data + gr->offset, &addr, 8);
-                }
-                else
-                {
-                    u64 addr = (u64) (uintptr_t) globals[gr->target].data;
-                    memcpy(globals[i].data + gr->offset, &addr, 8);
-                }
-            }
-        }
-    }
+    u32 nglobals;
+    InterpGlobal *globals = init_globals(frame_arena, m, &nglobals);
+    apply_global_relocs(m, globals);
 
-#define ALLOCA_SIZE (1ULL << 20)
     u8 *alloca_buf = arena_alloc(frame_arena, ALLOCA_SIZE, 8);
-
-    /* Function pseudo-addresses, aligned with m->funcs order (D16.1). */
-    u64 *func_addrs = arena_alloc(frame_arena, (nfuncs ? nfuncs : 1) * sizeof(u64), sizeof(u64));
-    for (size_t i = 0; i < nfuncs; i++)
-    {
-        func_addrs[i] = 0x400000000ULL + (u64) i * 8;
-    }
+    u64 *func_addrs = init_func_addrs(frame_arena, nfuncs);
 
     InterpCtx ctx = {
         .mod = m,
         .stack = stack,
         .frame_arena = frame_arena,
-        .nregs = nregs,
+        .nregs = m->next_vreg,
         .func_map = func_map,
         .globals = globals,
         .nglobals = nglobals,
