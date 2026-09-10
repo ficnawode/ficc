@@ -4,6 +4,7 @@
 #include "ir_interp.h"
 #include "lexer.h"
 #include "parser.h"
+#include "pp.h"
 #include "semantic.h"
 #include "util/arena.h"
 #include <stdio.h>
@@ -15,6 +16,7 @@ typedef struct
     bool dump_tokens;
     bool dump_ast;
     bool dump_ir;
+    bool dump_pp;
     bool emit_obj;
     bool run_interp;
 } DriverFlags;
@@ -91,7 +93,7 @@ static void replace_ext(const char *in, char *out, size_t out_len, const char *n
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "Usage: %s [-tokens] [-ast] [-ir] [-c] [-run] <file.c>\n", prog);
+    fprintf(stderr, "Usage: %s [-tokens] [-pp] [-ast] [-ir] [-c] [-run] <file.c>\n", prog);
 }
 
 static bool parse_args(int argc, char **argv, DriverArgs *out)
@@ -105,6 +107,10 @@ static bool parse_args(int argc, char **argv, DriverArgs *out)
         if (strcmp(arg, "-tokens") == 0)
         {
             out->flags.dump_tokens = true;
+        }
+        else if (strcmp(arg, "-pp") == 0)
+        {
+            out->flags.dump_pp = true;
         }
         else if (strcmp(arg, "-ast") == 0)
         {
@@ -151,6 +157,20 @@ static bool parse_args(int argc, char **argv, DriverArgs *out)
 static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
 {
     type_reset();
+
+    if (args->flags.dump_pp)
+    {
+        Pp *pp = pp_new(arena);
+        Vec *soup = pp_preprocess(pp, args->input_file, src);
+        if (!soup)
+        {
+            fprintf(stderr, "preprocess failed\n");
+            return 1;
+        }
+        pp_dump(soup);
+        pp_free(pp);
+        return 0;
+    }
 
     LexResult lexed = lex(args->input_file, src, arena);
     if (!lexed.tokens)
