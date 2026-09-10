@@ -4,6 +4,7 @@
 #include "lexer.h"
 #include "util/arena.h"
 #include "util/types.h"
+#include "util/vec.h"
 
 /* Preprocessing-token kinds (C11 §6.4). Append only. */
 #define PP_KINDS(X)                                                                                \
@@ -41,5 +42,12 @@ typedef struct PpToken
    splicing. Returns a newly arena-allocated NUL-terminated buffer, or NULL
    after reporting a diagnostic. */
 char *pp_prepare(const char *file, const char *src, Arena *arena);
+
+/* Translation phase 3: scans normalized source into a soup of PpToken*
+   (spellings slice the normalized buffer). Returns an arena-allocated Vec
+   terminated by a TOK_PP_EOF token, or NULL after reporting a diagnostic. */
+Vec *pp_lex(const char *file, const char *src, Arena *arena);
+
+const char *pp_kind_name(PpKind kind);
 
 #endif
