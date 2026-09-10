@@ -642,3 +642,106 @@ TEST(pp, stringize_not_followed_by_param_is_error)
     EXPECT_EQ(pp->error_count, 1);
     arena_free(a);
 }
+
+TEST(pp, paste_ident_ident)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define CAT(a,b) a##b\nCAT(foo,bar)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "foobar");
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, paste_chain)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define C(a,b,c) a##b##c\nC(1,2,3)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "123");
+    arena_free(a);
+}
+
+TEST(pp, paste_forms_new_macro_name)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define FOO1 42\n#define CAT(a,b) a##b\nCAT(FOO,1)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "42");
+    arena_free(a);
+}
+
+TEST(pp, paste_multi_token_arg)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define CAT(a,b) a##b\nCAT(x+y,z)\n");
+    EXPECT_EQ(vec_size(pp->out), 4);
+    expect_out(pp, 0, TOK_PP_IDENT, "x");
+    expect_out(pp, 1, TOK_PP_PUNCT, "+");
+    expect_out(pp, 2, TOK_PP_IDENT, "yz");
+    expect_out(pp, 3, TOK_PP_TRIVIA_NL, "\n");
+    arena_free(a);
+}
+
+TEST(pp, paste_empty_right_placemarker)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define C(a,b) a##b\nC(q,)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "q");
+    arena_free(a);
+}
+
+TEST(pp, paste_empty_left_placemarker)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define C(a,b) a##b\nC(,y)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "y");
+    arena_free(a);
+}
+
+TEST(pp, paste_raw_operand_not_expanded)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define E\n#define CAT(a,b) a##b\nCAT(x,E)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_IDENT, "xE");
+    arena_free(a);
+}
+
+TEST(pp, paste_suffix_building)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define MK(n) n##u\nMK(5)\n");
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_NUMBER, "5u");
+    arena_free(a);
+}
+
+TEST(pp, paste_invalid_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define CAT(a,b) a##b\nCAT(a,+)\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, paste_at_start_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(x) ## x\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, paste_at_end_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define F(x) x ##\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}

@@ -125,6 +125,11 @@ static bool pp_is_comma(const PpToken *tok)
     return tok->kind == TOK_PP_PUNCT && tok->punct == PP_PUNCT_COMMA;
 }
 
+static bool pp_is_hashhash(const PpToken *tok)
+{
+    return tok->kind == TOK_PP_PUNCT && tok->punct == PP_PUNCT_HASHHASH;
+}
+
 static bool pp_is_ellipsis(const PpToken *tok)
 {
     return tok->kind == TOK_PP_PUNCT && tok->punct == PP_PUNCT_ELLIPSIS;
@@ -392,6 +397,32 @@ static bool pp_check_hashes(Pp *pp, Vec *body)
     return true;
 }
 
+/* A `##` operand must not be the first or last token of a replacement list
+   (C11 §6.10.3.3). */
+static bool pp_check_pastes(Pp *pp, Vec *body)
+{
+    size_t n = vec_size(body);
+    for (size_t i = 0; i < n; i++)
+    {
+        PpToken *t = vec_get(body, i);
+        if (!pp_is_hashhash(t))
+        {
+            continue;
+        }
+        if (i == 0)
+        {
+            pp_error(pp, t->loc, "'##' cannot appear at the start of a macro expansion");
+            return false;
+        }
+        if (i + 1 >= n)
+        {
+            pp_error(pp, t->loc, "'##' cannot appear at the end of a macro expansion");
+            return false;
+        }
+    }
+    return true;
+}
+
 static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
                       Loc directive_loc)
 {
@@ -452,6 +483,11 @@ static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t 
     else
     {
         body = pp_collect_body(pp, frame, i + 1, end);
+    }
+
+    if (!pp_check_pastes(pp, body))
+    {
+        return;
     }
 
     Macro *prev = strmap_get(pp->macros, text);
@@ -654,31 +690,80 @@ static PpToken *pp_stringize(Pp *pp, Vec *raw, Loc loc)
     return tok;
 }
 
-/* Replaces body parameter markers with prescanned argument tokens; `#` before
-   a marker stringizes the raw argument instead. All substituted tokens get the
-   invocation's hide set. */
-static TokList *pp_subst(Pp *pp, Macro *macro, Vec *raw_args, Vec *args, Hideset *new_hs,
-                         Loc inv_loc)
+/* Concatenates two tokens' spellings and re-lexes the result; it must form
+   exactly one valid pp-token (C11 §6.10.3.3). */
+static PpToken *pp_paste(Pp *pp, PpToken *left, PpToken *right, Loc loc)
 {
-    TokList *head = NULL;
-    TokList **tail = &head;
-    for (size_t i = 0; i < vec_size(macro->body); i++)
+    size_t total = (size_t) left->len + right->len;
+    char *buf = arena_alloc(pp->arena, total + 1, 1);
+    memcpy(buf, left->spell, left->len);
+    memcpy(buf + left->len, right->spell, right->len);
+    buf[total] = '\0';
+
+    Vec *soup = pp_lex(loc.file ? loc.file : "", buf, pp->arena);
+    if (!soup)
+    {
+        pp_error(pp, loc, "pasting '%.*s' and '%.*s' does not give a valid preprocessing token",
+                 (int) left->len, left->spell, (int) right->len, right->spell);
+        return left;
+    }
+
+    PpToken *result = NULL;
+    size_t real = 0;
+    for (size_t i = 0; i < vec_size(soup); i++)
+    {
+        PpToken *t = vec_get(soup, i);
+        if (t->kind == TOK_PP_EOF)
+        {
+            break;
+        }
+        if (pp_is_trivia(t))
+        {
+            continue;
+        }
+        real++;
+        if (!result)
+        {
+            result = t;
+        }
+    }
+
+    if (real != 1 || !result)
+    {
+        pp_error(pp, loc, "pasting '%.*s' and '%.*s' does not give a valid preprocessing token",
+                 (int) left->len, left->spell, (int) right->len, right->spell);
+        return left;
+    }
+    result->loc = loc;
+    result->hide = hs_union(pp->arena, left->hide, right->hide);
+    return result;
+}
+
+/* Substitutes parameters in order; a parameter adjacent to `##` receives its
+   raw argument, everything else the prescanned one, and `#` stringizes. */
+static Vec *pp_substitute(Pp *pp, Macro *macro, Vec *raw_args, Vec *args, Hideset *new_hs,
+                          Loc inv_loc)
+{
+    Vec *out = vec_new(pp->arena);
+    size_t n = vec_size(macro->body);
+
+    for (size_t i = 0; i < n; i++)
     {
         PpToken *bt = vec_get(macro->body, i);
-        if (bt->kind == TOK_PP_PUNCT && bt->punct == PP_PUNCT_HASH && raw_args &&
-            i + 1 < vec_size(macro->body) &&
+        if (bt->kind == TOK_PP_PUNCT && bt->punct == PP_PUNCT_HASH && raw_args && i + 1 < n &&
             ((PpToken *) vec_get(macro->body, i + 1))->kind == TOK_PP_PARAM)
         {
             PpToken *next = vec_get(macro->body, i + 1);
-            Vec *raw = vec_get(raw_args, next->param_idx);
-            *tail = list_cons(pp->arena, pp_stringize(pp, raw, inv_loc), NULL);
-            tail = &(*tail)->next;
-            i++; /* consume the parameter */
+            vec_push(out, pp_stringize(pp, vec_get(raw_args, next->param_idx), inv_loc));
+            i++;
             continue;
         }
-        else if (bt->kind == TOK_PP_PARAM && args && bt->param_idx < vec_size(args))
+        if (bt->kind == TOK_PP_PARAM && args && bt->param_idx < vec_size(args))
         {
-            Vec *arg = vec_get(args, bt->param_idx);
+            bool under_paste = (i > 0 && pp_is_hashhash(vec_get(macro->body, i - 1))) ||
+                               (i + 1 < n && pp_is_hashhash(vec_get(macro->body, i + 1)));
+            Vec *arg =
+                under_paste ? vec_get(raw_args, bt->param_idx) : vec_get(args, bt->param_idx);
             for (size_t j = 0; j < vec_size(arg); j++)
             {
                 PpToken *a = vec_get(arg, j);
@@ -690,8 +775,7 @@ static TokList *pp_subst(Pp *pp, Macro *macro, Vec *raw_args, Vec *args, Hideset
                 *copy = *a;
                 copy->hide = hs_union(pp->arena, a->hide, new_hs);
                 copy->loc = inv_loc;
-                *tail = list_cons(pp->arena, copy, NULL);
-                tail = &(*tail)->next;
+                vec_push(out, copy);
             }
             continue;
         }
@@ -700,10 +784,57 @@ static TokList *pp_subst(Pp *pp, Macro *macro, Vec *raw_args, Vec *args, Hideset
         *copy = *bt;
         copy->hide = hs_union(pp->arena, bt->hide, new_hs);
         copy->loc = inv_loc;
-        *tail = list_cons(pp->arena, copy, NULL);
+        vec_push(out, copy);
+    }
+    return out;
+}
+
+/* Merges `##` runs with placemarker semantics: an empty side disappears. */
+static TokList *pp_paste_list(Pp *pp, Vec *tokens, Loc inv_loc)
+{
+    Vec *out = vec_new(pp->arena);
+    for (size_t i = 0; i < vec_size(tokens); i++)
+    {
+        PpToken *t = vec_get(tokens, i);
+        if (!pp_is_hashhash(t))
+        {
+            vec_push(out, t);
+            continue;
+        }
+        if (i + 1 < vec_size(tokens))
+        {
+            PpToken *right = vec_get(tokens, i + 1);
+            if (vec_size(out) > 0)
+            {
+                PpToken *left = vec_last(out);
+                vec_pop(out);
+                vec_push(out, pp_paste(pp, left, right, inv_loc));
+            }
+            else
+            {
+                vec_push(out, right);
+            }
+            i++;
+        }
+        /* trailing `##` with an empty right operand disappears */
+    }
+
+    TokList *head = NULL;
+    TokList **tail = &head;
+    for (size_t i = 0; i < vec_size(out); i++)
+    {
+        *tail = list_cons(pp->arena, vec_get(out, i), NULL);
         tail = &(*tail)->next;
     }
     return head;
+}
+
+/* Substitutes then pastes (§6.10.3.2/§6.10.3.3); every emitted token gets the
+   invocation's hide set. */
+static TokList *pp_subst(Pp *pp, Macro *macro, Vec *raw_args, Vec *args, Hideset *new_hs,
+                         Loc inv_loc)
+{
+    return pp_paste_list(pp, pp_substitute(pp, macro, raw_args, args, new_hs, inv_loc), inv_loc);
 }
 
 static Vec *pp_prescan_args(Pp *pp, Vec *args);
