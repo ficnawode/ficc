@@ -1,5 +1,6 @@
 CC      := gcc
-CFLAGS  := -std=c11 -Wall -Wextra -Werror -Isrc -Itest
+CFLAGS  := -std=c11 -Wall -Wextra -Werror -Isrc -Itest \
+           -DFICC_BUILTIN_INCLUDE=\"$(abspath include)\"
 DEPFLAGS := -MMD -MP
 LDFLAGS :=
 

@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef FICC_BUILTIN_INCLUDE
+#define FICC_BUILTIN_INCLUDE "include"
+#endif
+
 typedef struct Hideset Hideset;
 struct Hideset
 {
@@ -672,6 +676,239 @@ static void pp_endif_directive(Pp *pp, Loc directive_loc)
     vec_pop(pp->conds);
 }
 
+static bool pp_file_exists(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return false;
+    }
+    fclose(f);
+    return true;
+}
+
+static const char *pp_path_dirname(Pp *pp, const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    if (!slash)
+    {
+        return ".";
+    }
+    size_t len = (size_t) (slash - path);
+    if (len == 0)
+    {
+        return "/";
+    }
+    char *buf = arena_alloc(pp->arena, len + 1, 1);
+    memcpy(buf, path, len);
+    buf[len] = '\0';
+    return buf;
+}
+
+static const char *pp_path_join(Pp *pp, const char *dir, const char *name)
+{
+    size_t len = strlen(dir) + 1 + strlen(name);
+    char *buf = arena_alloc(pp->arena, len + 1, 1);
+    memcpy(buf, dir, strlen(dir));
+    buf[strlen(dir)] = '/';
+    memcpy(buf + strlen(dir) + 1, name, strlen(name) + 1);
+    return buf;
+}
+
+static char *pp_read_file(const char *path, Arena *arena)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) != 0 || ftell(f) < 0)
+    {
+        fclose(f);
+        return NULL;
+    }
+    long size = ftell(f);
+    if (fseek(f, 0, SEEK_SET) != 0)
+    {
+        fclose(f);
+        return NULL;
+    }
+    char *buf = arena_alloc(arena, (size_t) size + 1, 1);
+    if (fread(buf, 1, (size_t) size, f) != (size_t) size)
+    {
+        fclose(f);
+        return NULL;
+    }
+    buf[size] = '\0';
+    fclose(f);
+    return buf;
+}
+
+static const char *pp_builtin_dir(Pp *pp)
+{
+    if (!pp->builtin_dir)
+    {
+        const char *dir = FICC_BUILTIN_INCLUDE;
+        if (pp->exe_path)
+        {
+            const char *cand = pp_path_join(
+                pp, pp_path_join(pp, pp_path_dirname(pp, pp->exe_path), ".."), "include");
+            if (pp_file_exists(cand))
+            {
+                dir = cand;
+            }
+        }
+        pp->builtin_dir = dir;
+    }
+    return pp->builtin_dir;
+}
+
+/* Resolves a header name. Quoted form tries the including file's directory
+   first, then the angle chain. Returns the path or NULL. */
+static const char *pp_include_find(Pp *pp, bool quoted, const char *name,
+                                   const char *including_file)
+{
+    if (quoted && including_file)
+    {
+        const char *cand = pp_path_join(pp, pp_path_dirname(pp, including_file), name);
+        if (pp_file_exists(cand))
+        {
+            return cand;
+        }
+    }
+
+    for (size_t i = 0; i < vec_size(pp->include_paths); i++)
+    {
+        const char *cand = pp_path_join(pp, vec_get(pp->include_paths, i), name);
+        if (pp_file_exists(cand))
+        {
+            return cand;
+        }
+    }
+
+    if (!pp->nostdinc)
+    {
+        const char *cand = pp_path_join(pp, pp_builtin_dir(pp), name);
+        if (pp_file_exists(cand))
+        {
+            return cand;
+        }
+    }
+    return NULL;
+}
+
+static void pp_include_file(Pp *pp, const char *path)
+{
+    if (vec_size(pp->includes) >= 200)
+    {
+        pp_error(pp, (Loc) {.file = path, .line = 1, .col = 1},
+                 "too many nested #include directives");
+        return;
+    }
+    char *src = pp_read_file(path, pp->arena);
+    if (!src)
+    {
+        pp_error(pp, (Loc) {.file = path, .line = 1, .col = 1}, "cannot read include file");
+        return;
+    }
+    Vec *tokens = pp_lex(path, src, pp->arena);
+    if (!tokens)
+    {
+        pp_error(pp, (Loc) {.file = path, .line = 1, .col = 1}, "cannot preprocess include file");
+        return;
+    }
+    pp_push_include(pp, path, tokens);
+}
+
+/* `#include` operand is read contextually: `<...>` from punct tokens or a
+   `"..."` string literal. */
+static void pp_include_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
+                                 Loc directive_loc)
+{
+    size_t i = start;
+    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
+    {
+        i++;
+    }
+    if (i >= end)
+    {
+        pp_error(pp, directive_loc, "expected a header name after #include");
+        return;
+    }
+
+    PpToken *first = vec_get(frame->tokens, i);
+    bool quoted = false;
+    ByteBuf name_buf;
+    bytebuf_init(&name_buf, pp->arena);
+
+    if (first->kind == TOK_PP_PUNCT && first->punct == PP_PUNCT_LT)
+    {
+        size_t j = i + 1;
+        for (; j < end; j++)
+        {
+            PpToken *t = vec_get(frame->tokens, j);
+            if (t->kind == TOK_PP_PUNCT && t->punct == PP_PUNCT_GT)
+            {
+                break;
+            }
+            if (t->kind == TOK_PP_TRIVIA_COMMENT || t->kind == TOK_PP_TRIVIA_NL)
+            {
+                pp_error(pp, t->loc, "invalid character inside a #include header name");
+                return;
+            }
+            if (pp_is_trivia(t))
+            {
+                continue;
+            }
+            for (u32 k = 0; k < t->len; k++)
+            {
+                bytebuf_append(&name_buf, t->spell[k]);
+            }
+        }
+        if (j >= end)
+        {
+            pp_error(pp, first->loc, "missing '>' in #include");
+            return;
+        }
+        i = j + 1;
+    }
+    else if (first->kind == TOK_PP_STRING)
+    {
+        quoted = true;
+        for (u32 k = 1; k + 1 < first->len; k++)
+        {
+            bytebuf_append(&name_buf, first->spell[k]);
+        }
+        i++;
+    }
+    else
+    {
+        pp_error(pp, first->loc, "expected a header name after #include");
+        return;
+    }
+
+    bytebuf_append(&name_buf, '\0');
+    const char *name = (const char *) bytebuf_data(&name_buf);
+
+    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
+    {
+        i++;
+    }
+    if (i < end)
+    {
+        pp_warn(pp, ((PpToken *) vec_get(frame->tokens, i))->loc,
+                "extra tokens at end of #include directive");
+    }
+
+    const char *path = pp_include_find(pp, quoted, name, frame->file);
+    if (!path)
+    {
+        pp_error(pp, directive_loc, "include file not found: '%s'", name);
+        return;
+    }
+    pp_include_file(pp, path);
+}
+
 static u32 pp_count_newlines(const PpIncludeFrame *frame, size_t begin, size_t end)
 {
     u32 count = 0;
@@ -877,6 +1114,14 @@ static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end
     else if (pp_is_skipping(pp))
     {
         return false;
+    }
+    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "include"))
+    {
+        pp_include_directive(pp, frame, i, end, directive_loc);
+    }
+    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "include_next"))
+    {
+        pp_error(pp, directive_loc, "#include_next is not implemented yet");
     }
     else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "define"))
     {

@@ -48,6 +48,8 @@ struct Pp
     bool pedantic;
     Vec *include_paths;
     bool nostdinc;
+    const char *exe_path;
+    const char *builtin_dir;
     bool has_source_date_epoch;
     i64 source_date_epoch;
     u32 error_count;

@@ -2,11 +2,42 @@
 #include "pp.h"
 #include "util/arena.h"
 
+#include <stdio.h>
+
 static Pp *pp_run_text(Arena *a, const char *src)
 {
     Pp *pp = pp_new(a);
     pp_preprocess(pp, "<test>", src);
     return pp;
+}
+
+static unsigned int pp_inc_seq;
+
+static const char *pp_test_name(Arena *a, const char *tag)
+{
+    char buf[80];
+    snprintf(buf, sizeof(buf), "ficcinc_%u_%s", pp_inc_seq++, tag);
+    char *copy = arena_alloc(a, strlen(buf) + 1, 1);
+    strcpy(copy, buf);
+    return copy;
+}
+
+static void pp_test_write(const char *name, const char *content)
+{
+    char path[160];
+    snprintf(path, sizeof(path), "/tmp/%s", name);
+    FILE *f = fopen(path, "w");
+    fputs(content, f);
+    fclose(f);
+}
+
+static const char *pp_test_path(Arena *a, const char *name)
+{
+    char buf[160];
+    snprintf(buf, sizeof(buf), "/tmp/%s", name);
+    char *copy = arena_alloc(a, strlen(buf) + 1, 1);
+    strcpy(copy, buf);
+    return copy;
 }
 
 static PpToken *out_tok(Pp *pp, size_t i)
@@ -24,6 +55,19 @@ static void expect_out(Pp *pp, size_t i, PpKind kind, const char *spelling)
     PpToken *t = out_tok(pp, i);
     EXPECT_EQ(t->kind, kind);
     EXPECT_TRUE(spell_is(t, spelling));
+}
+
+static bool soup_has_token(Pp *pp, PpKind kind, const char *spelling)
+{
+    for (size_t i = 0; i < vec_size(pp->out); i++)
+    {
+        PpToken *t = out_tok(pp, i);
+        if (t->kind == kind && spell_is(t, spelling))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 TEST(pp, ordinary_line_passthrough)
@@ -1056,5 +1100,106 @@ TEST(pp, ifdef_missing_name_is_error)
     Pp *pp = pp_new(a);
     EXPECT_NULL(pp_preprocess(pp, "<test>", "#ifdef\n"));
     EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, include_quoted_resolves_relative)
+{
+    Arena *a = arena_new();
+    const char *hdr = pp_test_name(a, "h.h");
+    pp_test_write(hdr, "#define FROM_HEADER 42\n");
+    const char *main = pp_test_name(a, "main.c");
+
+    char src[200];
+    snprintf(src, sizeof(src), "#include \"%s\"\nint v = FROM_HEADER;\n", hdr);
+    Pp *pp = pp_new(a);
+    EXPECT_NOTNULL(pp_preprocess(pp, pp_test_path(a, main), src));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "42"));
+    arena_free(a);
+}
+
+TEST(pp, include_angle_with_I)
+{
+    Arena *a = arena_new();
+    const char *hdr = pp_test_name(a, "h.h");
+    pp_test_write(hdr, "#define FROM_I 77\n");
+
+    char src[200];
+    snprintf(src, sizeof(src), "#include <%s>\nint v = FROM_I;\n", hdr);
+    Pp *pp = pp_new(a);
+    vec_push(pp->include_paths, (void *) "/tmp");
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", src));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "77"));
+    arena_free(a);
+}
+
+TEST(pp, include_builtin_shim_resolves)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#include <stdbool.h>\nbool b = true;\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "_Bool"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "1"));
+    arena_free(a);
+}
+
+TEST(pp, include_missing_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#include <ficcinc_zz_missing.h>\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, include_guards_include_once)
+{
+    Arena *a = arena_new();
+    const char *ba = pp_test_name(a, "a.h");
+    const char *bb = pp_test_name(a, "b.h");
+    pp_test_write(bb, "#define FROM_B 7\n");
+    char asrc[200];
+    snprintf(asrc, sizeof(asrc),
+             "#ifndef %s\n#define %s\n#include \"%s\"\n#define FROM_A 42\n#endif\n", ba, ba, bb);
+    pp_test_write(ba, asrc);
+    const char *main = pp_test_name(a, "main.c");
+
+    char src[200];
+    snprintf(src, sizeof(src), "#include \"%s\"\n#include \"%s\"\nint v = FROM_A + FROM_B;\n", ba,
+             ba);
+    Pp *pp = pp_new(a);
+    EXPECT_NOTNULL(pp_preprocess(pp, pp_test_path(a, main), src));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "42"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "7"));
+    arena_free(a);
+}
+
+TEST(pp, include_depth_cap_is_error)
+{
+    Arena *a = arena_new();
+    const char *hdr = pp_test_name(a, "rec.h");
+    char rec[200];
+    snprintf(rec, sizeof(rec), "#include \"%s\"\n", hdr);
+    pp_test_write(hdr, rec);
+    const char *main = pp_test_name(a, "main.c");
+
+    char src[200];
+    snprintf(src, sizeof(src), "#include \"%s\"\n", hdr);
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, pp_test_path(a, main), src));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, include_in_skipped_branch_not_opened)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NOTNULL(pp_preprocess(
+        pp, "<test>", "#ifdef NOPE\n#include <ficcinc_zz_skipped_missing.h>\n#endif\nint ok;\n"));
+    EXPECT_EQ(pp->error_count, 0);
     arena_free(a);
 }

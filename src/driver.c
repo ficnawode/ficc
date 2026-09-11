@@ -19,11 +19,15 @@ typedef struct
     bool dump_pp;
     bool emit_obj;
     bool run_interp;
+    bool nostdinc;
 } DriverFlags;
 
 typedef struct
 {
     const char *input_file;
+    const char *exe_path;
+    const char *include_paths[16];
+    size_t include_path_count;
     DriverFlags flags;
 } DriverArgs;
 
@@ -93,12 +97,17 @@ static void replace_ext(const char *in, char *out, size_t out_len, const char *n
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "Usage: %s [-tokens] [-pp] [-ast] [-ir] [-c] [-run] <file.c>\n", prog);
+    fprintf(stderr,
+            "Usage: %s [-tokens] [-pp] [-ast] [-ir] [-c] [-run] [-I dir] [-nostdinc] "
+            "<file.c>\n",
+            prog);
 }
 
 static bool parse_args(int argc, char **argv, DriverArgs *out)
 {
     out->input_file = NULL;
+    out->exe_path = argv[0];
+    out->include_path_count = 0;
     out->flags = (DriverFlags) {0};
 
     for (int i = 1; i < argc; i++)
@@ -127,6 +136,34 @@ static bool parse_args(int argc, char **argv, DriverArgs *out)
         else if (strcmp(arg, "-run") == 0)
         {
             out->flags.run_interp = true;
+        }
+        else if (strcmp(arg, "-nostdinc") == 0)
+        {
+            out->flags.nostdinc = true;
+        }
+        else if (strcmp(arg, "-I") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "-I requires a directory argument\n");
+                usage(argv[0]);
+                return false;
+            }
+            if (out->include_path_count >= 16)
+            {
+                fprintf(stderr, "too many -I directories\n");
+                return false;
+            }
+            out->include_paths[out->include_path_count++] = argv[++i];
+        }
+        else if (arg[0] == '-' && arg[1] == 'I')
+        {
+            if (out->include_path_count >= 16)
+            {
+                fprintf(stderr, "too many -I directories\n");
+                return false;
+            }
+            out->include_paths[out->include_path_count++] = arg + 2;
         }
         else if (arg[0] == '-')
         {
@@ -161,6 +198,12 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
     if (args->flags.dump_pp)
     {
         Pp *pp = pp_new(arena_new());
+        pp->exe_path = args->exe_path;
+        pp->nostdinc = args->flags.nostdinc;
+        for (size_t k = 0; k < args->include_path_count; k++)
+        {
+            vec_push(pp->include_paths, (void *) args->include_paths[k]);
+        }
         Vec *soup = pp_preprocess(pp, args->input_file, src);
         if (!soup)
         {
@@ -174,6 +217,12 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
     }
 
     Pp *pp = pp_new(arena_new());
+    pp->exe_path = args->exe_path;
+    pp->nostdinc = args->flags.nostdinc;
+    for (size_t k = 0; k < args->include_path_count; k++)
+    {
+        vec_push(pp->include_paths, (void *) args->include_paths[k]);
+    }
     Vec *soup = pp_preprocess(pp, args->input_file, src);
     if (!soup)
     {
