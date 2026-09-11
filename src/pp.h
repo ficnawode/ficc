@@ -76,6 +76,12 @@ void pp_free(Pp *pp);
    pp->out), or NULL after reporting a diagnostic. */
 Vec *pp_preprocess(Pp *pp, const char *file, const char *src);
 
+/* Command-line hooks (17u), applied before the main file is read: `-D name[=val]`
+   (object-like), `-U name`, and `-include file` (preprocessed to completion). */
+void pp_define_cmdline(Pp *pp, const char *spec);
+void pp_undef_cmdline(Pp *pp, const char *name);
+void pp_include_cmdline(Pp *pp, const char *file);
+
 /* Diagnostics; exported so the #if evaluator can report through the same sink. */
 void pp_error(Pp *pp, Loc loc, const char *fmt, ...);
 void pp_warn(Pp *pp, Loc loc, const char *fmt, ...);

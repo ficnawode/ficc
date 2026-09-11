@@ -1773,3 +1773,92 @@ TEST(pp, emit_roundtrip_identical_soup)
     expect_soups_equal(first, second);
     arena_free(a);
 }
+
+TEST(pp, cmdline_define_value)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    pp_define_cmdline(pp, "FEATURE=17");
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "int x = FEATURE;\n"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "17"));
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, cmdline_define_defaults_to_one)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    pp_define_cmdline(pp, "FLAG");
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "int x = FLAG;\n"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "1"));
+    arena_free(a);
+}
+
+TEST(pp, cmdline_define_empty_value)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    pp_define_cmdline(pp, "EMPTY=");
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "a EMPTY b;\n"));
+    EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "EMPTY"));
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, cmdline_undef_and_ordering)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    pp_define_cmdline(pp, "V=1");
+    pp_undef_cmdline(pp, "V");
+    pp_define_cmdline(pp, "V=2");
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "int x = V;\n"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "2"));
+    EXPECT_FALSE(soup_has_token(pp, TOK_PP_NUMBER, "1"));
+    arena_free(a);
+}
+
+TEST(pp, cmdline_undef_leaves_ident)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    pp_define_cmdline(pp, "KEEP=1");
+    pp_undef_cmdline(pp, "KEEP");
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "int KEEP;\n"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "KEEP"));
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, cmdline_define_reserved_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    pp_define_cmdline(pp, "__LINE__=5");
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, cmdline_include_forces_header)
+{
+    Arena *a = arena_new();
+    const char *hdr = pp_test_name(a, "forced.h");
+    pp_test_write(hdr, "#define FROM_HDR 99\n");
+    Pp *pp = pp_new(a);
+    pp_include_cmdline(pp, pp_test_path(a, hdr));
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "int y = FROM_HDR;\n"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "99"));
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
+TEST(pp, pedantic_warns_on_gnu_pragma)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    pp->pedantic = true;
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "#pragma once\nint ok;\n"));
+    EXPECT_TRUE(pp->warning_count >= 1);
+    arena_free(a);
+}

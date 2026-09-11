@@ -9,6 +9,10 @@
 
 IrModule *tc_build_module(const char *src, Arena *arena);
 
+/* tc_build_module with a concrete file path and -I-style include dirs. */
+IrModule *tc_build_module_with_dirs(const char *src, const char *file, const char *const *dirs,
+                                    size_t ndirs, Arena *arena);
+
 /* lex + parse only (front-end check; no semantic or IR stages). */
 ASTNode *tc_parse(const char *src, Arena *arena);
 

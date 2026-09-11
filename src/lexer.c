@@ -1,6 +1,7 @@
 #include "lexer.h"
 #include "pp_lex.h"
 #include "util/bytebuf.h"
+#include "util/intern.h"
 #include "util/vec.h"
 #include <stdio.h>
 #include <string.h>
@@ -619,6 +620,7 @@ struct FinalizeCtx
 {
     Arena *arena;
     Vec *tokens;
+    InternPool *files;
     u32 error_count;
 };
 
@@ -651,6 +653,12 @@ static void finalize_push_token(FinalizeCtx *ctx, Token token)
 
     Token *slot = arena_alloc(ctx->arena, sizeof(Token), sizeof(void *));
     *slot = token;
+    if (slot->loc.file)
+    {
+        /* The soup's file strings live in the pp arena, which the driver frees
+           right after finalize; intern them so later diagnostics stay valid. */
+        slot->loc.file = intern(ctx->files, slot->loc.file);
+    }
     vec_push(ctx->tokens, slot);
 }
 
@@ -952,10 +960,8 @@ static void finalize_number(FinalizeCtx *ctx, const PpToken *tok)
     while (i < len && (base == 16 ? is_hex_digit(s[i]) : is_digit(s[i])))
     {
         u64 digit = hex_digit_value(s[i]);
-        if (!overflow && val > ((u64) INT64_MAX - digit) / base)
+        if (!overflow && val > ((u64) UINT64_MAX - digit) / base)
         {
-            finalize_error(ctx, tok->loc, "integer literal overflow");
-            val = (u64) INT64_MAX;
             overflow = true;
         }
         else if (!overflow)
@@ -992,6 +998,24 @@ static void finalize_number(FinalizeCtx *ctx, const PpToken *tok)
     {
         finalize_error(ctx, tok->loc, "invalid suffix on integer literal");
         return;
+    }
+
+    /* C11 §6.4.4.1: hex and octal literals may take an unsigned type when the
+       value exceeds the widest signed type; decimal literals are signed-only,
+       and an explicit u/U suffix widens the range to UINT64_MAX. */
+    if (overflow)
+    {
+        finalize_error(ctx, tok->loc, "integer literal overflow");
+        return;
+    }
+    if (!is_unsigned && !is_hex && val > (u64) INT64_MAX)
+    {
+        finalize_error(ctx, tok->loc, "integer literal overflow");
+        return;
+    }
+    if (!is_unsigned && is_hex && val > (u64) INT64_MAX)
+    {
+        is_unsigned = true;
     }
 
     finalize_push_token(
@@ -1041,6 +1065,7 @@ LexResult lex_finalize(const Vec *soup, Arena *arena)
     FinalizeCtx ctx;
     ctx.arena = arena;
     ctx.tokens = vec_new(arena);
+    ctx.files = intern_pool_new(arena);
     ctx.error_count = 0;
 
     for (size_t i = 0; i < vec_size(soup); i++)

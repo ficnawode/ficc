@@ -2411,6 +2411,111 @@ static void pp_run(Pp *pp)
     }
 }
 
+static bool pp_is_ident_text(const char *s, size_t n)
+{
+    if (n == 0)
+    {
+        return false;
+    }
+    char c0 = s[0];
+    if (!(c0 == '_' || (c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z')))
+    {
+        return false;
+    }
+    for (size_t i = 1; i < n; i++)
+    {
+        char c = s[i];
+        if (!(c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9')))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* `-D name[=value]`: object-like, value defaults to `1` (gcc), `name=` is
+   empty. */
+void pp_define_cmdline(Pp *pp, const char *spec)
+{
+    Loc loc = (Loc) {.file = "<command-line>", .line = 1, .col = 1};
+    const char *eq = strchr(spec, '=');
+    size_t name_len = eq ? (size_t) (eq - spec) : strlen(spec);
+    if (!pp_is_ident_text(spec, name_len))
+    {
+        pp_error(pp, loc, "invalid macro name '%s'", spec);
+        return;
+    }
+    char *name = arena_alloc(pp->arena, name_len + 1, 1);
+    memcpy(name, spec, name_len);
+    name[name_len] = '\0';
+    if (pp_is_reserved_name(name))
+    {
+        pp_error(pp, loc, "redefinition of predefined macro '%s'", name);
+        return;
+    }
+
+    Vec *body = vec_new(pp->arena);
+    if (!eq)
+    {
+        PpToken *one = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
+        *one = (PpToken) {.kind = TOK_PP_NUMBER, .loc = loc, .spell = "1", .len = 1};
+        vec_push(body, one);
+    }
+    else if (eq[1] != '\0')
+    {
+        Vec *soup = pp_lex("<command-line>", eq + 1, pp->arena);
+        if (!soup)
+        {
+            return;
+        }
+        for (size_t i = 0; i < vec_size(soup); i++)
+        {
+            PpToken *t = vec_get(soup, i);
+            if (!pp_is_trivia(t) && t->kind != TOK_PP_EOF)
+            {
+                vec_push(body, t);
+            }
+        }
+    }
+
+    Macro *prev = strmap_get(pp->macros, name);
+    if (prev)
+    {
+        if (prev->kind == MACRO_OBJ && pp_bodies_equal(prev->body, body))
+        {
+            return;
+        }
+        pp_error(pp, loc, "redefinition of macro '%s'", name);
+        pp_note(prev->loc, "previous definition of '%s' is here", name);
+        return;
+    }
+
+    Macro *macro = arena_alloc(pp->arena, sizeof(Macro), sizeof(void *));
+    *macro = (Macro) {.name = name, .kind = MACRO_OBJ, .loc = loc, .body = body};
+    strmap_set(pp->macros, name, macro);
+}
+
+void pp_undef_cmdline(Pp *pp, const char *name)
+{
+    hashmap_remove(pp->macros, name);
+}
+
+/* `-include file`: resolves like an angle include and processes it to
+   completion now, so its macros and output precede the main file. */
+void pp_include_cmdline(Pp *pp, const char *file)
+{
+    Loc loc = (Loc) {.file = file, .line = 1, .col = 1};
+    const char *path = pp_file_exists(file) ? file : pp_include_find(pp, false, file, NULL, false);
+    if (!path)
+    {
+        pp_error(pp, loc, "include file not found: '%s'", file);
+        return;
+    }
+    pp_include_file(pp, path);
+    pp_run(pp);
+}
+
 Vec *pp_preprocess(Pp *pp, const char *file, const char *src)
 {
     Vec *tokens = pp_lex(file, src, pp->arena);

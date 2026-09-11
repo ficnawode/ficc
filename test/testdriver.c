@@ -59,6 +59,42 @@ IrModule *tc_build_module(const char *src, Arena *arena)
     return ir_build_module(ast, arena);
 }
 
+/* tc_build_module over a concrete file path with -I-style include dirs, so
+   self-compile sources (`#include "util/sbuf.h"` from src/...) resolve. */
+IrModule *tc_build_module_with_dirs(const char *src, const char *file, const char *const *dirs,
+                                    size_t ndirs, Arena *arena)
+{
+    type_reset();
+    Pp *pp = pp_new(arena_new());
+    for (size_t i = 0; i < ndirs; i++)
+    {
+        vec_push(pp->include_paths, (void *) dirs[i]);
+    }
+    Vec *soup = pp_preprocess(pp, file ? file : "<test>", src);
+    if (!soup)
+    {
+        pp_free(pp);
+        return NULL;
+    }
+    LexResult lexed = lex_finalize(soup, arena);
+    pp_free(pp);
+    if (!lexed.tokens)
+    {
+        return NULL;
+    }
+    ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
+    if (!ast)
+    {
+        return NULL;
+    }
+    ast = semantic_check(ast, arena);
+    if (!ast)
+    {
+        return NULL;
+    }
+    return ir_build_module(ast, arena);
+}
+
 i64 tc_run_interp(const char *src)
 {
     Arena *arena = arena_new();
