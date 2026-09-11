@@ -361,18 +361,21 @@ Type *type_array(Type *elem, u64 length)
 }
 
 /* Structural key for an interned function type: mixes the (interned, so
-   collision-free) ret/param pointers and the variadic bit. Uses the same
-   avalanche as the array cache so no low-bit aliasing survives. */
+   collision-free) ret/param pointers and the variadic bit. The fold is
+   add-based and order-sensitive: a pure XOR fold cancels to 0 when a
+   parameter pointer equals the return pointer (e.g. `T *f(T *)`), after which
+   `type_key_mix` — being 0-preserving — keeps 0, so every such signature
+   collided on one cache slot. */
 static u64 func_key_mix(Type *ret, Vec *params, bool is_variadic)
 {
-    u64 key = type_key_mix((u64) (uintptr_t) ret);
-    key ^= type_key_mix(is_variadic ? 1 : 0);
+    u64 key = type_key_mix((u64) (uintptr_t) ret + (is_variadic ? 0x9E3779B97F4A7C15ULL : 0));
     size_t n = vec_size(params);
     for (size_t i = 0; i < n; i++)
     {
         Type *pt = (Type *) vec_get(params, i);
-        key = type_key_mix(key ^ type_key_mix((u64) (uintptr_t) pt));
+        key = type_key_mix(key + (u64) (uintptr_t) pt + (u64) (i + 1) * 0xBF58476D1CE4E5B9ULL);
     }
+    key = type_key_mix(key + n);
     return key;
 }
 
@@ -736,9 +739,11 @@ Type *type_record_lookup(const char *tag)
     return strmap_get(tag_table, tag);
 }
 
-static RecordField *find_record_field(Type *t, const char *name)
+/* Finds `name` in record t's own members or recursively inside an anonymous
+   struct/union member (C11 §6.7.2.1p13), writing the absolute field offset
+   (summing the anonymous member chain) into *off_out. */
+static RecordField *find_record_field(Type *t, const char *name, u32 *off_out)
 {
-    ASSERT(type_is_record(t));
     t = type_base(t);
     if (!t->record.fields)
     {
@@ -748,9 +753,24 @@ static RecordField *find_record_field(Type *t, const char *name)
     for (size_t i = 0; i < n; i++)
     {
         RecordField *f = (RecordField *) vec_get(t->record.fields, i);
-        if (strcmp(f->name, name) == 0)
+        if (f->name && strcmp(f->name, name) == 0)
         {
+            *off_out = f->offset;
             return f;
+        }
+    }
+    for (size_t i = 0; i < n; i++)
+    {
+        RecordField *f = (RecordField *) vec_get(t->record.fields, i);
+        if (!f->name && type_is_record(f->type))
+        {
+            u32 sub;
+            RecordField *inner = find_record_field(f->type, name, &sub);
+            if (inner)
+            {
+                *off_out = f->offset + sub;
+                return inner;
+            }
         }
     }
     return NULL;
@@ -758,14 +778,19 @@ static RecordField *find_record_field(Type *t, const char *name)
 
 Type *type_record_field(Type *t, const char *name)
 {
-    RecordField *f = find_record_field(t, name);
+    u32 off;
+    RecordField *f = find_record_field(t, name, &off);
     return f ? f->type : NULL;
 }
 
 u32 type_record_field_offset(Type *t, const char *name)
 {
-    RecordField *f = find_record_field(t, name);
-    return f ? f->offset : 0;
+    u32 off;
+    if (find_record_field(t, name, &off))
+    {
+        return off;
+    }
+    return 0;
 }
 
 bool type_is_ptr(Type *t)

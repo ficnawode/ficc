@@ -296,6 +296,20 @@ static Vec *parse_record_body(Parser *p, Type *rec)
             return NULL;
         }
 
+        /* Anonymous struct/union member (C11 §6.7.2.1p13): a tagless record
+           specifier with no declarator contributes its members to the
+           enclosing record. */
+        if (type_is_record(mspecs.type) && peek_token(p)->kind == TOK_SEMI &&
+            mspecs.type->record.tag == NULL && mspecs.type->record.complete)
+        {
+            next_token(p);
+            ASTNode *anon = ast_var_decl(mspecs.type, NULL, NULL, SC_NONE, mstart->loc, p->arena);
+            ast_as(ASTVarDecl, anon)->alignas = mspecs.alignas;
+            vec_push(field_decls, anon);
+            collect_member_fields(p->arena, record_fields, anon);
+            continue;
+        }
+
         ASTNode *member = parse_member_decl(p, mspecs.type, mspecs.alignas, mstart);
         if (!member)
         {

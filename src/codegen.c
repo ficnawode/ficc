@@ -853,11 +853,23 @@ static u8 vreg_width(CodegenCtx *ctx, u32 vreg)
     return ctx->mod->widths[vreg];
 }
 
+/* RHS for an arithmetic/compare whose 64-bit immediate has no imm encoding:
+   moves it through the scratch register (movabs) instead of erroring. */
+static X86Operand lowered_operand_rhs(CodegenCtx *ctx, IrOperand op, u8 width, u8 scratch)
+{
+    if (op.is_imm && width == 8 && !fits_i32(op.u.imm))
+    {
+        emit_mov(ctx->buf, 8, xop_reg(scratch), lowered_operand(ctx, op, scratch));
+        return xop_reg(scratch);
+    }
+    return lowered_operand(ctx, op, scratch);
+}
+
 static void lower_binary(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
     const ArithSpec *s = &arith_specs[in->opcode];
-    X86Operand rhs = lowered_operand(ctx, in->ops[1], R_ECX);
+    X86Operand rhs = lowered_operand_rhs(ctx, in->ops[1], w, R_ECX);
     emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
     if (in->opcode == OP_AND && w == 4 && rhs.kind == XOP_IMM && rhs.u.imm == 0xFF)
     {
@@ -910,7 +922,7 @@ static void lower_icmp(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
     emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
-    emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, lowered_operand(ctx, in->ops[1], R_ECX));
+    emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, lowered_operand_rhs(ctx, in->ops[1], w, R_ECX));
     emit_setcc(ctx->buf, icmp_cc[in->opcode]);
     emit_movzbl_al_eax(ctx->buf);
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
@@ -1429,38 +1441,8 @@ static void lower_memcpy(IrInstr *in, CodegenCtx *ctx)
     bytebuf_append(ctx->buf, X86_MOVSB);
 }
 
-/* True for the ten icmp predicates; designated initializers keep this order-independent from
- * IR_OPCODES. */
-static const bool is_icmp_op_table[OP_ICMP_SGE + 1] = {
-    [OP_ICMP_EQ] = true,  [OP_ICMP_NE] = true,  [OP_ICMP_ULT] = true, [OP_ICMP_ULE] = true,
-    [OP_ICMP_UGT] = true, [OP_ICMP_UGE] = true, [OP_ICMP_SLT] = true, [OP_ICMP_SLE] = true,
-    [OP_ICMP_SGT] = true, [OP_ICMP_SGE] = true,
-};
-
-/* arithmetic/compare have no imm64 form: an imm RHS must fit a sign-extended imm32 */
-static bool is_imm_rhs_op(IrOpcode op)
-{
-    return op == OP_ADD || op == OP_SUB || op == OP_MUL || op == OP_AND || op == OP_OR ||
-           op == OP_XOR || (op <= OP_ICMP_SGE && is_icmp_op_table[op]);
-}
-
-static bool instr_has_bad_imm(IrInstr *in, CodegenCtx *ctx)
-{
-    return is_imm_rhs_op(in->opcode) && vreg_width(ctx, in->result) == 8 && in->ops[1].is_imm &&
-           !fits_i32(in->ops[1].u.imm);
-}
-
 static void lower_instr(IrInstr *in, CodegenCtx *ctx)
 {
-    if (instr_has_bad_imm(in, ctx))
-    {
-        codegen_error(ctx,
-                      "%s: 64-bit immediate RHS outside signed i32 range "
-                      "(no imm64 form for arithmetic/compare)",
-                      ir_opcode_name(in->opcode));
-        emit_ud2(ctx->buf);
-        return;
-    }
     LowerFn fn = lower_fns[in->opcode];
     if (!fn)
     {

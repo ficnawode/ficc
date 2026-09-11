@@ -233,6 +233,7 @@ static void pp_push_include(Pp *pp, const char *file, Vec *tokens)
     frame->cursor = 0;
     frame->presumed_line = 1;
     frame->presumed_file = file;
+    frame->system_header = false;
     vec_push(pp->includes, frame);
 }
 

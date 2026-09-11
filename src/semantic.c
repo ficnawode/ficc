@@ -1217,7 +1217,7 @@ static bool record_field_index(Type *agg, const char *name, u32 *out)
     for (size_t i = 0; i < nf; i++)
     {
         RecordField *f = (RecordField *) vec_get(agg->record.fields, i);
-        if (strcmp(f->name, name) == 0)
+        if (f->name && strcmp(f->name, name) == 0)
         {
             *out = (u32) i;
             return true;
@@ -1811,22 +1811,31 @@ static bool check_do_while_statement(ASTDoWhileStmt *do_stmt, SemanticCtx *ctx, 
 
 static bool check_for_statement(ASTForStmt *for_stmt, SemanticCtx *ctx, Type *ret_type)
 {
+    /* C11 §6.8.5p5: a for-init declaration is scoped to the whole loop
+       (init, condition, post-expression, body), so `for (int i = ...)` never
+       collides with an enclosing or later `i`. */
+    push_scope(ctx);
+    bool ok = true;
     if (for_stmt->init && !check_stmt(for_stmt->init, ctx, ret_type))
     {
-        return false;
+        ok = false;
     }
-    if (for_stmt->cond &&
-        (!check_expr(for_stmt->cond, ctx) || !check_value_used(for_stmt->cond, ctx)))
+    else if (for_stmt->cond &&
+             (!check_expr(for_stmt->cond, ctx) || !check_value_used(for_stmt->cond, ctx)))
     {
-        return false;
+        ok = false;
     }
-    if (for_stmt->post && !check_expr(for_stmt->post, ctx))
+    else if (for_stmt->post && !check_expr(for_stmt->post, ctx))
     {
-        return false;
+        ok = false;
     }
-    ctx->loop_depth++;
-    bool ok = check_stmt(for_stmt->body, ctx, ret_type);
-    ctx->loop_depth--;
+    if (ok)
+    {
+        ctx->loop_depth++;
+        ok = check_stmt(for_stmt->body, ctx, ret_type);
+        ctx->loop_depth--;
+    }
+    pop_scope(ctx);
     return ok;
 }
 

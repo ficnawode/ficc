@@ -796,3 +796,88 @@ TEST(records, negative_enum_div_zero)
                       "    return 0;\n"
                       "}\n");
 }
+
+TEST(records, anonymous_union_members)
+{
+    /* C11 §6.7.2.1p13: an unnamed union member's members are accessed as if
+       they were members of the enclosing struct, with nested offsets. */
+    EXPECT_INTERP_AND_ELF("struct V {\n"
+                          "    int tag;\n"
+                          "    union {\n"
+                          "        struct { int i; } as_int;\n"
+                          "        struct { char c; int n; } as_pair;\n"
+                          "    };\n"
+                          "};\n"
+                          "int main(void) {\n"
+                          "    struct V v;\n"
+                          "    v.tag = 1;\n"
+                          "    v.as_pair.n = 41;\n"
+                          "    v.as_int.i = 1;\n"
+                          "    return v.tag + v.as_pair.n + v.as_int.i - 1;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(records, anonymous_struct_in_union_layout)
+{
+    /* The magic union in type.h: an anonymous union of anonymous structs; all
+       inner member offsets start at the union base. */
+    EXPECT_INTERP_AND_ELF("typedef unsigned long u64;\n"
+                          "typedef struct Type Type;\n"
+                          "struct Type {\n"
+                          "    u64 a;\n"
+                          "    union {\n"
+                          "        struct { Type *pointee; } ptr;\n"
+                          "        struct { Type *elem; u64 length; } arr;\n"
+                          "    };\n"
+                          "};\n"
+                          "int main(void) {\n"
+                          "    struct Type t;\n"
+                          "    t.a = 1;\n"
+                          "    t.arr.elem = &t;\n"
+                          "    t.arr.length = 2;\n"
+                          "    t.ptr.pointee = &t;\n"
+                          "    return (int) (t.a + t.arr.length + (t.arr.elem == t.ptr.pointee));\n"
+                          "}\n",
+                          4);
+}
+
+TEST(records, anonymous_member_offset_query)
+{
+    Arena *a = arena_new();
+    Type *inner = type_record_anon(TYPE_UNION);
+    Vec *ifields = vec_new(a);
+    vec_push(ifields, make_field(a, "x", type_int()));
+    vec_push(ifields, make_field(a, "y", type_char()));
+    type_record_complete(inner, ifields);
+
+    Type *outer = type_record(TYPE_STRUCT, "P17AnonOuter");
+    Vec *ofields = vec_new(a);
+    vec_push(ofields, make_field(a, "head", type_long()));
+    RecordField *anon = make_field(a, NULL, inner);
+    vec_push(ofields, anon);
+    vec_push(ofields, make_field(a, "tail", type_int()));
+    type_record_complete(outer, ofields);
+
+    EXPECT_EQ(anon->offset, 8);
+    EXPECT_EQ(type_record_field_offset(outer, "x"), 8);
+    EXPECT_EQ(type_record_field_offset(outer, "y"), 8);
+    EXPECT_EQ(type_record_field_offset(outer, "tail"), 12);
+    EXPECT_EQ(type_record_field(outer, "x"), type_int());
+    EXPECT_EQ(outer->size, 16);
+    arena_free(a);
+}
+
+TEST(records, many_same_shape_function_types_do_not_conflict)
+{
+    /* func_key_mix used to cancel to 0 for `T *f(T *)` signatures, making every
+       such prototype collide on one interning slot. */
+    EXPECT_BUILD_SUCCEED("typedef struct N N;\n"
+                         "struct N { int x; };\n"
+                         "N *f1(N *p);\n"
+                         "N *f2(N *p);\n"
+                         "N *f3(N *p);\n"
+                         "N *f1(N *p) { return p; }\n"
+                         "N *f2(N *p) { return p; }\n"
+                         "N *f3(N *p) { return p; }\n");
+}
