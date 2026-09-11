@@ -82,16 +82,21 @@ static void pp_emit_marker(FILE *f, const PpToken *t)
     fprintf(f, "#line %u \"%s\"\n", t->loc.line, t->loc.file ? t->loc.file : "");
 }
 
-/* Emits a marker at column 0 when the upcoming line needs one. Safe only when
-   the first real token of this line is reachable without crossing another
-   newline (so the marker sits directly above its content); otherwise the real
-   token's own branch emits it. */
-static const PpToken *pp_emit_maybe_marker(const Vec *out, size_t i, const PpToken *prev,
-                                           bool no_markers, FILE *f, bool *line_started)
+static void pp_emit_spell(FILE *f, const PpToken *t)
 {
-    if (no_markers || !*line_started)
+    fprintf(f, "%.*s", (int) t->len, t->spell);
+}
+
+/* Emits a `#line` marker at column 0 when the upcoming line needs one. Safe
+   only while still at column 0 and no newline intervenes before the first
+   real token; otherwise the intervening newline returns us to column 0 and
+   the next call places the marker. */
+static void pp_emit_maybe_marker(const Vec *out, size_t i, const PpToken *prev, bool no_markers,
+                                 FILE *f, bool *at_line_start)
+{
+    if (no_markers || !*at_line_start)
     {
-        return NULL;
+        return;
     }
     const PpToken *next = NULL;
     for (size_t j = i; j < vec_size(out); j++)
@@ -99,7 +104,7 @@ static const PpToken *pp_emit_maybe_marker(const Vec *out, size_t i, const PpTok
         const PpToken *t = vec_get(out, j);
         if (t->kind == TOK_PP_TRIVIA_NL)
         {
-            return NULL;
+            return;
         }
         if (!pp_emit_is_trivia(t))
         {
@@ -109,11 +114,10 @@ static const PpToken *pp_emit_maybe_marker(const Vec *out, size_t i, const PpTok
     }
     if (!next || !pp_emit_marker_needed(next, prev))
     {
-        return NULL;
+        return;
     }
     pp_emit_marker(f, next);
-    *line_started = false;
-    return next;
+    *at_line_start = false;
 }
 
 void pp_emit(Pp *pp, FILE *f, PpEmitOptions opts)
@@ -127,6 +131,7 @@ void pp_emit(Pp *pp, FILE *f, PpEmitOptions opts)
     for (size_t i = 0; i < n; i++)
     {
         const PpToken *t = vec_get(out, i);
+        pp_emit_maybe_marker(out, i, prev, opts.no_markers, f, &at_line_start);
         switch (t->kind)
         {
             case TOK_PP_TRIVIA_NL:
@@ -135,26 +140,23 @@ void pp_emit(Pp *pp, FILE *f, PpEmitOptions opts)
                 separated = true;
                 continue;
             case TOK_PP_TRIVIA_WS:
-                pp_emit_maybe_marker(out, i, prev, opts.no_markers, f, &at_line_start);
-                fprintf(f, "%.*s", (int) t->len, t->spell);
+                pp_emit_spell(f, t);
                 separated = true;
                 continue;
             case TOK_PP_TRIVIA_COMMENT:
-                pp_emit_maybe_marker(out, i, prev, opts.no_markers, f, &at_line_start);
                 if (opts.keep_comments)
                 {
-                    fprintf(f, "%.*s", (int) t->len, t->spell);
+                    pp_emit_spell(f, t);
                     separated = true;
                     at_line_start = t->len > 0 && t->spell[t->len - 1] == '\n';
                 }
                 continue;
             default:
-                pp_emit_maybe_marker(out, i, prev, opts.no_markers, f, &at_line_start);
                 if (!separated && prev && pp_emit_needs_space(prev, t))
                 {
                     fputc(' ', f);
                 }
-                fprintf(f, "%.*s", (int) t->len, t->spell);
+                pp_emit_spell(f, t);
                 separated = false;
                 prev = t;
                 at_line_start = false;
