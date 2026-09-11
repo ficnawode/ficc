@@ -234,16 +234,51 @@ static ASTNode *parse_member_decl(Parser *p, Type *base, u32 alignas, Token *sta
     while (true)
     {
         Declarator d;
-        if (!parse_declarator(p, base, &d))
+        bool unnamed = peek_token(p)->kind == TOK_COLON;
+        if (unnamed)
+        {
+            d.type = base;
+            d.name = NULL;
+        }
+        else if (!parse_declarator(p, base, &d))
         {
             return NULL;
         }
-        if (!check_not_enumerator(p, d.name))
+
+        u32 bit_width = 0;
+        if (peek_token(p)->kind == TOK_COLON)
+        {
+            /* C11 §6.7.2.1p12: `declarator : constant-expression`, integer
+               (or _Bool/enum) base, width within the declared type. */
+            if (!(type_is_integer(d.type) || d.type->kind == TYPE_ENUM))
+            {
+                parse_error(p, "bit-field has non-integer type");
+                return NULL;
+            }
+            next_token(p);
+            ASTNode *wexpr = parse_assign(p);
+            i64 width;
+            if (!wexpr || !folded_const(p, wexpr, &width))
+            {
+                parse_error(p, "bit-field width is not an integer constant expression");
+                return NULL;
+            }
+            u32 maxw = d.type->kind == TYPE_BOOL ? 1 : (u32) (d.type->size * 8);
+            if (width <= 0 || (u64) width > maxw)
+            {
+                parse_error(p, "width of bit-field exceeds its type");
+                return NULL;
+            }
+            bit_width = (u32) width;
+        }
+
+        if (!unnamed && !check_not_enumerator(p, d.name))
         {
             return NULL;
         }
         ASTNode *decl = ast_var_decl(d.type, d.name, NULL, SC_NONE, start->loc, p->arena);
         ast_as(ASTVarDecl, decl)->alignas = alignas;
+        ast_as(ASTVarDecl, decl)->bit_width = bit_width;
         vec_push(decls, decl);
         if (peek_token(p)->kind != TOK_COMMA)
         {
@@ -274,6 +309,8 @@ static void collect_member_fields(Arena *arena, Vec *record_fields, ASTNode *mem
         rf->name = vd->name;
         rf->type = vd->type;
         rf->offset = 0;
+        rf->bit_offset = -1;
+        rf->bit_width = vd->bit_width > 0 ? (i32) vd->bit_width : -1;
         vec_push(record_fields, rf);
     }
 }

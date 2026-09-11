@@ -13,6 +13,8 @@ static RecordField *make_field(Arena *a, const char *name, Type *t)
     rf->name = name;
     rf->type = t;
     rf->offset = 0;
+    rf->bit_offset = -1;
+    rf->bit_width = -1;
     return rf;
 }
 
@@ -880,4 +882,264 @@ TEST(records, many_same_shape_function_types_do_not_conflict)
                          "N *f1(N *p) { return p; }\n"
                          "N *f2(N *p) { return p; }\n"
                          "N *f3(N *p) { return p; }\n");
+}
+
+TEST(records, bitfield_layout_pack_ordinary)
+{
+    /* int a:3, int b (ordinary), int c:5: the two bit-fields each sit in their
+       own int storage unit; the ordinary member breaks the pack (§6.7.2.1). */
+    Arena *a = arena_new();
+    Type *s = type_record(TYPE_STRUCT, "P17BitPack");
+    Vec *fields = vec_new(a);
+    RecordField *a3 = make_field(a, "a", type_int());
+    a3->bit_width = 3;
+    RecordField *b = make_field(a, "b", type_int());
+    RecordField *c5 = make_field(a, "c", type_int());
+    c5->bit_width = 5;
+    vec_push(fields, a3);
+    vec_push(fields, b);
+    vec_push(fields, c5);
+    type_record_complete(s, fields);
+    EXPECT_EQ(s->size, 12);
+    EXPECT_EQ(s->align, 4);
+    EXPECT_EQ(a3->offset, 0);
+    EXPECT_EQ((u32) a3->bit_offset, 0);
+    EXPECT_EQ(b->offset, 4);
+    EXPECT_EQ(c5->offset, 8);
+    EXPECT_EQ((u32) c5->bit_offset, 0);
+    arena_free(a);
+}
+
+TEST(records, bitfield_layout_unit_after_char)
+{
+    /* gcc (and ficc) place `int x:1` after a char into the 4-byte unit at
+       offset 0, bit 8 — the field must fit one aligned unit of its type. */
+    Arena *a = arena_new();
+    Type *s = type_record(TYPE_STRUCT, "P17BitAfterChar");
+    Vec *fields = vec_new(a);
+    RecordField *c = make_field(a, "c", type_char());
+    RecordField *x = make_field(a, "x", type_int());
+    x->bit_width = 1;
+    vec_push(fields, c);
+    vec_push(fields, x);
+    type_record_complete(s, fields);
+    EXPECT_EQ(s->size, 4);
+    EXPECT_EQ(s->align, 4);
+    EXPECT_EQ(c->offset, 0);
+    EXPECT_EQ(x->offset, 0);
+    EXPECT_EQ((u32) x->bit_offset, 8);
+    arena_free(a);
+}
+
+TEST(records, bitfield_layout_split_storage_unit)
+{
+    /* int a:1, int b:31 fill one unit; int c:1 starts a second. */
+    Arena *a = arena_new();
+    Type *s = type_record(TYPE_STRUCT, "P17BitSplit");
+    Vec *fields = vec_new(a);
+    RecordField *a1 = make_field(a, "a", type_int());
+    a1->bit_width = 1;
+    RecordField *b31 = make_field(a, "b", type_int());
+    b31->bit_width = 31;
+    RecordField *c1 = make_field(a, "c", type_int());
+    c1->bit_width = 1;
+    vec_push(fields, a1);
+    vec_push(fields, b31);
+    vec_push(fields, c1);
+    type_record_complete(s, fields);
+    EXPECT_EQ(s->size, 8);
+    EXPECT_EQ(s->align, 4);
+    EXPECT_EQ(a1->offset, 0);
+    EXPECT_EQ((u32) a1->bit_offset, 0);
+    EXPECT_EQ((u32) b31->bit_offset, 1);
+    EXPECT_EQ(c1->offset, 4);
+    EXPECT_EQ((u32) c1->bit_offset, 0);
+    arena_free(a);
+}
+
+TEST(records, bitfield_layout_mixed_bases)
+{
+    /* The `int_suffix` pattern from ficc's own lexer.h/ast.h: _Bool:1, enum:2,
+       _Bool:1 pack into one 4-byte unit because the enum raises the align. */
+    Arena *a = arena_new();
+    Type *s = type_record(TYPE_STRUCT, "P17BitMixed");
+    Vec *fields = vec_new(a);
+    RecordField *u1 = make_field(a, "is_unsigned", type_cbool());
+    u1->bit_width = 1;
+    RecordField *len = make_field(a, "length", type_enum("P17BFSuffix"));
+    len->bit_width = 2;
+    RecordField *h1 = make_field(a, "is_hex", type_cbool());
+    h1->bit_width = 1;
+    vec_push(fields, u1);
+    vec_push(fields, len);
+    vec_push(fields, h1);
+    type_record_complete(s, fields);
+    EXPECT_EQ(s->size, 4);
+    EXPECT_EQ(s->align, 4);
+    EXPECT_EQ(u1->offset, 0);
+    EXPECT_EQ((u32) u1->bit_offset, 0);
+    EXPECT_EQ((u32) len->bit_offset, 1);
+    EXPECT_EQ((u32) h1->bit_offset, 3);
+    u32 bo = 0;
+    u32 bw = 0;
+    EXPECT_TRUE(type_record_field_bit(s, "length", &bo, &bw));
+    EXPECT_EQ(bo, 1);
+    EXPECT_EQ(bw, 2);
+    arena_free(a);
+}
+
+TEST(records, bitfield_signed_roundtrip)
+{
+    /* Signed fields: 7 in a 3-bit `int` reads -1; -4 and -16 round-trip.
+       Mixes bit-fields with an ordinary member and checks sizeof. */
+    EXPECT_INTERP_AND_ELF("struct S {\n"
+                          "    int a:3;\n"
+                          "    int b;\n"
+                          "    int c:5;\n"
+                          "};\n"
+                          "int main(void) {\n"
+                          "    struct S s;\n"
+                          "    s.b = 0;\n"
+                          "    s.a = 7;\n"
+                          "    s.c = 15;\n"
+                          "    int r = s.a + s.c;\n"
+                          "    s.a = -4;\n"
+                          "    r += s.a;\n"
+                          "    s.c = -16;\n"
+                          "    r += s.c;\n"
+                          "    s.a = 0;\n"
+                          "    s.c = 0;\n"
+                          "    r += (int) sizeof(struct S);\n"
+                          "    return r;\n"
+                          "}\n",
+                          6);
+}
+
+TEST(records, bitfield_unsigned_overflow_wraps)
+{
+    /* Unsigned fields wrap on overflow (99 -> 3 in 3 bits), _Bool set/clear,
+       and an ordinary member trails the pack (§6.7.2.1p12 rounding). */
+    EXPECT_INTERP_AND_ELF("typedef _Bool bool;\n"
+                          "struct F {\n"
+                          "    bool f:1;\n"
+                          "    unsigned n:3;\n"
+                          "    bool g:1;\n"
+                          "    int z;\n"
+                          "};\n"
+                          "int main(void) {\n"
+                          "    struct F x;\n"
+                          "    x.f = 1;\n"
+                          "    x.n = 5;\n"
+                          "    x.g = 0;\n"
+                          "    x.z = 11;\n"
+                          "    int r = (int) x.f + (int) x.n + (int) x.g + x.z;\n"
+                          "    x.n = 99;\n"
+                          "    r += (int) x.n;\n"
+                          "    x.f = 0;\n"
+                          "    r += (int) x.f;\n"
+                          "    return r;\n"
+                          "}\n",
+                          20);
+}
+
+TEST(records, bitfield_padding_and_named_members)
+{
+    /* Unnamed padding `:5` between two named fields occupies bits 3..7 of the
+       first unit; the second field lands at bit 8. */
+    EXPECT_INTERP_AND_ELF("struct S { int a:3; int :5; int b:4; };\n"
+                          "int main(void) {\n"
+                          "    struct S s;\n"
+                          "    s.a = -1;\n"
+                          "    s.b = 7;\n"
+                          "    int r = s.a + s.b;\n"
+                          "    r += (int) sizeof(struct S);\n"
+                          "    return r;\n"
+                          "}\n",
+                          10);
+}
+
+TEST(records, bitfield_token_style_stats)
+{
+    /* Mirrors the Token int-suffix trio from ficc's own lexer.h/ast.h plus the
+       trailing length member; the bit-field reads must reproduce the stored
+       values and sizeof must stay gcc-compatible. */
+    EXPECT_INTERP_AND_ELF("typedef _Bool bool;\n"
+                          "typedef enum { LEN_I, LEN_L, LEN_LL } Suffix;\n"
+                          "struct TokenLike {\n"
+                          "    union { long long i; void *p; } payload;\n"
+                          "    struct { bool is_unsigned:1; Suffix length:2; bool is_hex:1; } flags;\n"
+                          "    int str_len;\n"
+                          "};\n"
+                          "int main(void) {\n"
+                          "    struct TokenLike t;\n"
+                          "    t.flags.is_unsigned = 1;\n"
+                          "    t.flags.length = LEN_LL;\n"
+                          "    t.flags.is_hex = 1;\n"
+                          "    t.str_len = 7;\n"
+                          "    int r = (int) sizeof(struct TokenLike);\n"
+                          "    r += (int) t.flags.length * 10;\n"
+                          "    r += (int) t.flags.is_unsigned + (int) t.flags.is_hex;\n"
+                          "    r += t.str_len;\n"
+                          "    return r;\n"
+                          "}\n",
+                          45);
+}
+
+TEST(records, bitfield_arrow_access)
+{
+    EXPECT_INTERP_AND_ELF("struct Node { unsigned tag:2; int next_i:30; struct Node *next; };\n"
+                          "int main(void) {\n"
+                          "    struct Node a;\n"
+                          "    struct Node b;\n"
+                          "    a.tag = 1;\n"
+                          "    a.next_i = -2;\n"
+                          "    b.tag = 2;\n"
+                          "    b.next_i = 3;\n"
+                          "    b.next = 0;\n"
+                          "    a.next = &b;\n"
+                          "    return a.next->tag * 10 + a.tag + a.next->next_i;\n"
+                          "}\n",
+                          2 * 10 + 1 + 3);
+}
+
+TEST(records, negative_bitfield_non_integer_type)
+{
+    EXPECT_BUILD_FAIL("struct S { char *p : 3; };\n"
+                      "int main(void) { return 0; }\n");
+}
+
+TEST(records, negative_bitfield_width_not_const)
+{
+    EXPECT_BUILD_FAIL("int g;\n"
+                      "struct S { int x : g; };\n"
+                      "int main(void) { return 0; }\n");
+}
+
+TEST(records, negative_bitfield_width_exceeds_type)
+{
+    EXPECT_BUILD_FAIL("struct S { int x : 33; };\n"
+                      "int main(void) { return 0; }\n");
+}
+
+TEST(records, negative_bitfield_zero_width)
+{
+    EXPECT_BUILD_FAIL("struct S { int x : 0; };\n"
+                      "int main(void) { return 0; }\n");
+}
+
+TEST(records, negative_bitfield_bool_width)
+{
+    EXPECT_BUILD_FAIL("typedef _Bool bool;\n"
+                      "struct S { bool b : 2; };\n"
+                      "int main(void) { return 0; }\n");
+}
+
+TEST(records, negative_bitfield_take_address)
+{
+    EXPECT_BUILD_FAIL("struct S { int x : 3; };\n"
+                      "int main(void) {\n"
+                      "    struct S s;\n"
+                      "    int *p = &s.x;\n"
+                      "    return 0;\n"
+                      "}\n");
 }

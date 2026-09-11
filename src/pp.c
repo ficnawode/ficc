@@ -157,6 +157,7 @@ static void pp_predefine(Pp *pp, const char *name, const char *spelling)
     macro->param_count = 0;
     macro->variadic = false;
     macro->predefined = true;
+    macro->is_pragma = false;
     strmap_set(pp->macros, name, macro);
 }
 
@@ -666,6 +667,8 @@ static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t 
     macro->body = body;
     macro->param_count = param_count;
     macro->variadic = variadic;
+    macro->predefined = false;
+    macro->is_pragma = false;
     strmap_set(pp->macros, text, macro);
 }
 

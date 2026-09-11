@@ -456,21 +456,29 @@ Type *type_va_list(void)
     gp->name = "gp_offset";
     gp->type = type_uint();
     gp->offset = 0;
+    gp->bit_offset = -1;
+    gp->bit_width = -1;
     vec_push(fields, gp);
     RecordField *fp = arena_alloc(type_arena, sizeof(RecordField), sizeof(void *));
     fp->name = "fp_offset";
     fp->type = type_uint();
     fp->offset = 0;
+    fp->bit_offset = -1;
+    fp->bit_width = -1;
     vec_push(fields, fp);
     RecordField *ovf = arena_alloc(type_arena, sizeof(RecordField), sizeof(void *));
     ovf->name = "overflow_arg_area";
     ovf->type = type_ptr(type_void());
     ovf->offset = 0;
+    ovf->bit_offset = -1;
+    ovf->bit_width = -1;
     vec_push(fields, ovf);
     RecordField *regs = arena_alloc(type_arena, sizeof(RecordField), sizeof(void *));
     regs->name = "reg_save_area";
     regs->type = type_ptr(type_void());
     regs->offset = 0;
+    regs->bit_offset = -1;
+    regs->bit_width = -1;
     vec_push(fields, regs);
     type_record_complete(rec, fields);
     the_va_list = type_array(rec, 1);
@@ -629,40 +637,66 @@ void type_record_complete(Type *t, Vec *fields)
     t = type_base(t);
     t->record.fields = fields;
 
-    u32 max_align = 1;
     size_t n = vec_size(fields);
-    for (size_t i = 0; i < n; i++)
-    {
-        RecordField *f = (RecordField *) vec_get(fields, i);
-        if (f->type->align > max_align)
-        {
-            max_align = f->type->align;
-        }
-    }
-
     if (t->kind == TYPE_STRUCT)
     {
-        u32 offset = 0;
+        /* Members are laid out from a bit cursor. An ordinary member first
+           rounds the cursor up to a byte, aligns, and consumes its whole size.
+           A bit-field must lie inside one storage unit of its declared type
+           (size == align for the integer bases C11 §6.7.2.1p12 allows): it is
+           placed in the unit currently covering the cursor when it fits,
+           otherwise in the next unit-aligned boundary. This matches gcc, e.g.
+           `char c; int x:1;` shares the 4-byte unit at offset 0 (bit 8). */
+        u32 max_align = 1;
+        u64 cursor = 0; /* bit offset of the next free bit */
         for (size_t i = 0; i < n; i++)
         {
             RecordField *f = (RecordField *) vec_get(fields, i);
-            offset = align_up(offset, f->type->align);
-            f->offset = offset;
-            offset += (u32) f->type->size;
+            if (f->type->align > max_align)
+            {
+                max_align = f->type->align;
+            }
+            if (f->bit_width < 0)
+            {
+                cursor = (cursor + 7) / 8 * 8;
+                u32 offset = align_up((u32) (cursor / 8), f->type->align);
+                f->offset = offset;
+                cursor = ((u64) offset + f->type->size) * 8;
+            }
+            else
+            {
+                u64 unit_bits = f->type->size * 8;
+                u64 unit_start = cursor / unit_bits * unit_bits;
+                u64 bit_in_unit = cursor - unit_start;
+                if (bit_in_unit + f->bit_width > unit_bits)
+                {
+                    unit_start = (cursor + unit_bits - 1) / unit_bits * unit_bits;
+                    bit_in_unit = 0;
+                }
+                f->offset = (u32) (unit_start / 8);
+                f->bit_offset = (i32) bit_in_unit;
+                cursor = unit_start + bit_in_unit + f->bit_width;
+            }
         }
         t->align = max_align;
-        t->size = align_up(offset, max_align);
+        t->size = align_up((u32) ((cursor + 7) / 8), max_align);
     }
     else
     {
+        u32 max_align = 1;
         u32 max_size = 0;
         for (size_t i = 0; i < n; i++)
         {
             RecordField *f = (RecordField *) vec_get(fields, i);
             f->offset = 0;
+            f->bit_offset = 0;
             if (f->type->size > max_size)
             {
                 max_size = (u32) f->type->size;
+            }
+            if (f->type->align > max_align)
+            {
+                max_align = f->type->align;
             }
         }
         t->align = max_align;
@@ -791,6 +825,19 @@ u32 type_record_field_offset(Type *t, const char *name)
         return off;
     }
     return 0;
+}
+
+bool type_record_field_bit(Type *t, const char *name, u32 *bit_offset, u32 *bit_width)
+{
+    u32 off;
+    RecordField *f = find_record_field(t, name, &off);
+    if (!f || f->bit_width < 0)
+    {
+        return false;
+    }
+    *bit_offset = (u32) f->bit_offset;
+    *bit_width = (u32) f->bit_width;
+    return true;
 }
 
 bool type_is_ptr(Type *t)

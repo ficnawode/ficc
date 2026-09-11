@@ -55,7 +55,9 @@ struct RecordField
 {
     const char *name; /* field name, compared by content (not interned) */
     Type *type;
-    u32 offset; /* byte offset in the record (always 0 for unions) */
+    u32 offset;     /* byte offset of the member (bit-field: of its storage unit) */
+    i32 bit_offset; /* bit-field: bit position within the storage unit, else -1 */
+    i32 bit_width;  /* bit-field width, else -1 */
 };
 
 struct Type
@@ -146,6 +148,11 @@ Type *type_enum_anon(void);
 Type *type_record_lookup(const char *tag);
 Type *type_record_field(Type *t, const char *name);
 u32 type_record_field_offset(Type *t, const char *name);
+
+/* Bit-field info for `name` (recursing through anonymous members): true when
+   the member is a bit-field, filling its position within the storage unit and
+   width; false fills nothing. */
+bool type_record_field_bit(Type *t, const char *name, u32 *bit_offset, u32 *bit_width);
 
 /* Reset the tag table for a new compilation unit. Record types remain
    immortal (they may be referenced by interned pointer/array types), but the

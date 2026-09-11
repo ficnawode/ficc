@@ -189,6 +189,7 @@ struct ASTVarDecl
     bool is_block_scope;   /* declared inside a function body (vs file scope) */
     struct InitPlan *plan; /* aggregate/string flattening plan (filled by semantic) or NULL */
     u32 alignas;           /* requested _Alignas alignment, 0 = natural */
+    u32 bit_width;         /* bit-field width in bits; 0 = ordinary member (§6.7.2.1) */
 };
 
 /* An init-declarator list `int a = 1, b = 2;` sharing one declaration-specifier sequence (C11 §6.7.6). */
@@ -435,6 +436,9 @@ struct ASTMemberAccess
     bool is_arrow;
     u32 field_offset; /* filled by semantic */
     Type *field_type; /* filled by semantic */
+    bool is_bitfield; /* filled by semantic */
+    u32 bit_offset;   /* bit position within the storage unit */
+    u32 bit_width;    /* declared width in bits */
 };
 
 /* Cast `(type) expr` (C11 §5.5.4): never an lvalue; a qualified target equals the unqualified type (§6.5.4p4). */

@@ -379,7 +379,16 @@ static Type *check_address_of(ASTNode *operand, SemanticCtx *ctx)
     {
         return type_ptr(operand->expr_type);
     }
-    if (operand->kind == AST_SUBSCRIPT_EXPR || operand->kind == AST_MEMBER_ACCESS)
+    if (operand->kind == AST_MEMBER_ACCESS)
+    {
+        if (ast_as(ASTMemberAccess, operand)->is_bitfield)
+        {
+            sem_error(ctx, operand->loc, "cannot take address of bit-field");
+            return NULL;
+        }
+        return type_ptr(operand->expr_type);
+    }
+    if (operand->kind == AST_SUBSCRIPT_EXPR)
     {
         return type_ptr(operand->expr_type);
     }
@@ -791,6 +800,11 @@ static bool check_member_access(ASTMemberAccess *ma, SemanticCtx *ctx)
     {
         return sem_error(ctx, ma->base.loc, "no member named '%s'", ma->member);
     }
+    u32 bit_offset = 0;
+    u32 bit_width = 0;
+    ma->is_bitfield = type_record_field_bit(record_type, ma->member, &bit_offset, &bit_width);
+    ma->bit_offset = bit_offset;
+    ma->bit_width = bit_width;
     /* §6.5.2.3p4: a const-qualified object (or pointer to one) yields const members;
        array members take the qualifier on the element, so `s.a[i]` writes and the
        `const T*` decay work. */

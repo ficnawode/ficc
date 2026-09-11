@@ -36,6 +36,9 @@ struct LvalueSlot
     bool is_ssa;
     IrOperand addr; /* memory address (when !is_ssa) */
     Type *type;
+    bool is_bitfield; /* bit-field in a record: addr points at the storage unit */
+    u32 bit_offset;   /* bit position within the unit (LSb of first field) */
+    u32 bit_width;    /* field width in bits */
 };
 
 typedef struct LvalueResult LvalueResult;
@@ -618,6 +621,9 @@ static LvalueResult mem_lvalue(IrOperand addr, Type *type, IrBlock *bb)
     lv.slot.is_ssa = false;
     lv.slot.addr = addr;
     lv.slot.type = type;
+    lv.slot.is_bitfield = false;
+    lv.slot.bit_offset = 0;
+    lv.slot.bit_width = 0;
     return lv;
 }
 
@@ -657,7 +663,11 @@ static LvalueResult build_lvalue_slot(FuncBuilder *ctx, ASTNode *target, IrBlock
         {
             ASTMemberAccess *ma = ast_as(ASTMemberAccess, target);
             ExprResult lv = build_member_lvalue(ctx, ma, bb);
-            return mem_lvalue(lv.value, ma->field_type, lv.block);
+            LvalueResult res = mem_lvalue(lv.value, ma->field_type, lv.block);
+            res.slot.is_bitfield = ma->is_bitfield;
+            res.slot.bit_offset = ma->bit_offset;
+            res.slot.bit_width = ma->bit_width;
+            return res;
         }
         case AST_UNARY_EXPR:
         {
@@ -682,6 +692,73 @@ static LvalueResult build_lvalue_slot(FuncBuilder *ctx, ASTNode *target, IrBlock
     return bad_lvalue(bb);
 }
 
+static bool bitfield_signed(Type *ty)
+{
+    return type_is_signed(ty) && ty->kind != TYPE_ENUM;
+}
+
+static i64 bitfield_mask(u32 width)
+{
+    if (width >= 64)
+    {
+        return -1;
+    }
+    return (i64) (((u64) 1 << width) - 1);
+}
+
+/* Extract a bit-field from its storage unit at addr and return a value of the
+   declared type: load the unit, shift the field to the LSb, mask to its width,
+   then sign-extend within the unit for signed bases (gcc semantics: enum and
+   _Bool read without sign extension). */
+static IrOperand bitfield_read(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *ty,
+                               u32 bit_offset, u32 bit_width)
+{
+    u32 unit = alloc_vreg_from_type(ctx, ty);
+    ir_emit_load(bb, unit, addr);
+    u32 tbits = (u32) (ty->size * 8);
+    u32 shifted = alloc_vreg_from_type(ctx, ty);
+    ir_emit_binop(bb, OP_LSHR, shifted, ir_operand_vreg(unit), ir_operand_imm(bit_offset));
+    u32 masked = alloc_vreg_from_type(ctx, ty);
+    ir_emit_binop(bb, OP_AND, masked, ir_operand_vreg(shifted),
+                  ir_operand_imm(bitfield_mask(bit_width)));
+    IrOperand out = ir_operand_vreg(masked);
+    if (bitfield_signed(ty))
+    {
+        u32 up = alloc_vreg_from_type(ctx, ty);
+        u32 down = alloc_vreg_from_type(ctx, ty);
+        ir_emit_binop(bb, OP_SHL, up, out, ir_operand_imm((i64) (tbits - bit_width)));
+        ir_emit_binop(bb, OP_ASHR, down, ir_operand_vreg(up),
+                      ir_operand_imm((i64) (tbits - bit_width)));
+        out = ir_operand_vreg(down);
+    }
+    return out;
+}
+
+/* Write a bit-field via read-modify-write: clear the field's bits, OR in the
+   (truncated) value shifted into place. */
+static void bitfield_store(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *ty,
+                           u32 bit_offset, u32 bit_width, IrOperand val)
+{
+    u32 tbits = (u32) (ty->size * 8);
+    i64 tmask = tbits >= 64 ? -1 : (i64) (((u64) 1 << tbits) - 1);
+    i64 field_mask = bitfield_mask(bit_width) << bit_offset;
+    i64 inv = ~field_mask;
+
+    u32 unit = alloc_vreg_from_type(ctx, ty);
+    ir_emit_load(bb, unit, addr);
+    u32 keep = alloc_vreg_from_type(ctx, ty);
+    ir_emit_binop(bb, OP_AND, keep, ir_operand_vreg(unit), ir_operand_imm(inv));
+    u32 vt = alloc_vreg_from_type(ctx, ty);
+    ir_emit_binop(bb, OP_AND, vt, val, ir_operand_imm(tmask));
+    u32 sh = alloc_vreg_from_type(ctx, ty);
+    ir_emit_binop(bb, OP_SHL, sh, ir_operand_vreg(vt), ir_operand_imm((i64) bit_offset));
+    u32 bits = alloc_vreg_from_type(ctx, ty);
+    ir_emit_binop(bb, OP_AND, bits, ir_operand_vreg(sh), ir_operand_imm(field_mask));
+    u32 nv = alloc_vreg_from_type(ctx, ty);
+    ir_emit_binop(bb, OP_OR, nv, ir_operand_vreg(keep), ir_operand_vreg(bits));
+    ir_emit_store(bb, ir_operand_vreg(nv), addr, ty->size);
+}
+
 /* Read a lowered lvalue: SSA scalars via read_variable (or their spill slot);
    memory targets loaded at the slot type's width. */
 static IrOperand load_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot)
@@ -689,6 +766,11 @@ static IrOperand load_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot)
     if (slot->is_ssa)
     {
         return read_variable(ctx, slot->decl, bb);
+    }
+    if (slot->is_bitfield)
+    {
+        return bitfield_read(ctx, bb, slot->addr, slot->type, slot->bit_offset,
+                             slot->bit_width);
     }
     u32 dst = alloc_vreg_from_type(ctx, slot->type);
     ir_emit_load(bb, dst, slot->addr);
@@ -702,6 +784,11 @@ static IrBlock *store_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot, Ir
     if (slot->is_ssa)
     {
         write_variable(ctx, slot->decl, bb, val);
+        return bb;
+    }
+    if (slot->is_bitfield)
+    {
+        bitfield_store(ctx, bb, slot->addr, slot->type, slot->bit_offset, slot->bit_width, val);
         return bb;
     }
     if (type_is_record(slot->type))
@@ -1911,6 +1998,12 @@ static ExprResult build_member_lvalue(FuncBuilder *ctx, ASTMemberAccess *ma, IrB
 static ExprResult build_member_access_expr(FuncBuilder *ctx, ASTMemberAccess *ma, IrBlock *bb)
 {
     ExprResult lv = build_member_lvalue(ctx, ma, bb);
+    if (ma->is_bitfield)
+    {
+        IrOperand v = bitfield_read(ctx, lv.block, lv.value, ma->field_type, ma->bit_offset,
+                                    ma->bit_width);
+        return expr_result(v, lv.block);
+    }
     if (type_is_memory(ma->field_type))
     {
         return lv;
