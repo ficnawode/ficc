@@ -1,8 +1,13 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "harness.h"
 #include "pp.h"
 #include "util/arena.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 
 static Pp *pp_run_text(Arena *a, const char *src)
@@ -1412,5 +1417,74 @@ TEST(pp, include_next_finds_later_dir)
     EXPECT_EQ(pp->error_count, 0);
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "1"));
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "2"));
+    arena_free(a);
+}
+
+TEST(pp, predefined_line_and_file)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "__LINE__ __FILE__ __LINE__\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "1"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_STRING, "\"<test>\""));
+    arena_free(a);
+}
+
+TEST(pp, predefined_recook_per_use_and_after_line)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define L __LINE__\nL\nL\n#line 100\nL\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "2"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "3"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "100"));
+    arena_free(a);
+}
+
+TEST(pp, predefined_stdc_family)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "__STDC__ __STDC_VERSION__ __STDC_HOSTED__ __STDC_NO_VLA__\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "1"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "201112L"));
+    arena_free(a);
+}
+
+TEST(pp, predefined_usable_in_if)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#if __STDC__ == 1 && __LINE__ == 1\nint a;\n#endif\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "a"));
+    arena_free(a);
+}
+
+TEST(pp, predefined_redefinition_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define __STDC__ 1\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, predefined_line_redefinition_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define __LINE__ 5\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, predefined_date_time_respect_source_date_epoch)
+{
+    setenv("SOURCE_DATE_EPOCH", "0", 1);
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "__DATE__ __TIME__\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_STRING, "\"Jan  1 1970\""));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_STRING, "\"00:00:00\""));
     arena_free(a);
 }

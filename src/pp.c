@@ -5,7 +5,9 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifndef FICC_BUILTIN_INCLUDE
 #define FICC_BUILTIN_INCLUDE "include"
@@ -140,6 +142,24 @@ static bool pp_is_ellipsis(const PpToken *tok)
     return tok->kind == TOK_PP_PUNCT && tok->punct == PP_PUNCT_ELLIPSIS;
 }
 
+static void pp_predefine(Pp *pp, const char *name, const char *spelling)
+{
+    Vec *body = vec_new(pp->arena);
+    PpToken *tok = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
+    *tok = (PpToken) {.kind = TOK_PP_NUMBER, .spell = spelling, .len = (u32) strlen(spelling)};
+    vec_push(body, tok);
+
+    Macro *macro = arena_alloc(pp->arena, sizeof(Macro), sizeof(void *));
+    macro->name = name;
+    macro->kind = MACRO_OBJ;
+    macro->loc = (Loc) {0};
+    macro->body = body;
+    macro->param_count = 0;
+    macro->variadic = false;
+    macro->predefined = true;
+    strmap_set(pp->macros, name, macro);
+}
+
 Pp *pp_new(Arena *arena)
 {
     Pp *pp = arena_alloc(arena, sizeof(Pp), sizeof(void *));
@@ -156,10 +176,41 @@ Pp *pp_new(Arena *arena)
     pp->nostdinc = false;
     pp->exe_path = NULL;
     pp->builtin_dir = NULL;
+    pp->cooked_date = NULL;
+    pp->cooked_time = NULL;
     pp->has_source_date_epoch = false;
     pp->source_date_epoch = 0;
     pp->error_count = 0;
     pp->warning_count = 0;
+
+    const char *sde = getenv("SOURCE_DATE_EPOCH");
+    if (sde && sde[0])
+    {
+        u64 value = 0;
+        bool ok = true;
+        for (const char *p = sde; *p; p++)
+        {
+            if (*p < '0' || *p > '9')
+            {
+                ok = false;
+                break;
+            }
+            value = value * 10 + (u64) (*p - '0');
+        }
+        if (ok)
+        {
+            pp->has_source_date_epoch = true;
+            pp->source_date_epoch = (i64) value;
+        }
+    }
+
+    pp_predefine(pp, "__STDC__", "1");
+    pp_predefine(pp, "__STDC_VERSION__", "201112L");
+    pp_predefine(pp, "__STDC_HOSTED__", "1");
+    pp_predefine(pp, "__STDC_NO_ATOMICS__", "1");
+    pp_predefine(pp, "__STDC_NO_THREADS__", "1");
+    pp_predefine(pp, "__STDC_NO_VLA__", "1");
+    pp_predefine(pp, "__STDC_NO_COMPLEX__", "1");
     return pp;
 }
 
@@ -482,6 +533,27 @@ static bool pp_check_pastes(Pp *pp, Vec *body)
     return true;
 }
 
+/* Predefined names are reserved (§6.10.8): redefinition is a constraint. */
+static bool pp_is_reserved_name(const char *name)
+{
+    if (strcmp(name, "__LINE__") == 0 || strcmp(name, "__FILE__") == 0 ||
+        strcmp(name, "__DATE__") == 0 || strcmp(name, "__TIME__") == 0)
+    {
+        return true;
+    }
+    if (strcmp(name, "__STDC__") == 0 || strcmp(name, "__STDC_VERSION__") == 0 ||
+        strcmp(name, "__STDC_HOSTED__") == 0)
+    {
+        return true;
+    }
+    if (strcmp(name, "__STDC_NO_ATOMICS__") == 0 || strcmp(name, "__STDC_NO_THREADS__") == 0 ||
+        strcmp(name, "__STDC_NO_VLA__") == 0 || strcmp(name, "__STDC_NO_COMPLEX__") == 0)
+    {
+        return true;
+    }
+    return false;
+}
+
 static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
                       Loc directive_loc)
 {
@@ -504,6 +576,11 @@ static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t 
     }
 
     const char *text = pp_token_name(pp, name);
+    if (pp_is_reserved_name(text))
+    {
+        pp_error(pp, name->loc, "redefinition of predefined macro '%s'", text);
+        return;
+    }
     bool function_like = i + 1 < end && pp_is_lparen(vec_get(frame->tokens, i + 1));
     MacroKind kind = function_like ? MACRO_FUNC : MACRO_OBJ;
     Vec *body = NULL;
@@ -593,7 +670,12 @@ static void pp_undef(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t e
         pp_error(pp, name->loc, "macro names must be identifiers");
         return;
     }
-    hashmap_remove(pp->macros, pp_token_name(pp, name));
+    const char *text = pp_token_name(pp, name);
+    if (pp_is_reserved_name(text))
+    {
+        pp_warn(pp, name->loc, "undefining '%s'", text);
+    }
+    hashmap_remove(pp->macros, text);
 }
 
 static TokList *pp_expand_list(Pp *pp, TokList *ts);
@@ -1198,6 +1280,77 @@ static Vec *pp_resolve_controls(Pp *pp, Vec *raw, const PpIncludeFrame *frame)
     return out;
 }
 
+static void pp_cook_datetime(Pp *pp)
+{
+    if (pp->cooked_date)
+    {
+        return;
+    }
+    static const char *const MONTHS[] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    };
+    time_t now = pp->has_source_date_epoch ? (time_t) pp->source_date_epoch : time(NULL);
+    struct tm *tm = pp->has_source_date_epoch ? gmtime(&now) : localtime(&now);
+    char date[64], clock[64];
+    snprintf(date, sizeof(date), "%s %2d %d", MONTHS[tm->tm_mon], tm->tm_mday, tm->tm_year + 1900);
+    snprintf(clock, sizeof(clock), "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
+    pp->cooked_date = arena_alloc(pp->arena, strlen(date) + 1, 1);
+    strcpy((char *) pp->cooked_date, date);
+    pp->cooked_time = arena_alloc(pp->arena, strlen(clock) + 1, 1);
+    strcpy((char *) pp->cooked_time, clock);
+}
+
+static PpToken *pp_cooked_literal(Pp *pp, PpKind kind, const char *spell, u32 len, Loc loc)
+{
+    PpToken *t = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
+    *t = (PpToken) {.kind = kind, .loc = loc, .spell = spell, .len = len};
+    return t;
+}
+
+static PpToken *pp_cooked_number_token(Pp *pp, u32 value, Loc loc)
+{
+    char num[16];
+    snprintf(num, sizeof(num), "%u", value);
+    char *buf = arena_alloc(pp->arena, strlen(num) + 1, 1);
+    memcpy(buf, num, strlen(num) + 1);
+    return pp_cooked_literal(pp, TOK_PP_NUMBER, buf, (u32) strlen(num), loc);
+}
+
+static PpToken *pp_cooked_string_token(Pp *pp, const char *content, Loc loc)
+{
+    size_t n = strlen(content);
+    char *buf = arena_alloc(pp->arena, n + 3, 1);
+    buf[0] = '"';
+    memcpy(buf + 1, content, n);
+    buf[n + 1] = '"';
+    buf[n + 2] = '\0';
+    return pp_cooked_literal(pp, TOK_PP_STRING, buf, (u32) (n + 2), loc);
+}
+
+/* Materializes the lazy predefined macros at the point of use (§6.10.8). */
+static PpToken *pp_cook_predefined(Pp *pp, PpToken *t, u32 line, const char *file)
+{
+    if (t->kind != TOK_PP_IDENT)
+    {
+        return t;
+    }
+    if (pp_spelling_is(t, "__LINE__"))
+    {
+        return pp_cooked_number_token(pp, line, t->loc);
+    }
+    if (pp_spelling_is(t, "__FILE__"))
+    {
+        return pp_cooked_string_token(pp, file ? file : "", t->loc);
+    }
+    if (pp_spelling_is(t, "__DATE__") || pp_spelling_is(t, "__TIME__"))
+    {
+        pp_cook_datetime(pp);
+        return pp_cooked_string_token(
+            pp, pp_spelling_is(t, "__DATE__") ? pp->cooked_date : pp->cooked_time, t->loc);
+    }
+    return t;
+}
+
 /* Evaluates an #if/#elif controlling expression to a branch truth value. */
 static bool pp_if_condition(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end)
 {
@@ -1212,7 +1365,15 @@ static bool pp_if_condition(Pp *pp, const PpIncludeFrame *frame, size_t start, s
     }
     Vec *resolved = pp_resolve_controls(pp, raw, frame);
     Vec *expanded = pp_expand_vec(pp, resolved);
-    PpExprVal v = pp_eval_expr(pp, expanded);
+
+    Vec *cooked = vec_new(pp->arena);
+    for (size_t i = 0; i < vec_size(expanded); i++)
+    {
+        vec_push(cooked, pp_cook_predefined(pp, vec_get(expanded, i), frame->presumed_line,
+                                            frame->presumed_file));
+    }
+
+    PpExprVal v = pp_eval_expr(pp, cooked);
     return v.value != 0;
 }
 
@@ -1886,7 +2047,7 @@ static void pp_expand_line(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t e
     const char *presumed_file = frame->presumed_file;
     for (TokList *r = pp_expand_list(pp, list); r; r = r->next)
     {
-        PpToken *t = r->tok;
+        PpToken *t = pp_cook_predefined(pp, r->tok, presumed_line, presumed_file);
         t->loc.file = presumed_file;
         t->loc.line = presumed_line;
         if (t->kind == TOK_PP_TRIVIA_NL)

@@ -34,6 +34,7 @@ struct Macro
     Vec *body;
     u32 param_count;
     bool variadic;
+    bool predefined;
 };
 
 typedef struct Pp Pp;
@@ -52,6 +53,8 @@ struct Pp
     bool nostdinc;
     const char *exe_path;
     const char *builtin_dir;
+    const char *cooked_date;
+    const char *cooked_time;
     bool has_source_date_epoch;
     i64 source_date_epoch;
     u32 error_count;
