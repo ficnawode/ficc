@@ -653,8 +653,7 @@ static bool pp_macro_matches(const Macro *macro, const MacroDef *def)
            macro->variadic == def->variadic && pp_bodies_equal(macro->body, def->body);
 }
 
-static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
-                      Loc directive_loc)
+static void pp_define(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end, Loc directive_loc)
 {
     size_t open = pp_skip_trivia(frame, start, end);
     if (open >= end)
@@ -709,8 +708,7 @@ static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t 
     strmap_set(pp->macros, text, macro);
 }
 
-static void pp_undef(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
-                     Loc directive_loc)
+static void pp_undef(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end, Loc directive_loc)
 {
     size_t i = pp_skip_trivia(frame, start, end);
     if (i >= end)
@@ -763,21 +761,21 @@ static void pp_push_cond(Pp *pp, bool parent_active, bool taken)
     vec_push(pp->conds, frame);
 }
 
-static void pp_ifdef_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
-                               Loc directive_loc, bool is_ifndef)
+/* Reads the trailing macro name of `#ifdef`/`#ifndef`. */
+static PpToken *pp_cond_macro(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
+                              const char *directive, Loc directive_loc)
 {
-    const char *directive = is_ifndef ? "ifndef" : "ifdef";
     size_t i = pp_skip_trivia(frame, start, end);
     if (i >= end)
     {
         pp_error(pp, directive_loc, "#%s requires a macro name", directive);
-        return;
+        return NULL;
     }
     PpToken *name = vec_get(frame->tokens, i);
     if (name->kind != TOK_PP_IDENT)
     {
         pp_error(pp, name->loc, "#%s requires a macro name", directive);
-        return;
+        return NULL;
     }
     i = pp_skip_trivia(frame, i + 1, end);
     if (i < end)
@@ -785,14 +783,41 @@ static void pp_ifdef_directive(Pp *pp, const PpIncludeFrame *frame, size_t start
         pp_warn(pp, ((PpToken *) vec_get(frame->tokens, i))->loc,
                 "extra tokens at end of #%s directive", directive);
     }
-
-    bool defined = strmap_get(pp->macros, pp_token_text(pp, name)) != NULL;
-    bool parent_active = pp_branch_active(pp);
-    pp_push_cond(pp, parent_active, parent_active && (defined != is_ifndef));
+    return name;
 }
 
-static void pp_else_directive(Pp *pp, Loc directive_loc)
+static void pp_ifdef_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                               Loc directive_loc)
 {
+    PpToken *name = pp_cond_macro(pp, frame, start, end, "ifdef", directive_loc);
+    if (!name)
+    {
+        return;
+    }
+    bool defined = strmap_get(pp->macros, pp_token_text(pp, name)) != NULL;
+    bool parent_active = pp_branch_active(pp);
+    pp_push_cond(pp, parent_active, parent_active && defined);
+}
+
+static void pp_ifndef_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                                Loc directive_loc)
+{
+    PpToken *name = pp_cond_macro(pp, frame, start, end, "ifndef", directive_loc);
+    if (!name)
+    {
+        return;
+    }
+    bool defined = strmap_get(pp->macros, pp_token_text(pp, name)) != NULL;
+    bool parent_active = pp_branch_active(pp);
+    pp_push_cond(pp, parent_active, parent_active && !defined);
+}
+
+static void pp_else_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                              Loc directive_loc)
+{
+    (void) frame;
+    (void) start;
+    (void) end;
     if (vec_size(pp->conds) == 0)
     {
         pp_error(pp, directive_loc, "unexpected #else");
@@ -809,8 +834,12 @@ static void pp_else_directive(Pp *pp, Loc directive_loc)
     top->ever_taken = true;
 }
 
-static void pp_endif_directive(Pp *pp, Loc directive_loc)
+static void pp_endif_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                               Loc directive_loc)
 {
+    (void) frame;
+    (void) start;
+    (void) end;
     if (vec_size(pp->conds) == 0)
     {
         pp_error(pp, directive_loc, "unexpected #endif");
@@ -1123,8 +1152,10 @@ static bool pp_include_operand(Pp *pp, const PpIncludeFrame *frame, size_t start
     return out->name != NULL;
 }
 
-static void pp_include_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
-                                 Loc directive_loc, bool next_mode)
+/* Resolves and processes one include; `next_mode` (`#include_next`) searches
+   the search path after the current directory. */
+static void pp_include_common(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                              Loc directive_loc, bool next_mode)
 {
     IncludeOperand op;
     if (!pp_include_operand(pp, frame, start, end, directive_loc, &op))
@@ -1151,6 +1182,18 @@ static void pp_include_directive(Pp *pp, const PpIncludeFrame *frame, size_t sta
         return;
     }
     pp_include_file(pp, path);
+}
+
+static void pp_include_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                                 Loc directive_loc)
+{
+    pp_include_common(pp, frame, start, end, directive_loc, false);
+}
+
+static void pp_include_next_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                                      Loc directive_loc)
+{
+    pp_include_common(pp, frame, start, end, directive_loc, true);
 }
 
 static void pp_gnu_warn(Pp *pp, Loc loc, const char *feature)
@@ -1486,22 +1529,22 @@ static const char *pp_render_text(Pp *pp, Vec *tokens)
     return (const char *) bytebuf_data(&buf);
 }
 
-/* `#line N ["file"]`, also the GNU `# N "file"` linemarker. */
-static void pp_line_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
-                              Loc directive_loc, bool is_linemarker)
+/* Sets presumed_line from the operand's leading decimal and returns the
+   expanded operand for further inspection, or NULL after an error. */
+static Vec *pp_apply_presumed_line(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                                   Loc directive_loc)
 {
     Vec *expanded = pp_expand_operand(pp, frame, start, end);
     if (vec_size(expanded) == 0)
     {
         pp_error(pp, directive_loc, "#line requires a line number");
-        return;
+        return NULL;
     }
-
     PpToken *num = vec_get(expanded, 0);
     if (!pp_is_decimal_number(num))
     {
         pp_error(pp, num->loc, "invalid line number in #line directive");
-        return;
+        return NULL;
     }
     u32 line = 0;
     for (u32 i = 0; i < num->len; i++)
@@ -1509,24 +1552,48 @@ static void pp_line_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_
         line = line * 10 + (u32) (num->spell[i] - '0');
     }
     frame->presumed_line = line;
+    return expanded;
+}
 
+static void pp_line_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                              Loc directive_loc)
+{
+    Vec *expanded = pp_apply_presumed_line(pp, frame, start, end, directive_loc);
+    if (!expanded)
+    {
+        return;
+    }
     size_t i = 1;
     if (i < vec_size(expanded) && ((PpToken *) vec_get(expanded, i))->kind == TOK_PP_STRING)
     {
         frame->presumed_file = pp_string_content(pp, vec_get(expanded, i));
         i++;
     }
-    else if (i < vec_size(expanded) && !is_linemarker)
+    else if (i < vec_size(expanded))
     {
         pp_error(pp, ((PpToken *) vec_get(expanded, i))->loc,
                  "expected a string literal after the line number in #line");
         return;
     }
-
-    if (i < vec_size(expanded) && !is_linemarker)
+    if (i < vec_size(expanded))
     {
         pp_warn(pp, ((PpToken *) vec_get(expanded, i))->loc,
                 "extra tokens at end of #line directive");
+    }
+}
+
+/* The GNU `# N "file"` linemarker: lenient about trailing tokens. */
+static void pp_linemarker_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                                    Loc directive_loc)
+{
+    Vec *expanded = pp_apply_presumed_line(pp, frame, start, end, directive_loc);
+    if (!expanded)
+    {
+        return;
+    }
+    if (vec_size(expanded) > 1 && ((PpToken *) vec_get(expanded, 1))->kind == TOK_PP_STRING)
+    {
+        frame->presumed_file = pp_string_content(pp, vec_get(expanded, 1));
     }
 }
 
@@ -1542,19 +1609,28 @@ static const char *pp_directive_message(Pp *pp, const PpIncludeFrame *frame, siz
     return msg;
 }
 
-static void pp_error_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
+static void pp_error_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
                                Loc directive_loc)
 {
     pp_error(pp, directive_loc, "%s", pp_directive_message(pp, frame, start, end, "#error "));
 }
 
-static void pp_warning_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
+static void pp_warning_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
                                  Loc directive_loc)
 {
     pp_warn(pp, directive_loc, "%s", pp_directive_message(pp, frame, start, end, "#warning "));
 }
 
-static void pp_elif_directive(Pp *pp, const PpIncludeFrame *frame, size_t i, size_t end,
+static void pp_if_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                            Loc directive_loc)
+{
+    (void) directive_loc;
+    bool parent_active = pp_branch_active(pp);
+    bool cond = parent_active ? pp_if_condition(pp, frame, start, end) : false;
+    pp_push_cond(pp, parent_active, cond);
+}
+
+static void pp_elif_directive(Pp *pp, PpIncludeFrame *frame, size_t i, size_t end,
                               Loc directive_loc)
 {
     if (vec_size(pp->conds) == 0)
@@ -1577,7 +1653,63 @@ static void pp_elif_directive(Pp *pp, const PpIncludeFrame *frame, size_t i, siz
     top->ever_taken = top->taken;
 }
 
-/* Dispatches one directive line. Returns true when it set the presumed line. */
+/* X-macro: the `#name` directives (C11 §6.10). Columns: kind, spelling,
+   handler, and whether it enables conditional inclusion — a conditional must
+   still run inside skipped regions so its nesting stays balanced. Append
+   only. */
+#define DIRECTIVE_KINDS(X)                                                                         \
+    X(DIRECTIVE_IFDEF, "ifdef", pp_ifdef_directive, true)                                          \
+    X(DIRECTIVE_IFNDEF, "ifndef", pp_ifndef_directive, true)                                       \
+    X(DIRECTIVE_IF, "if", pp_if_directive, true)                                                   \
+    X(DIRECTIVE_ELIF, "elif", pp_elif_directive, true)                                             \
+    X(DIRECTIVE_ELSE, "else", pp_else_directive, true)                                             \
+    X(DIRECTIVE_ENDIF, "endif", pp_endif_directive, true)                                          \
+    X(DIRECTIVE_INCLUDE, "include", pp_include_directive, false)                                   \
+    X(DIRECTIVE_INCLUDE_NEXT, "include_next", pp_include_next_directive, false)                    \
+    X(DIRECTIVE_PRAGMA, "pragma", pp_pragma_directive, false)                                      \
+    X(DIRECTIVE_DEFINE, "define", pp_define, false)                                                \
+    X(DIRECTIVE_UNDEF, "undef", pp_undef, false)                                                   \
+    X(DIRECTIVE_LINE, "line", pp_line_directive, false)                                            \
+    X(DIRECTIVE_ERROR, "error", pp_error_directive, false)                                         \
+    X(DIRECTIVE_WARNING, "warning", pp_warning_directive, false)
+
+typedef void (*DirectiveFn)(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end, Loc loc);
+
+typedef enum
+{
+#define DIRECTIVE_ENUM_ENTRY(KIND, NAME, RUN, COND) KIND,
+    DIRECTIVE_KINDS(DIRECTIVE_ENUM_ENTRY)
+#undef DIRECTIVE_ENUM_ENTRY
+} DirectiveKind;
+
+typedef struct
+{
+    DirectiveKind kind;
+    const char *name;
+    DirectiveFn run;
+    bool is_conditional;
+} Directive;
+
+static const Directive DIRECTIVES[] = {
+#define DIRECTIVE_TABLE_ENTRY(KIND, NAME, RUN, COND) {KIND, NAME, RUN, COND},
+    DIRECTIVE_KINDS(DIRECTIVE_TABLE_ENTRY)
+#undef DIRECTIVE_TABLE_ENTRY
+};
+
+static const Directive *pp_directive_lookup(const PpToken *name)
+{
+    for (size_t i = 0; i < sizeof(DIRECTIVES) / sizeof(DIRECTIVES[0]); i++)
+    {
+        if (pp_is_ident(name, DIRECTIVES[i].name))
+        {
+            return &DIRECTIVES[i];
+        }
+    }
+    return NULL;
+}
+
+/* Dispatches one directive line. Returns true when it adjusted the presumed
+   line. */
 static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end)
 {
     size_t i = pp_skip_trivia(frame, begin, end);
@@ -1590,82 +1722,29 @@ static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end
         return false; /* null directive */
     }
     PpToken *name = vec_get(frame->tokens, name_index);
-    size_t operand = name_index + 1;
+    if (name->kind == TOK_PP_NUMBER)
+    {
+        pp_linemarker_directive(pp, frame, name_index, end, directive_loc);
+        return true;
+    }
 
-    if (pp_is_ident(name, "ifdef"))
+    const Directive *dir = pp_directive_lookup(name);
+    if (!dir)
     {
-        pp_ifdef_directive(pp, frame, operand, end, directive_loc, false);
-    }
-    else if (pp_is_ident(name, "ifndef"))
-    {
-        pp_ifdef_directive(pp, frame, operand, end, directive_loc, true);
-    }
-    else if (pp_is_ident(name, "if"))
-    {
-        bool parent_active = pp_branch_active(pp);
-        bool cond = parent_active ? pp_if_condition(pp, frame, operand, end) : false;
-        pp_push_cond(pp, parent_active, cond);
-    }
-    else if (pp_is_ident(name, "elif"))
-    {
-        pp_elif_directive(pp, frame, operand, end, directive_loc);
-    }
-    else if (pp_is_ident(name, "else"))
-    {
-        pp_else_directive(pp, directive_loc);
-    }
-    else if (pp_is_ident(name, "endif"))
-    {
-        pp_endif_directive(pp, directive_loc);
-    }
-    else if (pp_is_skipping(pp))
-    {
+        if (!pp_is_skipping(pp))
+        {
+            pp_warn(pp, name->loc, "invalid preprocessing directive #%.*s", (int) name->len,
+                    name->spell);
+        }
         return false;
     }
-    else if (pp_is_ident(name, "include"))
+    if (!pp_is_skipping(pp) || dir->is_conditional)
     {
-        pp_include_directive(pp, frame, operand, end, directive_loc, false);
+        dir->run(pp, frame, name_index + 1, end, directive_loc);
     }
-    else if (pp_is_ident(name, "include_next"))
-    {
-        pp_include_directive(pp, frame, operand, end, directive_loc, true);
-    }
-    else if (pp_is_ident(name, "pragma"))
-    {
-        pp_pragma_directive(pp, frame, operand, end, directive_loc);
-    }
-    else if (pp_is_ident(name, "define"))
-    {
-        pp_define(pp, frame, operand, end, directive_loc);
-    }
-    else if (pp_is_ident(name, "undef"))
-    {
-        pp_undef(pp, frame, operand, end, directive_loc);
-    }
-    else if (pp_is_ident(name, "line"))
-    {
-        pp_line_directive(pp, frame, operand, end, directive_loc, false);
-        return true;
-    }
-    else if (pp_is_ident(name, "error"))
-    {
-        pp_error_directive(pp, frame, operand, end, directive_loc);
-    }
-    else if (pp_is_ident(name, "warning"))
-    {
-        pp_warning_directive(pp, frame, operand, end, directive_loc);
-    }
-    else if (name->kind == TOK_PP_NUMBER)
-    {
-        pp_line_directive(pp, frame, name_index, end, directive_loc, true);
-        return true;
-    }
-    else
-    {
-        pp_warn(pp, name->loc, "invalid preprocessing directive #%.*s", (int) name->len,
-                name->spell);
-    }
-    return false;
+    /* Only `#line` establishes the presumed line itself; the caller must not
+       also count this line's newlines. */
+    return dir->kind == DIRECTIVE_LINE;
 }
 
 static bool pp_arg_is_empty(const Vec *arg)
