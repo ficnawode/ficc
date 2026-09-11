@@ -130,10 +130,6 @@ struct LexResult
     u64 count;
 };
 
-/* Lex source text into a flat array of tokens.
-   On lexical error, tokens is NULL and count is 0. */
-LexResult lex(const char *file, const char *src, Arena *arena);
-
 /* Translation phase 7: convert a preprocessing-token soup (trivia dropped)
    into the parser's Token[]; merges adjacent string literals. On error,
    tokens is NULL and count is 0. */

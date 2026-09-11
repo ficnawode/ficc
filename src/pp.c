@@ -1883,15 +1883,25 @@ static PpToken *pp_hidden_copy(Pp *pp, PpToken *src, const SubstArgs *sa)
     return copy;
 }
 
+/* Substitutes one argument into the body. Leading/trailing whitespace of the
+   argument (§6.10.3.1) is omitted, but *interior* trivia is preserved — an
+   outer stringize of a rescanned invocation must still see one space between
+   the argument's tokens (`XSTR(a b)` → `"a b"`). */
 static void pp_push_arg(Pp *pp, Vec *out, Vec *arg, const SubstArgs *sa)
 {
-    for (size_t i = 0; i < vec_size(arg); i++)
+    size_t start = 0;
+    while (start < vec_size(arg) && pp_is_trivia(vec_get(arg, start)))
     {
-        PpToken *a = vec_get(arg, i);
-        if (!pp_is_trivia(a))
-        {
-            vec_push(out, pp_hidden_copy(pp, a, sa));
-        }
+        start++;
+    }
+    size_t end = vec_size(arg);
+    while (end > start && pp_is_trivia(vec_get(arg, end - 1)))
+    {
+        end--;
+    }
+    for (size_t i = start; i < end; i++)
+    {
+        vec_push(out, pp_hidden_copy(pp, vec_get(arg, i), sa));
     }
 }
 
@@ -1979,7 +1989,10 @@ static Vec *pp_substitute(Pp *pp, Macro *macro, const SubstArgs *sa)
     return out;
 }
 
-/* Merges `##` runs with placemarker semantics: an empty side disappears. */
+/* Merges `##` runs with placemarker semantics: an empty side disappears.
+   Trivia around the pasted operands is skipped (whitespace is not a
+   preprocessing token) and the trivia between the operands is discarded with
+   the paste, per §6.10.3.3. */
 static TokList *pp_paste_list(Pp *pp, Vec *tokens, Loc inv_loc)
 {
     Vec *out = vec_new(pp->arena);
@@ -1991,9 +2004,19 @@ static TokList *pp_paste_list(Pp *pp, Vec *tokens, Loc inv_loc)
             vec_push(out, t);
             continue;
         }
-        if (i + 1 < vec_size(tokens))
+        size_t ri = i + 1;
+        while (ri < vec_size(tokens) &&
+               (pp_is_trivia(vec_get(tokens, ri)) || pp_is_hashhash(vec_get(tokens, ri))))
         {
-            PpToken *right = vec_get(tokens, i + 1);
+            ri++;
+        }
+        if (ri < vec_size(tokens))
+        {
+            PpToken *right = vec_get(tokens, ri);
+            while (vec_size(out) > 0 && pp_is_trivia(vec_last(out)))
+            {
+                vec_pop(out);
+            }
             if (vec_size(out) > 0)
             {
                 PpToken *left = vec_last(out);
@@ -2004,7 +2027,7 @@ static TokList *pp_paste_list(Pp *pp, Vec *tokens, Loc inv_loc)
             {
                 vec_push(out, right);
             }
-            i++;
+            i = ri;
         }
         /* trailing `##` with an empty right operand disappears */
     }

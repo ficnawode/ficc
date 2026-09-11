@@ -6,7 +6,7 @@
 #include <string.h>
 
 /* Runs the real frontend (pp -> lex_finalize) so these rows exercise the
-   production token path. A thin lex()-only smoke stays below until 17v. */
+   production token path. */
 static LexResult lex_text(const char *src, Arena *a)
 {
     Pp *pp = pp_new(a);
@@ -741,10 +741,10 @@ TEST(lexer, signed_keyword)
     arena_free(a);
 }
 
-TEST(lexer, legacy_lex_smoke)
+TEST(lexer, plain_declaration)
 {
     Arena *a = arena_new();
-    LexResult res = lex("t", "int x = 1;", a);
+    LexResult res = lex_text("int x = 1;", a);
     Token *t = res.tokens;
     EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 6);
