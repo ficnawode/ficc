@@ -44,8 +44,8 @@ static char pp_trigraph(char c)
     }
 }
 
-/* Returns the width of a trigraph at src[i] and writes its replacement to
- *out; 0 when src[i] does not begin one. */
+/* Width of a trigraph starting at src[i]: 0, or 3 with its replacement in
+ *out. */
 static u32 pp_trigraph_width(const char *src, size_t i, size_t n, char *out)
 {
     if (src[i] != '?' || i + 2 >= n || src[i + 1] != '?')
@@ -152,8 +152,8 @@ static bool is_ident_char(char c)
     return is_ident_start(c) || is_digit(c);
 }
 
-/* Returns true when p begins a (possibly prefixed) string or char literal;
-   prefix_len excludes the opening quote, quote receives it. */
+/* True when p begins a (possibly prefixed) string or char literal; prefix_len
+   excludes the opening quote, quote receives it. */
 static bool pp_literal_start(const char *p, u32 *prefix_len, char *quote)
 {
     if (*p == '"' || *p == '\'')
@@ -189,8 +189,8 @@ struct PpPunctSpelling
     PpPunct punct;
 };
 
-/* Longest first for max munch (C11 §6.4.6, including digraphs). Digraphs map
-   to their primary punctuator's id. */
+/* Longest-first for max munch (C11 §6.4.6, digraphs map to their primary's
+   id). */
 static const PpPunctSpelling PP_PUNCTS[] = {
     {"%:%:", PP_PUNCT_HASHHASH},
     {"...", PP_PUNCT_ELLIPSIS},
@@ -262,6 +262,10 @@ static u32 pp_punct_match(const char *p, PpPunct *out)
     return 0;
 }
 
+/* Joining a then b reads as one punctuator when the concatenation itself is
+   one, or when max-munch would chew part of `a` across the seam (`a` a strict
+   prefix of a punctuator whose remainder `b` starts with, e.g. `<` `<<`). This
+   is the -E token-separation test (D17.13). */
 bool pp_concat_is_punct(const char *a, size_t alen, const char *b, size_t blen)
 {
     if (alen + blen > 4)
@@ -274,25 +278,19 @@ bool pp_concat_is_punct(const char *a, size_t alen, const char *b, size_t blen)
     buf[alen + blen] = '\0';
     for (size_t i = 0; i < sizeof(PP_PUNCTS) / sizeof(PP_PUNCTS[0]); i++)
     {
-        if (strcmp(PP_PUNCTS[i].spelling, buf) == 0)
+        const char *spelling = PP_PUNCTS[i].spelling;
+        if (strcmp(spelling, buf) == 0)
         {
             return true;
         }
-    }
-    /* The join would invoke max-munch across the boundary even though the
-       full concatenation is not itself a punctuator: `a` is a strict prefix
-       of some punctuator whose remainder `b` begins with (e.g. `<` `<<`). */
-    for (size_t i = 0; i < sizeof(PP_PUNCTS) / sizeof(PP_PUNCTS[0]); i++)
-    {
-        size_t plen = strlen(PP_PUNCTS[i].spelling);
-        if (plen <= alen || strncmp(PP_PUNCTS[i].spelling, a, alen) != 0)
+        size_t plen = strlen(spelling);
+        if (plen > alen && strncmp(spelling, a, alen) == 0)
         {
-            continue;
-        }
-        size_t rem = plen - alen;
-        if (blen >= rem && strncmp(b, PP_PUNCTS[i].spelling + alen, rem) == 0)
-        {
-            return true;
+            size_t rem = plen - alen;
+            if (blen >= rem && strncmp(b, spelling + alen, rem) == 0)
+            {
+                return true;
+            }
         }
     }
     return false;
@@ -337,6 +335,14 @@ static void scanner_advance(SoupScannerCtx *ctx)
     ctx->p++;
 }
 
+static void scanner_advance_n(SoupScannerCtx *ctx, u32 n)
+{
+    for (u32 i = 0; i < n; i++)
+    {
+        scanner_advance(ctx);
+    }
+}
+
 static PpToken pp_token(PpKind kind, const char *spell, u32 len, Loc loc, bool has_newline)
 {
     return (PpToken) {
@@ -350,23 +356,40 @@ static void scanner_push(SoupScannerCtx *ctx, PpToken token)
     vec_push(ctx->tokens, slot);
 }
 
-static void scan_ws(SoupScannerCtx *ctx)
+/* Records a token covering [start, ctx->p). */
+static void scanner_emit(SoupScannerCtx *ctx, PpKind kind, const char *start, Loc loc,
+                         bool has_newline)
 {
+    scanner_push(ctx, pp_token(kind, start, (u32) (ctx->p - start), loc, has_newline));
+}
+
+static bool scan_ws(SoupScannerCtx *ctx)
+{
+    if (!is_hspace(*ctx->p))
+    {
+        return false;
+    }
     Loc loc = scanner_loc(ctx);
     const char *start = ctx->p;
     while (is_hspace(*ctx->p))
     {
         scanner_advance(ctx);
     }
-    scanner_push(ctx, pp_token(TOK_PP_TRIVIA_WS, start, (u32) (ctx->p - start), loc, false));
+    scanner_emit(ctx, TOK_PP_TRIVIA_WS, start, loc, false);
+    return true;
 }
 
-static void scan_nl(SoupScannerCtx *ctx)
+static bool scan_nl(SoupScannerCtx *ctx)
 {
+    if (*ctx->p != '\n')
+    {
+        return false;
+    }
     Loc loc = scanner_loc(ctx);
     const char *start = ctx->p;
     scanner_advance(ctx);
-    scanner_push(ctx, pp_token(TOK_PP_TRIVIA_NL, start, 1, loc, true));
+    scanner_emit(ctx, TOK_PP_TRIVIA_NL, start, loc, true);
+    return true;
 }
 
 static void scan_block_comment(SoupScannerCtx *ctx)
@@ -374,51 +397,50 @@ static void scan_block_comment(SoupScannerCtx *ctx)
     Loc loc = scanner_loc(ctx);
     const char *start = ctx->p;
     bool has_newline = false;
-    scanner_advance(ctx);
-    scanner_advance(ctx);
+    scanner_advance_n(ctx, 2);
     while (*ctx->p && !(ctx->p[0] == '*' && ctx->p[1] == '/'))
     {
-        if (*ctx->p == '\n')
-        {
-            has_newline = true;
-        }
+        has_newline |= *ctx->p == '\n';
         scanner_advance(ctx);
     }
     if (*ctx->p)
     {
-        scanner_advance(ctx);
-        scanner_advance(ctx);
+        scanner_advance_n(ctx, 2);
     }
     else
     {
         scanner_error(ctx, "unterminated comment");
     }
-    scanner_push(ctx,
-                 pp_token(TOK_PP_TRIVIA_COMMENT, start, (u32) (ctx->p - start), loc, has_newline));
+    scanner_emit(ctx, TOK_PP_TRIVIA_COMMENT, start, loc, has_newline);
 }
 
 static void scan_line_comment(SoupScannerCtx *ctx)
 {
     Loc loc = scanner_loc(ctx);
     const char *start = ctx->p;
-    scanner_advance(ctx);
-    scanner_advance(ctx);
+    scanner_advance_n(ctx, 2);
     while (*ctx->p && *ctx->p != '\n')
     {
         scanner_advance(ctx);
     }
-    scanner_push(ctx, pp_token(TOK_PP_TRIVIA_COMMENT, start, (u32) (ctx->p - start), loc, false));
+    scanner_emit(ctx, TOK_PP_TRIVIA_COMMENT, start, loc, false);
 }
 
-static void scan_ident(SoupScannerCtx *ctx)
+static bool scan_comment(SoupScannerCtx *ctx)
 {
-    Loc loc = scanner_loc(ctx);
-    const char *start = ctx->p;
-    while (is_ident_char(*ctx->p))
+    if (ctx->p[0] != '/' || (ctx->p[1] != '*' && ctx->p[1] != '/'))
     {
-        scanner_advance(ctx);
+        return false;
     }
-    scanner_push(ctx, pp_token(TOK_PP_IDENT, start, (u32) (ctx->p - start), loc, false));
+    if (ctx->p[1] == '*')
+    {
+        scan_block_comment(ctx);
+    }
+    else
+    {
+        scan_line_comment(ctx);
+    }
+    return true;
 }
 
 static bool scan_literal(SoupScannerCtx *ctx)
@@ -432,16 +454,12 @@ static bool scan_literal(SoupScannerCtx *ctx)
 
     Loc loc = scanner_loc(ctx);
     const char *start = ctx->p;
-    for (u32 i = 0; i < prefix_len + 1; i++)
-    {
-        scanner_advance(ctx);
-    }
+    scanner_advance_n(ctx, prefix_len + 1);
     while (*ctx->p && *ctx->p != quote && *ctx->p != '\n')
     {
         if (*ctx->p == '\\' && ctx->p[1] != '\0')
         {
-            scanner_advance(ctx);
-            scanner_advance(ctx);
+            scanner_advance_n(ctx, 2);
             continue;
         }
         scanner_advance(ctx);
@@ -457,12 +475,16 @@ static bool scan_literal(SoupScannerCtx *ctx)
         scanner_error(ctx, kind == TOK_PP_STRING ? "unterminated string literal"
                                                  : "unterminated character constant");
     }
-    scanner_push(ctx, pp_token(kind, start, (u32) (ctx->p - start), loc, false));
+    scanner_emit(ctx, kind, start, loc, false);
     return true;
 }
 
-static void scan_number(SoupScannerCtx *ctx)
+static bool scan_number(SoupScannerCtx *ctx)
 {
+    if (!pp_number_start(ctx->p[0], ctx->p[1]))
+    {
+        return false;
+    }
     Loc loc = scanner_loc(ctx);
     const char *start = ctx->p;
     scanner_advance(ctx);
@@ -472,8 +494,7 @@ static void scan_number(SoupScannerCtx *ctx)
         if ((c == 'e' || c == 'E' || c == 'p' || c == 'P') &&
             (ctx->p[1] == '+' || ctx->p[1] == '-'))
         {
-            scanner_advance(ctx);
-            scanner_advance(ctx);
+            scanner_advance_n(ctx, 2);
         }
         else if (is_ident_char(c) || c == '.')
         {
@@ -484,20 +505,41 @@ static void scan_number(SoupScannerCtx *ctx)
             break;
         }
     }
-    scanner_push(ctx, pp_token(TOK_PP_NUMBER, start, (u32) (ctx->p - start), loc, false));
+    scanner_emit(ctx, TOK_PP_NUMBER, start, loc, false);
+    return true;
 }
 
-static void scan_punct(SoupScannerCtx *ctx, u32 len, PpPunct punct)
+static bool scan_ident(SoupScannerCtx *ctx)
 {
+    if (!is_ident_start(*ctx->p))
+    {
+        return false;
+    }
     Loc loc = scanner_loc(ctx);
     const char *start = ctx->p;
-    for (u32 i = 0; i < len; i++)
+    while (is_ident_char(*ctx->p))
     {
         scanner_advance(ctx);
     }
+    scanner_emit(ctx, TOK_PP_IDENT, start, loc, false);
+    return true;
+}
+
+static bool scan_punct(SoupScannerCtx *ctx)
+{
+    PpPunct punct;
+    u32 len = pp_punct_match(ctx->p, &punct);
+    if (len == 0)
+    {
+        return false;
+    }
+    Loc loc = scanner_loc(ctx);
+    const char *start = ctx->p;
+    scanner_advance_n(ctx, len);
     PpToken token = pp_token(TOK_PP_PUNCT, start, len, loc, false);
     token.punct = punct;
     scanner_push(ctx, token);
+    return true;
 }
 
 static void scan_other(SoupScannerCtx *ctx)
@@ -505,7 +547,7 @@ static void scan_other(SoupScannerCtx *ctx)
     Loc loc = scanner_loc(ctx);
     const char *start = ctx->p;
     scanner_advance(ctx);
-    scanner_push(ctx, pp_token(TOK_PP_OTHER, start, 1, loc, false));
+    scanner_emit(ctx, TOK_PP_OTHER, start, loc, false);
 }
 
 Vec *pp_lex(const char *file, const char *src, Arena *arena)
@@ -521,46 +563,13 @@ Vec *pp_lex(const char *file, const char *src, Arena *arena)
 
     while (*ctx.p)
     {
-        if (scan_literal(&ctx))
+        /* First recognizer to match wins; literal-before-ident keeps a
+           prefixed literal one token, comment-before-punct so a block comment
+           isn't split into `/` and `*`. Whatever remains is a TOK_PP_OTHER. */
+        if (!(scan_ws(&ctx) || scan_nl(&ctx) || scan_comment(&ctx) || scan_literal(&ctx) ||
+              scan_number(&ctx) || scan_ident(&ctx) || scan_punct(&ctx)))
         {
-            continue;
-        }
-        if (is_hspace(*ctx.p))
-        {
-            scan_ws(&ctx);
-        }
-        else if (*ctx.p == '\n')
-        {
-            scan_nl(&ctx);
-        }
-        else if (ctx.p[0] == '/' && ctx.p[1] == '*')
-        {
-            scan_block_comment(&ctx);
-        }
-        else if (ctx.p[0] == '/' && ctx.p[1] == '/')
-        {
-            scan_line_comment(&ctx);
-        }
-        else if (pp_number_start(ctx.p[0], ctx.p[1]))
-        {
-            scan_number(&ctx);
-        }
-        else if (is_ident_start(*ctx.p))
-        {
-            scan_ident(&ctx);
-        }
-        else
-        {
-            PpPunct punct;
-            u32 len = pp_punct_match(ctx.p, &punct);
-            if (len > 0)
-            {
-                scan_punct(&ctx, len, punct);
-            }
-            else
-            {
-                scan_other(&ctx);
-            }
+            scan_other(&ctx);
         }
     }
 
