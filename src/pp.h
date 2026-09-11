@@ -72,8 +72,8 @@ Pp *pp_new(Arena *arena);
    only needed until lex_finalize has run. */
 void pp_free(Pp *pp);
 
-/* Runs translation phase 4 over src. Returns the output soup (also stored as
-   pp->out), or NULL after reporting a diagnostic. */
+/* Translation phase 4. Returns the output soup (also pp->out) or NULL on
+   error. */
 Vec *pp_preprocess(Pp *pp, const char *file, const char *src);
 
 /* Command-line hooks (17u), applied before the main file is read: `-D name[=val]`

@@ -81,7 +81,7 @@ static TokList *list_cons(Arena *arena, PpToken *tok, TokList *next)
     return node;
 }
 
-/* Returns a copy of x whose tail is y (y is shared, not copied). */
+/* Only copies x; y is shared. */
 static TokList *list_concat(Arena *arena, TokList *x, TokList *y)
 {
     if (!x)
@@ -99,47 +99,32 @@ static TokList *list_concat(Arena *arena, TokList *x, TokList *y)
     return head;
 }
 
+/* Appends t to the growing list and returns the advanced tail pointer. */
+static TokList **pp_list_append(Pp *pp, TokList **tail, PpToken *t)
+{
+    *tail = list_cons(pp->arena, t, NULL);
+    return &(*tail)->next;
+}
+
 static bool pp_is_trivia(const PpToken *tok)
 {
     return tok->kind == TOK_PP_TRIVIA_WS || tok->kind == TOK_PP_TRIVIA_NL ||
            tok->kind == TOK_PP_TRIVIA_COMMENT;
 }
 
-static bool pp_spelling_is(const PpToken *tok, const char *spelling)
+static bool pp_is_ident(const PpToken *tok, const char *spelling)
 {
+    if (tok->kind != TOK_PP_IDENT)
+    {
+        return false;
+    }
     size_t len = strlen(spelling);
     return tok->len == len && strncmp(tok->spell, spelling, len) == 0;
 }
 
-/* Directives are introduced by `#` and its digraph `%:` (C11 §6.4.6/§6.10). */
-static bool pp_is_hash(const PpToken *tok)
+static bool pp_is_punct(const PpToken *tok, PpPunct punct)
 {
-    return tok->kind == TOK_PP_PUNCT && tok->punct == PP_PUNCT_HASH;
-}
-
-static bool pp_is_lparen(const PpToken *tok)
-{
-    return tok->kind == TOK_PP_PUNCT && tok->punct == PP_PUNCT_LPAREN;
-}
-
-static bool pp_is_rparen(const PpToken *tok)
-{
-    return tok->kind == TOK_PP_PUNCT && tok->punct == PP_PUNCT_RPAREN;
-}
-
-static bool pp_is_comma(const PpToken *tok)
-{
-    return tok->kind == TOK_PP_PUNCT && tok->punct == PP_PUNCT_COMMA;
-}
-
-static bool pp_is_hashhash(const PpToken *tok)
-{
-    return tok->kind == TOK_PP_PUNCT && tok->punct == PP_PUNCT_HASHHASH;
-}
-
-static bool pp_is_ellipsis(const PpToken *tok)
-{
-    return tok->kind == TOK_PP_PUNCT && tok->punct == PP_PUNCT_ELLIPSIS;
+    return tok->kind == TOK_PP_PUNCT && tok->punct == punct;
 }
 
 static void pp_predefine(Pp *pp, const char *name, const char *spelling)
@@ -150,15 +135,33 @@ static void pp_predefine(Pp *pp, const char *name, const char *spelling)
     vec_push(body, tok);
 
     Macro *macro = arena_alloc(pp->arena, sizeof(Macro), sizeof(void *));
-    macro->name = name;
-    macro->kind = MACRO_OBJ;
-    macro->loc = (Loc) {0};
-    macro->body = body;
-    macro->param_count = 0;
-    macro->variadic = false;
-    macro->predefined = true;
-    macro->is_pragma = false;
+    *macro = (Macro) {
+        .name = name,
+        .kind = MACRO_OBJ,
+        .body = body,
+        .predefined = true,
+    };
     strmap_set(pp->macros, name, macro);
+}
+
+static void pp_load_source_date_epoch(Pp *pp)
+{
+    const char *sde = getenv("SOURCE_DATE_EPOCH");
+    if (!sde || !sde[0])
+    {
+        return;
+    }
+    u64 value = 0;
+    for (const char *p = sde; *p; p++)
+    {
+        if (*p < '0' || *p > '9')
+        {
+            return;
+        }
+        value = value * 10 + (u64) (*p - '0');
+    }
+    pp->has_source_date_epoch = true;
+    pp->source_date_epoch = (i64) value;
 }
 
 Pp *pp_new(Arena *arena)
@@ -181,31 +184,10 @@ Pp *pp_new(Arena *arena)
     pp->cooked_time = NULL;
     pp->pragma_once = hashset_new(arena, hashmap_str_hash, hashmap_str_eq);
     pp->poison = hashset_new(arena, hashmap_str_hash, hashmap_str_eq);
-    pp->has_source_date_epoch = false;
-    pp->source_date_epoch = 0;
     pp->error_count = 0;
     pp->warning_count = 0;
 
-    const char *sde = getenv("SOURCE_DATE_EPOCH");
-    if (sde && sde[0])
-    {
-        u64 value = 0;
-        bool ok = true;
-        for (const char *p = sde; *p; p++)
-        {
-            if (*p < '0' || *p > '9')
-            {
-                ok = false;
-                break;
-            }
-            value = value * 10 + (u64) (*p - '0');
-        }
-        if (ok)
-        {
-            pp->has_source_date_epoch = true;
-            pp->source_date_epoch = (i64) value;
-        }
-    }
+    pp_load_source_date_epoch(pp);
 
     pp_predefine(pp, "__STDC__", "1");
     pp_predefine(pp, "__STDC_VERSION__", "201112L");
@@ -289,7 +271,8 @@ void pp_note(Loc loc, const char *fmt, ...)
     va_end(args);
 }
 
-static const char *pp_token_name(Pp *pp, const PpToken *tok)
+/* Returns an arena NUL-terminated copy of the token's spelling. */
+static const char *pp_token_text(Pp *pp, const PpToken *tok)
 {
     char *buf = arena_alloc(pp->arena, tok->len + 1, 1);
     memcpy(buf, tok->spell, tok->len);
@@ -297,24 +280,64 @@ static const char *pp_token_name(Pp *pp, const PpToken *tok)
     return buf;
 }
 
-static Macro *pp_macro_lookup(Pp *pp, const PpToken *tok)
+static const char *pp_string_content(Pp *pp, const PpToken *tok)
 {
-    return strmap_get(pp->macros, pp_token_name(pp, tok));
+    char *buf = arena_alloc(pp->arena, tok->len > 1 ? tok->len - 1 : 1, 1);
+    u32 n = tok->len > 2 ? tok->len - 2 : 0;
+    memcpy(buf, tok->spell + 1, n);
+    buf[n] = '\0';
+    return buf;
 }
 
-/* Copies the real (non-trivia) tokens in [start, end) into a fresh vector. */
-static Vec *pp_collect_body(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end)
+static Macro *pp_macro_lookup(Pp *pp, const PpToken *tok)
 {
-    Vec *body = vec_new(pp->arena);
+    return strmap_get(pp->macros, pp_token_text(pp, tok));
+}
+
+static TokList *pp_expand_list(Pp *pp, TokList *ts);
+
+static Vec *pp_expand_vec(Pp *pp, Vec *input)
+{
+    TokList *list = NULL;
+    TokList **tail = &list;
+    for (size_t i = 0; i < vec_size(input); i++)
+    {
+        PpToken *t = vec_get(input, i);
+        if (!pp_is_trivia(t))
+        {
+            tail = pp_list_append(pp, tail, t);
+        }
+    }
+
+    Vec *expanded = vec_new(pp->arena);
+    for (TokList *r = pp_expand_list(pp, list); r; r = r->next)
+    {
+        if (!pp_is_trivia(r->tok))
+        {
+            vec_push(expanded, r->tok);
+        }
+    }
+    return expanded;
+}
+
+/* The real tokens in [start, end), macro-expanded with trivia dropped. */
+static Vec *pp_gather_real(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end)
+{
+    Vec *real = vec_new(pp->arena);
     for (size_t i = start; i < end; i++)
     {
         PpToken *tok = vec_get(frame->tokens, i);
         if (!pp_is_trivia(tok))
         {
-            vec_push(body, tok);
+            vec_push(real, tok);
         }
     }
-    return body;
+    return real;
+}
+
+static Vec *pp_expand_operand(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end)
+{
+    return pp_expand_vec(pp, pp_gather_real(pp, frame, start, end));
 }
 
 static bool pp_bodies_equal(const Vec *a, const Vec *b)
@@ -360,11 +383,20 @@ static int pp_param_index(const Vec *params, const PpToken *tok)
     return -1;
 }
 
+static size_t pp_skip_trivia(const PpIncludeFrame *frame, size_t i, size_t end)
+{
+    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
+    {
+        i++;
+    }
+    return i;
+}
+
 static size_t pp_param_list_end(const PpIncludeFrame *frame, size_t open, size_t end)
 {
     for (size_t i = open + 1; i < end; i++)
     {
-        if (pp_is_rparen(vec_get(frame->tokens, i)))
+        if (pp_is_punct(vec_get(frame->tokens, i), PP_PUNCT_RPAREN))
         {
             return i;
         }
@@ -372,93 +404,71 @@ static size_t pp_param_list_end(const PpIncludeFrame *frame, size_t open, size_t
     return end;
 }
 
-/* Parses the comma-separated parameter list in (open, close) into params.
-   `...` (or GNU `name...`) must be last; the variadic name, if any, aliases
-   `__VA_ARGS__` and is not a named parameter. */
-static bool pp_parse_params(Pp *pp, const PpIncludeFrame *frame, size_t open, size_t close,
-                            Vec *params, bool *variadic, const char **variadic_name)
+/* Advances past `...` and reports an error if anything follows it. */
+static bool pp_require_variadic_last(Pp *pp, const PpIncludeFrame *frame, size_t *i, size_t close,
+                                     Loc params_loc)
 {
-    size_t i = open + 1;
-    while (i < close)
+    *i = pp_skip_trivia(frame, *i + 1, close);
+    if (*i < close)
     {
-        while (i < close && pp_is_trivia(vec_get(frame->tokens, i)))
-        {
-            i++;
-        }
-        if (i >= close)
-        {
-            break;
-        }
-
-        PpToken *t = vec_get(frame->tokens, i);
-        if (pp_is_ellipsis(t))
-        {
-            *variadic = true;
-            i++;
-            while (i < close && pp_is_trivia(vec_get(frame->tokens, i)))
-            {
-                i++;
-            }
-            if (i < close)
-            {
-                pp_error(pp, t->loc, "'...' must be the last macro parameter");
-                return false;
-            }
-            break;
-        }
-        if (t->kind != TOK_PP_IDENT)
-        {
-            pp_error(pp, t->loc, "expected macro parameter name");
-            return false;
-        }
-
-        const char *name = pp_token_name(pp, t);
-        i++;
-        while (i < close && pp_is_trivia(vec_get(frame->tokens, i)))
-        {
-            i++;
-        }
-
-        if (i < close && pp_is_ellipsis(vec_get(frame->tokens, i)))
-        {
-            *variadic = true;
-            *variadic_name = name;
-            i++;
-            while (i < close && pp_is_trivia(vec_get(frame->tokens, i)))
-            {
-                i++;
-            }
-            if (i < close)
-            {
-                pp_error(pp, t->loc, "'...' must be the last macro parameter");
-                return false;
-            }
-            break;
-        }
-
-        if (pp_param_index(params, t) >= 0)
-        {
-            pp_error(pp, t->loc, "duplicate macro parameter '%.*s'", (int) t->len, t->spell);
-            return false;
-        }
-        vec_push(params, (void *) name);
-
-        if (i < close)
-        {
-            if (!pp_is_comma(vec_get(frame->tokens, i)))
-            {
-                pp_error(pp, ((PpToken *) vec_get(frame->tokens, i))->loc,
-                         "expected ',' or ')' in macro parameter list");
-                return false;
-            }
-            i++;
-        }
+        pp_error(pp, params_loc, "'...' must be the last macro parameter");
+        return false;
     }
     return true;
 }
 
-/* Rewrites body identifiers that name parameters into TOK_PP_PARAM markers.
-   `__VA_ARGS__` and the GNU variadic alias both mark the variadic tail. */
+/* `name...` (GNU) aliases `__VA_ARGS__`; a bare `...` is the variadic tail. */
+static bool pp_parse_params(Pp *pp, const PpIncludeFrame *frame, size_t open, size_t close,
+                            Vec *params, bool *variadic, const char **variadic_name)
+{
+    size_t i = pp_skip_trivia(frame, open + 1, close);
+    while (i < close)
+    {
+        PpToken *param = vec_get(frame->tokens, i);
+        if (pp_is_punct(param, PP_PUNCT_ELLIPSIS))
+        {
+            *variadic = true;
+            return pp_require_variadic_last(pp, frame, &i, close, param->loc);
+        }
+        if (param->kind != TOK_PP_IDENT)
+        {
+            pp_error(pp, param->loc, "expected macro parameter name");
+            return false;
+        }
+
+        const char *name = pp_token_text(pp, param);
+        i = pp_skip_trivia(frame, i + 1, close);
+        if (i < close && pp_is_punct(vec_get(frame->tokens, i), PP_PUNCT_ELLIPSIS))
+        {
+            *variadic = true;
+            *variadic_name = name;
+            return pp_require_variadic_last(pp, frame, &i, close, param->loc);
+        }
+        if (pp_param_index(params, param) >= 0)
+        {
+            pp_error(pp, param->loc, "duplicate macro parameter '%.*s'", (int) param->len,
+                     param->spell);
+            return false;
+        }
+        vec_push(params, (void *) name);
+
+        if (i >= close)
+        {
+            break;
+        }
+        if (!pp_is_punct(vec_get(frame->tokens, i), PP_PUNCT_COMMA))
+        {
+            pp_error(pp, ((PpToken *) vec_get(frame->tokens, i))->loc,
+                     "expected ',' or ')' in macro parameter list");
+            return false;
+        }
+        i = pp_skip_trivia(frame, i + 1, close);
+    }
+    return true;
+}
+
+/* Body identifiers naming a parameter become TOK_PP_PARAM markers;
+   `__VA_ARGS__` and the GNU alias mark the variadic tail. */
 static Vec *pp_mark_params(Pp *pp, Vec *body, Vec *params, bool variadic, const char *variadic_name)
 {
     Vec *marked = vec_new(pp->arena);
@@ -466,15 +476,15 @@ static Vec *pp_mark_params(Pp *pp, Vec *body, Vec *params, bool variadic, const 
     {
         PpToken *bt = vec_get(body, i);
         int idx = bt->kind == TOK_PP_IDENT ? pp_param_index(params, bt) : -1;
-        bool is_va =
-            bt->kind == TOK_PP_IDENT && (pp_spelling_is(bt, "__VA_ARGS__") ||
-                                         (variadic_name && pp_spelling_is(bt, variadic_name)));
-        if (idx < 0 && !is_va)
+        bool is_va_args =
+            bt->kind == TOK_PP_IDENT &&
+            (pp_is_ident(bt, "__VA_ARGS__") || (variadic_name && pp_is_ident(bt, variadic_name)));
+        if (idx < 0 && !is_va_args)
         {
             vec_push(marked, bt);
             continue;
         }
-        if (is_va && !variadic)
+        if (is_va_args && !variadic)
         {
             pp_error(pp, bt->loc, "__VA_ARGS__ can only appear in a variadic macro");
             return NULL;
@@ -483,19 +493,18 @@ static Vec *pp_mark_params(Pp *pp, Vec *body, Vec *params, bool variadic, const 
         PpToken *copy = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
         *copy = *bt;
         copy->kind = TOK_PP_PARAM;
-        copy->param_idx = is_va ? (u32) vec_size(params) : (u32) idx;
+        copy->param_idx = is_va_args ? (u32) vec_size(params) : (u32) idx;
         vec_push(marked, copy);
     }
     return marked;
 }
 
-/* `__VA_ARGS__` may not appear in an object-like macro (C11 §6.10.3.4). */
 static bool pp_check_va_args(Pp *pp, Vec *body)
 {
     for (size_t i = 0; i < vec_size(body); i++)
     {
         PpToken *t = vec_get(body, i);
-        if (t->kind == TOK_PP_IDENT && pp_spelling_is(t, "__VA_ARGS__"))
+        if (pp_is_ident(t, "__VA_ARGS__"))
         {
             pp_error(pp, t->loc, "__VA_ARGS__ can only appear in a variadic macro");
             return false;
@@ -504,14 +513,13 @@ static bool pp_check_va_args(Pp *pp, Vec *body)
     return true;
 }
 
-/* Every `#` in a function-like replacement must be followed by a parameter
-   (C11 §6.10.3.2). */
+/* C11 §6.10.3.2: every `#` in the replacement must precede a parameter. */
 static bool pp_check_hashes(Pp *pp, Vec *body)
 {
     for (size_t i = 0; i < vec_size(body); i++)
     {
         PpToken *t = vec_get(body, i);
-        if (t->kind == TOK_PP_PUNCT && t->punct == PP_PUNCT_HASH)
+        if (pp_is_punct(t, PP_PUNCT_HASH))
         {
             if (i + 1 >= vec_size(body) || ((PpToken *) vec_get(body, i + 1))->kind != TOK_PP_PARAM)
             {
@@ -523,15 +531,14 @@ static bool pp_check_hashes(Pp *pp, Vec *body)
     return true;
 }
 
-/* A `##` operand must not be the first or last token of a replacement list
-   (C11 §6.10.3.3). */
+/* C11 §6.10.3.3: `##` operands must exist on both sides. */
 static bool pp_check_pastes(Pp *pp, Vec *body)
 {
     size_t n = vec_size(body);
     for (size_t i = 0; i < n; i++)
     {
         PpToken *t = vec_get(body, i);
-        if (!pp_is_hashhash(t))
+        if (!pp_is_punct(t, PP_PUNCT_HASHHASH))
         {
             continue;
         }
@@ -549,7 +556,7 @@ static bool pp_check_pastes(Pp *pp, Vec *body)
     return true;
 }
 
-/* Predefined names are reserved (§6.10.8): redefinition is a constraint. */
+/* C11 §6.10.8: predefined names may not be redefined. */
 static bool pp_is_reserved_name(const char *name)
 {
     if (strcmp(name, "_Pragma") == 0)
@@ -574,87 +581,117 @@ static bool pp_is_reserved_name(const char *name)
     return false;
 }
 
+typedef struct
+{
+    MacroKind kind;
+    Vec *body;
+    u32 param_count;
+    bool variadic;
+} MacroDef;
+
+static bool pp_parse_function_like(Pp *pp, const PpIncludeFrame *frame, size_t open, size_t end,
+                                   PpToken *name, MacroDef *def)
+{
+    size_t close = pp_param_list_end(frame, open + 1, end);
+    if (close >= end)
+    {
+        pp_error(pp, name->loc, "missing ')' in macro parameter list");
+        return false;
+    }
+    Vec *params = vec_new(pp->arena);
+    bool variadic = false;
+    const char *variadic_name = NULL;
+    if (!pp_parse_params(pp, frame, open + 1, close, params, &variadic, &variadic_name))
+    {
+        return false;
+    }
+    Vec *body = pp_mark_params(pp, pp_gather_real(pp, frame, close + 1, end), params, variadic,
+                               variadic_name);
+    if (!body || !pp_check_hashes(pp, body))
+    {
+        return false;
+    }
+
+    def->kind = MACRO_FUNC;
+    def->body = body;
+    def->param_count = (u32) vec_size(params);
+    def->variadic = variadic;
+    return true;
+}
+
+static bool pp_parse_object_like(Pp *pp, const PpIncludeFrame *frame, size_t open, size_t end,
+                                 MacroDef *def)
+{
+    Vec *body = pp_gather_real(pp, frame, open + 1, end);
+    if (!pp_check_va_args(pp, body))
+    {
+        return false;
+    }
+
+    def->kind = MACRO_OBJ;
+    def->body = body;
+    def->param_count = 0;
+    def->variadic = false;
+    return true;
+}
+
+static bool pp_parse_macro_def(Pp *pp, const PpIncludeFrame *frame, size_t open, size_t end,
+                               PpToken *name, MacroDef *def)
+{
+    bool function_like =
+        open + 1 < end && pp_is_punct(vec_get(frame->tokens, open + 1), PP_PUNCT_LPAREN);
+    if (function_like)
+    {
+        return pp_parse_function_like(pp, frame, open, end, name, def);
+    }
+    return pp_parse_object_like(pp, frame, open, end, def);
+}
+
+static bool pp_macro_matches(const Macro *macro, const MacroDef *def)
+{
+    return macro->kind == def->kind && macro->param_count == def->param_count &&
+           macro->variadic == def->variadic && pp_bodies_equal(macro->body, def->body);
+}
+
 static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
                       Loc directive_loc)
 {
-    size_t i = start;
-    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
-    {
-        i++;
-    }
-    if (i >= end)
+    size_t open = pp_skip_trivia(frame, start, end);
+    if (open >= end)
     {
         pp_error(pp, directive_loc, "macro name missing");
         return;
     }
-
-    PpToken *name = vec_get(frame->tokens, i);
+    PpToken *name = vec_get(frame->tokens, open);
     if (name->kind != TOK_PP_IDENT)
     {
         pp_error(pp, name->loc, "macro names must be identifiers");
         return;
     }
-
-    const char *text = pp_token_name(pp, name);
+    const char *text = pp_token_text(pp, name);
     if (pp_is_reserved_name(text))
     {
         pp_error(pp, name->loc, "redefinition of predefined macro '%s'", text);
         return;
     }
-    bool function_like = i + 1 < end && pp_is_lparen(vec_get(frame->tokens, i + 1));
-    MacroKind kind = function_like ? MACRO_FUNC : MACRO_OBJ;
-    Vec *body = NULL;
-    u32 param_count = 0;
-    bool variadic = false;
-    const char *variadic_name = NULL;
 
-    if (function_like)
+    MacroDef def = {0};
+    if (!pp_parse_macro_def(pp, frame, open, end, name, &def))
     {
-        size_t close = pp_param_list_end(frame, i + 1, end);
-        if (close >= end)
-        {
-            pp_error(pp, name->loc, "missing ')' in macro parameter list");
-            return;
-        }
-        Vec *params = vec_new(pp->arena);
-        if (!pp_parse_params(pp, frame, i + 1, close, params, &variadic, &variadic_name))
-        {
-            return;
-        }
-        param_count = (u32) vec_size(params);
-        body = pp_mark_params(pp, pp_collect_body(pp, frame, close + 1, end), params, variadic,
-                              variadic_name);
-        if (!body)
-        {
-            return;
-        }
-        if (!pp_check_hashes(pp, body))
-        {
-            return;
-        }
+        return;
     }
-    else
-    {
-        body = pp_collect_body(pp, frame, i + 1, end);
-        if (!pp_check_va_args(pp, body))
-        {
-            return;
-        }
-    }
-
-    if (!pp_check_pastes(pp, body))
+    if (!pp_check_pastes(pp, def.body))
     {
         return;
     }
 
     Macro *prev = strmap_get(pp->macros, text);
+    if (prev && pp_macro_matches(prev, &def))
+    {
+        return;
+    }
     if (prev)
     {
-        if (prev->kind == kind && prev->param_count == param_count && prev->variadic == variadic &&
-            pp_bodies_equal(prev->body, body))
-        {
-            return;
-        }
         pp_error(pp, name->loc, "redefinition of macro '%s'", text);
         pp_note(prev->loc, "previous definition of '%s' is here", text);
         return;
@@ -662,11 +699,11 @@ static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t 
 
     Macro *macro = arena_alloc(pp->arena, sizeof(Macro), sizeof(void *));
     macro->name = text;
-    macro->kind = kind;
+    macro->kind = def.kind;
     macro->loc = name->loc;
-    macro->body = body;
-    macro->param_count = param_count;
-    macro->variadic = variadic;
+    macro->body = def.body;
+    macro->param_count = def.param_count;
+    macro->variadic = def.variadic;
     macro->predefined = false;
     macro->is_pragma = false;
     strmap_set(pp->macros, text, macro);
@@ -675,32 +712,25 @@ static void pp_define(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t 
 static void pp_undef(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
                      Loc directive_loc)
 {
-    size_t i = start;
-    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
-    {
-        i++;
-    }
+    size_t i = pp_skip_trivia(frame, start, end);
     if (i >= end)
     {
         pp_error(pp, directive_loc, "macro name missing");
         return;
     }
-
     PpToken *name = vec_get(frame->tokens, i);
     if (name->kind != TOK_PP_IDENT)
     {
         pp_error(pp, name->loc, "macro names must be identifiers");
         return;
     }
-    const char *text = pp_token_name(pp, name);
+    const char *text = pp_token_text(pp, name);
     if (pp_is_reserved_name(text))
     {
         pp_warn(pp, name->loc, "undefining '%s'", text);
     }
     hashmap_remove(pp->macros, text);
 }
-
-static TokList *pp_expand_list(Pp *pp, TokList *ts);
 
 typedef struct CondFrame CondFrame;
 struct CondFrame
@@ -736,34 +766,27 @@ static void pp_push_cond(Pp *pp, bool parent_active, bool taken)
 static void pp_ifdef_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
                                Loc directive_loc, bool is_ifndef)
 {
-    size_t i = start;
-    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
-    {
-        i++;
-    }
+    const char *directive = is_ifndef ? "ifndef" : "ifdef";
+    size_t i = pp_skip_trivia(frame, start, end);
     if (i >= end)
     {
-        pp_error(pp, directive_loc, "#%s requires a macro name", is_ifndef ? "ifndef" : "ifdef");
+        pp_error(pp, directive_loc, "#%s requires a macro name", directive);
         return;
     }
     PpToken *name = vec_get(frame->tokens, i);
     if (name->kind != TOK_PP_IDENT)
     {
-        pp_error(pp, name->loc, "#%s requires a macro name", is_ifndef ? "ifndef" : "ifdef");
+        pp_error(pp, name->loc, "#%s requires a macro name", directive);
         return;
     }
-    i++;
-    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
-    {
-        i++;
-    }
+    i = pp_skip_trivia(frame, i + 1, end);
     if (i < end)
     {
         pp_warn(pp, ((PpToken *) vec_get(frame->tokens, i))->loc,
-                "extra tokens at end of #%s directive", is_ifndef ? "ifndef" : "ifdef");
+                "extra tokens at end of #%s directive", directive);
     }
 
-    bool defined = strmap_get(pp->macros, pp_token_name(pp, name)) != NULL;
+    bool defined = strmap_get(pp->macros, pp_token_text(pp, name)) != NULL;
     bool parent_active = pp_branch_active(pp);
     pp_push_cond(pp, parent_active, parent_active && (defined != is_ifndef));
 }
@@ -827,11 +850,11 @@ static const char *pp_path_dirname(Pp *pp, const char *path)
 
 static const char *pp_path_join(Pp *pp, const char *dir, const char *name)
 {
-    size_t len = strlen(dir) + 1 + strlen(name);
-    char *buf = arena_alloc(pp->arena, len + 1, 1);
-    memcpy(buf, dir, strlen(dir));
-    buf[strlen(dir)] = '/';
-    memcpy(buf + strlen(dir) + 1, name, strlen(name) + 1);
+    size_t dir_len = strlen(dir);
+    char *buf = arena_alloc(pp->arena, dir_len + 1 + strlen(name) + 1, 1);
+    memcpy(buf, dir, dir_len);
+    buf[dir_len] = '/';
+    strcpy(buf + dir_len + 1, name);
     return buf;
 }
 
@@ -847,14 +870,14 @@ static char *pp_read_file(const char *path, Arena *arena)
         fclose(f);
         return NULL;
     }
-    long size = ftell(f);
+    size_t size = (size_t) ftell(f);
     if (fseek(f, 0, SEEK_SET) != 0)
     {
         fclose(f);
         return NULL;
     }
-    char *buf = arena_alloc(arena, (size_t) size + 1, 1);
-    if (fread(buf, 1, (size_t) size, f) != (size_t) size)
+    char *buf = arena_alloc(arena, size + 1, 1);
+    if (fread(buf, 1, size, f) != size)
     {
         fclose(f);
         return NULL;
@@ -883,8 +906,7 @@ static const char *pp_builtin_dir(Pp *pp)
     return pp->builtin_dir;
 }
 
-/* Resolves a header name. Quoted form tries the including file's directory
-   first, then the angle chain. Returns the path or NULL. */
+/* Quoted headers try the including file's directory first (gcc). */
 static const char *pp_include_find(Pp *pp, bool quoted, const char *name,
                                    const char *including_file, bool next_mode)
 {
@@ -954,118 +976,174 @@ static void pp_include_file(Pp *pp, const char *path)
     pp_push_include(pp, path, tokens);
 }
 
-/* `#include` operand: a literal `"..."`/`<...>` header-name, or macro
-   operands that expand to one (`#include H`). */
-static const char *pp_string_content(Pp *pp, const PpToken *tok);
-static Vec *pp_expand_vec(Pp *pp, Vec *input);
-static const char *pp_header_name_from_vec(Pp *pp, Vec *tokens, size_t *pos, bool *quoted);
+/* Reads `<...>` in a raw line; comments or newlines inside are errors. */
+static const char *pp_angle_header_name(Pp *pp, const PpIncludeFrame *frame, size_t open,
+                                        size_t end, size_t *next_index)
+{
+    ByteBuf name;
+    bytebuf_init(&name, pp->arena);
+    size_t i;
+    for (i = open + 1; i < end; i++)
+    {
+        PpToken *t = vec_get(frame->tokens, i);
+        if (pp_is_punct(t, PP_PUNCT_GT))
+        {
+            break;
+        }
+        if (t->kind == TOK_PP_TRIVIA_COMMENT || t->kind == TOK_PP_TRIVIA_NL)
+        {
+            pp_error(pp, t->loc, "invalid character inside a #include header name");
+            return NULL;
+        }
+        if (pp_is_trivia(t))
+        {
+            continue;
+        }
+        for (u32 k = 0; k < t->len; k++)
+        {
+            bytebuf_append(&name, (u8) t->spell[k]);
+        }
+    }
+    if (i >= end)
+    {
+        pp_error(pp, ((PpToken *) vec_get(frame->tokens, open))->loc, "missing '>' in #include");
+        return NULL;
+    }
+    bytebuf_append(&name, '\0');
+    *next_index = i + 1;
+    return (const char *) bytebuf_data(&name);
+}
+
+/* Reads one header-name at *pos: `"..."` or `<...>`. `what` names the
+   directive for diagnostics. */
+static const char *pp_read_header_name(Pp *pp, Vec *tokens, size_t *pos, bool *quoted,
+                                       const char *what)
+{
+    PpToken *t = vec_get(tokens, *pos);
+    if (t->kind == TOK_PP_STRING)
+    {
+        *quoted = true;
+        (*pos)++;
+        return pp_string_content(pp, t);
+    }
+    if (pp_is_punct(t, PP_PUNCT_LT))
+    {
+        ByteBuf name;
+        bytebuf_init(&name, pp->arena);
+        size_t i;
+        for (i = *pos + 1; i < vec_size(tokens); i++)
+        {
+            PpToken *u = vec_get(tokens, i);
+            if (pp_is_punct(u, PP_PUNCT_GT))
+            {
+                break;
+            }
+            for (u32 k = 0; k < u->len; k++)
+            {
+                bytebuf_append(&name, (u8) u->spell[k]);
+            }
+        }
+        if (i >= vec_size(tokens))
+        {
+            pp_error(pp, t->loc, "missing '>' in %s", what);
+            return NULL;
+        }
+        bytebuf_append(&name, '\0');
+        *pos = i + 1;
+        return (const char *) bytebuf_data(&name);
+    }
+    return NULL;
+}
+
+typedef struct
+{
+    const char *name;
+    bool quoted;
+    size_t next;
+} IncludeOperand;
+
+/* Requires the expanded operand to be exactly one `"..."`/`<...>` name. */
+static const char *pp_expanded_header_name(Pp *pp, Vec *expanded, bool *quoted, Loc loc)
+{
+    if (vec_size(expanded) == 0)
+    {
+        pp_error(pp, loc, "expected a header name after #include");
+        return NULL;
+    }
+    PpToken *first = vec_get(expanded, 0);
+    if (first->kind != TOK_PP_STRING && !pp_is_punct(first, PP_PUNCT_LT))
+    {
+        pp_error(pp, loc, "#include operand does not expand to a single header name");
+        return NULL;
+    }
+    size_t pos = 0;
+    const char *name = pp_read_header_name(pp, expanded, &pos, quoted, "#include");
+    if (!name)
+    {
+        return NULL;
+    }
+    if (pos != vec_size(expanded))
+    {
+        pp_error(pp, loc, "#include operand does not expand to a single header name");
+        return NULL;
+    }
+    return name;
+}
+
+/* Parses the header-name on the line: a literal form, or a macro that must
+   expand to exactly one. Reports a diagnostic and returns false on error. */
+static bool pp_include_operand(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
+                               Loc directive_loc, IncludeOperand *out)
+{
+    size_t open = pp_skip_trivia(frame, start, end);
+    if (open >= end)
+    {
+        pp_error(pp, directive_loc, "expected a header name after #include");
+        return false;
+    }
+    PpToken *first = vec_get(frame->tokens, open);
+    if (pp_is_punct(first, PP_PUNCT_LT))
+    {
+        out->quoted = false;
+        out->name = pp_angle_header_name(pp, frame, open, end, &out->next);
+        return out->name != NULL;
+    }
+    if (first->kind == TOK_PP_STRING)
+    {
+        out->quoted = true;
+        out->name = pp_string_content(pp, first);
+        out->next = open + 1;
+        return true;
+    }
+
+    out->quoted = false;
+    out->name = pp_expanded_header_name(pp, pp_expand_operand(pp, frame, start, end), &out->quoted,
+                                        first->loc);
+    out->next = end;
+    return out->name != NULL;
+}
 
 static void pp_include_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
                                  Loc directive_loc, bool next_mode)
 {
-    size_t i = start;
-    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
+    IncludeOperand op;
+    if (!pp_include_operand(pp, frame, start, end, directive_loc, &op))
     {
-        i++;
-    }
-    if (i >= end)
-    {
-        pp_error(pp, directive_loc, "expected a header name after #include");
         return;
     }
-
-    PpToken *first = vec_get(frame->tokens, i);
-    bool quoted = false;
-    const char *name = "";
-
-    if (first->kind == TOK_PP_PUNCT && first->punct == PP_PUNCT_LT)
-    {
-        ByteBuf name_buf;
-        bytebuf_init(&name_buf, pp->arena);
-        size_t j = i + 1;
-        for (; j < end; j++)
-        {
-            PpToken *t = vec_get(frame->tokens, j);
-            if (t->kind == TOK_PP_PUNCT && t->punct == PP_PUNCT_GT)
-            {
-                break;
-            }
-            if (t->kind == TOK_PP_TRIVIA_COMMENT || t->kind == TOK_PP_TRIVIA_NL)
-            {
-                pp_error(pp, t->loc, "invalid character inside a #include header name");
-                return;
-            }
-            if (pp_is_trivia(t))
-            {
-                continue;
-            }
-            for (u32 k = 0; k < t->len; k++)
-            {
-                bytebuf_append(&name_buf, t->spell[k]);
-            }
-        }
-        if (j >= end)
-        {
-            pp_error(pp, first->loc, "missing '>' in #include");
-            return;
-        }
-        bytebuf_append(&name_buf, '\0');
-        name = (const char *) bytebuf_data(&name_buf);
-        i = j + 1;
-    }
-    else if (first->kind == TOK_PP_STRING)
-    {
-        quoted = true;
-        name = pp_string_content(pp, first);
-        i++;
-    }
-    else
-    {
-        Vec *raw = vec_new(pp->arena);
-        for (size_t k = i; k < end; k++)
-        {
-            PpToken *t = vec_get(frame->tokens, k);
-            if (!pp_is_trivia(t))
-            {
-                vec_push(raw, t);
-            }
-        }
-        Vec *expanded = pp_expand_vec(pp, raw);
-        if (vec_size(expanded) == 0)
-        {
-            pp_error(pp, first->loc, "expected a header name after #include");
-            return;
-        }
-        size_t pos = 0;
-        PpToken *e0 = vec_get(expanded, 0);
-        if (e0->kind == TOK_PP_STRING || (e0->kind == TOK_PP_PUNCT && e0->punct == PP_PUNCT_LT))
-        {
-            name = pp_header_name_from_vec(pp, expanded, &pos, &quoted);
-        }
-        if (pos != vec_size(expanded))
-        {
-            pp_error(pp, first->loc, "#include operand does not expand to a single header name");
-            return;
-        }
-        i = end;
-    }
-
-    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
-    {
-        i++;
-    }
+    size_t i = pp_skip_trivia(frame, op.next, end);
     if (i < end)
     {
         pp_warn(pp, ((PpToken *) vec_get(frame->tokens, i))->loc,
                 "extra tokens at end of #include directive");
     }
 
-    const char *path = pp_include_find(pp, quoted, name, frame->file, next_mode);
+    const char *path = pp_include_find(pp, op.quoted, op.name, frame->file, next_mode);
     if (!path)
     {
         pp_error(pp, directive_loc,
                  next_mode ? "no such #include_next file: '%s'" : "include file not found: '%s'",
-                 name);
+                 op.name);
         return;
     }
     if (hashset_contains(pp->pragma_once, path))
@@ -1075,7 +1153,6 @@ static void pp_include_directive(Pp *pp, const PpIncludeFrame *frame, size_t sta
     pp_include_file(pp, path);
 }
 
-/* Warns on a GNU-lite construct when -pedantic is on (D17.9). */
 static void pp_gnu_warn(Pp *pp, Loc loc, const char *feature)
 {
     if (pp->pedantic)
@@ -1084,20 +1161,12 @@ static void pp_gnu_warn(Pp *pp, Loc loc, const char *feature)
     }
 }
 
-/* `#pragma once`, `#pragma GCC poison A B`, `#pragma GCC system_header`;
-   any other pragma is parsed and ignored. */
+/* Handles `#pragma once`, `#pragma GCC poison`, `#pragma GCC system_header`;
+   anything else is parsed and ignored. */
 static void pp_pragma_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
                                 Loc directive_loc)
 {
-    Vec *tokens = vec_new(pp->arena);
-    for (size_t i = start; i < end; i++)
-    {
-        PpToken *t = vec_get(frame->tokens, i);
-        if (!pp_is_trivia(t))
-        {
-            vec_push(tokens, t);
-        }
-    }
+    Vec *tokens = pp_gather_real(pp, frame, start, end);
     size_t n = vec_size(tokens);
     if (n == 0)
     {
@@ -1105,7 +1174,7 @@ static void pp_pragma_directive(Pp *pp, PpIncludeFrame *frame, size_t start, siz
     }
     PpToken *t0 = vec_get(tokens, 0);
 
-    if (n == 1 && t0->kind == TOK_PP_IDENT && pp_spelling_is(t0, "once"))
+    if (n == 1 && pp_is_ident(t0, "once"))
     {
         pp_gnu_warn(pp, t0->loc, "#pragma once");
         if (vec_size(pp->includes) == 1)
@@ -1119,16 +1188,16 @@ static void pp_pragma_directive(Pp *pp, PpIncludeFrame *frame, size_t start, siz
         return;
     }
 
-    if (n >= 2 && t0->kind == TOK_PP_IDENT && pp_spelling_is(t0, "GCC"))
+    if (n >= 2 && pp_is_ident(t0, "GCC"))
     {
         PpToken *t1 = vec_get(tokens, 1);
-        if (t1->kind == TOK_PP_IDENT && pp_spelling_is(t1, "system_header"))
+        if (pp_is_ident(t1, "system_header"))
         {
             pp_gnu_warn(pp, t0->loc, "#pragma GCC system_header");
             frame->system_header = true;
             return;
         }
-        if (t1->kind == TOK_PP_IDENT && pp_spelling_is(t1, "poison"))
+        if (pp_is_ident(t1, "poison"))
         {
             pp_gnu_warn(pp, t0->loc, "#pragma GCC poison");
             for (size_t i = 2; i < n; i++)
@@ -1139,7 +1208,7 @@ static void pp_pragma_directive(Pp *pp, PpIncludeFrame *frame, size_t start, siz
                     pp_error(pp, p->loc, "invalid '#pragma GCC poison' directive");
                     return;
                 }
-                hashset_add(pp->poison, (void *) pp_token_name(pp, p));
+                hashset_add(pp->poison, (void *) pp_token_text(pp, p));
             }
             return;
         }
@@ -1177,204 +1246,132 @@ static bool pp_is_decimal_number(const PpToken *tok)
     return true;
 }
 
-/* Expands a token vector, dropping trivia from the result. */
-static Vec *pp_expand_vec(Pp *pp, Vec *input)
-{
-    TokList *list = NULL;
-    TokList **tail = &list;
-    for (size_t i = 0; i < vec_size(input); i++)
-    {
-        PpToken *t = vec_get(input, i);
-        if (!pp_is_trivia(t))
-        {
-            *tail = list_cons(pp->arena, t, NULL);
-            tail = &(*tail)->next;
-        }
-    }
-
-    Vec *expanded = vec_new(pp->arena);
-    for (TokList *r = pp_expand_list(pp, list); r; r = r->next)
-    {
-        if (!pp_is_trivia(r->tok))
-        {
-            vec_push(expanded, r->tok);
-        }
-    }
-    return expanded;
-}
-
-/* Expands the real tokens in [start, end) (used for directive operands). */
-static Vec *pp_expand_operand(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end)
-{
-    Vec *raw = vec_new(pp->arena);
-    for (size_t i = start; i < end; i++)
-    {
-        PpToken *t = vec_get(frame->tokens, i);
-        if (!pp_is_trivia(t))
-        {
-            vec_push(raw, t);
-        }
-    }
-    return pp_expand_vec(pp, raw);
-}
-
-static PpToken *pp_cooked_number(Pp *pp, u64 value, Loc loc)
+static PpToken *pp_cooked_bool(Pp *pp, bool value, Loc loc)
 {
     PpToken *t = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
     *t = (PpToken) {.kind = TOK_PP_NUMBER, .loc = loc, .spell = value ? "1" : "0", .len = 1};
     return t;
 }
 
-/* Reads a header-name at *pos from a token vector: a string literal or angle
-   form. Returns the name (arena text) and advances *pos past it. */
-static const char *pp_header_name_from_vec(Pp *pp, Vec *tokens, size_t *pos, bool *quoted)
+/* Cooks `defined X` and `defined(X)` into 0/1 literals before expansion. */
+static void pp_resolve_defined(Pp *pp, Vec *raw, size_t *i, Vec *out, Loc loc)
 {
-    size_t n = vec_size(tokens);
-    PpToken *t = vec_get(tokens, *pos);
-    ByteBuf name_buf;
-    bytebuf_init(&name_buf, pp->arena);
-
-    if (t->kind == TOK_PP_STRING)
+    bool paren = *i < vec_size(raw) && pp_is_punct(vec_get(raw, *i), PP_PUNCT_LPAREN);
+    if (paren)
     {
-        *quoted = true;
-        for (u32 k = 1; k + 1 < t->len; k++)
-        {
-            bytebuf_append(&name_buf, t->spell[k]);
-        }
-        bytebuf_append(&name_buf, '\0');
-        (*pos)++;
-        return (const char *) bytebuf_data(&name_buf);
+        (*i)++;
     }
-    if (t->kind == TOK_PP_PUNCT && t->punct == PP_PUNCT_LT)
+
+    if (*i >= vec_size(raw) || ((PpToken *) vec_get(raw, *i))->kind != TOK_PP_IDENT)
     {
-        *quoted = false;
-        size_t j = *pos + 1;
-        for (; j < n; j++)
+        pp_error(pp, loc, "operator 'defined' requires an identifier");
+        vec_push(out, pp_cooked_bool(pp, false, loc));
+        return;
+    }
+    PpToken *name = vec_get(raw, *i);
+    (*i)++;
+
+    if (paren)
+    {
+        if (*i < vec_size(raw) && pp_is_punct(vec_get(raw, *i), PP_PUNCT_RPAREN))
         {
-            PpToken *u = vec_get(tokens, j);
-            if (u->kind == TOK_PP_PUNCT && u->punct == PP_PUNCT_GT)
-            {
-                break;
-            }
-            for (u32 k = 0; k < u->len; k++)
-            {
-                bytebuf_append(&name_buf, u->spell[k]);
-            }
-        }
-        if (j >= n)
-        {
-            pp_error(pp, t->loc, "missing '>' in __has_include");
+            (*i)++;
         }
         else
         {
-            *pos = j + 1;
+            pp_error(pp, name->loc, "expected ')' after 'defined'");
         }
-        bytebuf_append(&name_buf, '\0');
-        return (const char *) bytebuf_data(&name_buf);
     }
 
-    pp_error(pp, t->loc, "expected a header name in __has_include");
-    return "";
+    bool defined = strmap_get(pp->macros, pp_token_text(pp, name)) != NULL ||
+                   pp_is_ident(name, "__has_include") || pp_is_ident(name, "__has_include_next");
+    vec_push(out, pp_cooked_bool(pp, defined, loc));
 }
 
-/* Resolves `defined X` and `__has_include(...)` into cooked literals before
-   macro expansion (C11 §6.10.1). */
+/* Cooks a `__has_include` operand: a macro-expanded header name whose
+   existence is reported back to the #if parser. */
+static bool pp_header_found(Pp *pp, Vec *operand, const char *including_file, bool next, Loc loc)
+{
+    Vec *expanded = pp_expand_vec(pp, operand);
+    if (vec_size(expanded) == 0)
+    {
+        pp_error(pp, loc, "__has_include requires a single header-name operand");
+        return false;
+    }
+    PpToken *e0 = vec_get(expanded, 0);
+    if (e0->kind != TOK_PP_STRING && !pp_is_punct(e0, PP_PUNCT_LT))
+    {
+        pp_error(pp, loc, "__has_include requires a single header-name operand");
+        return false;
+    }
+    size_t pos = 0;
+    bool quoted = false;
+    const char *name = pp_read_header_name(pp, expanded, &pos, &quoted, "__has_include");
+    if (!name)
+    {
+        return false;
+    }
+    if (pos != vec_size(expanded))
+    {
+        pp_error(pp, loc, "__has_include requires a single header-name operand");
+        return false;
+    }
+    return pp_include_find(pp, quoted, name, including_file, next) != NULL;
+}
+
+/* Cooks `__has_include(...)` / `__has_include_next(...)` into 0/1. */
+static void pp_resolve_has_include(Pp *pp, Vec *raw, size_t *i, Vec *out, Loc loc, bool next,
+                                   const char *including_file)
+{
+    if (*i >= vec_size(raw) || !pp_is_punct(vec_get(raw, *i), PP_PUNCT_LPAREN))
+    {
+        pp_error(pp, loc, "expected '(' after __has_include");
+        vec_push(out, pp_cooked_bool(pp, false, loc));
+        return;
+    }
+    (*i)++;
+
+    Vec *operand = vec_new(pp->arena);
+    for (; *i < vec_size(raw) && !pp_is_punct(vec_get(raw, *i), PP_PUNCT_RPAREN); (*i)++)
+    {
+        vec_push(operand, vec_get(raw, *i));
+    }
+    if (*i >= vec_size(raw))
+    {
+        pp_error(pp, loc, "missing ')' after __has_include");
+        vec_push(out, pp_cooked_bool(pp, false, loc));
+        return;
+    }
+    (*i)++;
+
+    bool found = pp_header_found(pp, operand, including_file, next, loc);
+    vec_push(out, pp_cooked_bool(pp, found, loc));
+}
+
+/* C11 §6.10.1: the operators below are cooked before #if macro expansion. */
 static Vec *pp_resolve_controls(Pp *pp, Vec *raw, const PpIncludeFrame *frame)
 {
     Vec *out = vec_new(pp->arena);
-    size_t n = vec_size(raw);
     size_t i = 0;
-    while (i < n)
+    while (i < vec_size(raw))
     {
         PpToken *t = vec_get(raw, i);
-        if (t->kind == TOK_PP_IDENT && pp_spelling_is(t, "defined"))
+        if (pp_is_ident(t, "defined"))
         {
             i++;
-            bool paren = false;
-            if (i < n && pp_is_lparen(vec_get(raw, i)))
-            {
-                paren = true;
-                i++;
-            }
-            if (i >= n || ((PpToken *) vec_get(raw, i))->kind != TOK_PP_IDENT)
-            {
-                pp_error(pp, t->loc, "operator 'defined' requires an identifier");
-                vec_push(out, pp_cooked_number(pp, 0, t->loc));
-                continue;
-            }
-            PpToken *name = vec_get(raw, i);
-            i++;
-            bool defined = strmap_get(pp->macros, pp_token_name(pp, name)) != NULL ||
-                           pp_spelling_is(name, "__has_include") ||
-                           pp_spelling_is(name, "__has_include_next");
-            if (paren)
-            {
-                if (i < n && pp_is_rparen(vec_get(raw, i)))
-                {
-                    i++;
-                }
-                else
-                {
-                    pp_error(pp, name->loc, "expected ')' after 'defined'");
-                }
-            }
-            vec_push(out, pp_cooked_number(pp, defined ? 1 : 0, t->loc));
-            continue;
+            pp_resolve_defined(pp, raw, &i, out, t->loc);
         }
-        if (t->kind == TOK_PP_IDENT &&
-            (pp_spelling_is(t, "__has_include") || pp_spelling_is(t, "__has_include_next")))
+        else if (pp_is_ident(t, "__has_include") || pp_is_ident(t, "__has_include_next"))
         {
-            bool next = pp_spelling_is(t, "__has_include_next");
+            bool next = pp_is_ident(t, "__has_include_next");
             i++;
-            if (i >= n || !pp_is_lparen(vec_get(raw, i)))
-            {
-                pp_error(pp, t->loc, "expected '(' after __has_include");
-                vec_push(out, pp_cooked_number(pp, 0, t->loc));
-                continue;
-            }
-            i++;
-
-            Vec *operand = vec_new(pp->arena);
-            size_t j = i;
-            while (j < n && !pp_is_rparen(vec_get(raw, j)))
-            {
-                vec_push(operand, vec_get(raw, j));
-                j++;
-            }
-            if (j >= n)
-            {
-                pp_error(pp, t->loc, "missing ')' after __has_include");
-                vec_push(out, pp_cooked_number(pp, 0, t->loc));
-                continue;
-            }
-            i = j + 1;
-
-            Vec *expanded = pp_expand_vec(pp, operand);
-            bool quoted = false;
-            const char *name = "";
-            bool valid = false;
-            if (vec_size(expanded) > 0)
-            {
-                size_t pos = 0;
-                PpToken *e0 = vec_get(expanded, 0);
-                if (e0->kind == TOK_PP_STRING ||
-                    (e0->kind == TOK_PP_PUNCT && e0->punct == PP_PUNCT_LT))
-                {
-                    name = pp_header_name_from_vec(pp, expanded, &pos, &quoted);
-                    valid = pos == vec_size(expanded);
-                }
-            }
-            if (!valid)
-            {
-                pp_error(pp, t->loc, "__has_include requires a single header-name operand");
-            }
-            bool found = valid && pp_include_find(pp, quoted, name, frame ? frame->file : NULL,
-                                                  next) != NULL;
-            vec_push(out, pp_cooked_number(pp, found ? 1 : 0, t->loc));
-            continue;
+            pp_resolve_has_include(pp, raw, &i, out, t->loc, next, frame ? frame->file : NULL);
         }
-        vec_push(out, t);
-        i++;
+        else
+        {
+            vec_push(out, t);
+            i++;
+        }
     }
     return out;
 }
@@ -1426,42 +1423,33 @@ static PpToken *pp_cooked_string_token(Pp *pp, const char *content, Loc loc)
     return pp_cooked_literal(pp, TOK_PP_STRING, buf, (u32) (n + 2), loc);
 }
 
-/* Materializes the lazy predefined macros at the point of use (§6.10.8). */
+/* C11 §6.10.8: predefined macros materialize at the point of use. */
 static PpToken *pp_cook_predefined(Pp *pp, PpToken *t, u32 line, const char *file)
 {
     if (t->kind != TOK_PP_IDENT)
     {
         return t;
     }
-    if (pp_spelling_is(t, "__LINE__"))
+    if (pp_is_ident(t, "__LINE__"))
     {
         return pp_cooked_number_token(pp, line, t->loc);
     }
-    if (pp_spelling_is(t, "__FILE__"))
+    if (pp_is_ident(t, "__FILE__"))
     {
         return pp_cooked_string_token(pp, file ? file : "", t->loc);
     }
-    if (pp_spelling_is(t, "__DATE__") || pp_spelling_is(t, "__TIME__"))
+    if (pp_is_ident(t, "__DATE__") || pp_is_ident(t, "__TIME__"))
     {
         pp_cook_datetime(pp);
         return pp_cooked_string_token(
-            pp, pp_spelling_is(t, "__DATE__") ? pp->cooked_date : pp->cooked_time, t->loc);
+            pp, pp_is_ident(t, "__DATE__") ? pp->cooked_date : pp->cooked_time, t->loc);
     }
     return t;
 }
 
-/* Evaluates an #if/#elif controlling expression to a branch truth value. */
 static bool pp_if_condition(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end)
 {
-    Vec *raw = vec_new(pp->arena);
-    for (size_t i = start; i < end; i++)
-    {
-        PpToken *t = vec_get(frame->tokens, i);
-        if (!pp_is_trivia(t))
-        {
-            vec_push(raw, t);
-        }
-    }
+    Vec *raw = pp_gather_real(pp, frame, start, end);
     Vec *resolved = pp_resolve_controls(pp, raw, frame);
     Vec *expanded = pp_expand_vec(pp, resolved);
 
@@ -1491,23 +1479,14 @@ static const char *pp_render_text(Pp *pp, Vec *tokens)
         first = false;
         for (u32 j = 0; j < t->len; j++)
         {
-            bytebuf_append(&buf, t->spell[j]);
+            bytebuf_append(&buf, (u8) t->spell[j]);
         }
     }
     bytebuf_append(&buf, '\0');
     return (const char *) bytebuf_data(&buf);
 }
 
-static const char *pp_string_content(Pp *pp, const PpToken *tok)
-{
-    char *buf = arena_alloc(pp->arena, tok->len > 1 ? tok->len - 1 : 1, 1);
-    u32 n = tok->len > 2 ? tok->len - 2 : 0;
-    memcpy(buf, tok->spell + 1, n);
-    buf[n] = '\0';
-    return buf;
-}
-
-/* `#line N ["file"]` (also the GNU `# N "file"` linemarker). */
+/* `#line N ["file"]`, also the GNU `# N "file"` linemarker. */
 static void pp_line_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
                               Loc directive_loc, bool is_linemarker)
 {
@@ -1551,98 +1530,91 @@ static void pp_line_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_
     }
 }
 
-static void pp_error_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
-                               Loc directive_loc)
+static const char *pp_directive_message(Pp *pp, const PpIncludeFrame *frame, size_t start,
+                                        size_t end, const char *prefix)
 {
     Vec *expanded = pp_expand_operand(pp, frame, start, end);
     const char *text = pp_render_text(pp, expanded);
-    ByteBuf buf;
-    bytebuf_init(&buf, pp->arena);
-    bytebuf_append_bytes(&buf, (const u8 *) "#error ", 7);
-    bytebuf_append_bytes(&buf, (const u8 *) text, strlen(text));
-    bytebuf_append(&buf, '\0');
-    pp_error(pp, directive_loc, "%s", (const char *) bytebuf_data(&buf));
+    size_t prefix_len = strlen(prefix);
+    char *msg = arena_alloc(pp->arena, prefix_len + strlen(text) + 1, 1);
+    memcpy(msg, prefix, prefix_len);
+    strcpy(msg + prefix_len, text);
+    return msg;
+}
+
+static void pp_error_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
+                               Loc directive_loc)
+{
+    pp_error(pp, directive_loc, "%s", pp_directive_message(pp, frame, start, end, "#error "));
 }
 
 static void pp_warning_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
                                  Loc directive_loc)
 {
-    Vec *expanded = pp_expand_operand(pp, frame, start, end);
-    const char *text = pp_render_text(pp, expanded);
-    ByteBuf buf;
-    bytebuf_init(&buf, pp->arena);
-    bytebuf_append_bytes(&buf, (const u8 *) "#warning ", 9);
-    bytebuf_append_bytes(&buf, (const u8 *) text, strlen(text));
-    bytebuf_append(&buf, '\0');
-    pp_warn(pp, directive_loc, "%s", (const char *) bytebuf_data(&buf));
+    pp_warn(pp, directive_loc, "%s", pp_directive_message(pp, frame, start, end, "#warning "));
 }
 
-/* Returns true when the directive adjusted the presumed line ("#line"). */
+static void pp_elif_directive(Pp *pp, const PpIncludeFrame *frame, size_t i, size_t end,
+                              Loc directive_loc)
+{
+    if (vec_size(pp->conds) == 0)
+    {
+        pp_error(pp, directive_loc, "unexpected #elif");
+        return;
+    }
+    CondFrame *top = vec_last(pp->conds);
+    if (top->in_else)
+    {
+        pp_error(pp, directive_loc, "unexpected #elif after #else");
+        return;
+    }
+    if (!top->parent_active || top->ever_taken)
+    {
+        top->taken = false;
+        return;
+    }
+    top->taken = pp_if_condition(pp, frame, i, end);
+    top->ever_taken = top->taken;
+}
+
+/* Dispatches one directive line. Returns true when it set the presumed line. */
 static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end)
 {
-    size_t i = begin;
-    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
-    {
-        i++;
-    }
+    size_t i = pp_skip_trivia(frame, begin, end);
     Loc directive_loc = ((PpToken *) vec_get(frame->tokens, i))->loc;
-    i++; /* the introducing # */
-    while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
-    {
-        i++;
-    }
-    if (i >= end)
+    i++; /* the # */
+
+    size_t name_index = pp_skip_trivia(frame, i, end);
+    if (name_index >= end)
     {
         return false; /* null directive */
     }
+    PpToken *name = vec_get(frame->tokens, name_index);
+    size_t operand = name_index + 1;
 
-    PpToken *name = vec_get(frame->tokens, i);
-    size_t name_idx = i;
-    i++;
-    if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "ifdef"))
+    if (pp_is_ident(name, "ifdef"))
     {
-        pp_ifdef_directive(pp, frame, i, end, directive_loc, false);
+        pp_ifdef_directive(pp, frame, operand, end, directive_loc, false);
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "ifndef"))
+    else if (pp_is_ident(name, "ifndef"))
     {
-        pp_ifdef_directive(pp, frame, i, end, directive_loc, true);
+        pp_ifdef_directive(pp, frame, operand, end, directive_loc, true);
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "if"))
+    else if (pp_is_ident(name, "if"))
     {
         bool parent_active = pp_branch_active(pp);
-        bool cond = parent_active ? pp_if_condition(pp, frame, i, end) : false;
+        bool cond = parent_active ? pp_if_condition(pp, frame, operand, end) : false;
         pp_push_cond(pp, parent_active, cond);
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "elif"))
+    else if (pp_is_ident(name, "elif"))
     {
-        if (vec_size(pp->conds) == 0)
-        {
-            pp_error(pp, directive_loc, "unexpected #elif");
-        }
-        else
-        {
-            CondFrame *top = vec_last(pp->conds);
-            if (top->in_else)
-            {
-                pp_error(pp, directive_loc, "unexpected #elif after #else");
-            }
-            else if (!top->parent_active || top->ever_taken)
-            {
-                top->taken = false;
-            }
-            else
-            {
-                bool cond = pp_if_condition(pp, frame, i, end);
-                top->taken = cond;
-                top->ever_taken = top->taken;
-            }
-        }
+        pp_elif_directive(pp, frame, operand, end, directive_loc);
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "else"))
+    else if (pp_is_ident(name, "else"))
     {
         pp_else_directive(pp, directive_loc);
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "endif"))
+    else if (pp_is_ident(name, "endif"))
     {
         pp_endif_directive(pp, directive_loc);
     }
@@ -1650,42 +1622,42 @@ static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end
     {
         return false;
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "include"))
+    else if (pp_is_ident(name, "include"))
     {
-        pp_include_directive(pp, frame, i, end, directive_loc, false);
+        pp_include_directive(pp, frame, operand, end, directive_loc, false);
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "include_next"))
+    else if (pp_is_ident(name, "include_next"))
     {
-        pp_include_directive(pp, frame, i, end, directive_loc, true);
+        pp_include_directive(pp, frame, operand, end, directive_loc, true);
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "pragma"))
+    else if (pp_is_ident(name, "pragma"))
     {
-        pp_pragma_directive(pp, frame, i, end, directive_loc);
+        pp_pragma_directive(pp, frame, operand, end, directive_loc);
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "define"))
+    else if (pp_is_ident(name, "define"))
     {
-        pp_define(pp, frame, i, end, directive_loc);
+        pp_define(pp, frame, operand, end, directive_loc);
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "undef"))
+    else if (pp_is_ident(name, "undef"))
     {
-        pp_undef(pp, frame, i, end, directive_loc);
+        pp_undef(pp, frame, operand, end, directive_loc);
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "line"))
+    else if (pp_is_ident(name, "line"))
     {
-        pp_line_directive(pp, frame, i, end, directive_loc, false);
+        pp_line_directive(pp, frame, operand, end, directive_loc, false);
         return true;
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "error"))
+    else if (pp_is_ident(name, "error"))
     {
-        pp_error_directive(pp, frame, i, end, directive_loc);
+        pp_error_directive(pp, frame, operand, end, directive_loc);
     }
-    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "warning"))
+    else if (pp_is_ident(name, "warning"))
     {
-        pp_warning_directive(pp, frame, i, end, directive_loc);
+        pp_warning_directive(pp, frame, operand, end, directive_loc);
     }
     else if (name->kind == TOK_PP_NUMBER)
     {
-        pp_line_directive(pp, frame, name_idx, end, directive_loc, true);
+        pp_line_directive(pp, frame, name_index, end, directive_loc, true);
         return true;
     }
     else
@@ -1725,8 +1697,7 @@ struct MacroArgs
     TokList *after;
 };
 
-/* Collects invocation arguments starting at lparen. On a missing ')' it
-   reports a diagnostic and returns false. */
+/* Collects invocation arguments starting at lparen, honoring nesting. */
 static bool pp_collect_args(Pp *pp, PpToken *name, Macro *macro, TokList *lparen, MacroArgs *out)
 {
     Vec *args = vec_new(pp->arena);
@@ -1737,11 +1708,11 @@ static bool pp_collect_args(Pp *pp, PpToken *name, Macro *macro, TokList *lparen
     for (TokList *p = lparen->next; p; p = p->next)
     {
         PpToken *tok = p->tok;
-        if (pp_is_lparen(tok))
+        if (pp_is_punct(tok, PP_PUNCT_LPAREN))
         {
             depth++;
         }
-        else if (pp_is_rparen(tok))
+        else if (pp_is_punct(tok, PP_PUNCT_RPAREN))
         {
             depth--;
             if (depth == 0)
@@ -1753,7 +1724,7 @@ static bool pp_collect_args(Pp *pp, PpToken *name, Macro *macro, TokList *lparen
                 return true;
             }
         }
-        else if (depth == 1 && pp_is_comma(tok))
+        else if (depth == 1 && pp_is_punct(tok, PP_PUNCT_COMMA))
         {
             vec_push(args, current);
             current = vec_new(pp->arena);
@@ -1771,8 +1742,8 @@ static bool pp_collect_args(Pp *pp, PpToken *name, Macro *macro, TokList *lparen
     return false;
 }
 
-/* Stringizes a raw argument (§6.10.3.2): strips outer whitespace, collapses
-   interior whitespace runs to one space, and quotes `"`/`\`. */
+/* Stringizes a raw argument (C11 §6.10.3.2): outer whitespace is stripped,
+   interior runs collapse to one space, and `"`/`\` are quoted. */
 static PpToken *pp_stringize(Pp *pp, Vec *raw, Loc loc)
 {
     ByteBuf buf;
@@ -1802,7 +1773,7 @@ static PpToken *pp_stringize(Pp *pp, Vec *raw, Loc loc)
             {
                 bytebuf_append(&buf, '\\');
             }
-            bytebuf_append(&buf, c);
+            bytebuf_append(&buf, (u8) c);
         }
     }
     bytebuf_append(&buf, '"');
@@ -1816,8 +1787,7 @@ static PpToken *pp_stringize(Pp *pp, Vec *raw, Loc loc)
     return tok;
 }
 
-/* Concatenates two tokens' spellings and re-lexes the result; it must form
-   exactly one valid pp-token (C11 §6.10.3.3). */
+/* Pasting must re-lex into exactly one pp-token (C11 §6.10.3.3). */
 static PpToken *pp_paste(Pp *pp, PpToken *left, PpToken *right, Loc loc)
 {
     size_t total = (size_t) left->len + right->len;
@@ -1883,10 +1853,8 @@ static PpToken *pp_hidden_copy(Pp *pp, PpToken *src, const SubstArgs *sa)
     return copy;
 }
 
-/* Substitutes one argument into the body. Leading/trailing whitespace of the
-   argument (§6.10.3.1) is omitted, but *interior* trivia is preserved — an
-   outer stringize of a rescanned invocation must still see one space between
-   the argument's tokens (`XSTR(a b)` → `"a b"`). */
+/* Argument substitution strips outer whitespace but keeps interior trivia, so
+   a rescanned outer stringize still sees single spaces (`XSTR(a b)`). */
 static void pp_push_arg(Pp *pp, Vec *out, Vec *arg, const SubstArgs *sa)
 {
     size_t start = 0;
@@ -1913,8 +1881,8 @@ static PpToken *pp_comma_token(Pp *pp, Loc loc)
     return t;
 }
 
-/* Collapses the variadic tail (args[param_count..]) into one comma-joined
-   argument; named parameters keep their positions. */
+/* Joins the variadic tail into one comma-separated argument; missing named
+   args become empty. */
 static Vec *pp_effective_args(Pp *pp, Vec *args, u32 param_count, Loc loc)
 {
     Vec *eff = vec_new(pp->arena);
@@ -1940,8 +1908,8 @@ static Vec *pp_effective_args(Pp *pp, Vec *args, u32 param_count, Loc loc)
     return eff;
 }
 
-/* Substitutes parameters in order; a parameter adjacent to `##` receives its
-   raw argument, everything else the prescanned one, and `#` stringizes. */
+/* Substitutes parameters: `#` stringizes, a parameter beside `##` takes its
+   raw argument, everything else the prescanned one. */
 static Vec *pp_substitute(Pp *pp, Macro *macro, const SubstArgs *sa)
 {
     Vec *out = vec_new(pp->arena);
@@ -1952,8 +1920,8 @@ static Vec *pp_substitute(Pp *pp, Macro *macro, const SubstArgs *sa)
         PpToken *bt = vec_get(macro->body, i);
 
         /* GNU `, ## __VA_ARGS__`: drop the comma when the tail is absent. */
-        if (bt->kind == TOK_PP_PUNCT && bt->punct == PP_PUNCT_COMMA && sa->raw && i + 2 < n &&
-            pp_is_hashhash(vec_get(macro->body, i + 1)))
+        if (pp_is_punct(bt, PP_PUNCT_COMMA) && sa->raw && i + 2 < n &&
+            pp_is_punct(vec_get(macro->body, i + 1), PP_PUNCT_HASHHASH))
         {
             PpToken *va = vec_get(macro->body, i + 2);
             if (va->kind == TOK_PP_PARAM && va->param_idx == macro->param_count)
@@ -1968,7 +1936,7 @@ static Vec *pp_substitute(Pp *pp, Macro *macro, const SubstArgs *sa)
             }
         }
 
-        if (bt->kind == TOK_PP_PUNCT && bt->punct == PP_PUNCT_HASH && sa->raw && i + 1 < n &&
+        if (pp_is_punct(bt, PP_PUNCT_HASH) && sa->raw && i + 1 < n &&
             ((PpToken *) vec_get(macro->body, i + 1))->kind == TOK_PP_PARAM)
         {
             PpToken *next = vec_get(macro->body, i + 1);
@@ -1978,8 +1946,9 @@ static Vec *pp_substitute(Pp *pp, Macro *macro, const SubstArgs *sa)
         }
         if (bt->kind == TOK_PP_PARAM && sa->expanded && bt->param_idx < vec_size(sa->expanded))
         {
-            bool under_paste = (i > 0 && pp_is_hashhash(vec_get(macro->body, i - 1))) ||
-                               (i + 1 < n && pp_is_hashhash(vec_get(macro->body, i + 1)));
+            bool under_paste =
+                (i > 0 && pp_is_punct(vec_get(macro->body, i - 1), PP_PUNCT_HASHHASH)) ||
+                (i + 1 < n && pp_is_punct(vec_get(macro->body, i + 1), PP_PUNCT_HASHHASH));
             pp_push_arg(pp, out, vec_get(under_paste ? sa->raw : sa->expanded, bt->param_idx), sa);
             continue;
         }
@@ -1989,24 +1958,22 @@ static Vec *pp_substitute(Pp *pp, Macro *macro, const SubstArgs *sa)
     return out;
 }
 
-/* Merges `##` runs with placemarker semantics: an empty side disappears.
-   Trivia around the pasted operands is skipped (whitespace is not a
-   preprocessing token) and the trivia between the operands is discarded with
-   the paste, per §6.10.3.3. */
+/* Merges `##` pairs with placemarker semantics: a missing side disappears,
+   and whitespace around the paste is discarded (C11 §6.10.3.3). */
 static TokList *pp_paste_list(Pp *pp, Vec *tokens, Loc inv_loc)
 {
     Vec *out = vec_new(pp->arena);
     for (size_t i = 0; i < vec_size(tokens); i++)
     {
         PpToken *t = vec_get(tokens, i);
-        if (!pp_is_hashhash(t))
+        if (!pp_is_punct(t, PP_PUNCT_HASHHASH))
         {
             vec_push(out, t);
             continue;
         }
         size_t ri = i + 1;
-        while (ri < vec_size(tokens) &&
-               (pp_is_trivia(vec_get(tokens, ri)) || pp_is_hashhash(vec_get(tokens, ri))))
+        while (ri < vec_size(tokens) && (pp_is_trivia(vec_get(tokens, ri)) ||
+                                         pp_is_punct(vec_get(tokens, ri), PP_PUNCT_HASHHASH)))
         {
             ri++;
         }
@@ -2029,33 +1996,25 @@ static TokList *pp_paste_list(Pp *pp, Vec *tokens, Loc inv_loc)
             }
             i = ri;
         }
-        /* trailing `##` with an empty right operand disappears */
+        /* a trailing `##` with an empty right operand disappears */
     }
 
     TokList *head = NULL;
     TokList **tail = &head;
     for (size_t i = 0; i < vec_size(out); i++)
     {
-        *tail = list_cons(pp->arena, vec_get(out, i), NULL);
-        tail = &(*tail)->next;
+        tail = pp_list_append(pp, tail, vec_get(out, i));
     }
     return head;
 }
 
-/* Substitutes then pastes (§6.10.3.2/§6.10.3.3); every emitted token gets the
-   invocation's hide set. */
 static TokList *pp_subst(Pp *pp, Macro *macro, const SubstArgs *sa)
 {
     return pp_paste_list(pp, pp_substitute(pp, macro, sa), sa->loc);
 }
 
-static Vec *pp_prescan_args(Pp *pp, Vec *args);
-
-/* Deletes the L/u8/u/U prefix and quotes from a string-literal token, keeping
-   the raw bytes between the quotes and unescaping only `\"` (the rule gcc and
-   clang actually implement for `_Pragma`, despite C11 §6.10.9's escape
-   decoding). Returns an arena NUL-terminated buffer, or NULL after reporting a
-   diagnostic. */
+/* Deletes the string prefix and quotes, unescaping only `\"` — the rule gcc
+   and clang actually implement for `_Pragma` (C11 §6.10.9 decodes all). */
 static const char *pp_destringize(Pp *pp, const PpToken *str)
 {
     const char *p = str->spell;
@@ -2090,21 +2049,12 @@ static const char *pp_destringize(Pp *pp, const PpToken *str)
     return (const char *) buf.data;
 }
 
-/* Executes the destringized `_Pragma` operand as a `#pragma` directive line:
-   re-lexes the text with the 17b scanner and feeds a synthetic line into the
-   same directive dispatcher (reuse, don't fork). */
-static void pp_execute_pragma(Pp *pp, const char *text, Loc loc)
+static Vec *pp_synthesize_pragma_line(Pp *pp, const char *text, Loc loc)
 {
-    if (vec_size(pp->includes) == 0)
-    {
-        return;
-    }
-    PpIncludeFrame *cur = vec_last(pp->includes);
-
     Vec *lexed = pp_lex(loc.file, text, pp->arena);
     if (!lexed)
     {
-        return;
+        return NULL;
     }
 
     Vec *line = vec_new(pp->arena);
@@ -2115,8 +2065,7 @@ static void pp_execute_pragma(Pp *pp, const char *text, Loc loc)
     PpToken *name = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
     *name = (PpToken) {.kind = TOK_PP_IDENT, .spell = "pragma", .len = 6, .loc = loc};
     vec_push(line, name);
-    size_t n = vec_size(lexed);
-    for (size_t i = 0; i < n; i++)
+    for (size_t i = 0; i < vec_size(lexed); i++)
     {
         PpToken *tok = vec_get(lexed, i);
         if (tok->kind != TOK_PP_EOF)
@@ -2127,6 +2076,24 @@ static void pp_execute_pragma(Pp *pp, const char *text, Loc loc)
     PpToken *eof = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
     *eof = (PpToken) {.kind = TOK_PP_EOF, .loc = loc};
     vec_push(line, eof);
+    return line;
+}
+
+/* Feeds the destringized _Pragma operand back through the directive
+   dispatcher as a synthetic `#pragma` line. */
+static void pp_execute_pragma(Pp *pp, const char *text, Loc loc)
+{
+    if (vec_size(pp->includes) == 0)
+    {
+        return;
+    }
+    PpIncludeFrame *cur = vec_last(pp->includes);
+
+    Vec *line = pp_synthesize_pragma_line(pp, text, loc);
+    if (!line)
+    {
+        return;
+    }
 
     PpIncludeFrame syn = {0};
     syn.tokens = line;
@@ -2138,15 +2105,41 @@ static void pp_execute_pragma(Pp *pp, const char *text, Loc loc)
     }
 }
 
-/* C11 §6.10.9 `_Pragma`: the operand (a string literal, macro-expanded like a
-   call argument) is destringized, re-lexed, and executed as a `#pragma`
-   directive line. `_Pragma` itself produces no output tokens. */
+/* Returns the single string literal the operand expands to, or NULL after a
+   diagnostic. */
+static PpToken *pp_pragma_string_arg(Pp *pp, TokList *arg, Loc loc)
+{
+    if (!arg)
+    {
+        pp_error(pp, loc, "_Pragma operand must be a string literal");
+        return NULL;
+    }
+    PpToken *str = NULL;
+    size_t real = 0;
+    for (TokList *r = pp_expand_list(pp, arg); r; r = r->next)
+    {
+        if (!pp_is_trivia(r->tok))
+        {
+            str = r->tok;
+            real++;
+        }
+    }
+    if (real != 1 || str->kind != TOK_PP_STRING)
+    {
+        pp_error(pp, loc, "_Pragma operand must be a single string literal");
+        return NULL;
+    }
+    return str;
+}
+
+/* C11 §6.10.9: the operand stringifies like a call argument, then executes
+   as a #pragma line. `_Pragma` itself emits no tokens. */
 static TokList *pp_pragma_op(Pp *pp, TokList *ts)
 {
     PpToken *prag = ts->tok;
 
     TokList *lparen = pp_skip_trivia_list(ts->next);
-    if (!lparen || !pp_is_lparen(lparen->tok))
+    if (!lparen || !pp_is_punct(lparen->tok, PP_PUNCT_LPAREN))
     {
         pp_error(pp, prag->loc, "_Pragma expects '(' after it");
         return ts->next;
@@ -2155,41 +2148,17 @@ static TokList *pp_pragma_op(Pp *pp, TokList *ts)
     TokList *arg = NULL;
     TokList **atail = &arg;
     TokList *it = lparen->next;
-    for (; it && !pp_is_rparen(it->tok); it = it->next)
+    for (; it && !pp_is_punct(it->tok, PP_PUNCT_RPAREN); it = it->next)
     {
-        *atail = list_cons(pp->arena, it->tok, NULL);
-        atail = &(*atail)->next;
+        atail = pp_list_append(pp, atail, it->tok);
     }
     if (!it)
     {
         pp_error(pp, prag->loc, "unterminated _Pragma operand");
         return lparen->next;
     }
-    TokList *after = it->next;
 
-    PpToken *str = NULL;
-    if (arg)
-    {
-        size_t real = 0;
-        for (TokList *r = pp_expand_list(pp, arg); r; r = r->next)
-        {
-            if (!pp_is_trivia(r->tok))
-            {
-                str = r->tok;
-                real++;
-            }
-        }
-        if (real != 1 || str->kind != TOK_PP_STRING)
-        {
-            pp_error(pp, prag->loc, "_Pragma operand must be a single string literal");
-            str = NULL;
-        }
-    }
-    else
-    {
-        pp_error(pp, prag->loc, "_Pragma operand must be a string literal");
-    }
-
+    PpToken *str = pp_pragma_string_arg(pp, arg, prag->loc);
     if (str)
     {
         const char *text = pp_destringize(pp, str);
@@ -2198,11 +2167,63 @@ static TokList *pp_pragma_op(Pp *pp, TokList *ts)
             pp_execute_pragma(pp, text, prag->loc);
         }
     }
-    return after;
+    return it->next;
 }
 
-/* Rescans ts with hide sets, splicing each macro's replacement in place of its
-   invocation (C11 §6.10.3.1 argument prescan, §6.10.3.4 disable-during). */
+static Vec *pp_prescan_args(Pp *pp, Vec *args);
+
+/* Reports use of a poisoned identifier that is not being expanded. */
+static void pp_check_poison(Pp *pp, const PpToken *t)
+{
+    if (t->kind == TOK_PP_IDENT && !t->hide && hashset_contains(pp->poison, pp_token_text(pp, t)))
+    {
+        pp_error(pp, t->loc, "attempt to use poisoned '%.*s'", (int) t->len, t->spell);
+    }
+}
+
+/* Expands one function-like invocation, returning its replacement spliced
+   with the tokens after the call, or NULL to keep the token unchanged. */
+static TokList *pp_expand_call(Pp *pp, PpToken *name, Macro *macro, TokList *lparen)
+{
+    MacroArgs args;
+    if (!pp_collect_args(pp, name, macro, lparen, &args))
+    {
+        return NULL;
+    }
+
+    size_t arg_count = vec_size(args.args);
+    if (arg_count == 1 && macro->param_count == 0 && pp_arg_is_empty(vec_get(args.args, 0)))
+    {
+        arg_count = 0; /* `F()` passes one empty argument; treat it as none. */
+    }
+    bool arity_ok =
+        macro->variadic ? arg_count >= macro->param_count : arg_count == macro->param_count;
+    if (!arity_ok)
+    {
+        pp_error(pp, name->loc, "macro '%s' expects %u arguments, but %zu given", macro->name,
+                 macro->param_count, arg_count);
+        return NULL;
+    }
+
+    SubstArgs sa = {.hs = hs_add(pp->arena, args.hs, macro),
+                    .loc = name->loc,
+                    .variadic_absent = macro->variadic && arg_count <= macro->param_count};
+    Vec *expanded = pp_prescan_args(pp, args.args);
+    if (macro->variadic)
+    {
+        sa.raw = pp_effective_args(pp, args.args, macro->param_count, name->loc);
+        sa.expanded = pp_effective_args(pp, expanded, macro->param_count, name->loc);
+    }
+    else
+    {
+        sa.raw = args.args;
+        sa.expanded = expanded;
+    }
+    return list_concat(pp->arena, pp_subst(pp, macro, &sa), args.after);
+}
+
+/* Rescans a token list, splicing in replacements; a macro is disabled while
+   its own replacement is rescanned (C11 §6.10.3.4). */
 static TokList *pp_expand_list(Pp *pp, TokList *ts)
 {
     TokList *out = NULL;
@@ -2212,15 +2233,11 @@ static TokList *pp_expand_list(Pp *pp, TokList *ts)
     {
         PpToken *t = ts->tok;
         Macro *macro = t->kind == TOK_PP_IDENT ? pp_macro_lookup(pp, t) : NULL;
+
         if (!macro || hs_has(t->hide, macro))
         {
-            if (t->kind == TOK_PP_IDENT && !t->hide &&
-                hashset_contains(pp->poison, pp_token_name(pp, t)))
-            {
-                pp_error(pp, t->loc, "attempt to use poisoned '%.*s'", (int) t->len, t->spell);
-            }
-            *tail = list_cons(pp->arena, t, NULL);
-            tail = &(*tail)->next;
+            pp_check_poison(pp, t);
+            tail = pp_list_append(pp, tail, t);
             ts = ts->next;
             continue;
         }
@@ -2239,59 +2256,17 @@ static TokList *pp_expand_list(Pp *pp, TokList *ts)
         }
 
         TokList *lparen = pp_skip_trivia_list(ts->next);
-        if (!lparen || !pp_is_lparen(lparen->tok))
+        if (lparen && pp_is_punct(lparen->tok, PP_PUNCT_LPAREN))
         {
-            *tail = list_cons(pp->arena, t, NULL);
-            tail = &(*tail)->next;
-            ts = ts->next;
-            continue;
+            TokList *replacement = pp_expand_call(pp, t, macro, lparen);
+            if (replacement)
+            {
+                ts = replacement;
+                continue;
+            }
         }
-
-        MacroArgs args;
-        if (!pp_collect_args(pp, t, macro, lparen, &args))
-        {
-            *tail = list_cons(pp->arena, t, NULL);
-            tail = &(*tail)->next;
-            ts = ts->next;
-            continue;
-        }
-
-        size_t arg_count = vec_size(args.args);
-        bool empty_single = arg_count == 1 && pp_arg_is_empty(vec_get(args.args, 0));
-        bool arity_ok =
-            macro->variadic ? arg_count >= macro->param_count : arg_count == macro->param_count;
-        if (empty_single && macro->param_count == 0)
-        {
-            arity_ok = true;
-        }
-        if (!arity_ok)
-        {
-            pp_error(pp, t->loc, "macro '%s' expects %u arguments, but %zu given", macro->name,
-                     macro->param_count, arg_count);
-            *tail = list_cons(pp->arena, t, NULL);
-            tail = &(*tail)->next;
-            ts = ts->next;
-            continue;
-        }
-
-        size_t effective_count = (empty_single && macro->param_count == 0) ? 0 : arg_count;
-        SubstArgs sa = {.hs = hs_add(pp->arena, args.hs, macro),
-                        .loc = t->loc,
-                        .variadic_absent =
-                            macro->variadic && effective_count <= macro->param_count};
-
-        Vec *expanded = pp_prescan_args(pp, args.args);
-        if (macro->variadic)
-        {
-            sa.raw = pp_effective_args(pp, args.args, macro->param_count, t->loc);
-            sa.expanded = pp_effective_args(pp, expanded, macro->param_count, t->loc);
-        }
-        else
-        {
-            sa.raw = args.args;
-            sa.expanded = expanded;
-        }
-        ts = list_concat(pp->arena, pp_subst(pp, macro, &sa), args.after);
+        tail = pp_list_append(pp, tail, t);
+        ts = ts->next;
     }
     return out;
 }
@@ -2306,8 +2281,7 @@ static Vec *pp_prescan_args(Pp *pp, Vec *args)
         TokList **tail = &list;
         for (size_t j = 0; j < vec_size(raw); j++)
         {
-            *tail = list_cons(pp->arena, vec_get(raw, j), NULL);
-            tail = &(*tail)->next;
+            tail = pp_list_append(pp, tail, vec_get(raw, j));
         }
 
         Vec *arg = vec_new(pp->arena);
@@ -2320,14 +2294,15 @@ static Vec *pp_prescan_args(Pp *pp, Vec *args)
     return expanded;
 }
 
+/* Expands one logical line, stamping presumed locations and materializing
+   predefined macros; newline tokens bump the presumed line. */
 static void pp_expand_line(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end)
 {
     TokList *list = NULL;
     TokList **tail = &list;
     for (size_t i = begin; i < end; i++)
     {
-        *tail = list_cons(pp->arena, vec_get(frame->tokens, i), NULL);
-        tail = &(*tail)->next;
+        tail = pp_list_append(pp, tail, vec_get(frame->tokens, i));
     }
 
     u32 presumed_line = frame->presumed_line;
@@ -2377,8 +2352,8 @@ static const PpToken *pp_first_real(const PpIncludeFrame *frame, size_t start, s
     return NULL;
 }
 
-/* Processes one directive line or, for ordinary text, gathers consecutive
-   non-directive lines so macro invocations may span lines, then expands. */
+/* Processes one directive line, or gathers consecutive non-directive lines
+   (so macro invocations may span lines) before expanding them. */
 static void pp_line(Pp *pp, PpIncludeFrame *frame)
 {
     size_t count = vec_size(frame->tokens);
@@ -2386,7 +2361,7 @@ static void pp_line(Pp *pp, PpIncludeFrame *frame)
     size_t end = pp_line_end(frame, begin);
     const PpToken *first = pp_first_real(frame, begin, end);
 
-    if (first && pp_is_hash(first))
+    if (first && pp_is_punct(first, PP_PUNCT_HASH))
     {
         frame->cursor = end;
         bool is_line_directive = pp_directive(pp, frame, begin, end);
@@ -2401,7 +2376,7 @@ static void pp_line(Pp *pp, PpIncludeFrame *frame)
     {
         size_t next_end = pp_line_end(frame, end);
         const PpToken *next_first = pp_first_real(frame, end, next_end);
-        if (next_first && pp_is_hash(next_first))
+        if (next_first && pp_is_punct(next_first, PP_PUNCT_HASH))
         {
             break;
         }
@@ -2461,8 +2436,8 @@ static bool pp_is_ident_text(const char *s, size_t n)
     return true;
 }
 
-/* `-D name[=value]`: object-like, value defaults to `1` (gcc), `name=` is
-   empty. */
+/* `-D name[=value]` (gcc): object-like, value defaults to `1`; `name=` gives
+   an empty body. */
 void pp_define_cmdline(Pp *pp, const char *spec)
 {
     Loc loc = (Loc) {.file = "<command-line>", .line = 1, .col = 1};
@@ -2528,8 +2503,8 @@ void pp_undef_cmdline(Pp *pp, const char *name)
     hashmap_remove(pp->macros, name);
 }
 
-/* `-include file`: resolves like an angle include and processes it to
-   completion now, so its macros and output precede the main file. */
+/* `-include file`: resolves like an angle include and processes it now, so
+   its macros and output precede the main file. */
 void pp_include_cmdline(Pp *pp, const char *file)
 {
     Loc loc = (Loc) {.file = file, .line = 1, .col = 1};
