@@ -7,6 +7,8 @@
 #include "util/types.h"
 #include "util/vec.h"
 
+#include <stdarg.h>
+
 typedef struct PpIncludeFrame PpIncludeFrame;
 struct PpIncludeFrame
 {
@@ -66,6 +68,13 @@ void pp_free(Pp *pp);
 /* Runs translation phase 4 over src. Returns the output soup (also stored as
    pp->out), or NULL after reporting a diagnostic. */
 Vec *pp_preprocess(Pp *pp, const char *file, const char *src);
+
+/* Diagnostics; exported so the #if evaluator can report through the same sink. */
+void pp_error(Pp *pp, Loc loc, const char *fmt, ...);
+void pp_warn(Pp *pp, Loc loc, const char *fmt, ...);
+void pp_note(Loc loc, const char *fmt, ...);
+void pp_verror(Pp *pp, Loc loc, const char *fmt, va_list args);
+void pp_vwarn(Pp *pp, Loc loc, const char *fmt, va_list args);
 
 /* Prints one line per soup token: presumed loc, kind, spelling, has_newline. */
 void pp_dump(const Vec *soup);

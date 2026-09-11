@@ -1203,3 +1203,136 @@ TEST(pp, include_in_skipped_branch_not_opened)
     EXPECT_EQ(pp->error_count, 0);
     arena_free(a);
 }
+
+static void expect_if_taken_has(Pp *pp, const char *ident)
+{
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, ident));
+}
+
+TEST(pp, if_true_and_false)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#if 1\nint a;\n#endif\n#if 0\nint gone;\n#endif\nint b;\n");
+    expect_if_taken_has(pp, "a");
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "b"));
+    EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "gone"));
+    arena_free(a);
+}
+
+TEST(pp, if_arithmetic_and_precedence)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define X 5\n#if X * 2 == 10 && 1 + 2 * 3 == 7\nint a;\n#endif\n");
+    expect_if_taken_has(pp, "a");
+    arena_free(a);
+}
+
+TEST(pp, if_short_circuit_avoids_errors)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#if 0 && 1/0\nint gone;\n#endif\n#if 1 ? 2 : 1/0\nint a;\n#endif\n");
+    expect_if_taken_has(pp, "a");
+    EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "gone"));
+    arena_free(a);
+}
+
+TEST(pp, if_unsigned_comparison)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#if -1 < 0u\nint gone;\n#else\nint kept;\n#endif\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "kept"));
+    arena_free(a);
+}
+
+TEST(pp, if_defined_and_elif)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define X 1\n#if defined(X) && !defined(Y)\nint a;\n#elif 1\nint b;\n"
+                            "#else\nint c;\n#endif\n");
+    expect_if_taken_has(pp, "a");
+    EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "b"));
+    arena_free(a);
+}
+
+TEST(pp, if_elif_chain)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#if 0\nint a;\n#elif 1\nint b;\n#else\nint c;\n#endif\n");
+    expect_if_taken_has(pp, "b");
+    arena_free(a);
+}
+
+TEST(pp, if_char_and_hex_constants)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#if 'a' == 97 && 0x10 == 16\nint a;\n#endif\n");
+    expect_if_taken_has(pp, "a");
+    arena_free(a);
+}
+
+TEST(pp, if_zero_hides_everything)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#if 0\n#define Z 1\nZ\n#error boom\n#endif\nint ok;\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "ok"));
+    EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "Z"));
+    arena_free(a);
+}
+
+TEST(pp, if_div_by_zero_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#if 1/0\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, if_defined_from_macro_expansion_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define D defined\n#if D(X)\n"));
+    EXPECT_TRUE(pp->error_count >= 1);
+    arena_free(a);
+}
+
+TEST(pp, has_include_builtin_shim_is_present)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#if __has_include(<stdbool.h>)\nint a;\n#endif\n");
+    expect_if_taken_has(pp, "a");
+    arena_free(a);
+}
+
+TEST(pp, has_include_missing_is_absent)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#if __has_include(<ficcinc_zz_none.h>)\nint gone;\n#endif\nint ok;\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "ok"));
+    EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "gone"));
+    arena_free(a);
+}
+
+TEST(pp, has_include_macro_operand)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define H <string.h>\n#if defined(__has_include) && __has_include(H)\n"
+                            "int a;\n#endif\n");
+    expect_if_taken_has(pp, "a");
+    arena_free(a);
+}
+
+TEST(pp, has_include_next_is_absent)
+{
+    Arena *a = arena_new();
+    Pp *pp =
+        pp_run_text(a, "#if __has_include_next(<ficcinc_zz_none.h>)\nint gone;\n#endif\nint ok;\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "ok"));
+    arena_free(a);
+}

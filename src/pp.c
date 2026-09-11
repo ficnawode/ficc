@@ -1,4 +1,5 @@
 #include "pp.h"
+#include "pp_expr.h"
 
 #include "util/bytebuf.h"
 
@@ -153,6 +154,8 @@ Pp *pp_new(Arena *arena)
     pp->skipping = false;
     pp->pedantic = false;
     pp->nostdinc = false;
+    pp->exe_path = NULL;
+    pp->builtin_dir = NULL;
     pp->has_source_date_epoch = false;
     pp->source_date_epoch = 0;
     pp->error_count = 0;
@@ -183,25 +186,35 @@ static void pp_vdiag(Loc loc, const char *level, const char *fmt, va_list args)
     fputc('\n', stderr);
 }
 
-static void pp_error(Pp *pp, Loc loc, const char *fmt, ...)
+void pp_error(Pp *pp, Loc loc, const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    pp_vdiag(loc, "error", fmt, args);
+    pp_verror(pp, loc, fmt, args);
     va_end(args);
+}
+
+void pp_verror(Pp *pp, Loc loc, const char *fmt, va_list args)
+{
+    pp_vdiag(loc, "error", fmt, args);
     pp->error_count++;
 }
 
-static void pp_warn(Pp *pp, Loc loc, const char *fmt, ...)
+void pp_warn(Pp *pp, Loc loc, const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    pp_vdiag(loc, "warning", fmt, args);
+    pp_vwarn(pp, loc, fmt, args);
     va_end(args);
+}
+
+void pp_vwarn(Pp *pp, Loc loc, const char *fmt, va_list args)
+{
+    pp_vdiag(loc, "warning", fmt, args);
     pp->warning_count++;
 }
 
-static void pp_note(Loc loc, const char *fmt, ...)
+void pp_note(Loc loc, const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
@@ -590,6 +603,7 @@ struct CondFrame
 {
     bool parent_active;
     bool taken;
+    bool ever_taken;
     bool in_else;
 };
 
@@ -610,7 +624,8 @@ static bool pp_is_skipping(Pp *pp)
 static void pp_push_cond(Pp *pp, bool parent_active, bool taken)
 {
     CondFrame *frame = arena_alloc(pp->arena, sizeof(CondFrame), sizeof(void *));
-    *frame = (CondFrame) {.parent_active = parent_active, .taken = taken, .in_else = false};
+    *frame = (CondFrame) {
+        .parent_active = parent_active, .taken = taken, .ever_taken = taken, .in_else = false};
     vec_push(pp->conds, frame);
 }
 
@@ -663,7 +678,8 @@ static void pp_else_directive(Pp *pp, Loc directive_loc)
         return;
     }
     top->in_else = true;
-    top->taken = top->parent_active && !top->taken;
+    top->taken = top->parent_active && !top->ever_taken;
+    top->ever_taken = true;
 }
 
 static void pp_endif_directive(Pp *pp, Loc directive_loc)
@@ -766,9 +782,9 @@ static const char *pp_builtin_dir(Pp *pp)
 /* Resolves a header name. Quoted form tries the including file's directory
    first, then the angle chain. Returns the path or NULL. */
 static const char *pp_include_find(Pp *pp, bool quoted, const char *name,
-                                   const char *including_file)
+                                   const char *including_file, bool next_mode)
 {
-    if (quoted && including_file)
+    if (quoted && !next_mode && including_file)
     {
         const char *cand = pp_path_join(pp, pp_path_dirname(pp, including_file), name);
         if (pp_file_exists(cand))
@@ -777,7 +793,21 @@ static const char *pp_include_find(Pp *pp, bool quoted, const char *name,
         }
     }
 
-    for (size_t i = 0; i < vec_size(pp->include_paths); i++)
+    size_t start = 0;
+    if (next_mode && including_file)
+    {
+        const char *dir = pp_path_dirname(pp, including_file);
+        for (size_t k = 0; k < vec_size(pp->include_paths); k++)
+        {
+            if (strcmp((const char *) vec_get(pp->include_paths, k), dir) == 0)
+            {
+                start = k + 1;
+                break;
+            }
+        }
+    }
+
+    for (size_t i = start; i < vec_size(pp->include_paths); i++)
     {
         const char *cand = pp_path_join(pp, vec_get(pp->include_paths, i), name);
         if (pp_file_exists(cand))
@@ -900,7 +930,7 @@ static void pp_include_directive(Pp *pp, const PpIncludeFrame *frame, size_t sta
                 "extra tokens at end of #include directive");
     }
 
-    const char *path = pp_include_find(pp, quoted, name, frame->file);
+    const char *path = pp_include_find(pp, quoted, name, frame->file, false);
     if (!path)
     {
         pp_error(pp, directive_loc, "include file not found: '%s'", name);
@@ -938,14 +968,14 @@ static bool pp_is_decimal_number(const PpToken *tok)
     return true;
 }
 
-/* Expands the real tokens in [start, end) (used for directive operands). */
-static Vec *pp_expand_operand(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end)
+/* Expands a token vector, dropping trivia from the result. */
+static Vec *pp_expand_vec(Pp *pp, Vec *input)
 {
     TokList *list = NULL;
     TokList **tail = &list;
-    for (size_t i = start; i < end; i++)
+    for (size_t i = 0; i < vec_size(input); i++)
     {
-        PpToken *t = vec_get(frame->tokens, i);
+        PpToken *t = vec_get(input, i);
         if (!pp_is_trivia(t))
         {
             *tail = list_cons(pp->arena, t, NULL);
@@ -962,6 +992,200 @@ static Vec *pp_expand_operand(Pp *pp, const PpIncludeFrame *frame, size_t start,
         }
     }
     return expanded;
+}
+
+/* Expands the real tokens in [start, end) (used for directive operands). */
+static Vec *pp_expand_operand(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end)
+{
+    Vec *raw = vec_new(pp->arena);
+    for (size_t i = start; i < end; i++)
+    {
+        PpToken *t = vec_get(frame->tokens, i);
+        if (!pp_is_trivia(t))
+        {
+            vec_push(raw, t);
+        }
+    }
+    return pp_expand_vec(pp, raw);
+}
+
+static PpToken *pp_cooked_number(Pp *pp, u64 value, Loc loc)
+{
+    PpToken *t = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
+    *t = (PpToken) {.kind = TOK_PP_NUMBER, .loc = loc, .spell = value ? "1" : "0", .len = 1};
+    return t;
+}
+
+/* Reads a header-name at *pos from a token vector: a string literal or angle
+   form. Returns the name (arena text) and advances *pos past it. */
+static const char *pp_header_name_from_vec(Pp *pp, Vec *tokens, size_t *pos, bool *quoted)
+{
+    size_t n = vec_size(tokens);
+    PpToken *t = vec_get(tokens, *pos);
+    ByteBuf name_buf;
+    bytebuf_init(&name_buf, pp->arena);
+
+    if (t->kind == TOK_PP_STRING)
+    {
+        *quoted = true;
+        for (u32 k = 1; k + 1 < t->len; k++)
+        {
+            bytebuf_append(&name_buf, t->spell[k]);
+        }
+        bytebuf_append(&name_buf, '\0');
+        (*pos)++;
+        return (const char *) bytebuf_data(&name_buf);
+    }
+    if (t->kind == TOK_PP_PUNCT && t->punct == PP_PUNCT_LT)
+    {
+        *quoted = false;
+        size_t j = *pos + 1;
+        for (; j < n; j++)
+        {
+            PpToken *u = vec_get(tokens, j);
+            if (u->kind == TOK_PP_PUNCT && u->punct == PP_PUNCT_GT)
+            {
+                break;
+            }
+            for (u32 k = 0; k < u->len; k++)
+            {
+                bytebuf_append(&name_buf, u->spell[k]);
+            }
+        }
+        if (j >= n)
+        {
+            pp_error(pp, t->loc, "missing '>' in __has_include");
+        }
+        else
+        {
+            *pos = j + 1;
+        }
+        bytebuf_append(&name_buf, '\0');
+        return (const char *) bytebuf_data(&name_buf);
+    }
+
+    pp_error(pp, t->loc, "expected a header name in __has_include");
+    return "";
+}
+
+/* Resolves `defined X` and `__has_include(...)` into cooked literals before
+   macro expansion (C11 §6.10.1). */
+static Vec *pp_resolve_controls(Pp *pp, Vec *raw, const PpIncludeFrame *frame)
+{
+    Vec *out = vec_new(pp->arena);
+    size_t n = vec_size(raw);
+    size_t i = 0;
+    while (i < n)
+    {
+        PpToken *t = vec_get(raw, i);
+        if (t->kind == TOK_PP_IDENT && pp_spelling_is(t, "defined"))
+        {
+            i++;
+            bool paren = false;
+            if (i < n && pp_is_lparen(vec_get(raw, i)))
+            {
+                paren = true;
+                i++;
+            }
+            if (i >= n || ((PpToken *) vec_get(raw, i))->kind != TOK_PP_IDENT)
+            {
+                pp_error(pp, t->loc, "operator 'defined' requires an identifier");
+                vec_push(out, pp_cooked_number(pp, 0, t->loc));
+                continue;
+            }
+            PpToken *name = vec_get(raw, i);
+            i++;
+            bool defined = strmap_get(pp->macros, pp_token_name(pp, name)) != NULL ||
+                           pp_spelling_is(name, "__has_include") ||
+                           pp_spelling_is(name, "__has_include_next");
+            if (paren)
+            {
+                if (i < n && pp_is_rparen(vec_get(raw, i)))
+                {
+                    i++;
+                }
+                else
+                {
+                    pp_error(pp, name->loc, "expected ')' after 'defined'");
+                }
+            }
+            vec_push(out, pp_cooked_number(pp, defined ? 1 : 0, t->loc));
+            continue;
+        }
+        if (t->kind == TOK_PP_IDENT &&
+            (pp_spelling_is(t, "__has_include") || pp_spelling_is(t, "__has_include_next")))
+        {
+            bool next = pp_spelling_is(t, "__has_include_next");
+            i++;
+            if (i >= n || !pp_is_lparen(vec_get(raw, i)))
+            {
+                pp_error(pp, t->loc, "expected '(' after __has_include");
+                vec_push(out, pp_cooked_number(pp, 0, t->loc));
+                continue;
+            }
+            i++;
+
+            Vec *operand = vec_new(pp->arena);
+            size_t j = i;
+            while (j < n && !pp_is_rparen(vec_get(raw, j)))
+            {
+                vec_push(operand, vec_get(raw, j));
+                j++;
+            }
+            if (j >= n)
+            {
+                pp_error(pp, t->loc, "missing ')' after __has_include");
+                vec_push(out, pp_cooked_number(pp, 0, t->loc));
+                continue;
+            }
+            i = j + 1;
+
+            Vec *expanded = pp_expand_vec(pp, operand);
+            bool quoted = false;
+            const char *name = "";
+            bool valid = false;
+            if (vec_size(expanded) > 0)
+            {
+                size_t pos = 0;
+                PpToken *e0 = vec_get(expanded, 0);
+                if (e0->kind == TOK_PP_STRING ||
+                    (e0->kind == TOK_PP_PUNCT && e0->punct == PP_PUNCT_LT))
+                {
+                    name = pp_header_name_from_vec(pp, expanded, &pos, &quoted);
+                    valid = pos == vec_size(expanded);
+                }
+            }
+            if (!valid)
+            {
+                pp_error(pp, t->loc, "__has_include requires a single header-name operand");
+            }
+            bool found = valid && pp_include_find(pp, quoted, name, frame ? frame->file : NULL,
+                                                  next) != NULL;
+            vec_push(out, pp_cooked_number(pp, found ? 1 : 0, t->loc));
+            continue;
+        }
+        vec_push(out, t);
+        i++;
+    }
+    return out;
+}
+
+/* Evaluates an #if/#elif controlling expression to a branch truth value. */
+static bool pp_if_condition(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end)
+{
+    Vec *raw = vec_new(pp->arena);
+    for (size_t i = start; i < end; i++)
+    {
+        PpToken *t = vec_get(frame->tokens, i);
+        if (!pp_is_trivia(t))
+        {
+            vec_push(raw, t);
+        }
+    }
+    Vec *resolved = pp_resolve_controls(pp, raw, frame);
+    Vec *expanded = pp_expand_vec(pp, resolved);
+    PpExprVal v = pp_eval_expr(pp, expanded);
+    return v.value != 0;
 }
 
 static const char *pp_render_text(Pp *pp, Vec *tokens)
@@ -1097,11 +1321,34 @@ static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end
     }
     else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "if"))
     {
-        pp_error(pp, directive_loc, "#if is not implemented yet");
+        bool parent_active = pp_branch_active(pp);
+        bool cond = parent_active ? pp_if_condition(pp, frame, i, end) : false;
+        pp_push_cond(pp, parent_active, cond);
     }
     else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "elif"))
     {
-        pp_error(pp, directive_loc, "#elif is not implemented yet");
+        if (vec_size(pp->conds) == 0)
+        {
+            pp_error(pp, directive_loc, "unexpected #elif");
+        }
+        else
+        {
+            CondFrame *top = vec_last(pp->conds);
+            if (top->in_else)
+            {
+                pp_error(pp, directive_loc, "unexpected #elif after #else");
+            }
+            else if (!top->parent_active || top->ever_taken)
+            {
+                top->taken = false;
+            }
+            else
+            {
+                bool cond = pp_if_condition(pp, frame, i, end);
+                top->taken = cond;
+                top->ever_taken = top->taken;
+            }
+        }
     }
     else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "else"))
     {
