@@ -89,6 +89,7 @@ static const Keyword KEYWORDS[] = {
     {"for", TOK_KW_FOR},
     {"goto", TOK_KW_GOTO},
     {"if", TOK_KW_IF},
+    {"inline", TOK_KW_INLINE},
     {"int", TOK_KW_INT},
     {"long", TOK_KW_LONG},
     {"return", TOK_KW_RETURN},

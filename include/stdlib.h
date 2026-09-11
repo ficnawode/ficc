@@ -11,5 +11,6 @@ void exit(int status);
 void abort(void);
 int atoi(const char *nptr);
 int abs(int j);
+char *getenv(const char *name);
 
 #endif

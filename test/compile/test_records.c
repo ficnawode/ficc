@@ -679,11 +679,24 @@ TEST(records, negative_unary_on_record)
 TEST(records, negative_ternary_on_record)
 {
     EXPECT_BUILD_FAIL("struct Pt { int x; };\n"
+                      "struct Q { int x; };\n"
                       "int main(void) {\n"
                       "    struct Pt a;\n"
-                      "    struct Pt b;\n"
+                      "    struct Q b;\n"
                       "    return (1 ? a : b).x;\n"
                       "}\n");
+}
+
+TEST(records, ternary_same_record_ok)
+{
+    EXPECT_INTERP_AND_ELF("struct Pt { int x; int y; };\n"
+                          "int main(int argc, char **argv) {\n"
+                          "    struct Pt a = {1, 2};\n"
+                          "    struct Pt b = {3, 4};\n"
+                          "    struct Pt c = argc > 1 ? a : b;\n"
+                          "    return c.x * 10 + c.y;\n"
+                          "}\n",
+                          34);
 }
 
 TEST(records, negative_record_init_scalar)

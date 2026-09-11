@@ -9,6 +9,12 @@ extern FILE *stdin;
 extern FILE *stdout;
 extern FILE *stderr;
 
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+#define EOF (-1)
+
 int printf(const char *format, ...);
 int fprintf(FILE *stream, const char *format, ...);
 int snprintf(char *str, size_t size, const char *format, ...);
@@ -18,6 +24,7 @@ int vfprintf(FILE *stream, const char *format, va_list ap);
 int puts(const char *s);
 int fputs(const char *s, FILE *stream);
 int putchar(int c);
+int fputc(int c, FILE *stream);
 void perror(const char *s);
 FILE *fopen(const char *path, const char *mode);
 int fclose(FILE *stream);

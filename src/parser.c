@@ -712,6 +712,12 @@ static bool parse_qualifiers(Parser *p, bool *has_const, u32 *alignas)
 static Specs parse_decl_specifiers(Parser *p)
 {
     Specs s = {0};
+    /* Function specifiers (§6.7.4): `inline` is accepted and ignored — ficc has
+       no inlining pass, so it is a no-op hint like `register`. */
+    while (peek_token(p)->kind == TOK_KW_INLINE)
+    {
+        next_token(p);
+    }
     bool lead_const = false;
     if (!parse_qualifiers(p, &lead_const, &s.alignas))
     {
@@ -1064,12 +1070,13 @@ static Type *parse_array_suffix(Parser *p, Type *type)
         if (peek_token(p)->kind != TOK_RBRACKET)
         {
             ASTNode *size_expr = parse_assign(p);
-            if (!size_expr || size_expr->kind != AST_INT_LITERAL)
+            i64 folded;
+            if (!size_expr || !folded_const(p, size_expr, &folded))
             {
                 parse_error(p, "array size must be an integer constant");
                 return NULL;
             }
-            len = (u64) ast_as(ASTIntLiteral, size_expr)->value;
+            len = (u64) folded;
         }
         expect_token(p, TOK_RBRACKET, "]");
         if (ndim == MAX_ARRAY_DIM)
@@ -2385,7 +2392,8 @@ static Designator *parse_designators(Parser *p)
         {
             next_token(p);
             ASTNode *idx = parse_assign(p);
-            if (!idx || idx->kind != AST_INT_LITERAL)
+            i64 folded;
+            if (!idx || !folded_const(p, idx, &folded))
             {
                 parse_error(p, "array designator index must be an integer constant");
                 return NULL;
@@ -2395,7 +2403,7 @@ static Designator *parse_designators(Parser *p)
                 return NULL;
             }
             d->kind = ND_INDEX;
-            d->index = ast_as(ASTIntLiteral, idx)->value;
+            d->index = folded;
             d->field = NULL;
         }
         *tail = d;

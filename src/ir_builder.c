@@ -568,11 +568,47 @@ static ExprResult build_ternary_expr(FuncBuilder *ctx, ASTTernaryExpr *te, IrBlo
 {
     ExprResult cond = build_expr(ctx, te->cond, bb);
 
+    Type *tern_type = node_type((ASTNode *) te);
+    bool mem_tern = type_is_memory(tern_type);
+
     IrBlock *then_bb = new_block(ctx->f, "tern_then");
     IrBlock *else_bb = new_block(ctx->f, "tern_else");
     IrBlock *merge_bb = new_block(ctx->f, "tern_merge");
 
+    i64 mem_dst = NO_VREG;
+    if (mem_tern)
+    {
+        /* A record/array result is a memory object (§6.5.15): copy the
+           selected branch's value into a temp slot and yield its address,
+           like the other memory-typed rvalues in this IR. The slot must be
+           allocated before the branch so every edge can reference it. */
+        mem_dst = alloc_vreg_from_type(ctx, type_ptr(tern_type));
+        ir_emit_alloca(cond.block, (u32) mem_dst, tern_type->size);
+    }
+
     cond_jump(cond.block, cond.value, then_bb, else_bb);
+
+    if (mem_tern)
+    {
+        ExprResult then_val = build_expr(ctx, te->then_expr, then_bb);
+        if (!is_terminated(then_val.block))
+        {
+            ir_emit_memcpy(then_val.block, ir_operand_vreg((u32) mem_dst), then_val.value,
+                           tern_type->size);
+            jump(then_val.block, merge_bb);
+        }
+
+        ExprResult else_val = build_expr(ctx, te->else_expr, else_bb);
+        if (!is_terminated(else_val.block))
+        {
+            ir_emit_memcpy(else_val.block, ir_operand_vreg((u32) mem_dst), else_val.value,
+                           tern_type->size);
+            jump(else_val.block, merge_bb);
+        }
+
+        seal_block(ctx, merge_bb);
+        return expr_result(ir_operand_vreg((u32) mem_dst), merge_bb);
+    }
 
     ExprResult then_val = build_expr(ctx, te->then_expr, then_bb);
     if (!is_terminated(then_val.block))
@@ -586,7 +622,6 @@ static ExprResult build_ternary_expr(FuncBuilder *ctx, ASTTernaryExpr *te, IrBlo
         jump(else_val.block, merge_bb);
     }
 
-    Type *tern_type = node_type((ASTNode *) te);
     u32 dst = alloc_vreg_from_type(ctx, tern_type);
     IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, then_val.value, then_val.block);
@@ -1002,6 +1037,19 @@ static ArithResult lower_arith_into(FuncBuilder *ctx, ArithSpec spec, IrOperand 
         u32 gep_vreg = alloc_vreg_from_type(ctx, spec.lt);
         ir_emit_gep(bb, gep_vreg, lhs, rhs, elem->size);
         ar.value = ir_operand_vreg(gep_vreg);
+        return ar;
+    }
+    if (spec.op == BIN_SUB && type_is_ptr(spec.lt) && type_is_ptr(spec.rt))
+    {
+        /* §6.5.6p9: subtracting two pointers yields the element distance as
+           ptrdiff_t (long): (lhs - rhs) / sizeof(elem). */
+        Type *elem = type_deref(spec.lt);
+        u32 diff_vreg = alloc_vreg_from_type(ctx, type_long());
+        ir_emit_binop(bb, OP_SUB, diff_vreg, lval, rval);
+        u32 quot_vreg = alloc_vreg_from_type(ctx, type_long());
+        ir_emit_binop(bb, OP_SDIV, quot_vreg, ir_operand_vreg(diff_vreg),
+                      ir_operand_imm((i64) elem->size));
+        ar.value = ir_operand_vreg(quot_vreg);
         return ar;
     }
 
@@ -1972,8 +2020,17 @@ static IrBlock *emit_init_plan(FuncBuilder *ctx, IrBlock *bb, IrOperand base, In
         {
             ExprResult val = build_expr(ctx, w->value, bb);
             bb = val.block;
-            IrOperand o = promote_to(ctx, bb, val.value, node_type(w->value), w->type);
-            ir_emit_store(bb, o, ir_operand_vreg(addr), w->type->size);
+            if (type_is_record(w->type))
+            {
+                /* Whole-object copy of a record-valued subobject (§6.7.9p13):
+                   record rvalues are addresses in this IR, so move by value. */
+                ir_emit_memcpy(bb, ir_operand_vreg(addr), val.value, w->type->size);
+            }
+            else
+            {
+                IrOperand o = promote_to(ctx, bb, val.value, node_type(w->value), w->type);
+                ir_emit_store(bb, o, ir_operand_vreg(addr), w->type->size);
+            }
         }
     }
     return bb;

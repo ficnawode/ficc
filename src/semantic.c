@@ -314,9 +314,24 @@ static Type *value_op_result(BinOpKind op, Type *lt, Type *rt)
     {
         return type_int();
     }
+    if (type_is_ptr(lt) && type_is_ptr(rt))
+    {
+        /* §6.5.6p9: subtracting two pointers yields ptrdiff_t (long on LP64).
+           Every other pointer-`op`-pointer arithmetic is ill-formed. */
+        return op == BIN_SUB ? type_long() : NULL;
+    }
     if (type_is_ptr(lt) && (op == BIN_ADD || op == BIN_SUB) && !type_is_ptr(rt))
     {
         return lt;
+    }
+    if (type_is_ptr(rt) && op == BIN_ADD && !type_is_ptr(lt))
+    {
+        /* §6.5.6p7: pointer + integer (and the commutative integer + pointer). */
+        return rt;
+    }
+    if (type_is_ptr(lt) || type_is_ptr(rt))
+    {
+        return NULL;
     }
     return type_common(type_promote(lt), type_promote(rt));
 }
@@ -362,6 +377,10 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     else
     {
         result = value_op_result(op, type_rvalue(lt), type_rvalue(rt));
+        if (!result)
+        {
+            return sem_error(ctx, binary_expr->base.loc, "invalid operands to operator");
+        }
     }
     if (!result)
     {
@@ -1477,6 +1496,24 @@ static bool plan_elem(SemanticCtx *ctx, InitPlan *plan, Type *t, InitElem *e, u3
         cursor_advance(stack);
         return true;
     }
+    /* Whole-object copy (§6.7.9p13): a record-typed value initializes the whole
+       subobject it designates, matching the `struct T t = s;` and `(struct T){...}`
+       forms already handled at the declaration level. The clause must not be
+       brace-elided into per-member writes. */
+    if (!check_expr(e->value, ctx) || !check_value_used(e->value, ctx))
+    {
+        return false;
+    }
+    if (type_is_record(type_rvalue(e->value->expr_type)))
+    {
+        if (!type_assignable(cty, e->value->expr_type))
+        {
+            return sem_error(ctx, e->loc, "incompatible type in initializer (target type differs)");
+        }
+        plan_new_write(ctx, plan, coff, cty, e->value, false);
+        cursor_advance(stack);
+        return true;
+    }
     /* Scalar clause with brace elision: drill to the leaf subobject. */
     while (is_aggregate_type(cty))
     {
@@ -2122,7 +2159,18 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     Type *te = type_decay(type_rvalue(ternary->else_expr->expr_type));
     if (type_is_record(tt) || type_is_record(te))
     {
-        return sem_error(ctx, ternary->base.loc, "conditional operator on record type");
+        /* §6.5.15p5: a conditional on two operands of the same compatible
+           structure/union type is valid and selects one operand by value.
+           Same-tag records are interned to one Type, so unqualified pointer
+           equality is the compatibility check (anonymous records are distinct
+           types by §6.7.2.1p7). */
+        if (type_is_record(tt) && type_is_record(te) && type_unqual(tt) == type_unqual(te))
+        {
+            ternary->base.expr_type = type_rvalue(tt);
+            return true;
+        }
+        return sem_error(ctx, ternary->base.loc,
+                         "conditional operator on incompatible record types");
     }
     if (type_is_ptr(tt) || type_is_ptr(te))
     {
