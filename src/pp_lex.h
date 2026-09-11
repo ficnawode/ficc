@@ -28,60 +28,66 @@ typedef enum
 #undef PP_ENUM_ENTRY
 } PpKind;
 
-/* Punctuator identity (C11 §6.4.6), resolved from its spelling at scan time
-   so neither the pp nor the finalizer re-matches spellings. Digraphs map to
-   their primary's id. PP_PUNCT_NONE is the default for non-punctuators. */
+/* Punctuator identity and spelling (C11 §6.4.6), resolved from the spelling
+   at scan time so neither the pp nor the finalizer re-matches spellings. The
+   digraphs (§6.4.6.3) map to their primary's id; they can't be entries here
+   (one entry = one enum member) and so live in the scan table directly. */
+#define PP_PUNCTS(X)                                                                               \
+    X(PP_PUNCT_HASH, "#")                                                                          \
+    X(PP_PUNCT_HASHHASH, "##")                                                                     \
+    X(PP_PUNCT_LBRACKET, "[")                                                                      \
+    X(PP_PUNCT_RBRACKET, "]")                                                                      \
+    X(PP_PUNCT_LPAREN, "(")                                                                        \
+    X(PP_PUNCT_RPAREN, ")")                                                                        \
+    X(PP_PUNCT_LBRACE, "{")                                                                        \
+    X(PP_PUNCT_RBRACE, "}")                                                                        \
+    X(PP_PUNCT_DOT, ".")                                                                           \
+    X(PP_PUNCT_ELLIPSIS, "...")                                                                    \
+    X(PP_PUNCT_ARROW, "->")                                                                        \
+    X(PP_PUNCT_PLUS, "+")                                                                          \
+    X(PP_PUNCT_PLUS_PLUS, "++")                                                                    \
+    X(PP_PUNCT_PLUS_ASSIGN, "+=")                                                                  \
+    X(PP_PUNCT_MINUS, "-")                                                                         \
+    X(PP_PUNCT_MINUS_MINUS, "--")                                                                  \
+    X(PP_PUNCT_MINUS_ASSIGN, "-=")                                                                 \
+    X(PP_PUNCT_STAR, "*")                                                                          \
+    X(PP_PUNCT_STAR_ASSIGN, "*=")                                                                  \
+    X(PP_PUNCT_SLASH, "/")                                                                         \
+    X(PP_PUNCT_SLASH_ASSIGN, "/=")                                                                 \
+    X(PP_PUNCT_PERCENT, "%")                                                                       \
+    X(PP_PUNCT_PERCENT_ASSIGN, "%=")                                                               \
+    X(PP_PUNCT_TILDE, "~")                                                                         \
+    X(PP_PUNCT_BANG, "!")                                                                          \
+    X(PP_PUNCT_NE, "!=")                                                                           \
+    X(PP_PUNCT_ASSIGN, "=")                                                                        \
+    X(PP_PUNCT_EQ, "==")                                                                           \
+    X(PP_PUNCT_LT, "<")                                                                            \
+    X(PP_PUNCT_GT, ">")                                                                            \
+    X(PP_PUNCT_LE, "<=")                                                                           \
+    X(PP_PUNCT_GE, ">=")                                                                           \
+    X(PP_PUNCT_SHL, "<<")                                                                          \
+    X(PP_PUNCT_SHR, ">>")                                                                          \
+    X(PP_PUNCT_SHL_ASSIGN, "<<=")                                                                  \
+    X(PP_PUNCT_SHR_ASSIGN, ">>=")                                                                  \
+    X(PP_PUNCT_AMP, "&")                                                                           \
+    X(PP_PUNCT_AMP_ASSIGN, "&=")                                                                   \
+    X(PP_PUNCT_ANDAND, "&&")                                                                       \
+    X(PP_PUNCT_CARET, "^")                                                                         \
+    X(PP_PUNCT_CARET_ASSIGN, "^=")                                                                 \
+    X(PP_PUNCT_PIPE, "|")                                                                          \
+    X(PP_PUNCT_PIPE_ASSIGN, "|=")                                                                  \
+    X(PP_PUNCT_OROR, "||")                                                                         \
+    X(PP_PUNCT_QUESTION, "?")                                                                      \
+    X(PP_PUNCT_COLON, ":")                                                                         \
+    X(PP_PUNCT_SEMI, ";")                                                                          \
+    X(PP_PUNCT_COMMA, ",")
+
 typedef enum
 {
     PP_PUNCT_NONE,
-    PP_PUNCT_HASH,
-    PP_PUNCT_HASHHASH,
-    PP_PUNCT_LBRACKET,
-    PP_PUNCT_RBRACKET,
-    PP_PUNCT_LPAREN,
-    PP_PUNCT_RPAREN,
-    PP_PUNCT_LBRACE,
-    PP_PUNCT_RBRACE,
-    PP_PUNCT_DOT,
-    PP_PUNCT_ELLIPSIS,
-    PP_PUNCT_ARROW,
-    PP_PUNCT_PLUS,
-    PP_PUNCT_PLUS_PLUS,
-    PP_PUNCT_PLUS_ASSIGN,
-    PP_PUNCT_MINUS,
-    PP_PUNCT_MINUS_MINUS,
-    PP_PUNCT_MINUS_ASSIGN,
-    PP_PUNCT_STAR,
-    PP_PUNCT_STAR_ASSIGN,
-    PP_PUNCT_SLASH,
-    PP_PUNCT_SLASH_ASSIGN,
-    PP_PUNCT_PERCENT,
-    PP_PUNCT_PERCENT_ASSIGN,
-    PP_PUNCT_TILDE,
-    PP_PUNCT_BANG,
-    PP_PUNCT_NE,
-    PP_PUNCT_ASSIGN,
-    PP_PUNCT_EQ,
-    PP_PUNCT_LT,
-    PP_PUNCT_GT,
-    PP_PUNCT_LE,
-    PP_PUNCT_GE,
-    PP_PUNCT_SHL,
-    PP_PUNCT_SHR,
-    PP_PUNCT_SHL_ASSIGN,
-    PP_PUNCT_SHR_ASSIGN,
-    PP_PUNCT_AMP,
-    PP_PUNCT_AMP_ASSIGN,
-    PP_PUNCT_ANDAND,
-    PP_PUNCT_CARET,
-    PP_PUNCT_CARET_ASSIGN,
-    PP_PUNCT_PIPE,
-    PP_PUNCT_PIPE_ASSIGN,
-    PP_PUNCT_OROR,
-    PP_PUNCT_QUESTION,
-    PP_PUNCT_COLON,
-    PP_PUNCT_SEMI,
-    PP_PUNCT_COMMA,
+#define PP_PUNCT_ENUM_ENTRY(K, S) K,
+    PP_PUNCTS(PP_PUNCT_ENUM_ENTRY)
+#undef PP_PUNCT_ENUM_ENTRY
 } PpPunct;
 
 typedef struct Hideset Hideset;

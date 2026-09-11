@@ -189,77 +189,34 @@ struct PpPunctSpelling
     PpPunct punct;
 };
 
-/* Longest-first for max munch (C11 §6.4.6, digraphs map to their primary's
-   id). */
-static const PpPunctSpelling PP_PUNCTS[] = {
-    {"%:%:", PP_PUNCT_HASHHASH},
-    {"...", PP_PUNCT_ELLIPSIS},
-    {"<<=", PP_PUNCT_SHL_ASSIGN},
-    {">>=", PP_PUNCT_SHR_ASSIGN},
-    {"->", PP_PUNCT_ARROW},
-    {"++", PP_PUNCT_PLUS_PLUS},
-    {"--", PP_PUNCT_MINUS_MINUS},
-    {"<<", PP_PUNCT_SHL},
-    {">>", PP_PUNCT_SHR},
-    {"<=", PP_PUNCT_LE},
-    {">=", PP_PUNCT_GE},
-    {"==", PP_PUNCT_EQ},
-    {"!=", PP_PUNCT_NE},
-    {"&&", PP_PUNCT_ANDAND},
-    {"||", PP_PUNCT_OROR},
-    {"*=", PP_PUNCT_STAR_ASSIGN},
-    {"/=", PP_PUNCT_SLASH_ASSIGN},
-    {"%=", PP_PUNCT_PERCENT_ASSIGN},
-    {"+=", PP_PUNCT_PLUS_ASSIGN},
-    {"-=", PP_PUNCT_MINUS_ASSIGN},
-    {"&=", PP_PUNCT_AMP_ASSIGN},
-    {"^=", PP_PUNCT_CARET_ASSIGN},
-    {"|=", PP_PUNCT_PIPE_ASSIGN},
-    {"##", PP_PUNCT_HASHHASH},
+/* Every input spelling: the primary puncts from PP_PUNCTS plus the digraphs
+   (C11 §6.4.6.3), which map to their primary's id. Order is irrelevant —
+   pp_punct_match takes the longest match. */
+static const PpPunctSpelling PP_PUNCT_TABLE[] = {
+#define PP_TABLE_ENTRY(KIND, SPELLING) {SPELLING, KIND},
+    PP_PUNCTS(PP_TABLE_ENTRY)
+#undef PP_TABLE_ENTRY
+        {"%:%:", PP_PUNCT_HASHHASH},
     {"<:", PP_PUNCT_LBRACKET},
     {":>", PP_PUNCT_RBRACKET},
     {"<%", PP_PUNCT_LBRACE},
     {"%>", PP_PUNCT_RBRACE},
     {"%:", PP_PUNCT_HASH},
-    {"[", PP_PUNCT_LBRACKET},
-    {"]", PP_PUNCT_RBRACKET},
-    {"(", PP_PUNCT_LPAREN},
-    {")", PP_PUNCT_RPAREN},
-    {"{", PP_PUNCT_LBRACE},
-    {"}", PP_PUNCT_RBRACE},
-    {".", PP_PUNCT_DOT},
-    {"&", PP_PUNCT_AMP},
-    {"*", PP_PUNCT_STAR},
-    {"+", PP_PUNCT_PLUS},
-    {"-", PP_PUNCT_MINUS},
-    {"~", PP_PUNCT_TILDE},
-    {"!", PP_PUNCT_BANG},
-    {"/", PP_PUNCT_SLASH},
-    {"%", PP_PUNCT_PERCENT},
-    {"<", PP_PUNCT_LT},
-    {">", PP_PUNCT_GT},
-    {"^", PP_PUNCT_CARET},
-    {"|", PP_PUNCT_PIPE},
-    {"?", PP_PUNCT_QUESTION},
-    {":", PP_PUNCT_COLON},
-    {";", PP_PUNCT_SEMI},
-    {"=", PP_PUNCT_ASSIGN},
-    {",", PP_PUNCT_COMMA},
-    {"#", PP_PUNCT_HASH},
 };
 
 static u32 pp_punct_match(const char *p, PpPunct *out)
 {
-    for (size_t i = 0; i < sizeof(PP_PUNCTS) / sizeof(PP_PUNCTS[0]); i++)
+    u32 best_len = 0;
+    for (size_t i = 0; i < sizeof(PP_PUNCT_TABLE) / sizeof(PP_PUNCT_TABLE[0]); i++)
     {
-        size_t len = strlen(PP_PUNCTS[i].spelling);
-        if (strncmp(p, PP_PUNCTS[i].spelling, len) == 0)
+        size_t len = strlen(PP_PUNCT_TABLE[i].spelling);
+        if (len > best_len && strncmp(p, PP_PUNCT_TABLE[i].spelling, len) == 0)
         {
-            *out = PP_PUNCTS[i].punct;
-            return (u32) len;
+            *out = PP_PUNCT_TABLE[i].punct;
+            best_len = (u32) len;
         }
     }
-    return 0;
+    return best_len;
 }
 
 /* Joining a then b reads as one punctuator when the concatenation itself is
@@ -276,9 +233,9 @@ bool pp_concat_is_punct(const char *a, size_t alen, const char *b, size_t blen)
     memcpy(buf, a, alen);
     memcpy(buf + alen, b, blen);
     buf[alen + blen] = '\0';
-    for (size_t i = 0; i < sizeof(PP_PUNCTS) / sizeof(PP_PUNCTS[0]); i++)
+    for (size_t i = 0; i < sizeof(PP_PUNCT_TABLE) / sizeof(PP_PUNCT_TABLE[0]); i++)
     {
-        const char *spelling = PP_PUNCTS[i].spelling;
+        const char *spelling = PP_PUNCT_TABLE[i].spelling;
         if (strcmp(spelling, buf) == 0)
         {
             return true;
