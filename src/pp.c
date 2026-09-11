@@ -850,10 +850,14 @@ static void pp_include_file(Pp *pp, const char *path)
     pp_push_include(pp, path, tokens);
 }
 
-/* `#include` operand is read contextually: `<...>` from punct tokens or a
-   `"..."` string literal. */
+/* `#include` operand: a literal `"..."`/`<...>` header-name, or macro
+   operands that expand to one (`#include H`). */
+static const char *pp_string_content(Pp *pp, const PpToken *tok);
+static Vec *pp_expand_vec(Pp *pp, Vec *input);
+static const char *pp_header_name_from_vec(Pp *pp, Vec *tokens, size_t *pos, bool *quoted);
+
 static void pp_include_directive(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
-                                 Loc directive_loc)
+                                 Loc directive_loc, bool next_mode)
 {
     size_t i = start;
     while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
@@ -868,11 +872,12 @@ static void pp_include_directive(Pp *pp, const PpIncludeFrame *frame, size_t sta
 
     PpToken *first = vec_get(frame->tokens, i);
     bool quoted = false;
-    ByteBuf name_buf;
-    bytebuf_init(&name_buf, pp->arena);
+    const char *name = "";
 
     if (first->kind == TOK_PP_PUNCT && first->punct == PP_PUNCT_LT)
     {
+        ByteBuf name_buf;
+        bytebuf_init(&name_buf, pp->arena);
         size_t j = i + 1;
         for (; j < end; j++)
         {
@@ -900,25 +905,46 @@ static void pp_include_directive(Pp *pp, const PpIncludeFrame *frame, size_t sta
             pp_error(pp, first->loc, "missing '>' in #include");
             return;
         }
+        bytebuf_append(&name_buf, '\0');
+        name = (const char *) bytebuf_data(&name_buf);
         i = j + 1;
     }
     else if (first->kind == TOK_PP_STRING)
     {
         quoted = true;
-        for (u32 k = 1; k + 1 < first->len; k++)
-        {
-            bytebuf_append(&name_buf, first->spell[k]);
-        }
+        name = pp_string_content(pp, first);
         i++;
     }
     else
     {
-        pp_error(pp, first->loc, "expected a header name after #include");
-        return;
+        Vec *raw = vec_new(pp->arena);
+        for (size_t k = i; k < end; k++)
+        {
+            PpToken *t = vec_get(frame->tokens, k);
+            if (!pp_is_trivia(t))
+            {
+                vec_push(raw, t);
+            }
+        }
+        Vec *expanded = pp_expand_vec(pp, raw);
+        if (vec_size(expanded) == 0)
+        {
+            pp_error(pp, first->loc, "expected a header name after #include");
+            return;
+        }
+        size_t pos = 0;
+        PpToken *e0 = vec_get(expanded, 0);
+        if (e0->kind == TOK_PP_STRING || (e0->kind == TOK_PP_PUNCT && e0->punct == PP_PUNCT_LT))
+        {
+            name = pp_header_name_from_vec(pp, expanded, &pos, &quoted);
+        }
+        if (pos != vec_size(expanded))
+        {
+            pp_error(pp, first->loc, "#include operand does not expand to a single header name");
+            return;
+        }
+        i = end;
     }
-
-    bytebuf_append(&name_buf, '\0');
-    const char *name = (const char *) bytebuf_data(&name_buf);
 
     while (i < end && pp_is_trivia(vec_get(frame->tokens, i)))
     {
@@ -930,10 +956,12 @@ static void pp_include_directive(Pp *pp, const PpIncludeFrame *frame, size_t sta
                 "extra tokens at end of #include directive");
     }
 
-    const char *path = pp_include_find(pp, quoted, name, frame->file, false);
+    const char *path = pp_include_find(pp, quoted, name, frame->file, next_mode);
     if (!path)
     {
-        pp_error(pp, directive_loc, "include file not found: '%s'", name);
+        pp_error(pp, directive_loc,
+                 next_mode ? "no such #include_next file: '%s'" : "include file not found: '%s'",
+                 name);
         return;
     }
     pp_include_file(pp, path);
@@ -1364,11 +1392,11 @@ static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end
     }
     else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "include"))
     {
-        pp_include_directive(pp, frame, i, end, directive_loc);
+        pp_include_directive(pp, frame, i, end, directive_loc, false);
     }
     else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "include_next"))
     {
-        pp_error(pp, directive_loc, "#include_next is not implemented yet");
+        pp_include_directive(pp, frame, i, end, directive_loc, true);
     }
     else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "define"))
     {

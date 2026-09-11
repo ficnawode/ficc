@@ -3,6 +3,7 @@
 #include "util/arena.h"
 
 #include <stdio.h>
+#include <sys/stat.h>
 
 static Pp *pp_run_text(Arena *a, const char *src)
 {
@@ -35,6 +36,23 @@ static const char *pp_test_path(Arena *a, const char *name)
 {
     char buf[160];
     snprintf(buf, sizeof(buf), "/tmp/%s", name);
+    char *copy = arena_alloc(a, strlen(buf) + 1, 1);
+    strcpy(copy, buf);
+    return copy;
+}
+
+static void pp_test_write_at(const char *path, const char *content)
+{
+    FILE *f = fopen(path, "w");
+    fputs(content, f);
+    fclose(f);
+}
+
+static const char *pp_test_mkdir(Arena *a, const char *tag)
+{
+    char buf[120];
+    snprintf(buf, sizeof(buf), "/tmp/ppnext_%u_%s", pp_inc_seq++, tag);
+    mkdir(buf, 0700);
     char *copy = arena_alloc(a, strlen(buf) + 1, 1);
     strcpy(copy, buf);
     return copy;
@@ -1334,5 +1352,65 @@ TEST(pp, has_include_next_is_absent)
         pp_run_text(a, "#if __has_include_next(<ficcinc_zz_none.h>)\nint gone;\n#endif\nint ok;\n");
     EXPECT_EQ(pp->error_count, 0);
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "ok"));
+    arena_free(a);
+}
+
+TEST(pp, include_macro_operand_expands)
+{
+    Arena *a = arena_new();
+    const char *angle = pp_test_name(a, "macro.h");
+    pp_test_write(angle, "#define FROM_ANGLE 33\n");
+    char asrc[220];
+    snprintf(asrc, sizeof(asrc), "#define H <%s>\n#include H\nint v = FROM_ANGLE;\n", angle);
+    Pp *pp = pp_new(a);
+    vec_push(pp->include_paths, (void *) "/tmp");
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", asrc));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "33"));
+    arena_free(a);
+}
+
+TEST(pp, include_quoted_macro_operand)
+{
+    Arena *a = arena_new();
+    const char *qh = pp_test_name(a, "q.h");
+    pp_test_write(qh, "#define FROM_Q 44\n");
+    const char *main = pp_test_name(a, "main.c");
+    char qsrc[220];
+    snprintf(qsrc, sizeof(qsrc), "#define Q \"%s\"\n#include Q\nint v = FROM_Q;\n", qh);
+    Pp *pp = pp_new(a);
+    EXPECT_NOTNULL(pp_preprocess(pp, pp_test_path(a, main), qsrc));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "44"));
+    arena_free(a);
+}
+
+TEST(pp, include_operand_not_single_header_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#define BAD foo bar\n#include BAD\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, include_next_finds_later_dir)
+{
+    Arena *a = arena_new();
+    const char *d1 = pp_test_mkdir(a, "d1");
+    const char *d2 = pp_test_mkdir(a, "d2");
+    char path1[160], path2[160];
+    snprintf(path1, sizeof(path1), "%s/a.h", d1);
+    snprintf(path2, sizeof(path2), "%s/a.h", d2);
+    pp_test_write_at(path1, "#define FIRST 1\n#include_next <a.h>\n");
+    pp_test_write_at(path2, "#define SECOND 2\n");
+
+    Pp *pp = pp_new(a);
+    vec_push(pp->include_paths, (void *) d1);
+    vec_push(pp->include_paths, (void *) d2);
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "#include <a.h>\nint v = FIRST + SECOND;\n"));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "1"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "2"));
     arena_free(a);
 }
