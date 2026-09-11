@@ -1556,6 +1556,15 @@ TEST(pp, pragma_operator_once)
     arena_free(a);
 }
 
+TEST(pp, pragma_operator_once_in_main_file_warns)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "_Pragma(\"once\")\nint ok;\n");
+    EXPECT_EQ(pp->warning_count, 1);
+    EXPECT_EQ(pp->error_count, 0);
+    arena_free(a);
+}
+
 TEST(pp, pragma_operator_once_via_macro)
 {
     Arena *a = arena_new();
@@ -1570,12 +1579,11 @@ TEST(pp, pragma_operator_once_via_macro)
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "7"));
     arena_free(a);
 }
-
-TEST(pp, pragma_operator_decode_escapes)
+TEST(pp, pragma_operator_escapes_not_decoded)
 {
     Arena *a = arena_new();
     Pp *pp = pp_new(a);
-    EXPECT_NULL(pp_preprocess(pp, "<test>", "_Pragma(\"GCC\\x20poison\\x20ze\")\nint ze;\n"));
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "_Pragma(\"GCC poison \\x70p\")\nint a = pp;\n"));
     EXPECT_EQ(pp->error_count, 1);
     arena_free(a);
 }
@@ -1584,8 +1592,7 @@ TEST(pp, pragma_operator_escaped_quote_operand)
 {
     Arena *a = arena_new();
     Pp *pp = pp_run_text(a, "_Pragma(\"GCC poison \\\"a\\\"\")\nint ok;\n");
-    EXPECT_EQ(pp->error_count, 0);
-    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "ok"));
+    EXPECT_EQ(pp->error_count, 1);
     arena_free(a);
 }
 

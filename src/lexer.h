@@ -143,8 +143,7 @@ const char *token_kind_name(TokenKind kind);
 /* Decodes one escape sequence (the leading backslash is already consumed);
    end bounds the spelling, or is NULL for NUL-terminated input. Returns the
    byte (numeric escapes accumulate greedily and may exceed 0xFF), or -1 on a
-   hex escape with no digits. Shared by the string lexers and the pp
-   destringizer for `_Pragma`. */
+   hex escape with no digits. Shared by the two string-value decoders. */
 int lex_escape_byte(const char **pp, const char *end);
 
 #endif

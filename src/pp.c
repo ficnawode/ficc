@@ -1104,6 +1104,10 @@ static void pp_pragma_directive(Pp *pp, PpIncludeFrame *frame, size_t start, siz
     if (n == 1 && t0->kind == TOK_PP_IDENT && pp_spelling_is(t0, "once"))
     {
         pp_gnu_warn(pp, t0->loc, "#pragma once");
+        if (vec_size(pp->includes) == 1)
+        {
+            pp_warn(pp, t0->loc, "'#pragma once' in main file");
+        }
         if (frame->file)
         {
             hashset_add(pp->pragma_once, (void *) frame->file);
@@ -1126,10 +1130,12 @@ static void pp_pragma_directive(Pp *pp, PpIncludeFrame *frame, size_t start, siz
             for (size_t i = 2; i < n; i++)
             {
                 PpToken *p = vec_get(tokens, i);
-                if (p->kind == TOK_PP_IDENT)
+                if (p->kind != TOK_PP_IDENT)
                 {
-                    hashset_add(pp->poison, (void *) pp_token_name(pp, p));
+                    pp_error(pp, p->loc, "invalid '#pragma GCC poison' directive");
+                    return;
                 }
+                hashset_add(pp->poison, (void *) pp_token_name(pp, p));
             }
             return;
         }
@@ -2018,9 +2024,11 @@ static TokList *pp_subst(Pp *pp, Macro *macro, const SubstArgs *sa)
 
 static Vec *pp_prescan_args(Pp *pp, Vec *args);
 
-/* Deletes the L/u8/u/U prefix and quotes from a string-literal token and
-   decodes its escapes (C11 §6.10.9.1); returns an arena NUL-terminated
-   buffer, or NULL after reporting a diagnostic. */
+/* Deletes the L/u8/u/U prefix and quotes from a string-literal token, keeping
+   the raw bytes between the quotes and unescaping only `\"` (the rule gcc and
+   clang actually implement for `_Pragma`, despite C11 §6.10.9's escape
+   decoding). Returns an arena NUL-terminated buffer, or NULL after reporting a
+   diagnostic. */
 static const char *pp_destringize(Pp *pp, const PpToken *str)
 {
     const char *p = str->spell;
@@ -2040,16 +2048,10 @@ static const char *pp_destringize(Pp *pp, const PpToken *str)
     bytebuf_init(&buf, pp->arena);
     while (p < tail)
     {
-        if (*p == '\\')
+        if (*p == '\\' && p + 1 < tail && p[1] == '"')
         {
-            p++;
-            int val = lex_escape_byte(&p, tail);
-            if (val < 0)
-            {
-                pp_error(pp, str->loc, "hexadecimal escape sequence with no digits");
-                return NULL;
-            }
-            bytebuf_append(&buf, (u8) val);
+            p += 2;
+            bytebuf_append(&buf, '"');
         }
         else
         {
