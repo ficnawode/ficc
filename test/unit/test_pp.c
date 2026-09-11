@@ -1805,7 +1805,7 @@ TEST(pp, emit_markers)
     Arena *a = arena_new();
     Pp *pp = pp_run_text(a, "#define X 1\nint ok = X;\n#line 100 \"renamed.c\"\nint later;\n");
     char *got = pp_emit_str(pp, (PpEmitOptions) {0});
-    EXPECT_STR_EQ("# 2 \"<test>\"\nint ok = 1;\n# 100 \"renamed.c\"\nint later;\n", got);
+    EXPECT_STR_EQ("#line 2 \"<test>\"\nint ok = 1;\n#line 100 \"renamed.c\"\nint later;\n", got);
     arena_free(a);
 }
 

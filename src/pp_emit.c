@@ -62,8 +62,8 @@ static bool pp_emit_needs_space(const PpToken *prev, const PpToken *cur)
     return false;
 }
 
-/* Whether a `# NN "file"` marker must precede this line: its first real token
-   follows a different file or a non-contiguous line number. */
+/* Whether a `#line N "file"` marker must precede this line: its first real
+   token follows a different file or a non-contiguous line number. */
 static bool pp_emit_marker_needed(const PpToken *next, const PpToken *prev)
 {
     if (!prev)
@@ -79,7 +79,7 @@ static bool pp_emit_marker_needed(const PpToken *next, const PpToken *prev)
 
 static void pp_emit_marker(FILE *f, const PpToken *t)
 {
-    fprintf(f, "# %u \"%s\"\n", t->loc.line, t->loc.file ? t->loc.file : "");
+    fprintf(f, "#line %u \"%s\"\n", t->loc.line, t->loc.file ? t->loc.file : "");
 }
 
 /* Emits a marker at column 0 when the upcoming line needs one. Safe only when
