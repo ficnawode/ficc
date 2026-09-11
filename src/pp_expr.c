@@ -36,6 +36,24 @@ static void expr_advance(ExprParser *ep)
     ep->pos++;
 }
 
+/* Location of the current token, or of the last one consumed at end. */
+static Loc expr_loc(ExprParser *ep)
+{
+    PpToken *t = expr_peek(ep);
+    return t ? t->loc : ep->last_loc;
+}
+
+/* Consumes punct when it is next; returns whether it was. */
+static bool expr_expect(ExprParser *ep, PpPunct punct)
+{
+    if (expr_punct(ep, punct))
+    {
+        expr_advance(ep);
+        return true;
+    }
+    return false;
+}
+
 static void expr_error(ExprParser *ep, Loc loc, const char *fmt, ...)
 {
     if (ep->suppress)
@@ -230,14 +248,9 @@ static PpExprVal expr_primary(ExprParser *ep)
     {
         expr_advance(ep);
         PpExprVal v = expr_ternary(ep);
-        if (!expr_punct(ep, PP_PUNCT_RPAREN))
+        if (!expr_expect(ep, PP_PUNCT_RPAREN))
         {
-            expr_error(ep, expr_peek(ep) ? expr_peek(ep)->loc : ep->last_loc,
-                       "expected ')' in #if expression");
-            expr_advance(ep);
-        }
-        else
-        {
+            expr_error(ep, expr_loc(ep), "expected ')' in #if expression");
             expr_advance(ep);
         }
         return v;
@@ -298,6 +311,21 @@ static PpExprVal expr_unary(ExprParser *ep)
     return expr_primary(ep);
 }
 
+static bool expr_div_guard(ExprParser *ep, Loc loc, u64 a, u64 b, bool u, const char *what)
+{
+    if (b == 0)
+    {
+        expr_error(ep, loc, "division by zero in #if");
+        return true;
+    }
+    if (!u && (i64) a == INT64_MIN && (i64) b == -1)
+    {
+        expr_error(ep, loc, "overflow in %s in #if", what);
+        return true;
+    }
+    return false;
+}
+
 static PpExprVal expr_binop(ExprParser *ep, PpPunct op, PpExprVal l, PpExprVal r, Loc loc)
 {
     bool u = l.is_unsigned || r.is_unsigned;
@@ -315,26 +343,14 @@ static PpExprVal expr_binop(ExprParser *ep, PpPunct op, PpExprVal l, PpExprVal r
         case PP_PUNCT_STAR:
             return (PpExprVal) {a * b, u};
         case PP_PUNCT_SLASH:
-            if (b == 0)
+            if (expr_div_guard(ep, loc, a, b, u, "division"))
             {
-                expr_error(ep, loc, "division by zero in #if");
-                return (PpExprVal) {0, u};
-            }
-            if (!u && sa == INT64_MIN && sb == -1)
-            {
-                expr_error(ep, loc, "overflow in division in #if");
                 return (PpExprVal) {0, u};
             }
             return u ? (PpExprVal) {a / b, true} : (PpExprVal) {(u64) (sa / sb), false};
         case PP_PUNCT_PERCENT:
-            if (b == 0)
+            if (expr_div_guard(ep, loc, a, b, u, "remainder"))
             {
-                expr_error(ep, loc, "division by zero in #if");
-                return (PpExprVal) {0, u};
-            }
-            if (!u && sa == INT64_MIN && sb == -1)
-            {
-                expr_error(ep, loc, "overflow in remainder in #if");
                 return (PpExprVal) {0, u};
             }
             return u ? (PpExprVal) {a % b, true} : (PpExprVal) {(u64) (sa % sb), false};
@@ -392,6 +408,16 @@ static PpExprVal expr_binop(ExprParser *ep, PpPunct op, PpExprVal l, PpExprVal r
 
 typedef PpExprVal (*NextLevel)(ExprParser *);
 
+/* Parses an operand that C never evaluates (short-circuited &&/||/?:) with
+   diagnostics suppressed. */
+static void expr_skip(ExprParser *ep, NextLevel next)
+{
+    bool saved = ep->suppress;
+    ep->suppress = true;
+    next(ep);
+    ep->suppress = saved;
+}
+
 static PpExprVal expr_bin_level(ExprParser *ep, NextLevel next, PpPunct op1, PpPunct op2,
                                 PpPunct op3)
 {
@@ -415,7 +441,7 @@ static PpExprVal expr_bin_level(ExprParser *ep, NextLevel next, PpPunct op1, PpP
         {
             break;
         }
-        Loc loc = expr_peek(ep) ? expr_peek(ep)->loc : ep->last_loc;
+        Loc loc = expr_loc(ep);
         expr_advance(ep);
         l = expr_binop(ep, op, l, next(ep), loc);
     }
@@ -465,20 +491,16 @@ static PpExprVal expr_bor(ExprParser *ep)
 static PpExprVal expr_land(ExprParser *ep)
 {
     PpExprVal l = expr_bor(ep);
-    while (expr_punct(ep, PP_PUNCT_ANDAND))
+    while (expr_expect(ep, PP_PUNCT_ANDAND))
     {
-        expr_advance(ep);
-        if (l.value == 0)
-        {
-            bool saved = ep->suppress;
-            ep->suppress = true;
-            expr_bor(ep);
-            ep->suppress = saved;
-        }
-        else
+        if (l.value != 0)
         {
             PpExprVal r = expr_bor(ep);
             l.value = r.value != 0 ? 1 : 0;
+        }
+        else
+        {
+            expr_skip(ep, expr_bor);
         }
     }
     l.is_unsigned = false;
@@ -488,15 +510,11 @@ static PpExprVal expr_land(ExprParser *ep)
 static PpExprVal expr_lor(ExprParser *ep)
 {
     PpExprVal l = expr_land(ep);
-    while (expr_punct(ep, PP_PUNCT_OROR))
+    while (expr_expect(ep, PP_PUNCT_OROR))
     {
-        expr_advance(ep);
         if (l.value != 0)
         {
-            bool saved = ep->suppress;
-            ep->suppress = true;
-            expr_land(ep);
-            ep->suppress = saved;
+            expr_skip(ep, expr_land);
         }
         else
         {
@@ -511,38 +529,39 @@ static PpExprVal expr_lor(ExprParser *ep)
 static PpExprVal expr_ternary(ExprParser *ep)
 {
     PpExprVal cond = expr_lor(ep);
-    if (expr_punct(ep, PP_PUNCT_QUESTION))
+    if (!expr_expect(ep, PP_PUNCT_QUESTION))
     {
-        expr_advance(ep);
-        bool saved = ep->suppress;
-        if (cond.value == 0)
-        {
-            ep->suppress = true;
-        }
-        PpExprVal yes = expr_ternary(ep);
-        ep->suppress = saved;
-
-        if (!expr_punct(ep, PP_PUNCT_COLON))
-        {
-            expr_error(ep, expr_peek(ep) ? expr_peek(ep)->loc : ep->last_loc,
-                       "expected ':' in #if expression");
-            expr_advance(ep);
-        }
-        else
-        {
-            expr_advance(ep);
-        }
-
-        saved = ep->suppress;
-        if (cond.value != 0)
-        {
-            ep->suppress = true;
-        }
-        PpExprVal no = expr_ternary(ep);
-        ep->suppress = saved;
-        return cond.value != 0 ? yes : no;
+        return cond;
     }
-    return cond;
+
+    PpExprVal yes;
+    if (cond.value != 0)
+    {
+        yes = expr_ternary(ep);
+    }
+    else
+    {
+        yes = (PpExprVal) {0, false};
+        expr_skip(ep, expr_ternary);
+    }
+
+    if (!expr_expect(ep, PP_PUNCT_COLON))
+    {
+        expr_error(ep, expr_loc(ep), "expected ':' in #if expression");
+        expr_advance(ep);
+    }
+
+    PpExprVal no;
+    if (cond.value != 0)
+    {
+        no = (PpExprVal) {0, false};
+        expr_skip(ep, expr_ternary);
+    }
+    else
+    {
+        no = expr_ternary(ep);
+    }
+    return cond.value != 0 ? yes : no;
 }
 
 PpExprVal pp_eval_expr(Pp *pp, const Vec *tokens)
@@ -551,7 +570,7 @@ PpExprVal pp_eval_expr(Pp *pp, const Vec *tokens)
     PpExprVal v = expr_ternary(&ep);
     if (expr_peek(&ep))
     {
-        expr_error(&ep, expr_peek(&ep)->loc, "unexpected token after #if expression");
+        expr_error(&ep, expr_loc(&ep), "unexpected token after #if expression");
     }
     return v;
 }
