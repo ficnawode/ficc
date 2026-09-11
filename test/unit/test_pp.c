@@ -1488,3 +1488,55 @@ TEST(pp, predefined_date_time_respect_source_date_epoch)
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_STRING, "\"00:00:00\""));
     arena_free(a);
 }
+
+TEST(pp, pragma_once_prevents_double_include)
+{
+    Arena *a = arena_new();
+    const char *hdr = pp_test_name(a, "once.h");
+    pp_test_write(hdr, "#pragma once\n#define ONCE_X 5\n");
+    const char *main = pp_test_name(a, "main.c");
+    char src[240];
+    snprintf(src, sizeof(src), "#include \"%s\"\n#include \"%s\"\nint v = ONCE_X;\n", hdr, hdr);
+    Pp *pp = pp_new(a);
+    EXPECT_NOTNULL(pp_preprocess(pp, pp_test_path(a, main), src));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "5"));
+    arena_free(a);
+}
+
+TEST(pp, pragma_unknown_is_ignored)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#pragma Whatever foo bar\nint ok;\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "ok"));
+    arena_free(a);
+}
+
+TEST(pp, pragma_poison_use_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#pragma GCC poison printf\nprintf(\"x\");\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, pragma_poison_not_fired_from_expansion)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define CAT(a,b) a##b\n#pragma GCC poison foo\nint x = CAT(fo,o);\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "foo"));
+    arena_free(a);
+}
+
+TEST(pp, pragma_system_header_silences_warning)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#pragma GCC system_header\n#warning muted\nint ok;\n");
+    EXPECT_EQ(pp->warning_count, 0);
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "ok"));
+    arena_free(a);
+}

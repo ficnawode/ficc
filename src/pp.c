@@ -178,6 +178,8 @@ Pp *pp_new(Arena *arena)
     pp->builtin_dir = NULL;
     pp->cooked_date = NULL;
     pp->cooked_time = NULL;
+    pp->pragma_once = hashset_new(arena, hashmap_str_hash, hashmap_str_eq);
+    pp->poison = hashset_new(arena, hashmap_str_hash, hashmap_str_eq);
     pp->has_source_date_epoch = false;
     pp->source_date_epoch = 0;
     pp->error_count = 0;
@@ -253,6 +255,14 @@ void pp_verror(Pp *pp, Loc loc, const char *fmt, va_list args)
 
 void pp_warn(Pp *pp, Loc loc, const char *fmt, ...)
 {
+    if (vec_size(pp->includes) > 0)
+    {
+        PpIncludeFrame *frame = vec_last(pp->includes);
+        if (frame->system_header)
+        {
+            return;
+        }
+    }
     va_list args;
     va_start(args, fmt);
     pp_vwarn(pp, loc, fmt, args);
@@ -1046,7 +1056,78 @@ static void pp_include_directive(Pp *pp, const PpIncludeFrame *frame, size_t sta
                  name);
         return;
     }
+    if (hashset_contains(pp->pragma_once, path))
+    {
+        return;
+    }
     pp_include_file(pp, path);
+}
+
+/* Warns on a GNU-lite construct when -pedantic is on (D17.9). */
+static void pp_gnu_warn(Pp *pp, Loc loc, const char *feature)
+{
+    if (pp->pedantic)
+    {
+        pp_warn(pp, loc, "'%s' is a GNU extension", feature);
+    }
+}
+
+/* `#pragma once`, `#pragma GCC poison A B`, `#pragma GCC system_header`;
+   any other pragma is parsed and ignored. */
+static void pp_pragma_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
+                                Loc directive_loc)
+{
+    Vec *tokens = vec_new(pp->arena);
+    for (size_t i = start; i < end; i++)
+    {
+        PpToken *t = vec_get(frame->tokens, i);
+        if (!pp_is_trivia(t))
+        {
+            vec_push(tokens, t);
+        }
+    }
+    size_t n = vec_size(tokens);
+    if (n == 0)
+    {
+        return;
+    }
+    PpToken *t0 = vec_get(tokens, 0);
+
+    if (n == 1 && t0->kind == TOK_PP_IDENT && pp_spelling_is(t0, "once"))
+    {
+        pp_gnu_warn(pp, t0->loc, "#pragma once");
+        if (frame->file)
+        {
+            hashset_add(pp->pragma_once, (void *) frame->file);
+        }
+        return;
+    }
+
+    if (n >= 2 && t0->kind == TOK_PP_IDENT && pp_spelling_is(t0, "GCC"))
+    {
+        PpToken *t1 = vec_get(tokens, 1);
+        if (t1->kind == TOK_PP_IDENT && pp_spelling_is(t1, "system_header"))
+        {
+            pp_gnu_warn(pp, t0->loc, "#pragma GCC system_header");
+            frame->system_header = true;
+            return;
+        }
+        if (t1->kind == TOK_PP_IDENT && pp_spelling_is(t1, "poison"))
+        {
+            pp_gnu_warn(pp, t0->loc, "#pragma GCC poison");
+            for (size_t i = 2; i < n; i++)
+            {
+                PpToken *p = vec_get(tokens, i);
+                if (p->kind == TOK_PP_IDENT)
+                {
+                    hashset_add(pp->poison, (void *) pp_token_name(pp, p));
+                }
+            }
+            return;
+        }
+    }
+
+    (void) directive_loc;
 }
 
 static u32 pp_count_newlines(const PpIncludeFrame *frame, size_t begin, size_t end)
@@ -1559,6 +1640,10 @@ static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end
     {
         pp_include_directive(pp, frame, i, end, directive_loc, true);
     }
+    else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "pragma"))
+    {
+        pp_pragma_directive(pp, frame, i, end, directive_loc);
+    }
     else if (name->kind == TOK_PP_IDENT && pp_spelling_is(name, "define"))
     {
         pp_define(pp, frame, i, end, directive_loc);
@@ -1938,6 +2023,11 @@ static TokList *pp_expand_list(Pp *pp, TokList *ts)
         Macro *macro = t->kind == TOK_PP_IDENT ? pp_macro_lookup(pp, t) : NULL;
         if (!macro || hs_has(t->hide, macro))
         {
+            if (t->kind == TOK_PP_IDENT && !t->hide &&
+                hashset_contains(pp->poison, pp_token_name(pp, t)))
+            {
+                pp_error(pp, t->loc, "attempt to use poisoned '%.*s'", (int) t->len, t->spell);
+            }
             *tail = list_cons(pp->arena, t, NULL);
             tail = &(*tail)->next;
             ts = ts->next;

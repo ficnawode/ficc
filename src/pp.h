@@ -17,6 +17,7 @@ struct PpIncludeFrame
     size_t cursor;
     u32 presumed_line;
     const char *presumed_file;
+    bool system_header;
 };
 
 typedef enum
@@ -55,6 +56,8 @@ struct Pp
     const char *builtin_dir;
     const char *cooked_date;
     const char *cooked_time;
+    HashSet *pragma_once;
+    HashSet *poison;
     bool has_source_date_epoch;
     i64 source_date_epoch;
     u32 error_count;
