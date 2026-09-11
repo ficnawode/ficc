@@ -1215,7 +1215,8 @@ static u32 plan_frame_nchildren(const PlanFrame *fr)
     return (u32) vec_size(agg->record.fields);
 }
 
-static bool plan_frame_child(const PlanFrame *fr, Type **cty, u32 *coff)
+static bool plan_frame_child(const PlanFrame *fr, Type **cty, u32 *coff, bool *is_bf,
+                             u32 *bit_off, u32 *bit_w)
 {
     Type *agg = type_unqual(fr->agg);
     u32 idx = fr->next;
@@ -1229,6 +1230,7 @@ static bool plan_frame_child(const PlanFrame *fr, Type **cty, u32 *coff)
         Type *elem = type_unqual(type_array_elem(agg));
         *cty = elem;
         *coff = base + (u32) (idx * agg->arr.elem->size);
+        *is_bf = false;
         return true;
     }
     size_t nf = vec_size(agg->record.fields);
@@ -1239,6 +1241,9 @@ static bool plan_frame_child(const PlanFrame *fr, Type **cty, u32 *coff)
     RecordField *f = (RecordField *) vec_get(agg->record.fields, idx);
     *cty = type_unqual(f->type);
     *coff = base + f->offset; /* unions: every member sits at offset 0 */
+    *is_bf = f->bit_offset >= 0 && f->bit_width >= 0;
+    *bit_off = *is_bf ? (u32) f->bit_offset : 0;
+    *bit_w = *is_bf ? (u32) f->bit_width : 0;
     return true;
 }
 
@@ -1281,6 +1286,24 @@ static InitWrite *plan_new_write(SemanticCtx *ctx, InitPlan *plan, u32 offset, T
     w->type = type;
     w->value = value;
     w->is_string_fill = is_string_fill;
+    w->is_bitfield = false;
+    w->bit_offset = 0;
+    w->bit_width = 0;
+    vec_push(plan->writes, w);
+    return w;
+}
+
+static InitWrite *plan_new_bitfield_write(SemanticCtx *ctx, InitPlan *plan, u32 offset, Type *type,
+                                          u32 bit_offset, u32 bit_width, ASTNode *value)
+{
+    InitWrite *w = arena_alloc(ctx->arena, sizeof(InitWrite), _Alignof(InitWrite));
+    w->offset = offset;
+    w->type = type;
+    w->value = value;
+    w->is_string_fill = false;
+    w->is_bitfield = true;
+    w->bit_offset = bit_offset;
+    w->bit_width = bit_width;
     vec_push(plan->writes, w);
     return w;
 }
@@ -1313,6 +1336,25 @@ static bool plan_scalar_write(SemanticCtx *ctx, InitPlan *plan, Type *target, u3
         return sem_error(ctx, loc, "incompatible type in initializer (target type differs)");
     }
     plan_new_write(ctx, plan, offset, target, value, false);
+    return true;
+}
+
+static bool plan_bitfield_scalar_write(SemanticCtx *ctx, InitPlan *plan, Type *target, u32 offset,
+                                       u32 bit_offset, u32 bit_width, ASTNode *value, Loc loc)
+{
+    if (!check_expr(value, ctx))
+    {
+        return false;
+    }
+    if (!check_value_used(value, ctx))
+    {
+        return false;
+    }
+    if (!type_assignable(target, value->expr_type))
+    {
+        return sem_error(ctx, loc, "incompatible type in initializer (target type differs)");
+    }
+    plan_new_bitfield_write(ctx, plan, offset, target, bit_offset, bit_width, value);
     return true;
 }
 
@@ -1473,7 +1515,9 @@ static bool plan_elem(SemanticCtx *ctx, InitPlan *plan, Type *t, InitElem *e, u3
     PlanFrame *top = (PlanFrame *) vec_last(stack);
     Type *cty;
     u32 coff;
-    if (!plan_frame_child(top, &cty, &coff))
+    bool is_bf;
+    u32 boff, bw;
+    if (!plan_frame_child(top, &cty, &coff, &is_bf, &boff, &bw))
     {
         return sem_error(ctx, e->loc, "excess elements in %s initializer",
                          type_is_array(t) ? "array" : "struct/union");
@@ -1524,13 +1568,20 @@ static bool plan_elem(SemanticCtx *ctx, InitPlan *plan, Type *t, InitElem *e, u3
         fr->grow = false;
         vec_push(stack, fr);
         top = (PlanFrame *) vec_last(stack);
-        if (!plan_frame_child(top, &cty, &coff))
+        if (!plan_frame_child(top, &cty, &coff, &is_bf, &boff, &bw))
         {
             return sem_error(ctx, e->loc, "excess elements in %s initializer",
                              type_is_array(t) ? "array" : "struct/union");
         }
     }
-    if (!plan_scalar_write(ctx, plan, cty, coff, e->value, e->loc))
+    if (is_bf)
+    {
+        if (!plan_bitfield_scalar_write(ctx, plan, cty, coff, boff, bw, e->value, e->loc))
+        {
+            return false;
+        }
+    }
+    else if (!plan_scalar_write(ctx, plan, cty, coff, e->value, e->loc))
     {
         return false;
     }
@@ -1910,8 +1961,9 @@ static bool fold_unary_constant(UnaryOpKind op, i64 v, i64 *out)
 }
 
 /* Fold a binary integer-constant operation; division by zero and out-of-range
-   shifts are not foldable. */
-static bool fold_binary_constant(BinOpKind op, i64 l, i64 r, i64 *out)
+   shifts are not foldable. `is_unsigned` selects unsigned DIV/REM/SHR and
+   relational semantics (§6.3.1.8). */
+static bool fold_binary_constant(BinOpKind op, i64 l, i64 r, i64 *out, bool is_unsigned)
 {
     switch (op)
     {
@@ -1930,15 +1982,29 @@ static bool fold_binary_constant(BinOpKind op, i64 l, i64 r, i64 *out)
             {
                 return false;
             }
-            *out = op == BIN_DIV ? l / r : l % r;
+            if (is_unsigned)
+            {
+                *out = op == BIN_DIV ? (i64) ((u64) l / (u64) r)
+                                     : (i64) ((u64) l % (u64) r);
+            }
+            else
+            {
+                *out = op == BIN_DIV ? l / r : l % r;
+            }
             return true;
         case BIN_SHL:
+            if (r < 0 || r > 63)
+            {
+                return false;
+            }
+            *out = (i64) ((u64) l << r);
+            return true;
         case BIN_SHR:
             if (r < 0 || r > 63)
             {
                 return false;
             }
-            *out = op == BIN_SHL ? l << r : l >> r;
+            *out = is_unsigned ? (i64) ((u64) l >> r) : l >> r;
             return true;
         case BIN_AND:
             *out = l & r;
@@ -1962,20 +2028,35 @@ static bool fold_binary_constant(BinOpKind op, i64 l, i64 r, i64 *out)
             *out = l != r;
             return true;
         case BIN_LT:
-            *out = l < r;
+            *out = is_unsigned ? (i64) ((u64) l < (u64) r) : l < r;
             return true;
         case BIN_GT:
-            *out = l > r;
+            *out = is_unsigned ? (i64) ((u64) l > (u64) r) : l > r;
             return true;
         case BIN_LE:
-            *out = l <= r;
+            *out = is_unsigned ? (i64) ((u64) l <= (u64) r) : l <= r;
             return true;
         case BIN_GE:
-            *out = l >= r;
+            *out = is_unsigned ? (i64) ((u64) l >= (u64) r) : l >= r;
             return true;
         default:
             return false;
     }
+}
+
+/* Whether a folded binary operation follows unsigned arithmetic: DIV/REM and
+   the relational comparisons use the usual-arithmetic-conversions common type
+   of the (promoted) operands; shifts take the promoted left operand. */
+static bool fold_binary_unsigned(ASTBinaryExpr *b)
+{
+    Type *lt = b->left->expr_type ? type_promote(type_rvalue(b->left->expr_type)) : type_int();
+    if (b->op == BIN_SHL || b->op == BIN_SHR)
+    {
+        return type_is_unsigned(lt);
+    }
+    Type *rt = b->right->expr_type ? type_promote(type_rvalue(b->right->expr_type))
+                                   : type_int();
+    return type_is_unsigned(type_common(lt, rt));
 }
 
 static bool fold_integer_constant(ASTNode *node, i64 *out)
@@ -2000,7 +2081,7 @@ static bool fold_integer_constant(ASTNode *node, i64 *out)
             ASTBinaryExpr *b = ast_as(ASTBinaryExpr, node);
             i64 l, r;
             return fold_integer_constant(b->left, &l) && fold_integer_constant(b->right, &r) &&
-                   fold_binary_constant(b->op, l, r, out);
+                   fold_binary_constant(b->op, l, r, out, fold_binary_unsigned(b));
         }
         case AST_TERNARY_EXPR:
         {

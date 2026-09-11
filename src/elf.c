@@ -189,18 +189,34 @@ static void rela_emit(ByteBuf *out, u64 offset, u32 sym_idx, u32 type, i64 adden
     bytebuf_append_u64(out, (u64) addend);
 }
 
-/* One past the last STB_LOCAL symbol index: .symtab sh_info. Section symbols
-   (0-4) are local; LOCAL-binding globals (strings, static) extend the local
-   region whatever their position. */
-static u32 sh_info_first_nonlocal(size_t nglobals, Vec *globals, size_t nfuncs, Vec *funcs)
+/* .symtab layout. 0 = null, 1-4 = section symbols; then all STB_LOCAL
+   symbols first (string/static globals, then static functions); then the
+   globals (non-local globals, then defined functions); then SHN_UNDEF extern
+   function symbols. BFD/ld treat every symbol below sh_info as local and
+   every symbol at or above it as global (matching st_info), so sh_info must
+   be exactly the first non-local index. */
+typedef struct
 {
-    u32 last_local = FIRST_GLOBAL_SYM;
+    size_t nlocal_globals;
+    size_t nstatic_funcs;
+    size_t nglobal_vars;
+    size_t nglobal_funcs;
+    u32 first_global;
+} SymLayout;
+
+static SymLayout sym_layout(size_t nglobals, Vec *globals, size_t nfuncs, Vec *funcs)
+{
+    SymLayout l = {0};
     for (size_t i = 0; i < nglobals; i++)
     {
         IrGlobal *g = (IrGlobal *) vec_get(globals, i);
         if (g->linkage == IR_LINK_LOCAL)
         {
-            last_local = FIRST_GLOBAL_SYM + (u32) i + 1;
+            l.nlocal_globals++;
+        }
+        else
+        {
+            l.nglobal_vars++;
         }
     }
     for (size_t fi = 0; fi < nfuncs; fi++)
@@ -208,10 +224,36 @@ static u32 sh_info_first_nonlocal(size_t nglobals, Vec *globals, size_t nfuncs, 
         CodegenFunc *cf = (CodegenFunc *) vec_get(funcs, fi);
         if (cf->is_static)
         {
-            last_local = FIRST_GLOBAL_SYM + (u32) nglobals + (u32) fi + 1;
+            l.nstatic_funcs++;
+        }
+        else
+        {
+            l.nglobal_funcs++;
         }
     }
-    return last_local;
+    l.first_global = FIRST_GLOBAL_SYM + (u32) l.nlocal_globals + (u32) l.nstatic_funcs;
+    return l;
+}
+
+/* Symbol-table index of the global vector element gi (locals and non-locals
+   are interleaved in cm->globals). */
+static u32 global_sym_index(Vec *globals, size_t gi, const SymLayout *l)
+{
+    IrGlobal *g = (IrGlobal *) vec_get(globals, gi);
+    size_t pos = 0;
+    for (size_t i = 0; i < gi; i++)
+    {
+        IrGlobal *o = (IrGlobal *) vec_get(globals, i);
+        if ((o->linkage == IR_LINK_LOCAL) == (g->linkage == IR_LINK_LOCAL))
+        {
+            pos++;
+        }
+    }
+    if (g->linkage == IR_LINK_LOCAL)
+    {
+        return FIRST_GLOBAL_SYM + (u32) pos;
+    }
+    return l->first_global + (u32) pos;
 }
 
 static CodegenFunc *find_codegen_func_elf(CodegenModule *cm, const char *name)
@@ -228,19 +270,32 @@ static CodegenFunc *find_codegen_func_elf(CodegenModule *cm, const char *name)
     return NULL;
 }
 
-/* Symbol-table index of a function name: a defined in-module function is at
-   FIRST_GLOBAL_SYM + nglobals + <func index>; a declaration-only extern is at
-   FIRST_GLOBAL_SYM + nglobals + nfuncs + <extern index>. Returns 0 if not
+/* Symbol-table index of a function name: a defined in-module function
+   (static in the local region, non-static among the globals) or a
+   declaration-only extern (after the defined functions). Returns 0 if not
    found (only the null-symbol index 0 is a valid fallback). */
-static u32 func_sym_index(CodegenModule *cm, size_t nglobals, size_t nfuncs, const char *name,
-                          Vec *extern_syms)
+static u32 func_sym_index(CodegenModule *cm, const char *name, Vec *extern_syms, const SymLayout *l)
 {
+    size_t sfunc = 0, gfunc = 0;
+    size_t nfuncs = vec_size(cm->funcs);
     for (size_t i = 0; i < nfuncs; i++)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
         if (strcmp(cf->name, name) == 0)
         {
-            return FIRST_GLOBAL_SYM + (u32) nglobals + (u32) i;
+            if (cf->is_static)
+            {
+                return FIRST_GLOBAL_SYM + (u32) l->nlocal_globals + (u32) sfunc;
+            }
+            return l->first_global + (u32) l->nglobal_vars + (u32) gfunc;
+        }
+        if (cf->is_static)
+        {
+            sfunc++;
+        }
+        else
+        {
+            gfunc++;
         }
     }
     size_t nuniq = vec_size(extern_syms);
@@ -248,7 +303,7 @@ static u32 func_sym_index(CodegenModule *cm, size_t nglobals, size_t nfuncs, con
     {
         if (strcmp((const char *) vec_get(extern_syms, j), name) == 0)
         {
-            return FIRST_GLOBAL_SYM + (u32) nglobals + (u32) nfuncs + (u32) j;
+            return l->first_global + (u32) l->nglobal_vars + (u32) l->nglobal_funcs + (u32) j;
         }
     }
     return 0;
@@ -338,7 +393,8 @@ void elf_write(CodegenModule *cm, const char *path)
         bytebuf_append_bytes(&text, bytebuf_data(cf->bytes), bytebuf_len(cf->bytes));
     }
 
-    /* .symtab: 0 = null, 1-4 = section symbols, 5+i = globals, then functions */
+    /* .symtab: 0 = null, 1-4 = section symbols; local globals and static
+       functions first (indices below sh_info), then globals, then externs. */
     ByteBuf symtab;
     bytebuf_init(&symtab, arena);
     for (size_t i = 0; i < sizeof(Elf64_Sym); i++)
@@ -349,10 +405,36 @@ void elf_write(CodegenModule *cm, const char *path)
     sym_emit(&symtab, 0, ELF64_ST_INFO(STB_LOCAL, STT_SECTION), SEC_RODATA, 0, 0);
     sym_emit(&symtab, 0, ELF64_ST_INFO(STB_LOCAL, STT_SECTION), SEC_DATA, 0, 0);
     sym_emit(&symtab, 0, ELF64_ST_INFO(STB_LOCAL, STT_SECTION), SEC_BSS, 0, 0);
-    u32 first_nonlocal = sh_info_first_nonlocal(nglobals, cm->globals, nfuncs, cm->funcs);
+    SymLayout layout = sym_layout(nglobals, cm->globals, nfuncs, cm->funcs);
     for (size_t i = 0; i < nglobals; i++)
     {
         IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
+        if (g->linkage != IR_LINK_LOCAL)
+        {
+            continue;
+        }
+        u32 name_off = g->name ? strtab_add(&strtab, g->name) : 0;
+        sym_emit(&symtab, name_off, ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE), section_shndx(g->section),
+                 global_off[i], type_sizeof(g->type));
+    }
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
+        if (!cf->is_static)
+        {
+            continue;
+        }
+        u32 name_off = strtab_add(&strtab, cf->name);
+        sym_emit(&symtab, name_off, ELF64_ST_INFO(STB_LOCAL, STT_FUNC), SEC_TEXT, cf->offset,
+                 bytebuf_len(cf->bytes));
+    }
+    for (size_t i = 0; i < nglobals; i++)
+    {
+        IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
+        if (g->linkage == IR_LINK_LOCAL)
+        {
+            continue;
+        }
         u32 name_off = g->name ? strtab_add(&strtab, g->name) : 0;
         u8 bind =
             (g->linkage == IR_LINK_GLOBAL || g->linkage == IR_LINK_EXTERN) ? STB_GLOBAL : STB_LOCAL;
@@ -370,9 +452,13 @@ void elf_write(CodegenModule *cm, const char *path)
     for (size_t i = 0; i < nfuncs; i++)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
+        if (cf->is_static)
+        {
+            continue;
+        }
         u32 name_off = strtab_add(&strtab, cf->name);
-        sym_emit(&symtab, name_off, ELF64_ST_INFO(cf->is_static ? STB_LOCAL : STB_GLOBAL, STT_FUNC),
-                 SEC_TEXT, cf->offset, bytebuf_len(cf->bytes));
+        sym_emit(&symtab, name_off, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), SEC_TEXT, cf->offset,
+                 bytebuf_len(cf->bytes));
     }
 
     /* Declaration-only extern functions referenced by calls *or* whose address
@@ -479,8 +565,8 @@ void elf_write(CodegenModule *cm, const char *path)
         for (size_t pi = 0; pi < vec_size(cf->global_patches); pi++)
         {
             GlobalPatch *gp = (GlobalPatch *) vec_get(cf->global_patches, pi);
-            rela_emit(&rela_text, cf->offset + gp->offset, FIRST_GLOBAL_SYM + gp->global_index,
-                      R_X86_64_32S, 0);
+            rela_emit(&rela_text, cf->offset + gp->offset,
+                      global_sym_index(cm->globals, gp->global_index, &layout), R_X86_64_32S, 0);
         }
     }
 
@@ -496,7 +582,8 @@ void elf_write(CodegenModule *cm, const char *path)
         {
             if (strcmp((const char *) vec_get(extern_syms, j), ec->name) == 0)
             {
-                sym_idx = FIRST_GLOBAL_SYM + (u32) nglobals + (u32) nfuncs + (u32) j;
+                sym_idx = layout.first_global + (u32) layout.nglobal_vars + (u32) layout.nglobal_funcs
+                          + (u32) j;
                 break;
             }
         }
@@ -512,7 +599,7 @@ void elf_write(CodegenModule *cm, const char *path)
         for (size_t pi = 0; pi < nfp; pi++)
         {
             FuncAddrPatch *fp = (FuncAddrPatch *) vec_get(cf->func_patches, pi);
-            u32 sym_idx = func_sym_index(cm, nglobals, nfuncs, fp->name, extern_syms);
+            u32 sym_idx = func_sym_index(cm, fp->name, extern_syms, &layout);
             rela_emit(&rela_text, cf->offset + fp->offset, sym_idx, R_X86_64_32S, 0);
         }
     }
@@ -538,11 +625,11 @@ void elf_write(CodegenModule *cm, const char *path)
             {
                 /* A function-address initializer (D16.1): R_X86_64_64 against
                    the function's symbol. */
-                sym_idx = func_sym_index(cm, nglobals, nfuncs, gr->func_name, extern_syms);
+                sym_idx = func_sym_index(cm, gr->func_name, extern_syms, &layout);
             }
             else
             {
-                sym_idx = FIRST_GLOBAL_SYM + gr->target;
+                sym_idx = global_sym_index(cm->globals, gr->target, &layout);
             }
             rela_emit(target, global_off[i] + gr->offset, sym_idx, R_X86_64_64, 0);
         }
@@ -631,7 +718,7 @@ void elf_write(CodegenModule *cm, const char *path)
               0, 0, 8, 0);
     shdr_emit(&out, shname_bss, SHT_NOBITS, SHF_ALLOC | SHF_WRITE, off_bss, bss_size, 0, 0, 8, 0);
     shdr_emit(&out, shname_symtab, SHT_SYMTAB, 0, off_symtab, bytebuf_len(&symtab), SEC_STRTAB,
-              first_nonlocal, 8, sizeof(Elf64_Sym));
+              layout.first_global, 8, sizeof(Elf64_Sym));
     shdr_emit(&out, shname_strtab, SHT_STRTAB, 0, off_strtab, bytebuf_len(&strtab), 0, 0, 1, 0);
     shdr_emit(&out, shname_shstrtab, SHT_STRTAB, 0, off_shstrtab, bytebuf_len(&shstrtab), 0, 0, 1,
               0);

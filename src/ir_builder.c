@@ -549,8 +549,10 @@ static ExprResult build_short_circuit(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlo
     jump(true_bb, merge_bb);
     jump(false_bb, merge_bb);
 
-    /* Seal branches first so merge inputs come from sealed preds. */
-    seal_block(ctx, left.block);
+    /* Seal branches first so merge inputs come from sealed preds. `left.block`
+       must NOT be sealed: it often belongs to an enclosing construct whose
+       incoming edges are not wired yet (do-while body, loop body, unsealed
+       merge), and an early seal resolves its not-yet-connected reads as imm 0. */
     seal_block(ctx, right_bb);
     seal_block(ctx, false_bb);
     seal_block(ctx, true_bb);
@@ -1511,8 +1513,12 @@ static bool fold_unary_constant(ASTUnaryExpr *u, i64 v, i64 *out)
     }
 }
 
+/* Fold a binary constant (§6.6). DIV/REM, shifts, and the relational
+   comparisons honor the operands' unsignedness (§6.3.1.8). */
+static bool fold_binary_unsigned(ASTBinaryExpr *b);
 static bool fold_binary_constant(ASTBinaryExpr *b, i64 l, i64 r, i64 *out)
 {
+    bool is_unsigned = fold_binary_unsigned(b);
     switch (b->op)
     {
         case BIN_ADD:
@@ -1530,15 +1536,29 @@ static bool fold_binary_constant(ASTBinaryExpr *b, i64 l, i64 r, i64 *out)
             {
                 return false;
             }
-            *out = b->op == BIN_DIV ? l / r : l % r;
+            if (is_unsigned)
+            {
+                *out = b->op == BIN_DIV ? (i64) ((u64) l / (u64) r)
+                                        : (i64) ((u64) l % (u64) r);
+            }
+            else
+            {
+                *out = b->op == BIN_DIV ? l / r : l % r;
+            }
             return true;
         case BIN_SHL:
+            if (r < 0 || r > 63)
+            {
+                return false;
+            }
+            *out = (i64) ((u64) l << r);
+            return true;
         case BIN_SHR:
             if (r < 0 || r > 63)
             {
                 return false;
             }
-            *out = b->op == BIN_SHL ? l << r : l >> r;
+            *out = is_unsigned ? (i64) ((u64) l >> r) : l >> r;
             return true;
         case BIN_AND:
             *out = l & r;
@@ -1562,20 +1582,34 @@ static bool fold_binary_constant(ASTBinaryExpr *b, i64 l, i64 r, i64 *out)
             *out = l != r;
             return true;
         case BIN_LT:
-            *out = l < r;
+            *out = is_unsigned ? (i64) ((u64) l < (u64) r) : l < r;
             return true;
         case BIN_GT:
-            *out = l > r;
+            *out = is_unsigned ? (i64) ((u64) l > (u64) r) : l > r;
             return true;
         case BIN_LE:
-            *out = l <= r;
+            *out = is_unsigned ? (i64) ((u64) l <= (u64) r) : l <= r;
             return true;
         case BIN_GE:
-            *out = l >= r;
+            *out = is_unsigned ? (i64) ((u64) l >= (u64) r) : l >= r;
             return true;
         default:
             return false;
     }
+}
+
+/* Whether a foldable binary operation follows unsigned semantics: the usual
+   arithmetic conversions' common type for arithmetic/relational ops, the
+   promoted left operand for shifts. */
+static bool fold_binary_unsigned(ASTBinaryExpr *b)
+{
+    Type *lt = b->left->expr_type ? type_promote(b->left->expr_type) : type_int();
+    if (b->op == BIN_SHL || b->op == BIN_SHR)
+    {
+        return type_is_unsigned(lt);
+    }
+    Type *rt = b->right->expr_type ? type_promote(b->right->expr_type) : type_int();
+    return type_is_unsigned(type_common(lt, rt));
 }
 
 /* Fold a constant expression (§6.6); semantic already resolved sizeof/alignof.
@@ -1846,6 +1880,26 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
             ir_error(w->value, "initializer element is not a constant");
             return false;
         }
+        if (w->is_bitfield)
+        {
+            /* File-scope bit-field: merge the folded value into its storage
+               unit in the serialized bytes (read-modify-write in place). */
+            u32 tbits = w->type->size * 8;
+            u64 mask = bitfield_mask(w->bit_width) << w->bit_offset;
+            u64 word = 0;
+            for (u32 b = 0; b < w->type->size; b++)
+            {
+                word |= (u64) (u8) buf[w->offset + b] << (8 * b);
+            }
+            word = (word & ~(u64) mask) | (((u64) value & bitfield_mask(w->bit_width))
+                                           << w->bit_offset);
+            word &= tbits >= 64 ? ~0ULL : ((1ULL << tbits) - 1);
+            for (u32 b = 0; b < w->type->size; b++)
+            {
+                buf[w->offset + b] = (u8) (word >> (8 * b));
+            }
+            continue;
+        }
         const u8 *bytes = encode_object_bytes(arena, value, w->type);
         memcpy(buf + w->offset, bytes, w->type->size);
     }
@@ -2029,7 +2083,17 @@ static IrBlock *emit_init_plan(FuncBuilder *ctx, IrBlock *bb, IrOperand base, In
             else
             {
                 IrOperand o = promote_to(ctx, bb, val.value, node_type(w->value), w->type);
-                ir_emit_store(bb, o, ir_operand_vreg(addr), w->type->size);
+                if (w->is_bitfield)
+                {
+                    /* Bit-field members initialize via read-modify-write of
+                       their storage unit (§6.7.2.1), like lvalue assignments. */
+                    bitfield_store(ctx, bb, ir_operand_vreg(addr), w->type, w->bit_offset,
+                                   w->bit_width, o);
+                }
+                else
+                {
+                    ir_emit_store(bb, o, ir_operand_vreg(addr), w->type->size);
+                }
             }
         }
     }

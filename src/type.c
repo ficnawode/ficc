@@ -689,7 +689,10 @@ void type_record_complete(Type *t, Vec *fields)
         {
             RecordField *f = (RecordField *) vec_get(fields, i);
             f->offset = 0;
-            f->bit_offset = 0;
+            /* Only real bit-fields carry a bit position; ordinary union
+               members must keep bit_offset < 0 so they are not mistaken for
+               bit-fields (§6.7.2.1). */
+            f->bit_offset = f->bit_width >= 0 ? 0 : -1;
             if (f->type->size > max_size)
             {
                 max_size = (u32) f->type->size;

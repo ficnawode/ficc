@@ -162,6 +162,7 @@ typedef enum
     X86_XOR_REG_RM = 0x31,
     X86_XOR_RM8_REG8 = 0x30,
     X86_TEST_REG_RM = 0x85,
+    X86_TEST_RM8_REG8 = 0x84,
 
     X86_MOVZX_REG8 = 0xB6,
     X86_MOVZX_REG16 = 0xB7,
@@ -612,18 +613,24 @@ static void emit_shift_cl(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 
 static void emit_cdq(ByteBuf *buf, u8 width, bool is_unsigned)
 {
-    if (width == 1)
+    if (is_unsigned)
     {
-        if (is_unsigned)
+        /* `div` reads rdx:rax; the high half must be zeroed (cqto/cdq would
+           sign-extend a value with the top bit set). 8-bit uses ax:al. */
+        if (width == 1)
         {
             bytebuf_append(buf, X86_XOR_RM8_REG8);
             bytebuf_append(buf, modrm(3, 4, 4));
+            return;
         }
-        else
-        {
-            bytebuf_append(buf, X86_OPERAND_SIZE);
-            bytebuf_append(buf, X86_CBW_CWDE_CDQE);
-        }
+        bytebuf_append(buf, X86_XOR_REG_RM);
+        bytebuf_append(buf, modrm(3, 2, 2)); /* xor edx, edx */
+        return;
+    }
+    if (width == 1)
+    {
+        bytebuf_append(buf, X86_OPERAND_SIZE);
+        bytebuf_append(buf, X86_CBW_CWDE_CDQE);
         return;
     }
     if (width == 8)
@@ -639,6 +646,14 @@ static void emit_idiv(ByteBuf *buf, u8 width, u8 reg)
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
     bytebuf_append(buf, width == 1 ? X86_GROUP3_RM8 : X86_GROUP3_RM32);
     bytebuf_append(buf, modrm(3, 7, reg));
+}
+
+/* F7 /6: div %reg (unsigned). 8-bit uses F6 /6. */
+static void emit_div(ByteBuf *buf, u8 width, u8 reg)
+{
+    bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
+    bytebuf_append(buf, width == 1 ? X86_GROUP3_RM8 : X86_GROUP3_RM32);
+    bytebuf_append(buf, modrm(3, 6, reg));
 }
 
 /* imul r, r/m, imm (6B ib / 69 id) for the GEP fallback path. */
@@ -659,10 +674,20 @@ static void emit_imul_imm(ByteBuf *buf, u8 width, u8 reg, i64 imm)
     }
 }
 
-static void emit_test_eax_eax(ByteBuf *buf)
+/* test %reg(width), %reg(width): a 1-byte condition uses `test al, al` so
+   adjacent slot bytes cannot leak into the result. */
+static void emit_test_reg(ByteBuf *buf, u8 width, u8 reg)
 {
+    if (width == 1)
+    {
+        bytebuf_append(buf, X86_TEST_RM8_REG8);
+        bytebuf_append(buf, modrm(3, 0, reg));
+        return;
+    }
+    emit_os16(buf, width);
+    bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
     bytebuf_append(buf, X86_TEST_REG_RM);
-    bytebuf_append(buf, modrm(3, 0, 0));
+    bytebuf_append(buf, modrm(3, 0, reg));
 }
 
 static void emit_xor_eax_eax(ByteBuf *buf)
@@ -910,7 +935,14 @@ static void lower_div(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
     emit_cdq(ctx->buf, w, is_unsigned);
     emit_mov(ctx->buf, w, xop_reg(R_ECX), lowered_operand(ctx, in->ops[1], R_ECX));
-    emit_idiv(ctx->buf, w, R_ECX);
+    if (is_unsigned)
+    {
+        emit_div(ctx->buf, w, R_ECX);
+    }
+    else
+    {
+        emit_idiv(ctx->buf, w, R_ECX);
+    }
     if (in->opcode == OP_SREM || in->opcode == OP_UREM)
     {
         emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_reg(R_EDX));
@@ -920,12 +952,48 @@ static void lower_div(IrInstr *in, CodegenCtx *ctx)
 
 static void lower_icmp(IrInstr *in, CodegenCtx *ctx)
 {
-    u8 w = vreg_width(ctx, in->result);
-    emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
-    emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, lowered_operand_rhs(ctx, in->ops[1], w, R_ECX));
+    /* Compare at the widest operand width: a width-1 vreg (`char != 0`) or a
+       width-8 pointer/64-bit immediate vs a small immediate must not truncate
+       to the int result width. Load each operand at its own width; sub-32-bit
+       vregs are zero-extended, immediates wider than imm32 load as full 64-bit. */
+    u8 rw = vreg_width(ctx, in->result);
+    IrOperand lhs = in->ops[0];
+    IrOperand rhs = in->ops[1];
+    u8 w0 = lhs.is_imm ? (lhs.u.imm >= INT32_MIN && lhs.u.imm <= INT32_MAX ? 4 : 8)
+                       : operand_width(ctx, lhs);
+    u8 w1 = rhs.is_imm ? (rhs.u.imm >= INT32_MIN && rhs.u.imm <= INT32_MAX ? 4 : 8)
+                       : operand_width(ctx, rhs);
+    u8 w = w0 > w1 ? w0 : w1;
+
+    if (lhs.is_imm)
+    {
+        emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_imm(lhs.u.imm));
+    }
+    else
+    {
+        emit_mov(ctx->buf, w0, xop_reg(R_EAX), lowered_operand(ctx, lhs, R_EAX));
+        if (w0 < w && w0 < 4)
+        {
+            emit_movzx(ctx->buf, w0, w, R_EAX, xop_reg(R_EAX));
+        }
+    }
+    if (rhs.is_imm)
+    {
+        emit_mov(ctx->buf, w, xop_reg(R_ECX), xop_imm(rhs.u.imm));
+    }
+    else
+    {
+        emit_mov(ctx->buf, w1, xop_reg(R_ECX), lowered_operand(ctx, rhs, R_ECX));
+        if (w1 < w && w1 < 4)
+        {
+            emit_movzx(ctx->buf, w1, w, R_ECX, xop_reg(R_ECX));
+        }
+    }
+
+    emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, xop_reg(R_ECX));
     emit_setcc(ctx->buf, icmp_cc[in->opcode]);
     emit_movzbl_al_eax(ctx->buf);
-    emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
+    emit_mov(ctx->buf, rw, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
 /* System V AMD64 argument registers. */
@@ -1075,8 +1143,12 @@ static void lower_br(IrInstr *in, CodegenCtx *ctx)
 
 static void lower_brcond(IrInstr *in, CodegenCtx *ctx)
 {
-    emit_mov(ctx->buf, 4, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
-    emit_test_eax_eax(ctx->buf);
+    /* The condition vreg may be width 1 (`while (c)` on a char); test it at
+       that width so the 3 garbage bytes past a byte-sized slot cannot
+       influence the branch. */
+    u8 cw = operand_width(ctx, in->ops[0]);
+    emit_mov(ctx->buf, cw, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
+    emit_test_reg(ctx->buf, cw, R_EAX);
     emit_jcc(ctx->buf, CC_E, in->extra.brcond.false_label, ctx->block_patches, ctx->arena);
     emit_jmp(ctx->buf, in->extra.brcond.true_label, ctx->block_patches, ctx->arena);
 }
@@ -1610,8 +1682,9 @@ static void collect_phi_copies(IrFunction *f, CodegenCtx *ctx)
     }
 }
 
-/* Lower a PHI source into vreg `dst`; global/func addresses materialize as 8-byte addresses, else
- * at the value's own width. */
+/* Copy a PHI source into vreg `dst` at the DST slot's width: an immediate
+ * like SIZE_MAX (−1) is 4 bytes wide by operand_width, and an 8-byte φ slot
+ * must not keep stale high bytes. */
 static void emit_phi_copy(CodegenCtx *ctx, IrOperand src, u32 dst_vreg)
 {
     if (src.is_global)
@@ -1626,9 +1699,9 @@ static void emit_phi_copy(CodegenCtx *ctx, IrOperand src, u32 dst_vreg)
         emit_mov(ctx->buf, 8, xop_vreg(dst_vreg), xop_reg(R_EAX));
         return;
     }
-    u8 pw = operand_width(ctx, src);
-    emit_mov(ctx->buf, pw, xop_reg(R_EAX), lowered_operand(ctx, src, R_ECX));
-    emit_mov(ctx->buf, pw, xop_vreg(dst_vreg), xop_reg(R_EAX));
+    u8 dw = vreg_width(ctx, dst_vreg);
+    emit_mov(ctx->buf, dw, xop_reg(R_EAX), lowered_operand(ctx, src, R_ECX));
+    emit_mov(ctx->buf, dw, xop_vreg(dst_vreg), xop_reg(R_EAX));
 }
 
 static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)

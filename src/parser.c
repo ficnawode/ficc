@@ -2473,6 +2473,91 @@ static ASTNode *parse_initializer(Parser *p)
     return parse_assign(p);
 }
 
+/* The promoted type of a foldable constant expression, derived from the
+   leaves (literal suffixes, casts, sizeof) because parse-time nodes have no
+   expr_type yet. Lets `folded_const` honor unsigned DIV/REM/SHR and
+   relational semantics (§6.3.1.8). */
+static bool folded_const(Parser *p, ASTNode *node, i64 *out);
+static Type *folded_const_type(Parser *p, ASTNode *node)
+{
+    if (!node)
+    {
+        return type_int();
+    }
+    switch (node->kind)
+    {
+        case AST_INT_LITERAL:
+        {
+            ASTIntLiteral *lit = ast_as(ASTIntLiteral, node);
+            return type_int_literal(lit->value, lit->is_hex, lit->is_unsigned, lit->length);
+        }
+        case AST_UNARY_EXPR:
+        {
+            ASTUnaryExpr *u = ast_as(ASTUnaryExpr, node);
+            return u->op == UN_LOG_NOT ? type_int() : folded_const_type(p, u->operand);
+        }
+        case AST_BINARY_EXPR:
+        {
+            ASTBinaryExpr *b = ast_as(ASTBinaryExpr, node);
+            Type *lt = folded_const_type(p, b->left);
+            Type *rt = folded_const_type(p, b->right);
+            if (b->op == BIN_SHL || b->op == BIN_SHR)
+            {
+                return type_promote(lt);
+            }
+            switch (b->op)
+            {
+                case BIN_LOG_AND:
+                case BIN_LOG_OR:
+                case BIN_EQ:
+                case BIN_NE:
+                case BIN_LT:
+                case BIN_GT:
+                case BIN_LE:
+                case BIN_GE:
+                    return type_int();
+                default:
+                    return type_common(type_promote(lt), type_promote(rt));
+            }
+        }
+        case AST_TERNARY_EXPR:
+        {
+            ASTTernaryExpr *te = ast_as(ASTTernaryExpr, node);
+            i64 cond;
+            if (!folded_const(p, te->cond, &cond))
+            {
+                return type_int();
+            }
+            return folded_const_type(p, cond ? te->then_expr : te->else_expr);
+        }
+        case AST_SIZEOF_TYPE:
+        case AST_SIZEOF_EXPR:
+        case AST_ALIGNOF_TYPE:
+        case AST_ALIGNOF_EXPR:
+            return type_ulong(); /* size_t: results are unsigned */
+        case AST_CAST_EXPR:
+            return type_is_integer(ast_as(ASTCastExpr, node)->target_type)
+                       ? type_unqual(ast_as(ASTCastExpr, node)->target_type)
+                       : type_int();
+        default:
+            return type_int();
+    }
+}
+
+/* Whether a folded binary operation follows unsigned semantics: the usual
+   arithmetic conversions' common type for DIV/REM and the relational
+   comparands, the promoted left operand for shifts. */
+static bool folded_binary_unsigned(Parser *p, ASTBinaryExpr *b)
+{
+    if (b->op == BIN_SHL || b->op == BIN_SHR)
+    {
+        return type_is_unsigned(type_promote(folded_const_type(p, b->left)));
+    }
+    Type *lt = type_promote(folded_const_type(p, b->left));
+    Type *rt = type_promote(folded_const_type(p, b->right));
+    return type_is_unsigned(type_common(lt, rt));
+}
+
 static bool folded_const(Parser *p, ASTNode *node, i64 *out)
 {
     (void) p;
@@ -2533,7 +2618,15 @@ static bool folded_const(Parser *p, ASTNode *node, i64 *out)
                     {
                         return false;
                     }
-                    *out = b->op == BIN_DIV ? l / r : l % r;
+                    if (folded_binary_unsigned(p, b))
+                    {
+                        *out = b->op == BIN_DIV ? (i64) ((u64) l / (u64) r)
+                                                : (i64) ((u64) l % (u64) r);
+                    }
+                    else
+                    {
+                        *out = b->op == BIN_DIV ? l / r : l % r;
+                    }
                     return true;
                 case BIN_SHL:
                 case BIN_SHR:
@@ -2541,7 +2634,18 @@ static bool folded_const(Parser *p, ASTNode *node, i64 *out)
                     {
                         return false;
                     }
-                    *out = b->op == BIN_SHL ? l << r : l >> r;
+                    if (b->op == BIN_SHR && folded_binary_unsigned(p, b))
+                    {
+                        *out = (i64) ((u64) l >> r); /* logical */
+                    }
+                    else if (b->op == BIN_SHR)
+                    {
+                        *out = l >> r; /* arithmetic */
+                    }
+                    else
+                    {
+                        *out = (i64) ((u64) l << r);
+                    }
                     return true;
                 case BIN_AND:
                     *out = l & r;
@@ -2565,16 +2669,16 @@ static bool folded_const(Parser *p, ASTNode *node, i64 *out)
                     *out = l != r;
                     return true;
                 case BIN_LT:
-                    *out = l < r;
+                    *out = folded_binary_unsigned(p, b) ? (i64) ((u64) l < (u64) r) : l < r;
                     return true;
                 case BIN_GT:
-                    *out = l > r;
+                    *out = folded_binary_unsigned(p, b) ? (i64) ((u64) l > (u64) r) : l > r;
                     return true;
                 case BIN_LE:
-                    *out = l <= r;
+                    *out = folded_binary_unsigned(p, b) ? (i64) ((u64) l <= (u64) r) : l <= r;
                     return true;
                 case BIN_GE:
-                    *out = l >= r;
+                    *out = folded_binary_unsigned(p, b) ? (i64) ((u64) l >= (u64) r) : l >= r;
                     return true;
                 default:
                     return false;

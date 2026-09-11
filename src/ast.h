@@ -501,6 +501,9 @@ struct InitWrite
     Type *type;     /* unqualified target type (scalar, or char array for a fill) */
     ASTNode *value; /* expression (scalar) or ASTStringLiteral (string fill) */
     bool is_string_fill;
+    bool is_bitfield; /* the subobject is a bit-field member (§6.7.2.1) */
+    u32 bit_offset;   /* bit position within the storage unit */
+    u32 bit_width;    /* field width in bits */
 };
 
 /* A brace-enclosed initializer list `{ ... }` (C11 §6.7.9) with semantic's flattened lowering plan. */

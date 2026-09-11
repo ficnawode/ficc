@@ -142,6 +142,7 @@ static bool parse_args(int argc, char **argv, DriverArgs *out)
     out->input_file = NULL;
     out->exe_path = argv[0];
     out->include_path_count = 0;
+    out->cmd_count = 0;
     out->flags = (DriverFlags) {0};
 
     for (int i = 1; i < argc; i++)
