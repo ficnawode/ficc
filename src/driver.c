@@ -5,6 +5,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "pp.h"
+#include "pp_emit.h"
 #include "semantic.h"
 #include "util/arena.h"
 #include <stdio.h>
@@ -17,9 +18,12 @@ typedef struct
     bool dump_ast;
     bool dump_ir;
     bool dump_pp;
+    bool emit_pp;
     bool emit_obj;
     bool run_interp;
     bool nostdinc;
+    bool pp_keep_comments;
+    bool pp_no_markers;
 } DriverFlags;
 
 typedef struct
@@ -98,8 +102,8 @@ static void replace_ext(const char *in, char *out, size_t out_len, const char *n
 static void usage(const char *prog)
 {
     fprintf(stderr,
-            "Usage: %s [-tokens] [-pp] [-ast] [-ir] [-c] [-run] [-I dir] [-nostdinc] "
-            "<file.c>\n",
+            "Usage: %s [-tokens] [-pp] [-E] [-C] [-P] [-ast] [-ir] [-c] [-run] "
+            "[-I dir] [-nostdinc] <file.c>\n",
             prog);
 }
 
@@ -120,6 +124,20 @@ static bool parse_args(int argc, char **argv, DriverArgs *out)
         else if (strcmp(arg, "-pp") == 0)
         {
             out->flags.dump_pp = true;
+        }
+        else if (strcmp(arg, "-E") == 0)
+        {
+            out->flags.emit_pp = true;
+        }
+        else if (strcmp(arg, "-C") == 0)
+        {
+            out->flags.pp_keep_comments = true;
+            out->flags.emit_pp = true;
+        }
+        else if (strcmp(arg, "-P") == 0)
+        {
+            out->flags.pp_no_markers = true;
+            out->flags.emit_pp = true;
         }
         else if (strcmp(arg, "-ast") == 0)
         {
@@ -191,31 +209,8 @@ static bool parse_args(int argc, char **argv, DriverArgs *out)
     return true;
 }
 
-static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
+static Pp *pp_from_args(const DriverArgs *args)
 {
-    type_reset();
-
-    if (args->flags.dump_pp)
-    {
-        Pp *pp = pp_new(arena_new());
-        pp->exe_path = args->exe_path;
-        pp->nostdinc = args->flags.nostdinc;
-        for (size_t k = 0; k < args->include_path_count; k++)
-        {
-            vec_push(pp->include_paths, (void *) args->include_paths[k]);
-        }
-        Vec *soup = pp_preprocess(pp, args->input_file, src);
-        if (!soup)
-        {
-            pp_free(pp);
-            fprintf(stderr, "preprocess failed\n");
-            return 1;
-        }
-        pp_dump(soup);
-        pp_free(pp);
-        return 0;
-    }
-
     Pp *pp = pp_new(arena_new());
     pp->exe_path = args->exe_path;
     pp->nostdinc = args->flags.nostdinc;
@@ -223,6 +218,14 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
     {
         vec_push(pp->include_paths, (void *) args->include_paths[k]);
     }
+    return pp;
+}
+
+static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
+{
+    type_reset();
+
+    Pp *pp = pp_from_args(args);
     Vec *soup = pp_preprocess(pp, args->input_file, src);
     if (!soup)
     {
@@ -230,6 +233,23 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
         fprintf(stderr, "preprocess failed\n");
         return 1;
     }
+
+    if (args->flags.emit_pp || args->flags.dump_pp)
+    {
+        if (args->flags.emit_pp)
+        {
+            pp_emit(pp, stdout,
+                    (PpEmitOptions) {.keep_comments = args->flags.pp_keep_comments,
+                                     .no_markers = args->flags.pp_no_markers});
+        }
+        if (args->flags.dump_pp)
+        {
+            pp_dump(soup);
+        }
+        pp_free(pp);
+        return 0;
+    }
+
     LexResult lexed = lex_finalize(soup, arena);
     pp_free(pp);
     if (!lexed.tokens)

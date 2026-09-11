@@ -1,0 +1,8 @@
+/* leading comment stays with -C */
+#define GREET(x) hello x
+int a = GREET(1);
+/* mid comment */
+#define LINE_NUM __LINE__
+int b = LINE_NUM;
+#line 100 "renamed.c"
+int c;

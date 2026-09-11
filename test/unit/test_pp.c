@@ -4,6 +4,7 @@
 
 #include "harness.h"
 #include "pp.h"
+#include "pp_emit.h"
 #include "util/arena.h"
 
 #include <stdio.h>
@@ -1602,5 +1603,173 @@ TEST(pp, pragma_operator_non_string_operand_is_error)
     Pp *pp = pp_new(a);
     EXPECT_NULL(pp_preprocess(pp, "<test>", "_Pragma(foo)\n"));
     EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+static char *pp_emit_str(Pp *pp, PpEmitOptions opts)
+{
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *f = open_memstream(&buf, &len);
+    pp_emit(pp, f, opts);
+    fclose(f);
+    return buf;
+}
+
+static char *pp_file_read(Arena *a, const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return NULL;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = arena_alloc(a, (size_t) size + 1, 1);
+    fread(buf, 1, (size_t) size, f);
+    fclose(f);
+    buf[size] = '\0';
+    return buf;
+}
+
+/* Two soups are the same if every token shares kind, spelling and presumed
+   loc; the -E round-trip restores exactly these. */
+static void expect_soups_equal(Pp *a, Pp *b)
+{
+    EXPECT_EQ(vec_size(a->out), vec_size(b->out));
+    for (size_t i = 0; i < vec_size(a->out) && i < vec_size(b->out); i++)
+    {
+        PpToken *x = vec_get(a->out, i);
+        PpToken *y = vec_get(b->out, i);
+        EXPECT_EQ(x->kind, y->kind);
+        EXPECT_EQ(x->len, y->len);
+        EXPECT_TRUE(x->len == y->len && strncmp(x->spell, y->spell, x->len) == 0);
+        EXPECT_EQ(x->loc.line, y->loc.line);
+        EXPECT_TRUE((x->loc.file == NULL) == (y->loc.file == NULL));
+        if (x->loc.file && y->loc.file)
+        {
+            EXPECT_STR_EQ(x->loc.file, y->loc.file);
+        }
+    }
+}
+
+static void pp_emit_fixture(const char *base)
+{
+    Arena *a = arena_new();
+    char path[160];
+    snprintf(path, sizeof(path), "test/pp/%s.in", base);
+    char *src = pp_file_read(a, path);
+    EXPECT_NOTNULL(src);
+    if (!src)
+    {
+        arena_free(a);
+        return;
+    }
+    Pp *pp = pp_new(a);
+    EXPECT_NOTNULL(pp_preprocess(pp, path, src));
+    if (pp->error_count > 0)
+    {
+        arena_free(a);
+        return;
+    }
+
+    struct
+    {
+        const char *suffix;
+        PpEmitOptions opts;
+    } modes[] = {
+        {"", {false, false}},
+        {"-C", {true, false}},
+        {"-P", {false, true}},
+    };
+    for (size_t m = 0; m < sizeof(modes) / sizeof(modes[0]); m++)
+    {
+        char exp[180];
+        snprintf(exp, sizeof(exp), "test/pp/%s.expect%s", base, modes[m].suffix);
+        char *want = pp_file_read(a, exp);
+        if (!want)
+        {
+            continue;
+        }
+        char *got = pp_emit_str(pp, modes[m].opts);
+        EXPECT_STR_EQ(want, got);
+    }
+    arena_free(a);
+}
+
+TEST(pp, emit_fixture_basic)
+{
+    pp_emit_fixture("basic");
+}
+
+TEST(pp, emit_fixture_sep)
+{
+    pp_emit_fixture("sep");
+}
+
+TEST(pp, emit_keep_comments)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "/* hi */\nint ok;\n");
+    char *got = pp_emit_str(pp, (PpEmitOptions) {.keep_comments = true, .no_markers = true});
+    EXPECT_STR_EQ("/* hi */\nint ok;\n", got);
+    arena_free(a);
+}
+
+TEST(pp, emit_drops_comments)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "/* hi */\nint ok;\n");
+    char *got = pp_emit_str(pp, (PpEmitOptions) {.keep_comments = false, .no_markers = true});
+    EXPECT_STR_EQ("\nint ok;\n", got);
+    arena_free(a);
+}
+
+TEST(pp, emit_no_markers)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define X 1\nint ok = X;\nint ok2;\n");
+    char *got = pp_emit_str(pp, (PpEmitOptions) {.no_markers = true});
+    EXPECT_STR_EQ("int ok = 1;\nint ok2;\n", got);
+    arena_free(a);
+}
+
+TEST(pp, emit_markers)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define X 1\nint ok = X;\n#line 100 \"renamed.c\"\nint later;\n");
+    char *got = pp_emit_str(pp, (PpEmitOptions) {0});
+    EXPECT_STR_EQ("# 2 \"<test>\"\nint ok = 1;\n# 100 \"renamed.c\"\nint later;\n", got);
+    arena_free(a);
+}
+
+TEST(pp, emit_separates_fused_pairs)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define DASH -\n#define LSH <\n#define DOT .\n"
+                            "int a = 1 DASH DASH 2;\nint b = 1 LSH LSH 2;\nint c = 3 DOT 5;\n");
+    char *got = pp_emit_str(pp, (PpEmitOptions) {.no_markers = true});
+    EXPECT_STR_EQ("int a = 1 - - 2;\nint b = 1 < < 2;\nint c = 3 . 5;\n", got);
+    arena_free(a);
+}
+
+TEST(pp, emit_roundtrip_identical_soup)
+{
+    Arena *a = arena_new();
+    const char *hdr = pp_test_name(a, "rt.h");
+    pp_test_write(hdr, "#define RTT_X 42\nint r = RTT_X;\n");
+    const char *main = pp_test_name(a, "main.c");
+    char src[240];
+    snprintf(src, sizeof(src),
+             "#include \"%s\"\n#line 9 \"mapped.c\"\nint w = RTT_X;\nint ln = __LINE__;\n", hdr);
+    Pp *first = pp_new(a);
+    EXPECT_NOTNULL(pp_preprocess(first, pp_test_path(a, main), src));
+    char *text = pp_emit_str(first, (PpEmitOptions) {0});
+    EXPECT_EQ(first->error_count, 0);
+
+    Pp *second = pp_new(a);
+    EXPECT_NOTNULL(pp_preprocess(second, pp_test_path(a, main), text));
+    expect_soups_equal(first, second);
     arena_free(a);
 }

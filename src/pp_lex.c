@@ -262,6 +262,42 @@ static u32 pp_punct_match(const char *p, PpPunct *out)
     return 0;
 }
 
+bool pp_concat_is_punct(const char *a, size_t alen, const char *b, size_t blen)
+{
+    if (alen + blen > 4)
+    {
+        return false;
+    }
+    char buf[5];
+    memcpy(buf, a, alen);
+    memcpy(buf + alen, b, blen);
+    buf[alen + blen] = '\0';
+    for (size_t i = 0; i < sizeof(PP_PUNCTS) / sizeof(PP_PUNCTS[0]); i++)
+    {
+        if (strcmp(PP_PUNCTS[i].spelling, buf) == 0)
+        {
+            return true;
+        }
+    }
+    /* The join would invoke max-munch across the boundary even though the
+       full concatenation is not itself a punctuator: `a` is a strict prefix
+       of some punctuator whose remainder `b` begins with (e.g. `<` `<<`). */
+    for (size_t i = 0; i < sizeof(PP_PUNCTS) / sizeof(PP_PUNCTS[0]); i++)
+    {
+        size_t plen = strlen(PP_PUNCTS[i].spelling);
+        if (plen <= alen || strncmp(PP_PUNCTS[i].spelling, a, alen) != 0)
+        {
+            continue;
+        }
+        size_t rem = plen - alen;
+        if (blen >= rem && strncmp(b, PP_PUNCTS[i].spelling + alen, rem) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void scanner_init(SoupScannerCtx *ctx, const char *file, const char *src, Arena *arena)
 {
     ctx->file = file;

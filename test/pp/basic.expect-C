@@ -1,0 +1,8 @@
+/* leading comment stays with -C */
+# 3 "test/pp/basic.in"
+int a = hello 1;
+/* mid comment */
+# 6 "test/pp/basic.in"
+int b = 6;
+# 100 "renamed.c"
+int c;
