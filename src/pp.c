@@ -213,6 +213,10 @@ Pp *pp_new(Arena *arena)
     pp_predefine(pp, "__STDC_NO_THREADS__", "1");
     pp_predefine(pp, "__STDC_NO_VLA__", "1");
     pp_predefine(pp, "__STDC_NO_COMPLEX__", "1");
+
+    Macro *pragma = arena_alloc(pp->arena, sizeof(Macro), sizeof(void *));
+    *pragma = (Macro) {.name = "_Pragma", .kind = MACRO_OBJ, .predefined = true, .is_pragma = true};
+    strmap_set(pp->macros, "_Pragma", pragma);
     return pp;
 }
 
@@ -546,6 +550,10 @@ static bool pp_check_pastes(Pp *pp, Vec *body)
 /* Predefined names are reserved (§6.10.8): redefinition is a constraint. */
 static bool pp_is_reserved_name(const char *name)
 {
+    if (strcmp(name, "_Pragma") == 0)
+    {
+        return true;
+    }
     if (strcmp(name, "__LINE__") == 0 || strcmp(name, "__FILE__") == 0 ||
         strcmp(name, "__DATE__") == 0 || strcmp(name, "__TIME__") == 0)
     {
@@ -2010,6 +2018,160 @@ static TokList *pp_subst(Pp *pp, Macro *macro, const SubstArgs *sa)
 
 static Vec *pp_prescan_args(Pp *pp, Vec *args);
 
+/* Deletes the L/u8/u/U prefix and quotes from a string-literal token and
+   decodes its escapes (C11 §6.10.9.1); returns an arena NUL-terminated
+   buffer, or NULL after reporting a diagnostic. */
+static const char *pp_destringize(Pp *pp, const PpToken *str)
+{
+    const char *p = str->spell;
+    const char *end = str->spell + str->len;
+    while (p < end && *p != '"')
+    {
+        p++;
+    }
+    if (p >= end - 1)
+    {
+        pp_error(pp, str->loc, "malformed string literal in _Pragma operand");
+        return NULL;
+    }
+    p++;
+    const char *tail = end - 1;
+    ByteBuf buf;
+    bytebuf_init(&buf, pp->arena);
+    while (p < tail)
+    {
+        if (*p == '\\')
+        {
+            p++;
+            int val = lex_escape_byte(&p, tail);
+            if (val < 0)
+            {
+                pp_error(pp, str->loc, "hexadecimal escape sequence with no digits");
+                return NULL;
+            }
+            bytebuf_append(&buf, (u8) val);
+        }
+        else
+        {
+            bytebuf_append(&buf, (u8) *p);
+            p++;
+        }
+    }
+    bytebuf_append(&buf, 0);
+    return (const char *) buf.data;
+}
+
+/* Executes the destringized `_Pragma` operand as a `#pragma` directive line:
+   re-lexes the text with the 17b scanner and feeds a synthetic line into the
+   same directive dispatcher (reuse, don't fork). */
+static void pp_execute_pragma(Pp *pp, const char *text, Loc loc)
+{
+    if (vec_size(pp->includes) == 0)
+    {
+        return;
+    }
+    PpIncludeFrame *cur = vec_last(pp->includes);
+
+    Vec *lexed = pp_lex(loc.file, text, pp->arena);
+    if (!lexed)
+    {
+        return;
+    }
+
+    Vec *line = vec_new(pp->arena);
+    PpToken *hash = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
+    *hash = (PpToken) {
+        .kind = TOK_PP_PUNCT, .punct = PP_PUNCT_HASH, .spell = "#", .len = 1, .loc = loc};
+    vec_push(line, hash);
+    PpToken *name = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
+    *name = (PpToken) {.kind = TOK_PP_IDENT, .spell = "pragma", .len = 6, .loc = loc};
+    vec_push(line, name);
+    size_t n = vec_size(lexed);
+    for (size_t i = 0; i < n; i++)
+    {
+        PpToken *tok = vec_get(lexed, i);
+        if (tok->kind != TOK_PP_EOF)
+        {
+            vec_push(line, tok);
+        }
+    }
+    PpToken *eof = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
+    *eof = (PpToken) {.kind = TOK_PP_EOF, .loc = loc};
+    vec_push(line, eof);
+
+    PpIncludeFrame syn = {0};
+    syn.tokens = line;
+    syn.file = cur->file;
+    pp_directive(pp, &syn, 0, vec_size(line) - 1);
+    if (syn.system_header)
+    {
+        cur->system_header = true;
+    }
+}
+
+/* C11 §6.10.9 `_Pragma`: the operand (a string literal, macro-expanded like a
+   call argument) is destringized, re-lexed, and executed as a `#pragma`
+   directive line. `_Pragma` itself produces no output tokens. */
+static TokList *pp_pragma_op(Pp *pp, TokList *ts)
+{
+    PpToken *prag = ts->tok;
+
+    TokList *lparen = pp_skip_trivia_list(ts->next);
+    if (!lparen || !pp_is_lparen(lparen->tok))
+    {
+        pp_error(pp, prag->loc, "_Pragma expects '(' after it");
+        return ts->next;
+    }
+
+    TokList *arg = NULL;
+    TokList **atail = &arg;
+    TokList *it = lparen->next;
+    for (; it && !pp_is_rparen(it->tok); it = it->next)
+    {
+        *atail = list_cons(pp->arena, it->tok, NULL);
+        atail = &(*atail)->next;
+    }
+    if (!it)
+    {
+        pp_error(pp, prag->loc, "unterminated _Pragma operand");
+        return lparen->next;
+    }
+    TokList *after = it->next;
+
+    PpToken *str = NULL;
+    if (arg)
+    {
+        size_t real = 0;
+        for (TokList *r = pp_expand_list(pp, arg); r; r = r->next)
+        {
+            if (!pp_is_trivia(r->tok))
+            {
+                str = r->tok;
+                real++;
+            }
+        }
+        if (real != 1 || str->kind != TOK_PP_STRING)
+        {
+            pp_error(pp, prag->loc, "_Pragma operand must be a single string literal");
+            str = NULL;
+        }
+    }
+    else
+    {
+        pp_error(pp, prag->loc, "_Pragma operand must be a string literal");
+    }
+
+    if (str)
+    {
+        const char *text = pp_destringize(pp, str);
+        if (text)
+        {
+            pp_execute_pragma(pp, text, prag->loc);
+        }
+    }
+    return after;
+}
+
 /* Rescans ts with hide sets, splicing each macro's replacement in place of its
    invocation (C11 §6.10.3.1 argument prescan, §6.10.3.4 disable-during). */
 static TokList *pp_expand_list(Pp *pp, TokList *ts)
@@ -2031,6 +2193,12 @@ static TokList *pp_expand_list(Pp *pp, TokList *ts)
             *tail = list_cons(pp->arena, t, NULL);
             tail = &(*tail)->next;
             ts = ts->next;
+            continue;
+        }
+
+        if (macro->is_pragma)
+        {
+            ts = pp_pragma_op(pp, ts);
             continue;
         }
 

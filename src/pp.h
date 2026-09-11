@@ -36,6 +36,7 @@ struct Macro
     u32 param_count;
     bool variadic;
     bool predefined;
+    bool is_pragma;
 };
 
 typedef struct Pp Pp;

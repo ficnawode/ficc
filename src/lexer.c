@@ -239,58 +239,83 @@ static void lex_skip_whitespace(LexerCtx *ctx)
 }
 
 /* Decode one escape sequence; the leading backslash is already consumed.
-   Returns e.g. 'n' -> '\n'. Numeric escapes accumulate greedily and can return
-   values > 0xFF, which callers reject. Unknown escapes keep the character. */
-static int lex_escape(LexerCtx *ctx)
+   Shared by the legacy string lexer, the finalizer's string decoder, and the
+   pp destringizer for `_Pragma` (C11 §6.10.9). Returns e.g. 'n' -> '\n'.
+   Numeric escapes accumulate greedily and can return values > 0xFF, which
+   callers reject. Unknown escapes keep the character. */
+int lex_escape_byte(const char **pp, const char *end)
 {
     static const char simple_codes[] = "abfnrtv\\'\"?";
     static const char simple_vals[] = {'\a', '\b', '\f', '\n', '\r', '\t',
                                        '\v', '\\', '\'', '"',  '?'};
 
-    char c = *ctx->p;
+    const char *p = *pp;
+    if (end == NULL)
+    {
+        end = p + strlen(p);
+    }
+    if (p >= end)
+    {
+        return 0;
+    }
+
+    char c = *p;
     const char *hit = strchr(simple_codes, c);
     if (hit)
     {
-        lexer_advance(ctx);
+        *pp = p + 1;
         return simple_vals[hit - simple_codes];
     }
 
     if (c >= '0' && c <= '7')
     {
         int val = 0;
-        for (int i = 0; i < 3 && *ctx->p >= '0' && *ctx->p <= '7'; i++)
+        for (int i = 0; i < 3 && p < end && *p >= '0' && *p <= '7'; i++)
         {
             if (val <= 0xFF)
             {
-                val = val * 8 + (*ctx->p - '0');
+                val = val * 8 + (*p - '0');
             }
-            lexer_advance(ctx);
+            p++;
         }
+        *pp = p;
         return val;
     }
 
     if (c == 'x' || c == 'X')
     {
-        lexer_advance(ctx);
-        if (!is_hex_digit(*ctx->p))
+        p++;
+        if (p >= end || !is_hex_digit(*p))
         {
-            lexer_error(ctx, "hexadecimal escape sequence with no digits");
-            return 0;
+            *pp = p;
+            return -1;
         }
         int val = 0;
-        while (is_hex_digit(*ctx->p))
+        while (p < end && is_hex_digit(*p))
         {
             if (val <= 0xFF)
             {
-                val = val * 16 + hex_digit_value(*ctx->p);
+                val = val * 16 + hex_digit_value(*p);
             }
-            lexer_advance(ctx);
+            p++;
         }
+        *pp = p;
         return val;
     }
 
-    lexer_advance(ctx);
+    *pp = p + 1;
     return c;
+}
+
+static int lex_escape(LexerCtx *ctx)
+{
+    int val = lex_escape_byte(&ctx->p, NULL);
+    if (val >= 0)
+    {
+        return val;
+    }
+    lexer_error(ctx, "hexadecimal escape sequence with no digits");
+    return 0;
 }
 
 static void lex_number(LexerCtx *ctx)
@@ -796,63 +821,13 @@ static void finalize_punct(FinalizeCtx *ctx, const PpToken *tok)
    escapes accumulate greedily and can return values > 0xFF. */
 static int finalize_escape(const char **pp, const char *end, FinalizeCtx *ctx, Loc loc)
 {
-    static const char simple_codes[] = "abfnrtv\\'\"?";
-    static const char simple_vals[] = {'\a', '\b', '\f', '\n', '\r', '\t',
-                                       '\v', '\\', '\'', '"',  '?'};
-
-    const char *p = *pp;
-    if (p >= end)
+    int val = lex_escape_byte(pp, end);
+    if (val >= 0)
     {
-        return 0;
-    }
-
-    char c = *p;
-    const char *hit = strchr(simple_codes, c);
-    if (hit)
-    {
-        *pp = p + 1;
-        return simple_vals[hit - simple_codes];
-    }
-
-    if (c >= '0' && c <= '7')
-    {
-        int val = 0;
-        for (int i = 0; i < 3 && p < end && *p >= '0' && *p <= '7'; i++)
-        {
-            if (val <= 0xFF)
-            {
-                val = val * 8 + (*p - '0');
-            }
-            p++;
-        }
-        *pp = p;
         return val;
     }
-
-    if (c == 'x' || c == 'X')
-    {
-        p++;
-        if (p >= end || !is_hex_digit(*p))
-        {
-            finalize_error(ctx, loc, "hexadecimal escape sequence with no digits");
-            *pp = p;
-            return 0;
-        }
-        int val = 0;
-        while (p < end && is_hex_digit(*p))
-        {
-            if (val <= 0xFF)
-            {
-                val = val * 16 + hex_digit_value(*p);
-            }
-            p++;
-        }
-        *pp = p;
-        return val;
-    }
-
-    *pp = p + 1;
-    return c;
+    finalize_error(ctx, loc, "hexadecimal escape sequence with no digits");
+    return 0;
 }
 
 static void finalize_string(FinalizeCtx *ctx, const PpToken *tok)

@@ -1540,3 +1540,60 @@ TEST(pp, pragma_system_header_silences_warning)
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "ok"));
     arena_free(a);
 }
+
+TEST(pp, pragma_operator_once)
+{
+    Arena *a = arena_new();
+    const char *hdr = pp_test_name(a, "ponce.h");
+    pp_test_write(hdr, "_Pragma(\"once\")\n#define PONCE_Y 5\n");
+    const char *main = pp_test_name(a, "main.c");
+    char src[240];
+    snprintf(src, sizeof(src), "#include \"%s\"\n#include \"%s\"\nint v = PONCE_Y;\n", hdr, hdr);
+    Pp *pp = pp_new(a);
+    EXPECT_NOTNULL(pp_preprocess(pp, pp_test_path(a, main), src));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "5"));
+    arena_free(a);
+}
+
+TEST(pp, pragma_operator_once_via_macro)
+{
+    Arena *a = arena_new();
+    const char *hdr = pp_test_name(a, "poncem.h");
+    pp_test_write(hdr, "#define DO _Pragma(\"once\")\nDO\n#define PONCE_M 7\n");
+    const char *main = pp_test_name(a, "main.c");
+    char src[240];
+    snprintf(src, sizeof(src), "#include \"%s\"\n#include \"%s\"\nint v = PONCE_M;\n", hdr, hdr);
+    Pp *pp = pp_new(a);
+    EXPECT_NOTNULL(pp_preprocess(pp, pp_test_path(a, main), src));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "7"));
+    arena_free(a);
+}
+
+TEST(pp, pragma_operator_decode_escapes)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "_Pragma(\"GCC\\x20poison\\x20ze\")\nint ze;\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, pragma_operator_escaped_quote_operand)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "_Pragma(\"GCC poison \\\"a\\\"\")\nint ok;\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "ok"));
+    arena_free(a);
+}
+
+TEST(pp, pragma_operator_non_string_operand_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "_Pragma(foo)\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
