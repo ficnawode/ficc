@@ -27,16 +27,9 @@ typedef struct
     bool pp_no_markers;
 } DriverFlags;
 
-enum
-{
-    CMD_DEFINE,
-    CMD_UNDEF,
-    CMD_INCLUDE,
-};
-
 typedef struct
 {
-    int kind;
+    PPCommandKind kind;
     const char *arg;
 } DriverCmd;
 
@@ -124,7 +117,7 @@ static void usage(const char *prog)
             prog);
 }
 
-static bool add_cmd(DriverArgs *out, int kind, const char *arg)
+static bool add_cmd(DriverArgs *out, PPCommandKind kind, const char *arg)
 {
     if (out->cmd_count >= 32)
     {
@@ -202,9 +195,9 @@ static bool parse_args(int argc, char **argv, DriverArgs *out)
                 usage(argv[0]);
                 return false;
             }
-            int kind = strcmp(arg, "-D") == 0   ? CMD_DEFINE
-                       : strcmp(arg, "-U") == 0 ? CMD_UNDEF
-                                                : CMD_INCLUDE;
+            PPCommandKind kind = strcmp(arg, "-D") == 0   ? CMD_DEFINE
+                               : strcmp(arg, "-U") == 0 ? CMD_UNDEF
+                                                        : CMD_INCLUDE;
             if (!add_cmd(out, kind, argv[++i]))
             {
                 return false;
@@ -285,27 +278,24 @@ static Pp *pp_from_args(const DriverArgs *args)
 {
     Pp *pp = pp_new(arena_new());
     pp->exe_path = args->exe_path;
-    pp->nostdinc = args->flags.nostdinc;
-    pp->pedantic = args->flags.pedantic;
+
+    PPConfig cfg = {0};
+    cfg.include_paths = vec_new(pp->arena);
+    cfg.cmds = vec_new(pp->arena);
+    cfg.nostdinc = args->flags.nostdinc;
+    cfg.pedantic = args->flags.pedantic;
     for (size_t k = 0; k < args->include_path_count; k++)
     {
-        vec_push(pp->include_paths, (void *) args->include_paths[k]);
+        vec_push(cfg.include_paths, (void *) args->include_paths[k]);
     }
     for (size_t k = 0; k < args->cmd_count; k++)
     {
-        switch (args->cmds[k].kind)
-        {
-            case CMD_DEFINE:
-                pp_define_cmdline(pp, args->cmds[k].arg);
-                break;
-            case CMD_UNDEF:
-                pp_undef_cmdline(pp, args->cmds[k].arg);
-                break;
-            case CMD_INCLUDE:
-                pp_include_cmdline(pp, args->cmds[k].arg);
-                break;
-        }
+        PPCommand *cmd = arena_alloc(pp->arena, sizeof(*cmd), sizeof(void *));
+        cmd->kind = (PPCommandKind) args->cmds[k].kind;
+        cmd->arg = args->cmds[k].arg;
+        vec_push(cfg.cmds, cmd);
     }
+    pp_apply_config(pp, &cfg);
     return pp;
 }
 
@@ -363,7 +353,8 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
         }
     }
 
-    ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
+    ParserConfig parser_cfg = {.pedantic = args->flags.pedantic};
+    ASTNode *ast = parse(lexed.tokens, lexed.count, &parser_cfg, arena);
     if (!ast)
     {
         fprintf(stderr, "parse failed\n");
@@ -374,14 +365,16 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
         ast_dump(ast);
     }
 
-    ast = semantic_check(ast, arena);
+    SemanticConfig sem_cfg = {.pedantic = args->flags.pedantic};
+    ast = semantic_check(ast, &sem_cfg, arena);
     if (!ast)
     {
         fprintf(stderr, "semantic check failed\n");
         return 1;
     }
 
-    IrModule *mod = ir_build_module(ast, arena);
+    IRConfig ir_cfg;
+    IrModule *mod = ir_build_module(ast, &ir_cfg, arena);
     if (!mod)
     {
         fprintf(stderr, "IR build failed\n");
@@ -400,7 +393,8 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
 
     if (args->flags.emit_obj)
     {
-        CodegenModule *cm = codegen_ir_to_machine(mod, arena);
+        CodegenConfig cg_cfg;
+        CodegenModule *cm = codegen_ir_to_machine(mod, &cg_cfg, arena);
         char outpath[256];
         replace_ext(args->input_file, outpath, sizeof(outpath), ".o");
         elf_write(cm, outpath);

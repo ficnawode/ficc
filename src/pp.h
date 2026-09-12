@@ -1,6 +1,7 @@
 #ifndef FICC_PP_H
 #define FICC_PP_H
 
+#include "cli.h"
 #include "pp_lex.h"
 #include "util/arena.h"
 #include "util/hashmap.h"
@@ -50,9 +51,7 @@ struct Pp
     Loc physical;
     Loc presumed;
     bool skipping;
-    bool pedantic;
-    Vec *include_paths;
-    bool nostdinc;
+    PPConfig cfg;             /* -I / -D / -U / -include / -nostdinc / -fpedantic */
     const char *exe_path;
     const char *builtin_dir;
     const char *cooked_date;
@@ -75,6 +74,11 @@ void pp_free(Pp *pp);
 /* Translation phase 4. Returns the output soup (also pp->out) or NULL on
    error. */
 Vec *pp_preprocess(Pp *pp, const char *file, const char *src);
+
+/* Imports a command-line config fragment into the context: `nostdinc`,
+   `pedantic`, the `-I` include paths, and the `-D`/`-U`/`-include` commands
+   (applied in order). */
+void pp_apply_config(Pp *pp, const PPConfig *cfg);
 
 /* Command-line hooks (17u), applied before the main file is read: `-D name[=val]`
    (object-like), `-U name`, and `-include file` (preprocessed to completion). */

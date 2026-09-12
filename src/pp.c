@@ -172,12 +172,11 @@ Pp *pp_new(Arena *arena)
     pp->includes = vec_new(arena);
     pp->macros = strmap_new(arena);
     pp->conds = vec_new(arena);
-    pp->include_paths = vec_new(arena);
+    pp->cfg = (PPConfig) {0};
+    pp->cfg.include_paths = vec_new(arena);
     pp->physical = (Loc) {.file = NULL, .line = 1, .col = 1};
     pp->presumed = (Loc) {.file = NULL, .line = 1, .col = 1};
     pp->skipping = false;
-    pp->pedantic = false;
-    pp->nostdinc = false;
     pp->exe_path = NULL;
     pp->builtin_dir = NULL;
     pp->cooked_date = NULL;
@@ -206,6 +205,32 @@ Pp *pp_new(Arena *arena)
 void pp_free(Pp *pp)
 {
     arena_free(pp->arena);
+}
+
+void pp_apply_config(Pp *pp, const PPConfig *cfg)
+{
+    pp->cfg.nostdinc = cfg->nostdinc;
+    pp->cfg.pedantic = cfg->pedantic;
+    for (size_t k = 0; k < vec_size(cfg->include_paths); k++)
+    {
+        vec_push(pp->cfg.include_paths, vec_get(cfg->include_paths, k));
+    }
+    for (size_t k = 0; k < vec_size(cfg->cmds); k++)
+    {
+        PPCommand *cmd = vec_get(cfg->cmds, k);
+        switch (cmd->kind)
+        {
+            case CMD_DEFINE:
+                pp_define_cmdline(pp, cmd->arg);
+                break;
+            case CMD_UNDEF:
+                pp_undef_cmdline(pp, cmd->arg);
+                break;
+            case CMD_INCLUDE:
+                pp_include_cmdline(pp, cmd->arg);
+                break;
+        }
+    }
 }
 
 static void pp_push_include(Pp *pp, const char *file, Vec *tokens)
@@ -952,9 +977,9 @@ static const char *pp_include_find(Pp *pp, bool quoted, const char *name,
     if (next_mode && including_file)
     {
         const char *dir = pp_path_dirname(pp, including_file);
-        for (size_t k = 0; k < vec_size(pp->include_paths); k++)
+        for (size_t k = 0; k < vec_size(pp->cfg.include_paths); k++)
         {
-            if (strcmp((const char *) vec_get(pp->include_paths, k), dir) == 0)
+            if (strcmp((const char *) vec_get(pp->cfg.include_paths, k), dir) == 0)
             {
                 start = k + 1;
                 break;
@@ -962,16 +987,16 @@ static const char *pp_include_find(Pp *pp, bool quoted, const char *name,
         }
     }
 
-    for (size_t i = start; i < vec_size(pp->include_paths); i++)
+    for (size_t i = start; i < vec_size(pp->cfg.include_paths); i++)
     {
-        const char *cand = pp_path_join(pp, vec_get(pp->include_paths, i), name);
+        const char *cand = pp_path_join(pp, vec_get(pp->cfg.include_paths, i), name);
         if (pp_file_exists(cand))
         {
             return cand;
         }
     }
 
-    if (!pp->nostdinc)
+    if (!pp->cfg.nostdinc)
     {
         const char *cand = pp_path_join(pp, pp_builtin_dir(pp), name);
         if (pp_file_exists(cand))
@@ -1198,7 +1223,7 @@ static void pp_include_next_directive(Pp *pp, PpIncludeFrame *frame, size_t star
 
 static void pp_gnu_warn(Pp *pp, Loc loc, const char *feature)
 {
-    if (pp->pedantic)
+    if (pp->cfg.pedantic)
     {
         pp_warn(pp, loc, "'%s' is a GNU extension", feature);
     }

@@ -1153,7 +1153,7 @@ TEST(pp, include_angle_with_I)
     char src[200];
     snprintf(src, sizeof(src), "#include <%s>\nint v = FROM_I;\n", hdr);
     Pp *pp = pp_new(a);
-    vec_push(pp->include_paths, (void *) "/tmp");
+    vec_push(pp->cfg.include_paths, (void *) "/tmp");
     EXPECT_NOTNULL(pp_preprocess(pp, "<test>", src));
     EXPECT_EQ(pp->error_count, 0);
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "77"));
@@ -1370,7 +1370,7 @@ TEST(pp, include_macro_operand_expands)
     char asrc[220];
     snprintf(asrc, sizeof(asrc), "#define H <%s>\n#include H\nint v = FROM_ANGLE;\n", angle);
     Pp *pp = pp_new(a);
-    vec_push(pp->include_paths, (void *) "/tmp");
+    vec_push(pp->cfg.include_paths, (void *) "/tmp");
     EXPECT_NOTNULL(pp_preprocess(pp, "<test>", asrc));
     EXPECT_EQ(pp->error_count, 0);
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "33"));
@@ -1413,8 +1413,8 @@ TEST(pp, include_next_finds_later_dir)
     pp_test_write_at(path2, "#define SECOND 2\n");
 
     Pp *pp = pp_new(a);
-    vec_push(pp->include_paths, (void *) d1);
-    vec_push(pp->include_paths, (void *) d2);
+    vec_push(pp->cfg.include_paths, (void *) d1);
+    vec_push(pp->cfg.include_paths, (void *) d2);
     EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "#include <a.h>\nint v = FIRST + SECOND;\n"));
     EXPECT_EQ(pp->error_count, 0);
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "1"));
@@ -1922,7 +1922,7 @@ TEST(pp, pedantic_warns_on_gnu_pragma)
 {
     Arena *a = arena_new();
     Pp *pp = pp_new(a);
-    pp->pedantic = true;
+    pp->cfg.pedantic = true;
     EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "#pragma once\nint ok;\n"));
     EXPECT_TRUE(pp->warning_count >= 1);
     arena_free(a);

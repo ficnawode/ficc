@@ -68,7 +68,8 @@ TEST(ir_builder, wrong_toplevel_returns_null)
     Arena *a = arena_new();
     /* Build an int literal AST directly, bypass parser */
     ASTNode *lit = ast_int_literal(42, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
-    IrModule *m = ir_build_module(lit, a);
+    IRConfig ir_cfg;
+    IrModule *m = ir_build_module(lit, &ir_cfg, a);
     EXPECT_NULL(m);
     arena_free(a);
 }

@@ -14,6 +14,7 @@ struct Parser
     Arena *arena;
     StrMap *enum_consts;
     Vec *name_scopes;
+    ParserConfig cfg;
 };
 
 typedef enum
@@ -2757,10 +2758,15 @@ static bool resolve_constant_init(Parser *p, ASTVarDecl *vd, ASTNode *expr)
     return false;
 }
 
-ASTNode *parse(Token *tokens, u64 count, Arena *arena)
+ASTNode *parse(Token *tokens, u64 count, const ParserConfig *cfg, Arena *arena)
 {
     ASSERT(count > 0);
-    Parser p = {tokens, count, 0, arena, strmap_new(arena), vec_new(arena)};
+    ParserConfig pc = (ParserConfig) {0};
+    if (cfg)
+    {
+        pc = *cfg;
+    }
+    Parser p = {tokens, count, 0, arena, strmap_new(arena), vec_new(arena), pc};
     push_scope(&p);
 
     if (!declare_name(&p, "__builtin_va_list", BIND_TYPEDEF, type_va_list()))

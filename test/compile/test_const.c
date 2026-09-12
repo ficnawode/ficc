@@ -213,7 +213,8 @@ TEST(const, const_global_elf_rodata_no_write_flag)
         arena_free(arena);
         return;
     }
-    CodegenModule *cm = codegen_ir_to_machine(mod, arena);
+    CodegenConfig cg_cfg;
+    CodegenModule *cm = codegen_ir_to_machine(mod, &cg_cfg, arena);
     EXPECT_NOTNULL(cm);
     if (!cm)
     {

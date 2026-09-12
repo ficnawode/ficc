@@ -3188,8 +3188,9 @@ static bool is_toplevel_declaration(ASTNode *decl)
     }
 }
 
-IrModule *ir_build_module(ASTNode *ast, Arena *arena)
+IrModule *ir_build_module(ASTNode *ast, const IRConfig *cfg, Arena *arena)
 {
+    (void) cfg;
     if (ast->kind != AST_PROGRAM)
     {
         ir_error(ast, "expected program at top level");

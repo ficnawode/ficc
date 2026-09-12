@@ -40,7 +40,8 @@ ASTNode *tc_parse(const char *src, Arena *arena)
     {
         return NULL;
     }
-    return parse(lexed.tokens, lexed.count, arena);
+    ParserConfig pc = {0};
+    return parse(lexed.tokens, lexed.count, &pc, arena);
 }
 
 IrModule *tc_build_module(const char *src, Arena *arena)
@@ -51,12 +52,13 @@ IrModule *tc_build_module(const char *src, Arena *arena)
     {
         return NULL;
     }
-    ast = semantic_check(ast, arena);
+    ast = semantic_check(ast, &(SemanticConfig) {0}, arena);
     if (!ast)
     {
         return NULL;
     }
-    return ir_build_module(ast, arena);
+    IRConfig ir_cfg;
+    return ir_build_module(ast, &ir_cfg, arena);
 }
 
 /* tc_build_module over a concrete file path with -I-style include dirs, so
@@ -68,7 +70,7 @@ IrModule *tc_build_module_with_dirs(const char *src, const char *file, const cha
     Pp *pp = pp_new(arena_new());
     for (size_t i = 0; i < ndirs; i++)
     {
-        vec_push(pp->include_paths, (void *) dirs[i]);
+        vec_push(pp->cfg.include_paths, (void *) dirs[i]);
     }
     Vec *soup = pp_preprocess(pp, file ? file : "<test>", src);
     if (!soup)
@@ -82,17 +84,18 @@ IrModule *tc_build_module_with_dirs(const char *src, const char *file, const cha
     {
         return NULL;
     }
-    ASTNode *ast = parse(lexed.tokens, lexed.count, arena);
+    ASTNode *ast = parse(lexed.tokens, lexed.count, &(ParserConfig) {0}, arena);
     if (!ast)
     {
         return NULL;
     }
-    ast = semantic_check(ast, arena);
+    ast = semantic_check(ast, &(SemanticConfig) {0}, arena);
     if (!ast)
     {
         return NULL;
     }
-    return ir_build_module(ast, arena);
+    IRConfig ir_cfg2;
+    return ir_build_module(ast, &ir_cfg2, arena);
 }
 
 i64 tc_run_interp(const char *src)
@@ -138,7 +141,8 @@ int tc_run_elf(const char *src)
         return -1;
     }
 
-    CodegenModule *cm = codegen_ir_to_machine(mod, arena);
+    CodegenConfig cg_cfg;
+    CodegenModule *cm = codegen_ir_to_machine(mod, &cg_cfg, arena);
     if (!cm)
     {
         fprintf(stderr, "  [testdriver] codegen failed for: %s\n", src);
@@ -174,7 +178,8 @@ int tc_run_elf_with_extra_tu(const char *src, const char *extra_src)
         return -1;
     }
 
-    CodegenModule *cm = codegen_ir_to_machine(mod, arena);
+    CodegenConfig cg_cfg2;
+    CodegenModule *cm = codegen_ir_to_machine(mod, &cg_cfg2, arena);
     if (!cm)
     {
         fprintf(stderr, "  [testdriver] codegen failed for: %s\n", src);

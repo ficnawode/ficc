@@ -18,6 +18,7 @@ struct SemanticCtx
     Vec *switch_sem_stack; /* Vec<SwitchSem*> — per-switch case-value sets */
     Vec *fn_params;        /* enclosing function's ASTVarDecl* list (for builtin
                               va_start validation), NULL outside function bodies */
+    SemanticConfig cfg;
     bool error;
 };
 
@@ -2746,7 +2747,7 @@ static bool check_function_bodies(ASTProgram *prog, SemanticCtx *ctx)
     return true;
 }
 
-ASTNode *semantic_check(ASTNode *ast, Arena *arena)
+ASTNode *semantic_check(ASTNode *ast, const SemanticConfig *cfg, Arena *arena)
 {
     if (!ast)
     {
@@ -2762,6 +2763,7 @@ ASTNode *semantic_check(ASTNode *ast, Arena *arena)
         .loop_depth = 0,
         .switch_depth = 0,
         .switch_sem_stack = vec_new(arena),
+        .cfg = cfg ? *cfg : (SemanticConfig) {0},
         .error = false,
     };
 

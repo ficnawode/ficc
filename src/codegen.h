@@ -1,6 +1,7 @@
 #ifndef FICC_CODEGEN_H
 #define FICC_CODEGEN_H
 
+#include "cli.h"
 #include "ir.h"
 #include "util/bytebuf.h"
 #include "util/types.h"
@@ -49,6 +50,6 @@ struct CodegenModule
 };
 
 /* Convert IR to machine code bytes. */
-CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena);
+CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Arena *arena);
 
 #endif

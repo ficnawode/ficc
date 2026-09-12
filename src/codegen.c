@@ -1843,8 +1843,9 @@ static CodegenFunc *find_codegen_func(CodegenModule *cm, const char *name)
     return NULL;
 }
 
-CodegenModule *codegen_ir_to_machine(IrModule *ir, Arena *arena)
+CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Arena *arena)
 {
+    (void) cfg;
     CodegenModule *cm = arena_alloc(arena, sizeof(CodegenModule), sizeof(void *));
     cm->funcs = vec_new(arena);
     cm->globals = ir->globals;
