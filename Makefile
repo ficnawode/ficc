@@ -31,6 +31,9 @@ OBJ_TEST_TEST := $(patsubst test/%.c,$(TEST_OBJ_DIR)/test/%.o,$(SRC_TEST))
 FICC_BIN := $(BIN_DIR)/ficc
 TEST_BIN := $(BIN_DIR)/test_runner
 
+# test/compile/test_driver.c runs the real ficc binary through tc_run_shell.
+TEST_CFLAGS := $(CFLAGS) -DFICC_BIN=\"$(abspath $(FICC_BIN))\"
+
 DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_BIN) $(TEST_BIN)))
 
 .PHONY: all clean test selftest dirs compile-commands
@@ -53,7 +56,7 @@ $(TEST_OBJ_DIR)/src/%.o: src/%.c | dirs
 	$(BEAR_RUN) $(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(TEST_OBJ_DIR)/test/%.o: test/%.c | dirs
-	$(BEAR_RUN) $(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+	$(BEAR_RUN) $(CC) $(TEST_CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 TEST_DEPS := $(wildcard $(TEST_OBJ_DIR)/test/*.d $(TEST_OBJ_DIR)/test/*/*.d)
 -include $(OBJ_DIR)/src/*.d $(TEST_OBJ_DIR)/src/*.d $(TEST_DEPS)
@@ -69,22 +72,22 @@ compile-commands:
 	$(MAKE) clean
 	$(MAKE) COMPILE_COMMANDS=1 all test
 
-# --- Self-compilation / bootstrap check ---
+# --- Self-compilation / bootstrap check (phase 18: uses -o, per-stage object trees) ---
 #
-# Stage 1: compile every ficc source with the gcc-built ficc, link with gcc ->
-# ficc1. Stage 2: rebuild every source *with ficc1 itself*, link with gcc ->
-# ficc2. A correct, deterministic self-hosting compiler must produce a ficc2
-# byte-identical to ficc1; any mismatch (or crash) is a bootstrap failure.
+# stage 1: compile every source with the gcc-built ficc   -> build/selftest/obj/stage1
+# stage 2: rebuild every source with ficc1 itself         -> build/selftest/obj/stage2
 #
-# Both stages compile the same staged copy of src/ using relative names, so
-# __FILE__-derived constants match; SOURCE_DATE_EPOCH pins __DATE__/__TIME__
-# so the comparison does not depend on the wall clock. ficc emits each object
-# next to its source, so stage 2 overwrites the stage-1 objects in place.
+# Each stage writes objects to its own dir via `-c src -o obj/stageN/<src>.o`, so stage 2
+# no longer overwrites stage 1. Bootstrap correctness = stage1 and stage2 OBJECT trees
+# are byte-identical (stricter, and independent of the external linker).
 #
-# ficc-produced objects contain R_X86_64_32S data-facing relocations, so the
-# link is forced -no-pie (plain `make` builds gcc objects and is unaffected).
+# We still cd into the staging dir so __FILE__-derived strings match across stages, and
+# still force -no-pie on the final links because ficc objects carry R_X86_64_32S data
+# relocations; both vanish when an internal linker replaces the external ld step.
 SELF_DIR  := $(BUILD_DIR)/selftest
 SELF_SRC  := $(SELF_DIR)/src
+SELF_OBJ1 := $(SELF_DIR)/obj/stage1
+SELF_OBJ2 := $(SELF_DIR)/obj/stage2
 FICC1_BIN := $(SELF_DIR)/ficc1
 FICC2_BIN := $(SELF_DIR)/ficc2
 SELF_FILES := $(wildcard src/*.c src/*.h src/util/*.c src/util/*.h)
@@ -96,26 +99,28 @@ $(SELF_DIR)/.staged: $(SELF_FILES) | dirs
 	@cp src/util/*.c src/util/*.h $(SELF_SRC)/util/
 	@touch $@
 
-# ficc writes object files next to the source; the loop runs from the staging
-# dir so every object lands there and relative __FILE__ strings match.
+# $1 = compiler binary, $2 = target object dir. Compile each source from the staged
+# dir (relative names, so __FILE__ matches) but write each .o into $(2).
 define self-compile-loop
+	@rm -rf $(2) && mkdir -p $(2)/util
 	@cd $(SELF_SRC) && for c in *.c util/*.c; do \
-		SOURCE_DATE_EPOCH=0 $(1) -c "-DFICC_BUILTIN_INCLUDE=\"$(abspath include)\"" "$$c" \
+		SOURCE_DATE_EPOCH=0 $(1) -c "-DFICC_BUILTIN_INCLUDE=\"$(abspath include)\"" \
+			"$$c" -o "$(2)/$${c%.c}.o" \
 		|| { echo "selftest: stage $(2) failed to compile $$c"; exit 1; }; \
 	done
 endef
 
 selftest: $(FICC_BIN) $(SELF_DIR)/.staged
 	@echo "== selftest stage 1: compile with $(notdir $(FICC_BIN)) =="
-	$(call self-compile-loop,$(abspath $(FICC_BIN)),1)
-	@$(CC) -no-pie $(LDFLAGS) $(SELF_SRC)/*.o $(SELF_SRC)/util/*.o -o $(FICC1_BIN)
+	$(call self-compile-loop,$(abspath $(FICC_BIN)),$(abspath $(SELF_OBJ1)))
+	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ1)/*.o $(SELF_OBJ1)/util/*.o -o $(FICC1_BIN)
 	@echo "== selftest stage 2: rebuild with ficc1 =="
-	$(call self-compile-loop,$(abspath $(FICC1_BIN)),2)
-	@$(CC) -no-pie $(LDFLAGS) $(SELF_SRC)/*.o $(SELF_SRC)/util/*.o -o $(FICC2_BIN)
-	@if cmp -s $(FICC1_BIN) $(FICC2_BIN); then \
-		echo "selftest: OK — ficc1 and ficc2 are byte-identical"; \
+	$(call self-compile-loop,$(abspath $(FICC1_BIN)),$(abspath $(SELF_OBJ2)))
+	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ2)/*.o $(SELF_OBJ2)/util/*.o -o $(FICC2_BIN)
+	@if diff -r --brief $(SELF_OBJ1) $(SELF_OBJ2); then \
+		echo "selftest: OK — stage1 and stage2 object trees are byte-identical"; \
 	else \
-		echo "selftest: FAIL — ficc1 and ficc2 differ (bootstrap mismatch)"; \
-		cmp $(FICC1_BIN) $(FICC2_BIN); \
+		echo "selftest: FAIL — bootstrap objects differ"; \
+		diff -r $(SELF_OBJ1) $(SELF_OBJ2); \
 		exit 1; \
 	fi
