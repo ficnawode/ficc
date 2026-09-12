@@ -1,3 +1,4 @@
+#include "cli.h"
 #include "codegen.h"
 #include "elf.h"
 #include "ir_builder.h"
@@ -12,37 +13,39 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct
+static char *read_stream(FILE *f, const char *what, Arena *arena)
 {
-    bool dump_tokens;
-    bool dump_ast;
-    bool dump_ir;
-    bool dump_pp;
-    bool emit_pp;
-    bool emit_obj;
-    bool run_interp;
-    bool nostdinc;
-    bool pedantic;
-    bool pp_keep_comments;
-    bool pp_no_markers;
-} DriverFlags;
-
-typedef struct
-{
-    PPCommandKind kind;
-    const char *arg;
-} DriverCmd;
-
-typedef struct
-{
-    const char *input_file;
-    const char *exe_path;
-    const char *include_paths[16];
-    size_t include_path_count;
-    DriverCmd cmds[32];
-    size_t cmd_count;
-    DriverFlags flags;
-} DriverArgs;
+    (void) what;
+    size_t cap = 8192;
+    size_t size = 0;
+    char *buf = arena_alloc(arena, cap, 1);
+    if (!buf)
+    {
+        return NULL;
+    }
+    for (;;)
+    {
+        if (size == cap)
+        {
+            cap *= 2;
+            char *nb = arena_alloc(arena, cap, 1);
+            if (!nb)
+            {
+                return NULL;
+            }
+            memcpy(nb, buf, size);
+            buf = nb;
+        }
+        size_t n = fread(buf + size, 1, cap - size, f);
+        if (n == 0)
+        {
+            break;
+        }
+        size += n;
+    }
+    buf[size] = '\0';
+    return buf;
+}
 
 static char *read_file(const char *path, Arena *arena)
 {
@@ -52,44 +55,7 @@ static char *read_file(const char *path, Arena *arena)
         perror(path);
         return NULL;
     }
-
-    if (fseek(f, 0, SEEK_END) != 0)
-    {
-        perror(path);
-        fclose(f);
-        return NULL;
-    }
-
-    long size = ftell(f);
-    if (size < 0)
-    {
-        perror(path);
-        fclose(f);
-        return NULL;
-    }
-
-    if (fseek(f, 0, SEEK_SET) != 0)
-    {
-        perror(path);
-        fclose(f);
-        return NULL;
-    }
-
-    char *buf = arena_alloc(arena, (size_t) size + 1, 1);
-    if (!buf)
-    {
-        fclose(f);
-        return NULL;
-    }
-
-    size_t nread = fread(buf, 1, (size_t) size, f);
-    if (nread != (size_t) size)
-    {
-        fprintf(stderr, "%s: short read (%zu of %ld bytes)\n", path, nread, size);
-        fclose(f);
-        return NULL;
-    }
-    buf[size] = '\0';
+    char *buf = read_stream(f, path, arena);
     fclose(f);
     return buf;
 }
@@ -108,203 +74,20 @@ static void replace_ext(const char *in, char *out, size_t out_len, const char *n
     memcpy(out + base_len, new_ext, ext_len + 1);
 }
 
-static void usage(const char *prog)
-{
-    fprintf(stderr,
-            "Usage: %s [-tokens] [-pp] [-E] [-C] [-P] [-ast] [-ir] [-c] [-run] "
-            "[-I dir] [-D name[=val]] [-U name] [-include file] [-nostdinc] "
-            "[-pedantic] <file.c>\n",
-            prog);
-}
-
-static bool add_cmd(DriverArgs *out, PPCommandKind kind, const char *arg)
-{
-    if (out->cmd_count >= 32)
-    {
-        fprintf(stderr, "too many -D/-U/-include options\n");
-        return false;
-    }
-    out->cmds[out->cmd_count].kind = kind;
-    out->cmds[out->cmd_count].arg = arg;
-    out->cmd_count++;
-    return true;
-}
-
-static bool parse_args(int argc, char **argv, DriverArgs *out)
-{
-    out->input_file = NULL;
-    out->exe_path = argv[0];
-    out->include_path_count = 0;
-    out->cmd_count = 0;
-    out->flags = (DriverFlags) {0};
-
-    for (int i = 1; i < argc; i++)
-    {
-        const char *arg = argv[i];
-        if (strcmp(arg, "-tokens") == 0)
-        {
-            out->flags.dump_tokens = true;
-        }
-        else if (strcmp(arg, "-pp") == 0)
-        {
-            out->flags.dump_pp = true;
-        }
-        else if (strcmp(arg, "-E") == 0)
-        {
-            out->flags.emit_pp = true;
-        }
-        else if (strcmp(arg, "-C") == 0)
-        {
-            out->flags.pp_keep_comments = true;
-            out->flags.emit_pp = true;
-        }
-        else if (strcmp(arg, "-P") == 0)
-        {
-            out->flags.pp_no_markers = true;
-            out->flags.emit_pp = true;
-        }
-        else if (strcmp(arg, "-ast") == 0)
-        {
-            out->flags.dump_ast = true;
-        }
-        else if (strcmp(arg, "-ir") == 0)
-        {
-            out->flags.dump_ir = true;
-        }
-        else if (strcmp(arg, "-c") == 0)
-        {
-            out->flags.emit_obj = true;
-        }
-        else if (strcmp(arg, "-run") == 0)
-        {
-            out->flags.run_interp = true;
-        }
-        else if (strcmp(arg, "-nostdinc") == 0)
-        {
-            out->flags.nostdinc = true;
-        }
-        else if (strcmp(arg, "-pedantic") == 0)
-        {
-            out->flags.pedantic = true;
-        }
-        else if (strcmp(arg, "-D") == 0 || strcmp(arg, "-U") == 0 || strcmp(arg, "-include") == 0)
-        {
-            if (i + 1 >= argc)
-            {
-                fprintf(stderr, "%s requires an argument\n", arg);
-                usage(argv[0]);
-                return false;
-            }
-            PPCommandKind kind = strcmp(arg, "-D") == 0   ? CMD_DEFINE
-                               : strcmp(arg, "-U") == 0 ? CMD_UNDEF
-                                                        : CMD_INCLUDE;
-            if (!add_cmd(out, kind, argv[++i]))
-            {
-                return false;
-            }
-        }
-        else if (arg[0] == '-' && arg[1] == 'D' && arg[2] != '\0')
-        {
-            if (!add_cmd(out, CMD_DEFINE, arg + 2))
-            {
-                return false;
-            }
-        }
-        else if (arg[0] == '-' && arg[1] == 'U' && arg[2] != '\0')
-        {
-            if (!add_cmd(out, CMD_UNDEF, arg + 2))
-            {
-                return false;
-            }
-        }
-        else if (strncmp(arg, "-include", 8) == 0 && arg[8] == '=')
-        {
-            if (!add_cmd(out, CMD_INCLUDE, arg + 9))
-            {
-                return false;
-            }
-        }
-        else if (strcmp(arg, "-I") == 0)
-        {
-            if (i + 1 >= argc)
-            {
-                fprintf(stderr, "-I requires a directory argument\n");
-                usage(argv[0]);
-                return false;
-            }
-            if (out->include_path_count >= 16)
-            {
-                fprintf(stderr, "too many -I directories\n");
-                return false;
-            }
-            out->include_paths[out->include_path_count++] = argv[++i];
-        }
-        else if (arg[0] == '-' && arg[1] == 'I')
-        {
-            if (out->include_path_count >= 16)
-            {
-                fprintf(stderr, "too many -I directories\n");
-                return false;
-            }
-            out->include_paths[out->include_path_count++] = arg + 2;
-        }
-        else if (arg[0] == '-')
-        {
-            fprintf(stderr, "unknown flag: %s\n", arg);
-            usage(argv[0]);
-            return false;
-        }
-        else
-        {
-            if (out->input_file)
-            {
-                fprintf(stderr, "multiple input files not supported\n");
-                usage(argv[0]);
-                return false;
-            }
-            out->input_file = arg;
-        }
-    }
-
-    if (!out->input_file)
-    {
-        usage(argv[0]);
-        return false;
-    }
-    return true;
-}
-
-static Pp *pp_from_args(const DriverArgs *args)
+static Pp *pp_from_config(const CompilerConfig *cfg)
 {
     Pp *pp = pp_new(arena_new());
-    pp->exe_path = args->exe_path;
-
-    PPConfig cfg = {0};
-    cfg.include_paths = vec_new(pp->arena);
-    cfg.cmds = vec_new(pp->arena);
-    cfg.nostdinc = args->flags.nostdinc;
-    cfg.pedantic = args->flags.pedantic;
-    for (size_t k = 0; k < args->include_path_count; k++)
-    {
-        vec_push(cfg.include_paths, (void *) args->include_paths[k]);
-    }
-    for (size_t k = 0; k < args->cmd_count; k++)
-    {
-        PPCommand *cmd = arena_alloc(pp->arena, sizeof(*cmd), sizeof(void *));
-        cmd->kind = (PPCommandKind) args->cmds[k].kind;
-        cmd->arg = args->cmds[k].arg;
-        vec_push(cfg.cmds, cmd);
-    }
-    pp_apply_config(pp, &cfg);
+    pp->exe_path = cfg->exe_path;
+    pp_apply_config(pp, &cfg->pp);
     return pp;
 }
 
-static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
+static int run_pipeline(const CompilerConfig *cfg, const char *input, Arena *arena, char *src)
 {
     type_reset();
 
-    Pp *pp = pp_from_args(args);
-    Vec *soup = pp_preprocess(pp, args->input_file, src);
+    Pp *pp = pp_from_config(cfg);
+    Vec *soup = pp_preprocess(pp, input, src);
     if (!soup)
     {
         pp_free(pp);
@@ -312,15 +95,15 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
         return 1;
     }
 
-    if (args->flags.emit_pp || args->flags.dump_pp)
+    if (cfg->emit_pp || cfg->dump_pp)
     {
-        if (args->flags.emit_pp)
+        if (cfg->emit_pp)
         {
             pp_emit(pp, stdout,
-                    (PpEmitOptions) {.keep_comments = args->flags.pp_keep_comments,
-                                     .no_markers = args->flags.pp_no_markers});
+                    (PpEmitOptions) {.keep_comments = cfg->pp.keep_comments,
+                                     .no_markers = cfg->pp.no_markers});
         }
-        if (args->flags.dump_pp)
+        if (cfg->dump_pp)
         {
             pp_dump(soup);
         }
@@ -335,7 +118,7 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
         fprintf(stderr, "lex failed\n");
         return 1;
     }
-    if (args->flags.dump_tokens)
+    if (cfg->dump_tokens)
     {
         for (size_t i = 0; i < lexed.count; i++)
         {
@@ -353,50 +136,54 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
         }
     }
 
-    ParserConfig parser_cfg = {.pedantic = args->flags.pedantic};
-    ASTNode *ast = parse(lexed.tokens, lexed.count, &parser_cfg, arena);
+    ASTNode *ast = parse(lexed.tokens, lexed.count, &cfg->parser, arena);
     if (!ast)
     {
         fprintf(stderr, "parse failed\n");
         return 1;
     }
-    if (args->flags.dump_ast)
+    if (cfg->dump_ast)
     {
         ast_dump(ast);
     }
 
-    SemanticConfig sem_cfg = {.pedantic = args->flags.pedantic};
-    ast = semantic_check(ast, &sem_cfg, arena);
+    ast = semantic_check(ast, &cfg->semantic, arena);
     if (!ast)
     {
         fprintf(stderr, "semantic check failed\n");
         return 1;
     }
 
-    IRConfig ir_cfg;
-    IrModule *mod = ir_build_module(ast, &ir_cfg, arena);
+    IrModule *mod = ir_build_module(ast, &cfg->ir, arena);
     if (!mod)
     {
         fprintf(stderr, "IR build failed\n");
         return 1;
     }
-    if (args->flags.dump_ir)
+    if (cfg->dump_ir)
     {
         ir_dump(mod);
     }
 
-    if (args->flags.run_interp)
+    if (cfg->run_interp)
     {
         i64 result = ir_interp_run(mod);
         printf("interp: %lld\n", (long long) result);
     }
 
-    if (args->flags.emit_obj)
+    if (cfg->emit_obj)
     {
-        CodegenConfig cg_cfg;
-        CodegenModule *cm = codegen_ir_to_machine(mod, &cg_cfg, arena);
+        CodegenModule *cm = codegen_ir_to_machine(mod, &cfg->codegen, arena);
         char outpath[256];
-        replace_ext(args->input_file, outpath, sizeof(outpath), ".o");
+        if (cfg->output_path)
+        {
+            strncpy(outpath, cfg->output_path, sizeof(outpath) - 1);
+            outpath[sizeof(outpath) - 1] = '\0';
+        }
+        else
+        {
+            replace_ext(input, outpath, sizeof(outpath), ".o");
+        }
         elf_write(cm, outpath);
     }
 
@@ -405,20 +192,41 @@ static int run_pipeline(const DriverArgs *args, Arena *arena, char *src)
 
 int main(int argc, char **argv)
 {
-    DriverArgs args;
-    if (!parse_args(argc, argv, &args))
-    {
-        return 1;
-    }
-
     Arena *arena = arena_new();
-    char *src = read_file(args.input_file, arena);
-    if (!src)
+    CompilerConfig *cfg = cli_parse(argc, argv, arena);
+    if (!cfg)
     {
+        arena_free(arena);
         return 1;
     }
+    if (cfg->show_help)
+    {
+        cli_help(cfg);
+        arena_free(arena);
+        return 0;
+    }
 
-    int rc = run_pipeline(&args, arena, src);
+    int rc = 0;
+    for (size_t i = 0; i < vec_size(cfg->inputs) && rc == 0; i++)
+    {
+        const char *input = (const char *) vec_get(cfg->inputs, i);
+        char *src;
+        if (strcmp(input, "-") == 0)
+        {
+            src = read_stream(stdin, "stdin", arena);
+        }
+        else
+        {
+            src = read_file(input, arena);
+        }
+        if (!src)
+        {
+            rc = 1;
+            break;
+        }
+        rc = run_pipeline(cfg, input, arena, src);
+    }
+
     arena_free(arena);
     return rc;
 }
