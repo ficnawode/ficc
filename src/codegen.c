@@ -950,6 +950,17 @@ static void lower_div(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
+/* Width of an integer-immediate load: 4 bytes when it fits a sign-extended
+   imm32, otherwise a full 64-bit load. */
+static u8 imm_load_width(i64 imm)
+{
+    if (imm >= INT32_MIN && imm <= INT32_MAX)
+    {
+        return 4;
+    }
+    return 8;
+}
+
 static void lower_icmp(IrInstr *in, CodegenCtx *ctx)
 {
     /* Compare at the widest operand width: a width-1 vreg (`char != 0`) or a
@@ -959,10 +970,24 @@ static void lower_icmp(IrInstr *in, CodegenCtx *ctx)
     u8 rw = vreg_width(ctx, in->result);
     IrOperand lhs = in->ops[0];
     IrOperand rhs = in->ops[1];
-    u8 w0 = lhs.is_imm ? (lhs.u.imm >= INT32_MIN && lhs.u.imm <= INT32_MAX ? 4 : 8)
-                       : operand_width(ctx, lhs);
-    u8 w1 = rhs.is_imm ? (rhs.u.imm >= INT32_MIN && rhs.u.imm <= INT32_MAX ? 4 : 8)
-                       : operand_width(ctx, rhs);
+    u8 w0;
+    if (lhs.is_imm)
+    {
+        w0 = imm_load_width(lhs.u.imm);
+    }
+    else
+    {
+        w0 = operand_width(ctx, lhs);
+    }
+    u8 w1;
+    if (rhs.is_imm)
+    {
+        w1 = imm_load_width(rhs.u.imm);
+    }
+    else
+    {
+        w1 = operand_width(ctx, rhs);
+    }
     u8 w = w0 > w1 ? w0 : w1;
 
     if (lhs.is_imm)

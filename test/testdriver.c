@@ -57,8 +57,7 @@ IrModule *tc_build_module(const char *src, Arena *arena)
     {
         return NULL;
     }
-    IRConfig ir_cfg;
-    return ir_build_module(ast, &ir_cfg, arena);
+    return ir_build_module(ast, NULL, arena);
 }
 
 /* tc_build_module over a concrete file path with -I-style include dirs, so
@@ -94,8 +93,7 @@ IrModule *tc_build_module_with_dirs(const char *src, const char *file, const cha
     {
         return NULL;
     }
-    IRConfig ir_cfg2;
-    return ir_build_module(ast, &ir_cfg2, arena);
+    return ir_build_module(ast, NULL, arena);
 }
 
 i64 tc_run_interp(const char *src)
@@ -141,8 +139,7 @@ int tc_run_elf(const char *src)
         return -1;
     }
 
-    CodegenConfig cg_cfg;
-    CodegenModule *cm = codegen_ir_to_machine(mod, &cg_cfg, arena);
+    CodegenModule *cm = codegen_ir_to_machine(mod, NULL, arena);
     if (!cm)
     {
         fprintf(stderr, "  [testdriver] codegen failed for: %s\n", src);
@@ -178,8 +175,7 @@ int tc_run_elf_with_extra_tu(const char *src, const char *extra_src)
         return -1;
     }
 
-    CodegenConfig cg_cfg2;
-    CodegenModule *cm = codegen_ir_to_machine(mod, &cg_cfg2, arena);
+    CodegenModule *cm = codegen_ir_to_machine(mod, NULL, arena);
     if (!cm)
     {
         fprintf(stderr, "  [testdriver] codegen failed for: %s\n", src);

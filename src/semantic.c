@@ -1985,12 +1985,25 @@ static bool fold_binary_constant(BinOpKind op, i64 l, i64 r, i64 *out, bool is_u
             }
             if (is_unsigned)
             {
-                *out = op == BIN_DIV ? (i64) ((u64) l / (u64) r)
-                                     : (i64) ((u64) l % (u64) r);
+                if (op == BIN_DIV)
+                {
+                    *out = (i64) ((u64) l / (u64) r);
+                }
+                else
+                {
+                    *out = (i64) ((u64) l % (u64) r);
+                }
             }
             else
             {
-                *out = op == BIN_DIV ? l / r : l % r;
+                if (op == BIN_DIV)
+                {
+                    *out = l / r;
+                }
+                else
+                {
+                    *out = l % r;
+                }
             }
             return true;
         case BIN_SHL:
@@ -2754,6 +2767,12 @@ ASTNode *semantic_check(ASTNode *ast, const SemanticConfig *cfg, Arena *arena)
         return NULL;
     }
 
+    SemanticConfig sc = (SemanticConfig) {0};
+    if (cfg)
+    {
+        sc = *cfg;
+    }
+
     SemanticCtx ctx = {
         .arena = arena,
         .globals = strmap_new(arena),
@@ -2763,7 +2782,7 @@ ASTNode *semantic_check(ASTNode *ast, const SemanticConfig *cfg, Arena *arena)
         .loop_depth = 0,
         .switch_depth = 0,
         .switch_sem_stack = vec_new(arena),
-        .cfg = cfg ? *cfg : (SemanticConfig) {0},
+        .cfg = sc,
         .error = false,
     };
 

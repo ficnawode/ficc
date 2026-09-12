@@ -1006,8 +1006,12 @@ static IrOpcode arith_opcode(BinOpKind op, Type *lt)
     }
     if (is_divrem_op(op))
     {
-        return type_is_unsigned(lt) ? (op == BIN_DIV ? OP_UDIV : OP_UREM)
-                                    : (op == BIN_DIV ? OP_SDIV : OP_SREM);
+        bool unsig = type_is_unsigned(lt);
+        if (op == BIN_DIV)
+        {
+            return unsig ? OP_UDIV : OP_SDIV;
+        }
+        return unsig ? OP_UREM : OP_SREM;
     }
     if (op == BIN_SHR)
     {
@@ -1834,7 +1838,11 @@ static u32 clamped_string_len(ASTStringLiteral *sl, Type *array_type)
 {
     u32 need = (u32) sl->length + 1;
     u32 bound = array_type->arr.length;
-    return bound ? (need < bound ? need : bound) : need;
+    if (bound != 0 && need > bound)
+    {
+        return bound;
+    }
+    return need;
 }
 
 /* Encode a plan into init bytes: zero-filled base, folded scalars, string

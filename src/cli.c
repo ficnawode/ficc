@@ -330,7 +330,12 @@ static const CLIOption *lookup(const CLIOption *table, const char *arg, const ch
 CompilerConfig *cli_parse(int argc, char **argv, Arena *arena)
 {
     CompilerConfig *cfg = arena_alloc(arena, sizeof(*cfg), sizeof(void *));
-    cli_config_init(cfg, arena, (argc > 0 && argv[0]) ? argv[0] : "ficc");
+    const char *exe = "ficc";
+    if (argc > 0 && argv[0])
+    {
+        exe = argv[0];
+    }
+    cli_config_init(cfg, arena, exe);
 
     for (int i = 1; i < argc; i++)
     {
