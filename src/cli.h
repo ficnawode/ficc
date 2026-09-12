@@ -62,6 +62,7 @@ typedef struct {
     bool dump_ir;             /* -ir */
     bool emit_obj;            /* -c */
     bool run_interp;          /* -run */
+    bool show_help;           /* --help: print the option listing and leave */
 
     /* sub-configs handed to each stage */
     PPConfig       pp;
@@ -74,5 +75,6 @@ typedef struct {
 
 CompilerConfig *cli_parse(int argc, char **argv, Arena *arena);
 void cli_usage(const CompilerConfig *cfg);
+void cli_help(const CompilerConfig *cfg);
 
 #endif
