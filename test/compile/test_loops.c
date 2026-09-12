@@ -240,3 +240,44 @@ TEST(loops, semantic_duplicate_label)
                       "    return 0;\n"
                       "}\n");
 }
+
+/* Regression: `&&`/`||` guards sealed their enclosing do-while body too early,
+   turning loop-carried variables into undefined (0) — here `align` became 0
+   and the mask arithmetic collapsed. */
+static const char *short_circuit_guard_src =
+    "int main(void) {\n"
+    "    unsigned long align = 8;\n"
+    "    unsigned long used = 130;\n"
+    "    unsigned long mask, pos;\n"
+    "    do { if (!(align >= 1 && align <= 16)) { return 1; } } while (0);\n"
+    "    do { if (align < 1 || align > 16) { return 3; } } while (0);\n"
+    "    mask = align - 1;\n"
+    "    pos = (used + mask) & ~mask;\n"
+    "    if (pos != 136) { return 2; }\n"
+    "    return 0;\n"
+    "}\n";
+
+TEST(loops, short_circuit_guard)
+{
+    EXPECT_INTERP_AND_ELF(short_circuit_guard_src, 0);
+}
+
+/* Regression: a loop-carried VALUE_MAX sentinel is a PHI initialized with an
+   immediate; the copy must write the full 64-bit slot. */
+static const char *phi_width_src =
+    "#include <stdint.h>\n"
+    "int main(void) {\n"
+    "    unsigned long first = SIZE_MAX;\n"
+    "    unsigned long i;\n"
+    "    for (i = 0; i < 5; i++) {\n"
+    "        if (i == 2) { first = i; }\n"
+    "        if (i < 2) { if (first != SIZE_MAX) { return 1; } }\n"
+    "    }\n"
+    "    if (first != 2) { return 2; }\n"
+    "    return 0;\n"
+    "}\n";
+
+TEST(loops, phi_sized_sentinel)
+{
+    EXPECT_INTERP_AND_ELF(phi_width_src, 0);
+}

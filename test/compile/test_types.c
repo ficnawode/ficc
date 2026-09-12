@@ -338,5 +338,22 @@ TEST(types, elf_long_return)
                          "    long r = ret_long();\n"
                          "    return r;\n"
                          "}\n"),
-              99);
+               99);
+}
+
+/* Regression: big decimal literals (> 2^63) with UL/ULL suffixes must be typed
+   unsigned end to end — the lexer's suffix bit-field must survive compilation. */
+static const char *big_literal_src =
+    "int main(void) {\n"
+    "    unsigned long big = 18446744073709551615UL;\n"
+    "    unsigned long q = big / 16;\n"
+    "    if (q != 1152921504606846975UL) { return 1; }\n"
+    "    if (18446744073709551615UL != 0xFFFFFFFFFFFFFFFFUL) { return 2; }\n"
+    "    if (18446744073709551615ULL / 16ULL != 1152921504606846975ULL) { return 3; }\n"
+    "    return 0;\n"
+    "}\n";
+
+TEST(types, big_decimal_literal)
+{
+    EXPECT_INTERP_AND_ELF(big_literal_src, 0);
 }

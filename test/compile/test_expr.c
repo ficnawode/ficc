@@ -119,3 +119,23 @@ TEST(expr, elf_call_7_args)
 {
     EXPECT_EQ(tc_run_elf(call7_src), 0);
 }
+
+/* Regression: conditions on char-typed values and 64-bit pointers/immediates
+   must be tested at their full width, not truncated to 32 bits. */
+static const char *wide_compare_src =
+    "int main(void) {\n"
+    "    const char *s = \"abcdefgh\";\n"
+    "    int n = 0;\n"
+    "    while (*(s + n)) { n++; }\n"
+    "    if (n != 8) { return 1; }\n"
+    "    if (s[0] != 'a') { return 2; }\n"
+    "    if (!(0xFFFFFFFF00000000UL > 0x7FFFFFFFFFFFFFFFUL)) { return 3; }\n"
+    "    if (18446744073709551615UL < 0UL != 0) { return 4; }\n"
+    "    if (18446744073709551615UL > 0UL != 1) { return 5; }\n"
+    "    return 0;\n"
+    "}\n";
+
+TEST(expr, wide_compare)
+{
+    EXPECT_INTERP_AND_ELF(wide_compare_src, 0);
+}

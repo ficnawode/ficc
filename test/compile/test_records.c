@@ -1149,10 +1149,53 @@ TEST(records, negative_bitfield_bool_width)
 
 TEST(records, negative_bitfield_take_address)
 {
-    EXPECT_BUILD_FAIL("struct S { int x : 3; };\n"
+    EXPECT_BUILD_FAIL("struct S { int x : 3 };\n"
                       "int main(void) {\n"
                       "    struct S s;\n"
                       "    int *p = &s.x;\n"
                       "    return 0;\n"
                       "}\n");
+}
+
+/* Regression: bit-field members initialize via read-modify-write of their
+   storage unit (positional, designated, and later assignment with width
+   wrap). */
+static const char *bitfield_init_src =
+    "struct S { unsigned a:1; unsigned b:2; unsigned c:1; unsigned d:3; };\n"
+    "int main(void) {\n"
+    "    struct S s = {1, 2, 1, 5};\n"
+    "    if (s.a != 1 || s.b != 2 || s.c != 1 || s.d != 5) { return 1; }\n"
+    "    struct S t = {.a = 1, .b = 3, .d = 4};\n"
+    "    if (t.a != 1 || t.b != 3 || t.c != 0 || t.d != 4) { return 2; }\n"
+    "    t.b = 6;\n"
+    "    if (t.b != 2 || t.a != 1 || t.c != 0 || t.d != 4) { return 3; }\n"
+    "    return 0;\n"
+    "}\n";
+
+TEST(records, bitfield_init)
+{
+    EXPECT_INTERP_AND_ELF(bitfield_init_src, 0);
+}
+
+/* Regression: ordinary union members must not be mistaken for bit-fields: the
+   payload write is a full-width store, and a bit-field sibling keeps its RMW. */
+static const char *union_payload_src =
+    "typedef struct {\n"
+    "    int kind;\n"
+    "    long pad;\n"
+    "    union { long int_val; const char *str; } payload;\n"
+    "    unsigned sx:3;\n"
+    "} Tok;\n"
+    "int main(void) {\n"
+    "    Tok t = {.payload = {.int_val = 0xFFFFFFFFFFFFFFFFUL}, .sx = 5};\n"
+    "    if (t.payload.int_val != 0xFFFFFFFFFFFFFFFFUL) { return 1; }\n"
+    "    if (t.sx != 5) { return 2; }\n"
+    "    t.payload.int_val = 0xFFFF0000FFFF0000UL;\n"
+    "    if (t.payload.int_val != 0xFFFF0000FFFF0000UL) { return 3; }\n"
+    "    return 0;\n"
+    "}\n";
+
+TEST(records, union_payload_not_bitfield)
+{
+    EXPECT_INTERP_AND_ELF(union_payload_src, 0);
 }
