@@ -40,7 +40,7 @@ DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_BIN) $(T
 
 all: $(FICC_BIN)
 
-test: $(TEST_BIN)
+test: $(TEST_BIN) $(FICC_BIN)
 	$(TEST_BIN)
 
 $(FICC_BIN): $(OBJ_SRC) | dirs
