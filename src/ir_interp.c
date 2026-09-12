@@ -425,7 +425,7 @@ static void bind_args(IrInstr *in, InterpCtx *ctx, i64 *regs, Frame *callee_fram
         i64 v = operand_val(ctx, in->extra.call.args[a], regs);
         u8 width = ctx->mod->widths[p->vreg];
         callee_frame->regs[p->vreg] =
-            type_is_signed(p->type) ? sext_result(v, width) : trunc_result(v, width);
+            type_is_signed_int(p->type) ? sext_result(v, width) : trunc_result(v, width);
     }
 }
 

@@ -32,16 +32,29 @@ TEST(types, type_size)
     EXPECT_EQ(type_long()->size, 8);
 }
 
-TEST(types, type_is_signed)
+TEST(types, type_is_signed_int)
 {
-    EXPECT_TRUE(type_is_signed(type_char()));
-    EXPECT_TRUE(type_is_signed(type_short()));
+    EXPECT_TRUE(type_is_signed_int(type_char()));
+    EXPECT_TRUE(type_is_signed_int(type_short()));
+    EXPECT_TRUE(type_is_signed_int(type_int()));
+    EXPECT_TRUE(type_is_signed_int(type_long()));
+    EXPECT_TRUE(type_is_signed_int(type_llong()));
+    EXPECT_TRUE(!type_is_signed_int(type_uchar()));
+    EXPECT_TRUE(!type_is_signed_int(type_uint()));
+    EXPECT_TRUE(!type_is_signed_int(type_ulong()));
+}
+
+TEST(types, type_is_signed_is_unsigned_complement)
+{
+    /* type_is_signed is the exact inverse of type_is_unsigned, so relations
+       and pointers fall on the "signed" side while unsigned ints do not. */
     EXPECT_TRUE(type_is_signed(type_int()));
-    EXPECT_TRUE(type_is_signed(type_long()));
-    EXPECT_TRUE(type_is_signed(type_llong()));
-    EXPECT_TRUE(!type_is_signed(type_uchar()));
     EXPECT_TRUE(!type_is_signed(type_uint()));
-    EXPECT_TRUE(!type_is_signed(type_ulong()));
+    EXPECT_TRUE(type_is_signed(type_ptr(type_int())));
+    EXPECT_TRUE(type_is_signed(type_long()));
+    EXPECT_TRUE(!type_is_unsigned(type_ptr(type_int())));
+    EXPECT_EQ(type_is_signed(type_int()), !type_is_unsigned(type_int()));
+    EXPECT_EQ(type_is_signed(type_uint()), !type_is_unsigned(type_uint()));
 }
 
 TEST(types, type_is_integer)

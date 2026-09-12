@@ -1320,7 +1320,7 @@ TEST(parser, llong_specifier_types)
     EXPECT_EQ(d1->type->kind, TYPE_ULLONG);
     ASTVarDecl *d2 = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 2));
     EXPECT_EQ(d2->type->kind, TYPE_CHAR);
-    EXPECT_TRUE(type_is_signed(d2->type));
+    EXPECT_TRUE(type_is_signed_int(d2->type));
     ASTVarDecl *d3 = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 3));
     EXPECT_EQ(d3->type->kind, TYPE_INT);
     ASTVarDecl *d4 = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 4));

@@ -118,6 +118,7 @@ Type *type_uint(void);
 Type *type_ulong(void);
 Type *type_ullong(void);
 
+bool type_is_signed_int(Type *t);
 bool type_is_signed(Type *t);
 bool type_is_unsigned(Type *t);
 bool type_is_integer(Type *t);

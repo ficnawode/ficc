@@ -101,10 +101,19 @@ Type *type_ullong(void)
     return (Type *) &the_ullong;
 }
 
-bool type_is_signed(Type *t)
+bool type_is_signed_int(Type *t)
 {
     return t->kind == TYPE_CHAR || t->kind == TYPE_SHORT || t->kind == TYPE_INT ||
            t->kind == TYPE_LONG || t->kind == TYPE_LLONG || t->kind == TYPE_ENUM;
+}
+
+/* Signedness for operator selection: the exact inverse of type_is_unsigned.
+   Unlike type_is_signed_int (a signed-integer-kind test), this also treats
+   non-integer types such as pointers as signed, so relational comparisons on
+   them pick the signed opcodes. */
+bool type_is_signed(Type *t)
+{
+    return !type_is_unsigned(t);
 }
 
 bool type_is_unsigned(Type *t)
@@ -118,7 +127,7 @@ bool type_is_unsigned(Type *t)
 
 bool type_is_integer(Type *t)
 {
-    return type_is_signed(t) || type_is_unsigned(t);
+    return type_is_signed_int(t) || type_is_unsigned(t);
 }
 
 bool type_is_record(Type *t)
@@ -229,8 +238,8 @@ Type *type_common(Type *a, Type *b)
         return a;
     }
 
-    bool a_signed = type_is_signed(a);
-    bool b_signed = type_is_signed(b);
+    bool a_signed = type_is_signed_int(a);
+    bool b_signed = type_is_signed_int(b);
     int a_rank = type_rank(a);
     int b_rank = type_rank(b);
 
@@ -922,7 +931,7 @@ i64 type_reduce_int(Type *target, i64 value)
     }
     u64 mask = ((u64) 1 << width) - 1;
     i64 m = (i64) ((u64) value & mask);
-    if (type_is_signed(target) && (m & ((i64) 1 << (width - 1))))
+    if (type_is_signed_int(target) && (m & ((i64) 1 << (width - 1))))
     {
         m |= ~(i64) mask;
     }

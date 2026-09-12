@@ -160,7 +160,7 @@ static u32 alloc_vreg_from_type(FuncBuilder *ctx, Type *type)
 {
     u8 width = type->width / 8;
     ASSERT(width == 1 || width == 2 || width == 4 || width == 8);
-    return ir_alloc_vreg(ctx->mod, width, type_is_signed(type));
+    return ir_alloc_vreg(ctx->mod, width, type_is_signed_int(type));
 }
 
 /* Records and arrays are memory objects: addressed by pointer, never loaded
@@ -215,13 +215,13 @@ static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *
     if (val.is_imm)
     {
         u32 src_vreg = alloc_vreg_from_type(ctx, src_type);
-        ir_emit_unary(bb, type_is_signed(src_type) ? OP_SEXT : OP_ZEXT, src_vreg, val);
+        ir_emit_unary(bb, type_is_signed_int(src_type) ? OP_SEXT : OP_ZEXT, src_vreg, val);
         val = ir_operand_vreg(src_vreg);
     }
     if (tgt_w > src_w)
     {
         u32 dst = alloc_vreg_from_type(ctx, target_type);
-        IrOpcode op = type_is_signed(src_type) ? OP_SEXT : OP_ZEXT;
+        IrOpcode op = type_is_signed_int(src_type) ? OP_SEXT : OP_ZEXT;
         ir_emit_unary(bb, op, dst, val);
         return ir_operand_vreg(dst);
     }
@@ -731,7 +731,7 @@ static LvalueResult build_lvalue_slot(FuncBuilder *ctx, ASTNode *target, IrBlock
 
 static bool bitfield_signed(Type *ty)
 {
-    return type_is_signed(ty) && ty->kind != TYPE_ENUM;
+    return type_is_signed_int(ty) && ty->kind != TYPE_ENUM;
 }
 
 static i64 bitfield_mask(u32 width)
@@ -985,7 +985,7 @@ static IrOpcode arith_opcode(BinOpKind op, Type *lt)
     IrOpcode opcode = binop_ir[op];
     if (is_comparison_op(op))
     {
-        bool unsig = type_is_unsigned(lt);
+        bool is_signed = type_is_signed(lt);
         switch (op)
         {
             case BIN_EQ:
@@ -993,25 +993,25 @@ static IrOpcode arith_opcode(BinOpKind op, Type *lt)
             case BIN_NE:
                 return OP_ICMP_NE;
             case BIN_LT:
-                return unsig ? OP_ICMP_ULT : OP_ICMP_SLT;
+                return is_signed ? OP_ICMP_SLT : OP_ICMP_ULT;
             case BIN_GT:
-                return unsig ? OP_ICMP_UGT : OP_ICMP_SGT;
+                return is_signed ? OP_ICMP_SGT : OP_ICMP_UGT;
             case BIN_LE:
-                return unsig ? OP_ICMP_ULE : OP_ICMP_SLE;
+                return is_signed ? OP_ICMP_SLE : OP_ICMP_ULE;
             case BIN_GE:
-                return unsig ? OP_ICMP_UGE : OP_ICMP_SGE;
+                return is_signed ? OP_ICMP_SGE : OP_ICMP_UGE;
             default:
                 return opcode;
         }
     }
     if (is_divrem_op(op))
     {
-        bool unsig = type_is_unsigned(lt);
+        bool is_signed = type_is_signed(lt);
         if (op == BIN_DIV)
         {
-            return unsig ? OP_UDIV : OP_SDIV;
+            return is_signed ? OP_SDIV : OP_UDIV;
         }
-        return unsig ? OP_UREM : OP_SREM;
+        return is_signed ? OP_SREM : OP_UREM;
     }
     if (op == BIN_SHR)
     {

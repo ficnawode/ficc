@@ -160,7 +160,7 @@ TEST(records, enum_is_int)
     Type *e = type_enum("P7Enum");
     EXPECT_TRUE(type_is_enum(e));
     EXPECT_TRUE(type_is_integer(e));
-    EXPECT_TRUE(type_is_signed(e));
+    EXPECT_TRUE(type_is_signed_int(e));
     EXPECT_FALSE(type_is_unsigned(e));
     EXPECT_EQ(type_sizeof(e), 4);
     EXPECT_EQ(type_rank(e), type_rank(type_int()));
