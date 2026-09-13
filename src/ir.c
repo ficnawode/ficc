@@ -127,10 +127,12 @@ IrInstr *ir_emit_ret_void(IrBlock *bb)
     return instr_new(bb, OP_RET, NO_VREG, 0);
 }
 
-/* The opcode carries the operation; only binops and icmp predicates belong. */
+/* The opcode carries the operation; only binops, icmp predicates, FP arithmetic
+   and fcmp predicates belong. */
 IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOperand rhs)
 {
-    ASSERT((op >= OP_ADD && op <= OP_ASHR) || (op >= OP_ICMP_EQ && op <= OP_ICMP_SGE));
+    ASSERT((op >= OP_ADD && op <= OP_ASHR) || (op >= OP_ICMP_EQ && op <= OP_ICMP_SGE) ||
+           (op >= OP_FADD && op <= OP_FDIV) || (op >= OP_FCMP_EQ && op <= OP_FCMP_GE));
     IrInstr *ins = instr_new(bb, op, dst, 2);
     ins->ops[0] = lhs;
     ins->ops[1] = rhs;
@@ -140,7 +142,7 @@ IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOpera
 IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src)
 {
     ASSERT(op == OP_NEG || op == OP_NOT || op == OP_TRUNC || op == OP_ZEXT || op == OP_SEXT ||
-           op == OP_ITOF || op == OP_FTOI || op == OP_FCONV);
+           op == OP_ITOF || op == OP_FTOI || op == OP_FCONV || op == OP_FNEG);
     IrInstr *ins = instr_new(bb, op, dst, 1);
     ins->ops[0] = src;
     return ins;

@@ -209,6 +209,21 @@ static u32 materialize_to_vreg(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Typ
     return vreg;
 }
 
+/* FP → i1: C truthiness is `x != 0.0` (−0.0 compares equal to 0.0, NaN is
+   truthy), so bit-testing the raw bytes would mis-evaluate −0.0. Integer
+   values pass through unchanged — the conditions test them directly. */
+static IrOperand boolify(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *type)
+{
+    if (!type_is_fp(type))
+    {
+        return val;
+    }
+    u32 src = materialize_to_vreg(ctx, bb, val, type);
+    u32 dst = alloc_vreg_from_type(ctx, type_cbool());
+    ir_emit_binop(bb, OP_FCMP_NE, dst, ir_operand_vreg(src), ir_operand_imm(0));
+    return ir_operand_vreg(dst);
+}
+
 static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *src_type,
                             Type *target_type)
 {
@@ -233,9 +248,8 @@ static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *
         }
         if (tu->kind == TYPE_BOOL)
         {
-            ctx->failed = true;
-            ir_error(NULL, "cannot convert a floating-point value to _Bool yet (phase 19)");
-            return val;
+            /* §6.3.1.2: _Bool holds (x != 0.0); FCMP_NE handles −0.0/NaN. */
+            return boolify(ctx, bb, val, su);
         }
         u32 src_vreg = materialize_to_vreg(ctx, bb, val, su);
         u32 dst = alloc_vreg_from_type(ctx, tu);
@@ -582,17 +596,19 @@ static ExprResult build_short_circuit(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlo
     IrBlock *right_bb = new_block(ctx->f, is_or ? "lor_rhs" : "land_rhs");
     IrBlock *merge_bb = new_block(ctx->f, is_or ? "lor_merge" : "land_merge");
 
+    IrOperand lcond = boolify(ctx, left.block, left.value, node_type(be->left));
     if (is_or)
     {
-        cond_jump(left.block, left.value, true_bb, right_bb);
+        cond_jump(left.block, lcond, true_bb, right_bb);
     }
     else
     {
-        cond_jump(left.block, left.value, right_bb, false_bb);
+        cond_jump(left.block, lcond, right_bb, false_bb);
     }
 
     ExprResult right = build_expr(ctx, be->right, right_bb);
-    cond_jump(right.block, right.value, true_bb, false_bb);
+    IrOperand rcond = boolify(ctx, right.block, right.value, node_type(be->right));
+    cond_jump(right.block, rcond, true_bb, false_bb);
 
     jump(true_bb, merge_bb);
     jump(false_bb, merge_bb);
@@ -625,6 +641,7 @@ static ExprResult build_ternary_expr(FuncBuilder *ctx, ASTTernaryExpr *te, IrBlo
     IrBlock *else_bb = new_block(ctx->f, "tern_else");
     IrBlock *merge_bb = new_block(ctx->f, "tern_merge");
 
+    IrOperand cval = boolify(ctx, cond.block, cond.value, node_type(te->cond));
     i64 mem_dst = NO_VREG;
     if (mem_tern)
     {
@@ -636,7 +653,7 @@ static ExprResult build_ternary_expr(FuncBuilder *ctx, ASTTernaryExpr *te, IrBlo
         ir_emit_alloca(cond.block, (u32) mem_dst, tern_type->size);
     }
 
-    cond_jump(cond.block, cond.value, then_bb, else_bb);
+    cond_jump(cond.block, cval, then_bb, else_bb);
 
     if (mem_tern)
     {
@@ -661,21 +678,29 @@ static ExprResult build_ternary_expr(FuncBuilder *ctx, ASTTernaryExpr *te, IrBlo
     }
 
     ExprResult then_val = build_expr(ctx, te->then_expr, then_bb);
+    IrOperand t_prom = then_val.value;
     if (!is_terminated(then_val.block))
     {
+        /* §6.5.15p5: each branch converts to the common type before the phi,
+           so `int : double` and `float : double` meet the right value. */
+        t_prom =
+            promote_to(ctx, then_val.block, then_val.value, node_type(te->then_expr), tern_type);
         jump(then_val.block, merge_bb);
     }
 
     ExprResult else_val = build_expr(ctx, te->else_expr, else_bb);
+    IrOperand e_prom = else_val.value;
     if (!is_terminated(else_val.block))
     {
+        e_prom =
+            promote_to(ctx, else_val.block, else_val.value, node_type(te->else_expr), tern_type);
         jump(else_val.block, merge_bb);
     }
 
     u32 dst = alloc_vreg_from_type(ctx, tern_type);
     IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
-    ir_phi_add_entry(phi, then_val.value, then_val.block);
-    ir_phi_add_entry(phi, else_val.value, else_val.block);
+    ir_phi_add_entry(phi, t_prom, then_val.block);
+    ir_phi_add_entry(phi, e_prom, else_val.block);
     seal_block(ctx, merge_bb);
 
     return expr_result(ir_operand_vreg(dst), merge_bb);
@@ -938,7 +963,17 @@ static ExprResult build_incdec_expr(FuncBuilder *ctx, ASTIncDecExpr *ie, IrBlock
         Type *prom = type_promote(t);
         IrOperand pold = promote_to(ctx, bb, old, t, prom);
         u32 res = alloc_vreg_from_type(ctx, prom);
-        ir_emit_binop(bb, step == 1 ? OP_ADD : OP_SUB, res, pold, ir_operand_imm(1));
+        if (type_is_fp(prom))
+        {
+            /* §6.5.2.4: ++ on FP is `f = f + 1.0` in the FP class — the step
+               rides the exact one bit pattern, never the integer `1`. */
+            i64 one = prom->width == 32 ? 0x3F800000 : 0x3FF0000000000000;
+            ir_emit_binop(bb, step == 1 ? OP_FADD : OP_FSUB, res, pold, ir_operand_imm(one));
+        }
+        else
+        {
+            ir_emit_binop(bb, step == 1 ? OP_ADD : OP_SUB, res, pold, ir_operand_imm(1));
+        }
         newv = promote_to(ctx, bb, ir_operand_vreg(res), prom, t);
     }
 
@@ -1029,6 +1064,36 @@ static void promote_binop_operands(FuncBuilder *ctx, BinOpKind op, IrBlock *bb, 
 /* Select the IR opcode for a promoted binary op. */
 static IrOpcode arith_opcode(BinOpKind op, Type *lt)
 {
+    if (type_is_fp(lt))
+    {
+        /* Floating lanes pick the FP opcodes; `%`/shifts/bitwise never reach
+           here (semantic rejects them first, and division is always FDIV). */
+        switch (op)
+        {
+            case BIN_ADD:
+                return OP_FADD;
+            case BIN_SUB:
+                return OP_FSUB;
+            case BIN_MUL:
+                return OP_FMUL;
+            case BIN_DIV:
+                return OP_FDIV;
+            case BIN_EQ:
+                return OP_FCMP_EQ;
+            case BIN_NE:
+                return OP_FCMP_NE;
+            case BIN_LT:
+                return OP_FCMP_LT;
+            case BIN_GT:
+                return OP_FCMP_GT;
+            case BIN_LE:
+                return OP_FCMP_LE;
+            case BIN_GE:
+                return OP_FCMP_GE;
+            default:
+                return 0;
+        }
+    }
     IrOpcode opcode = binop_ir[op];
     if (is_comparison_op(op))
     {
@@ -1118,6 +1183,19 @@ static ArithResult lower_arith_into(FuncBuilder *ctx, ArithSpec spec, IrOperand 
         ir_error(spec.node, "unsupported binary operator");
         return ar;
     }
+    if (type_is_fp(lt))
+    {
+        /* A bare FP immediate rides no width-table entry; give it a classed
+           vreg so the backends read float vs double at the right width. */
+        if (lhs.is_imm)
+        {
+            lhs = ir_operand_vreg(materialize_to_vreg(ctx, bb, lhs, lt));
+        }
+        if (rhs.is_imm)
+        {
+            rhs = ir_operand_vreg(materialize_to_vreg(ctx, bb, rhs, lt));
+        }
+    }
     u32 dst = alloc_vreg_from_type(ctx, spec.result_type);
     ir_emit_binop(bb, opcode, dst, lhs, rhs);
     ar.value = ir_operand_vreg(dst);
@@ -1181,17 +1259,31 @@ static ExprResult build_unary_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *
             break;
     }
     ExprResult src = build_expr(ctx, ue->operand, bb);
+    Type *op_type = node_type(ue->operand);
     Type *result_type = node_type((ASTNode *) ue);
     u32 dst = alloc_vreg_from_type(ctx, result_type);
     if (ue->op == UN_LOG_NOT)
     {
-        ir_emit_binop(src.block, OP_ICMP_EQ, dst, src.value, ir_operand_imm(0));
+        if (type_is_fp(op_type))
+        {
+            /* `!x` on FP is `x == 0.0` (−0.0 is falsy, NaN is truthy → 0). */
+            u32 fp = materialize_to_vreg(ctx, src.block, src.value, type_rvalue(op_type));
+            ir_emit_binop(src.block, OP_FCMP_EQ, dst, ir_operand_vreg(fp), ir_operand_imm(0));
+        }
+        else
+        {
+            ir_emit_binop(src.block, OP_ICMP_EQ, dst, src.value, ir_operand_imm(0));
+        }
+        return expr_result(ir_operand_vreg(dst), src.block);
+    }
+    Type *promoted = type_promote(op_type);
+    IrOperand promoted_op = promote_to(ctx, src.block, src.value, op_type, promoted);
+    if (ue->op == UN_NEG && type_is_fp(promoted))
+    {
+        ir_emit_unary(src.block, OP_FNEG, dst, promoted_op);
     }
     else
     {
-        Type *op_type = node_type(ue->operand);
-        Type *promoted = type_promote(op_type);
-        IrOperand promoted_op = promote_to(ctx, src.block, src.value, op_type, promoted);
         emit_unary_op(src.block, dst, ue->op, promoted_op, &ue->base);
     }
     return expr_result(ir_operand_vreg(dst), src.block);
@@ -2411,12 +2503,13 @@ static IrBlock *build_if_stmt(FuncBuilder *ctx, ASTIfStmt *is, IrBlock *bb)
 {
     ExprResult cond = build_expr(ctx, is->cond, bb);
     bb = cond.block;
+    IrOperand cval = boolify(ctx, bb, cond.value, node_type(is->cond));
 
     IrBlock *then_bb = new_block(ctx->f, "then");
     IrBlock *else_bb = new_block(ctx->f, "else");
     IrBlock *merge_bb = new_block(ctx->f, "merge");
 
-    cond_jump(bb, cond.value, then_bb, else_bb);
+    cond_jump(bb, cval, then_bb, else_bb);
 
     build_cond_branch(ctx, is->then_branch, then_bb, merge_bb);
     build_cond_branch(ctx, is->else_branch, else_bb, merge_bb);
@@ -2440,7 +2533,8 @@ static IrBlock *finish_loop(FuncBuilder *ctx, ASTNode *cond_node, LoopBlocks *lb
     {
         ExprResult c = build_expr(ctx, cond_node, h);
         h = c.block;
-        ir_emit_brcond(h, c.value, lb->body->label, lb->exit->label);
+        IrOperand cval = boolify(ctx, h, c.value, node_type(cond_node));
+        ir_emit_brcond(h, cval, lb->body->label, lb->exit->label);
     }
     else
     {

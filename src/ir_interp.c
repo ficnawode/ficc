@@ -810,6 +810,137 @@ static i64 eval_fconv(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
+/* An immediate carries the FP pattern for the destination width (a bare imm
+   rides no width-table entry); classed vregs name their own width. */
+static u8 fp_operand_width(InterpCtx *ctx, IrOperand o, u8 dw)
+{
+    return o.is_imm ? dw : ctx->mod->widths[o.u.vreg];
+}
+
+/* FP arithmetic. Width 4 re-rounds through `float` at every step — never
+   compute the float operands in double precision (the #1 interp drift trap).
+   Immediates adopt the destination width, so a float-1.0 pattern stays a
+   float. */
+static i64 eval_fbin(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    u8 dw = ctx->mod->widths[in->result];
+    i64 lb = operand_val(ctx, in->ops[0], regs);
+    i64 rb = operand_val(ctx, in->ops[1], regs);
+    u8 lw = fp_operand_width(ctx, in->ops[0], dw);
+    u8 rw = fp_operand_width(ctx, in->ops[1], dw);
+
+    if (dw == 4)
+    {
+        float a = (float) fp_bits_to_double(lb, lw);
+        float b = (float) fp_bits_to_double(rb, rw);
+        float r;
+        switch (in->opcode)
+        {
+            case OP_FADD:
+                r = a + b;
+                break;
+            case OP_FSUB:
+                r = a - b;
+                break;
+            case OP_FMUL:
+                r = a * b;
+                break;
+            case OP_FDIV:
+                r = a / b;
+                break;
+            default:
+                ASSERT(false && "eval_fbin dispatches only to the FP arithmetic opcodes");
+                return 1;
+        }
+        store_fp_bits(regs, in->result, &r, 4);
+    }
+    else
+    {
+        double a = fp_bits_to_double(lb, lw);
+        double b = fp_bits_to_double(rb, rw);
+        double r;
+        switch (in->opcode)
+        {
+            case OP_FADD:
+                r = a + b;
+                break;
+            case OP_FSUB:
+                r = a - b;
+                break;
+            case OP_FMUL:
+                r = a * b;
+                break;
+            case OP_FDIV:
+                r = a / b;
+                break;
+            default:
+                ASSERT(false && "eval_fbin dispatches only to the FP arithmetic opcodes");
+                return 1;
+        }
+        store_fp_bits(regs, in->result, &r, 8);
+    }
+    return 0;
+}
+
+static i64 eval_fneg(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    i64 bits = operand_val(ctx, in->ops[0], regs);
+    u8 dw = ctx->mod->widths[in->result];
+    u8 sw = fp_operand_width(ctx, in->ops[0], dw);
+    if (dw == 4)
+    {
+        float f = (float) fp_bits_to_double(bits, sw);
+        f = -f;
+        store_fp_bits(regs, in->result, &f, 4);
+    }
+    else
+    {
+        double d = fp_bits_to_double(bits, sw);
+        d = -d;
+        store_fp_bits(regs, in->result, &d, 8);
+    }
+    return 0;
+}
+
+/* FP compare with C11 NaN semantics: only != is true for a NaN operand.
+   float→double is exact and monotonic, so the host double compares preserve
+   float ordering bit-for-bit. */
+static i64 eval_fcmp(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    i64 lb = operand_val(ctx, in->ops[0], regs);
+    i64 rb = operand_val(ctx, in->ops[1], regs);
+    double a = fp_bits_to_double(lb, operand_fp_width(ctx, in->ops[0]));
+    double b = fp_bits_to_double(rb, operand_fp_width(ctx, in->ops[1]));
+    bool r;
+    switch (in->opcode)
+    {
+        case OP_FCMP_EQ:
+            r = a == b;
+            break;
+        case OP_FCMP_NE:
+            r = a != b;
+            break;
+        case OP_FCMP_LT:
+            r = a < b;
+            break;
+        case OP_FCMP_GT:
+            r = a > b;
+            break;
+        case OP_FCMP_LE:
+            r = a <= b;
+            break;
+        case OP_FCMP_GE:
+            r = a >= b;
+            break;
+        default:
+            ASSERT(false && "eval_fcmp dispatches only to the FP compare opcodes");
+            return 1;
+    }
+    regs[in->result] = r ? 1 : 0;
+    apply_vreg_width(ctx, regs, in->result);
+    return 0;
+}
+
 /* Copy at most one register-sized word into/out of a typed slot. */
 static void copy_word(u8 *dst, const void *src, u32 bytes)
 {
@@ -959,7 +1090,18 @@ static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
     X(OP_MEMCPY, eval_memcpy)                                                                      \
     X(OP_ITOF, eval_itof)                                                                          \
     X(OP_FTOI, eval_ftoi)                                                                          \
-    X(OP_FCONV, eval_fconv)
+    X(OP_FCONV, eval_fconv)                                                                        \
+    X(OP_FADD, eval_fbin)                                                                          \
+    X(OP_FSUB, eval_fbin)                                                                          \
+    X(OP_FMUL, eval_fbin)                                                                          \
+    X(OP_FDIV, eval_fbin)                                                                          \
+    X(OP_FNEG, eval_fneg)                                                                          \
+    X(OP_FCMP_EQ, eval_fcmp)                                                                       \
+    X(OP_FCMP_NE, eval_fcmp)                                                                       \
+    X(OP_FCMP_LT, eval_fcmp)                                                                       \
+    X(OP_FCMP_GT, eval_fcmp)                                                                       \
+    X(OP_FCMP_LE, eval_fcmp)                                                                       \
+    X(OP_FCMP_GE, eval_fcmp)
 
 /* Opcode dispatch table; unlisted opcodes are NULL and diagnosed in run_block. */
 static const EvalFn eval_fns[] = {

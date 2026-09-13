@@ -159,39 +159,268 @@ TEST(float, int_to_float_init_now_lowers)
                          "int main(void) { return 0; }");
 }
 
-TEST(float, float_to_bool_still_rejected)
+TEST(float, float_to_bool)
 {
-    /* Float→`_Bool` needs an x != 0.0 compare, so it stays an error. */
-    EXPECT_BUILD_FAIL("_Bool b = 1.5;\nint main(void) { return b; }");
-    EXPECT_BUILD_FAIL("_Bool b = (double) 3;\nint main(void) { return b; }");
+    /* §6.3.1.2: _Bool holds (x != 0.0) — FCMP_NE, so -0.0 is false and
+       anything with magnitude is true. */
+    EXPECT_INTERP_AND_ELF("int main(void) { _Bool b = 1.5; return (int) b; }", 1);
+    EXPECT_INTERP_AND_ELF("int main(void) { _Bool b = (double) 3; return (int) b; }", 1);
+    EXPECT_INTERP_AND_ELF("int main(void) { double x = 0.0; _Bool b = x; return (int) b; }", 0);
+    EXPECT_INTERP_AND_ELF("int main(void) { double x = -0.0; _Bool b = x; return (int) b; }", 0);
+    EXPECT_INTERP_AND_ELF("int main(void) { double x = 1e-300; _Bool b = x; return (int) b; }", 1);
 }
 
-TEST(float, unlowered_fp_contexts_error_loudly)
+TEST(float, fp_arithmetic_both_backends)
 {
-    /* FP math/compare/unary-minus never lowers to an integer op. */
-    EXPECT_BUILD_FAIL("int main(void) { double a, b; return a + b; }");
-    EXPECT_BUILD_FAIL("int main(void) { double a, b; if (a < b) return 1; return 0; }");
-    EXPECT_BUILD_FAIL("double f(double a) { return -a; }");
-    EXPECT_BUILD_FAIL("double f(double a, double b) { return a / b; }");
-    EXPECT_BUILD_FAIL("int main(void) { double a; return a * 2.0; }");
+    /* FP binary arithmetic lands in both backends; exact values stay exact. */
+    EXPECT_INTERP_AND_ELF("int main(void){ double a=1.5, b=2.5;"
+                          " if (a+b != 4.0) return 1;"
+                          " if (a*b != 3.75) return 2;"
+                          " if (b-a != 1.0) return 3;"
+                          " if (b/a != 1.6666666666666667) return 4;"
+                          " return 42; }",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void){ float a=1.5f, b=2.5f;"
+                          " if (a+b != 4.0f) return 1;"
+                          " if (a*b != 3.75f) return 2;"
+                          " return 42; }",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void){ float a=1.5f, b=2.5f;"
+                          " if (b-a != 1.0f) return 1;"
+                          " if (!(b/a > 1.6666665f && b/a < 1.6666668f)) return 2;"
+                          " return 42; }",
+                          42);
+    /* A literal overload lands on the FP opcodes (the immediates carry bits). */
+    EXPECT_INTERP_AND_ELF("int main(void){ return (int)(1.5 + 2.5); }", 4);
+    EXPECT_INTERP_AND_ELF("int main(void){ return (int)(1.5f * 2.0f); }", 3);
+    /* int × float promotes to float via the usual arithmetic conversions. */
+    EXPECT_INTERP_AND_ELF("int main(void){ double a = 1.5; return (int)(a * 2); }", 3);
+    EXPECT_INTERP_AND_ELF("int main(void){ float a = 1.5f; return (int)(3 * a); }", 4);
 }
 
-TEST(float, fp_conditions_error_loudly)
+TEST(float, fp_compound_assign)
 {
-    EXPECT_BUILD_FAIL("int main(void) { double x; if (x) return 1; return 0; }");
-    EXPECT_BUILD_FAIL("int main(void) { double x; while (x) return 1; return 0; }");
-    EXPECT_BUILD_FAIL("int main(void) { double x; return x ? 1 : 0; }");
-    EXPECT_BUILD_FAIL("int main(void) { double x; return !x; }");
-    EXPECT_BUILD_FAIL("int main(void) { double x; return x && x; }");
+    EXPECT_INTERP_AND_ELF("int main(void){ double a=1.5; a += 2.5; return (int)a; }", 4);
+    EXPECT_INTERP_AND_ELF("int main(void){ double a=5.0; a /= 2.0; return (int)a; }", 2);
+    EXPECT_INTERP_AND_ELF("int main(void){ float f=1.5f; f *= 2.0f; return (int)f; }", 3);
+    EXPECT_INTERP_AND_ELF("int main(void){ double a=1.5; a -= 0.5; return (int)(a*10.0); }", 10);
 }
 
-TEST(float, incdec_fp_rejected)
+TEST(float, fp_reround_each_step)
 {
-    EXPECT_BUILD_FAIL("int main(void) { double x; x++; return 0; }");
-    EXPECT_BUILD_FAIL("int main(void) { float x; --x; return 0; }");
+    /* 200 × 0.1f summed in float drifts away from the double-accumulated value;
+       the interpreter must re-round to float at every add or `interp` and the
+       ELF (which computes in single precision) would diverge. */
+    EXPECT_INTERP_AND_ELF("int main(void){ float s = 0.0f; int i;"
+                          " for (i = 0; i < 200; i++) s += 0.1f;"
+                          " if ((int)(s * 10.0f) != 200) return 1;"
+                          " return 42; }",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void){ float p = 1.0f; int i;"
+                          " for (i = 0; i < 10; i++) p = p * 1.1f;"
+                          " if ((int)(p * 1000.0f) != 2593) return 1;"
+                          " return 42; }",
+                          42);
 }
 
-TEST(float, integer_only_contexts_reject_floats)
+TEST(float, fp_unary_minus)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ double a = 1.5;"
+                          " if ((int)(-a) != -1) return 1;"
+                          " if ((int)(-a * 10.0) != -15) return 2;"
+                          " return 42; }",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void){ if ((int)-2.25 != -2) return 1; return 42; }", 42);
+    EXPECT_INTERP_AND_ELF("float fn(float x){ return -x; }"
+                          " int main(void){ if ((int)(fn(3.5f)) != -3) return 1; return 42; }",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void){ float f = -1.5f;"
+                          " if (f != -1.5f) return 1; return 42; }",
+                          42);
+}
+
+TEST(float, fp_conditions_allowed)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = 1.5; if (x) return 1; "
+                          " return 0; }",
+                          1);
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = 0.0; if (x) return 1; return 2; }", 2);
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = -0.0; if (x) return 1; return 2; }", 2);
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = 1.0; while (x < 3.0) x += 0.5; "
+                          " return (int)x; }",
+                          3);
+    /* Ternary conditions boolify like if/while. */
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = 1.5; return x ? 7 : 9; }", 7);
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = -0.0; return x ? 7 : 9; }", 9);
+}
+
+TEST(float, fp_logical_ops)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = 1.5, y = 0.0;"
+                          " if (x && y) return 1;"
+                          " if (!(x || y)) return 2;"
+                          " return 42; }",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = -0.0;"
+                          " if (x || 1.0) return 1;"
+                          " return 0; }",
+                          1);
+}
+
+TEST(float, fp_compare_matrix)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){\n"
+                          "  double x = 1.5, y = 2.5;\n"
+                          "  if (!(x == x)) return 1;\n"
+                          "  if (x == y) return 2;\n"
+                          "  if (!(x != y)) return 3;\n"
+                          "  if (x != x) return 4;\n"
+                          "  if (!(x < y)) return 5;\n"
+                          "  if (y < x) return 6;\n"
+                          "  if (!(y > x)) return 7;\n"
+                          "  if (x > y) return 8;\n"
+                          "  if (!(x <= y)) return 9;\n"
+                          "  if (y <= x) return 10;\n"
+                          "  if (x <= 1.5 - 1.0) return 11;\n"
+                          "  if (!(x >= x)) return 12;\n"
+                          "  if (y >= 3.0) return 13;\n"
+                          "  return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, fp_compare_nan_semantics)
+{
+    /* C11: `x == NaN` is 0, `x != NaN` is 1, ordered predicates are all 0. */
+    EXPECT_INTERP_AND_ELF("int main(void){\n"
+                          "  double n = 0.0 / 0.0;\n"
+                          "  if (n == n) return 1;\n"
+                          "  if (!(n != n)) return 2;\n"
+                          "  if (n < n) return 3;\n"
+                          "  if (n > n) return 4;\n"
+                          "  if (n <= n) return 5;\n"
+                          "  if (n >= n) return 6;\n"
+                          "  if (n < 1.0) return 7;\n"
+                          "  if (n > -1.0) return 8;\n"
+                          "  return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, fp_neg_zero)
+{
+    /* -0.0 compares equal to 0.0 and is falsy; the sign survives FNEG. */
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = -0.0;"
+                          " if (x != 0.0) return 1;"
+                          " if (x) return 2;"
+                          " double y = -x;"
+                          " if (y != 0.0) return 3;"
+                          " return 42; }",
+                          42);
+}
+
+TEST(float, boolify_is_not_bit_testing)
+{
+    /* -0.0 has nonzero bits yet compares equal to 0.0: conditions must not
+       test the raw bytes. */
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = -0.0;"
+                          " if (x) return 1;"
+                          " if (!x) return 2;"
+                          " return 0; }",
+                          2);
+    /* NaN is nonzero (truthy) even though it is not `<`/`>`/`==` anything. */
+    EXPECT_INTERP_AND_ELF("int main(void){ double n = 0.0 / 0.0;"
+                          " if (!n) return 1;"
+                          " return 2; }",
+                          2);
+}
+
+TEST(float, fp_log_not)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ return !0.0 == 1 ? 42 : 1; }", 42);
+    EXPECT_INTERP_AND_ELF("int main(void){ return !1.5 == 0 ? 42 : 1; }", 42);
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = -0.0; return !x == 1 ? 42 : 1; }", 42);
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = 1e-300; return !x == 0 ? 42 : 1; }", 42);
+}
+
+TEST(float, fp_incdec)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = 1.5; x++; return (int)x; }", 2);
+    EXPECT_INTERP_AND_ELF("int main(void){ double x = 1.5; x--; return (int)x; }", 0);
+    EXPECT_INTERP_AND_ELF("int main(void){ float f = 1.5f; ++f; return (int)f; }", 2);
+    EXPECT_INTERP_AND_ELF("int main(void){ float f = 1.5f; if (f++ != 1.5f) return 1;"
+                          " if (f != 2.5f) return 2; return 42; }",
+                          42);
+}
+
+TEST(float, fp_mixed_ternary)
+{
+    /* A conditional mixing an int and a float converts the int to the FP
+       common type (§6.5.15); float/double pick double. */
+    EXPECT_INTERP_AND_ELF("int main(void){ int c = 0;"
+                          " if ((c ? 1 : 1.5) != 1.5) return 1;"
+                          " if ((c ? 1.5 : 2) != 2.0) return 2;"
+                          " if ((c ? 1 : 1.5f) != 1.5) return 3;"
+                          " c = 1;"
+                          " if ((c ? 1 : 1.5) != 1.0) return 4;"
+                          " if ((c ? 2 : 2.5f) != 2.0) return 5;"
+                          " return 42; }",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void){ double a = 1.5, b = 2.5;"
+                          " if ((a < b ? a : b) != 1.5) return 1;"
+                          " if ((a > b ? a : b) != 2.5) return 2;"
+                          " return 42; }",
+                          42);
+}
+
+TEST(float, fp_ternary_branches_promote)
+{
+    /* The selected branch converts to the common type before the phi, so a
+       double-typed conditional never reads an integer immediate as FP bits. */
+    EXPECT_INTERP_AND_ELF("int main(void){ int c = 1; double d = c ? 300000000 : 1.5;"
+                          " return (int)d == 300000000 ? 42 : 1; }",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void){ int c = 0; double d = c ? 300000000 : 1.5;"
+                          " return (int)(d * 10.0) == 15 ? 42 : 1; }",
+                          42);
+}
+
+TEST(float, fp_arrays_stay_32bit)
+{
+    /* movss must stay 32-bit: 8-byte moves on a float slot would read the
+       neighbor's bytes in arrays. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    float a[4];\n"
+                          "    a[0] = 1.5f; a[1] = 2.5f; a[2] = 3.5f; a[3] = 4.5f;\n"
+                          "    if (a[0] + a[3] != 6.0f) return 1;\n"
+                          "    if (a[1] * a[2] != 8.75f) return 2;\n"
+                          "    double d[3];\n"
+                          "    d[0] = 0.5; d[1] = 1.5; d[2] = 2.5;\n"
+                          "    if (d[0] + d[1] + d[2] != 4.5) return 3;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, fp_integer_lane_ops_rejected)
+{
+    /* % / shifts / bitwise are integer-only: a float operand is a violation,
+       both plain and compound. */
+    EXPECT_BUILD_FAIL("int main(void) { double a, b; return (int) (a % b); }");
+    EXPECT_BUILD_FAIL("int main(void) { double a; return (int) (a & 1); }");
+    EXPECT_BUILD_FAIL("int main(void) { double a; return (int) (a << 1); }");
+    EXPECT_BUILD_FAIL("int main(void) { double a; return (int) ~a; }");
+    EXPECT_BUILD_FAIL("int main(void) { double a; a %= 1.0; return 0; }");
+    EXPECT_BUILD_FAIL("int main(void) { double a; a <<= 1; return 0; }");
+    EXPECT_BUILD_FAIL("int main(void) { double a; float b; return (int) (a & b); }");
+    /* A float on either side of a shift/remainder/bitwise op is rejected. */
+    EXPECT_BUILD_FAIL("int main(void) { int x = 4; return (int) (x << 1.5); }");
+    EXPECT_BUILD_FAIL("int main(void) { return (int) (1.5 << 2); }");
+    EXPECT_BUILD_FAIL("int main(void) { double d; return (int) (d % 2); }");
+    EXPECT_BUILD_FAIL("int main(void) { double d; return (int) (d & 1.5); }");
+}
+
+TEST(float, fp_integer_only_contexts_reject_floats)
 {
     /* A float never satisfies an integer constant-expression slot. */
     EXPECT_BUILD_FAIL("int main(void) { switch (1) { case 1.5: break; } return 0; }");
@@ -200,13 +429,6 @@ TEST(float, integer_only_contexts_reject_floats)
     EXPECT_PARSE_FAIL("int a[1.5];");
     EXPECT_PARSE_FAIL("enum E { A = 1.5 };");
     EXPECT_PARSE_FAIL("_Alignas(1.5) int x;");
-}
-
-TEST(float, ternary_fp_mismatch_rejected)
-{
-    /* A conditional mixing FP classes would select between wrong immediates. */
-    EXPECT_BUILD_FAIL("int main(void) { int c; return c ? 1 : 1.5; }");
-    EXPECT_BUILD_FAIL("int main(void) { int c; double a; float b; return c ? a : b; }");
 }
 
 TEST(float, truncation_toward_zero)

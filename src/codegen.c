@@ -131,7 +131,10 @@ typedef enum
     X86_SSE_CVTT = 0x2C,   /* cvttsd2si (F2, REX.W for 64) / cvttss2si (F3) */
     X86_SSE_CVTS2S = 0x5A, /* cvtsd2ss (F2) / cvtss2sd (F3) */
     X86_SSE_ADD = 0x58,    /* addsd (F2) / addss (F3) */
-    X86_SSE_SUB = 0x5C,    /* subsd (F2) */
+    X86_SSE_MUL = 0x59,    /* mulsd (F2) / mulss (F3) */
+    X86_SSE_SUB = 0x5C,    /* subsd (F2) / subss (F3) */
+    X86_SSE_DIV = 0x5E,    /* divsd (F2) / divss (F3) */
+    X86_SSE_XOR = 0x57,    /* xorpd (66) / xorps (no prefix) */
     X86_SSE_UCOMIS = 0x2E, /* ucomisd (66) / ucomiss (no prefix) */
     X86_SSE_MOVD = 0x6E,   /* movd/movq xmm, r/m (66 prefix, REX.W for 64) */
     X86_BIT_BASE = 0xBA,   /* 0F BA /digit ib: bt/bts/btr on r/m64 */
@@ -529,9 +532,18 @@ typedef struct
 } ArithSpec;
 
 static const ArithSpec arith_specs[] = {
-    [OP_ADD] = {0x03, 0x83, 0x81, 0, false}, [OP_SUB] = {0x2B, 0x83, 0x81, 5, false},
-    [OP_MUL] = {0xAF, 0x6B, 0x69, 0, true},  [OP_AND] = {0x23, 0x83, 0x81, 4, false},
-    [OP_OR] = {0x0B, 0x83, 0x81, 1, false},  [OP_XOR] = {0x33, 0x83, 0x81, 6, false},
+    [OP_ADD] = {0x03, 0x83, 0x81, 0, false},
+    [OP_SUB] = {0x2B, 0x83, 0x81, 5, false},
+    [OP_MUL] = {0xAF, 0x6B, 0x69, 0, true},
+    [OP_AND] = {0x23, 0x83, 0x81, 4, false},
+    [OP_OR] = {0x0B, 0x83, 0x81, 1, false},
+    [OP_XOR] = {0x33, 0x83, 0x81, 6, false},
+    /* FP entry: `mem` is the two-byte (0F) opcode byte; the mandatory prefix
+       and the width come from the vreg at lowering time. */
+    [OP_FADD] = {0x58, 0, 0, 0, true},
+    [OP_FSUB] = {0x5C, 0, 0, 0, true},
+    [OP_FMUL] = {0x59, 0, 0, 0, true},
+    [OP_FDIV] = {0x5E, 0, 0, 0, true},
 };
 
 /* cmp: same shape as the arithmetic ops, /7. Not an IR opcode itself. */
@@ -725,12 +737,18 @@ static void emit_xor_eax_eax(ByteBuf *buf)
     bytebuf_append(buf, modrm(3, 0, 0));
 }
 
-/* 0F 90+cc: setcc %al */
-static void emit_setcc(ByteBuf *buf, u8 cc)
+/* 0F 90+cc: setcc %reg8 (the low 3 bits of `reg` name the byte register). */
+static void emit_setcc_reg(ByteBuf *buf, u8 cc, u8 reg)
 {
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, (u8) (X86_SETCC_BASE + cc));
-    bytebuf_append(buf, modrm(3, 0, 0));
+    bytebuf_append(buf, modrm(3, 0, reg));
+}
+
+/* 0F 90+cc: setcc %al. */
+static void emit_setcc(ByteBuf *buf, u8 cc)
+{
+    emit_setcc_reg(buf, cc, R_EAX);
 }
 
 static void emit_movzbl_al_eax(ByteBuf *buf)
@@ -894,6 +912,38 @@ static void emit_movd_to_xmm(ByteBuf *buf, u8 dst_xmm, u8 src_reg, bool w)
     bytebuf_append(buf, modrm(3, dst_xmm, src_reg));
 }
 
+/* F3/F2 0F <op> xmm, r/m — FP binary op with a memory operand. */
+static void emit_sse_op_mem(ByteBuf *buf, u8 mf, u8 op, u8 dst_xmm, X86Mem mem)
+{
+    bytebuf_append(buf, mf);
+    bytebuf_append(buf,
+                   rex(false, dst_xmm >= 8, reg_is_extended(mem.index), reg_is_extended(mem.base)));
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, op);
+    emit_mem_operand(buf, dst_xmm, mem);
+}
+
+/* F3/F2 0F <op> xmm, xmm. */
+static void emit_sse_op_reg(ByteBuf *buf, u8 mf, u8 op, u8 dst_xmm, u8 src_xmm)
+{
+    bytebuf_append(buf, mf);
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, op);
+    bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
+}
+
+/* xorps (0F 57) / xorpd (66 0F 57): flip the sign bit for FNEG. */
+static void emit_sse_xor(ByteBuf *buf, u8 mand, u8 dst_xmm, u8 src_xmm)
+{
+    if (mand)
+    {
+        bytebuf_append(buf, mand);
+    }
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_XOR);
+    bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
+}
+
 static void emit_bit_imm(ByteBuf *buf, u8 digit, u8 dst_reg, u8 imm)
 {
     bytebuf_append(buf, X86_REX_W);
@@ -951,6 +1001,9 @@ static void lower_store(IrInstr *in, CodegenCtx *ctx);
 static void lower_itof(IrInstr *in, CodegenCtx *ctx);
 static void lower_ftoi(IrInstr *in, CodegenCtx *ctx);
 static void lower_fconv(IrInstr *in, CodegenCtx *ctx);
+static void lower_fbin(IrInstr *in, CodegenCtx *ctx);
+static void lower_fneg(IrInstr *in, CodegenCtx *ctx);
+static void lower_fcmp(IrInstr *in, CodegenCtx *ctx);
 static void lower_gep(IrInstr *in, CodegenCtx *ctx);
 static void lower_alloca(IrInstr *in, CodegenCtx *ctx);
 static void lower_memcpy(IrInstr *in, CodegenCtx *ctx);
@@ -1005,7 +1058,18 @@ static X86Mem load_ptr(CodegenCtx *ctx, IrOperand ptr);
     X(OP_VA_END, lower_va_end)                                                                     \
     X(OP_ITOF, lower_itof)                                                                         \
     X(OP_FTOI, lower_ftoi)                                                                         \
-    X(OP_FCONV, lower_fconv)
+    X(OP_FCONV, lower_fconv)                                                                       \
+    X(OP_FADD, lower_fbin)                                                                         \
+    X(OP_FSUB, lower_fbin)                                                                         \
+    X(OP_FMUL, lower_fbin)                                                                         \
+    X(OP_FDIV, lower_fbin)                                                                         \
+    X(OP_FNEG, lower_fneg)                                                                         \
+    X(OP_FCMP_EQ, lower_fcmp)                                                                      \
+    X(OP_FCMP_NE, lower_fcmp)                                                                      \
+    X(OP_FCMP_LT, lower_fcmp)                                                                      \
+    X(OP_FCMP_GT, lower_fcmp)                                                                      \
+    X(OP_FCMP_LE, lower_fcmp)                                                                      \
+    X(OP_FCMP_GE, lower_fcmp)
 
 /* Dispatch table indexed by opcode; unlisted opcodes hit the error path in lower_instr. */
 static const LowerFn lower_fns[] = {
@@ -1770,6 +1834,122 @@ static void lower_fconv(IrInstr *in, CodegenCtx *ctx)
     emit_fp_source_to_xmm0(ctx, in->ops[0], sw);
     emit_sse_cvt(ctx->buf, mf, R_XMM0, R_XMM0);
     emit_sse_store(ctx->buf, dw == 4 ? MF_FLOAT : MF_DOUBLE, xop_vreg(in->result).u.mem, R_XMM0);
+}
+
+/* FP arithmetic: `mov[sd] xmm0, lhs; <op>[sd] xmm0, rhs; mov[sd] dst, xmm0`,
+   mirroring the lower_binary shape. The RHS may load straight from memory; a
+   bare immediate rides GP mov + movd/movq into xmm1. */
+static void lower_fbin(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 w = vreg_width(ctx, in->result);
+    u8 mf = w == 4 ? MF_FLOAT : MF_DOUBLE;
+    const ArithSpec *s = &arith_specs[in->opcode];
+    ByteBuf *b = ctx->buf;
+
+    emit_fp_source_to_xmm0(ctx, in->ops[0], w);
+
+    X86Operand rhs = lowered_operand(ctx, in->ops[1], R_EAX);
+    if (rhs.kind == XOP_MEM)
+    {
+        emit_sse_op_mem(b, mf, s->mem, R_XMM0, rhs.u.mem);
+    }
+    else
+    {
+        if (rhs.kind == XOP_IMM)
+        {
+            emit_mov(b, w == 4 ? 4 : 8, xop_reg(R_EAX), rhs);
+        }
+        emit_movd_to_xmm(b, R_XMM1, R_EAX, w != 4);
+        emit_sse_op_reg(b, mf, s->mem, R_XMM0, R_XMM1);
+    }
+    emit_sse_store(b, mf, xop_vreg(in->result).u.mem, R_XMM0);
+}
+
+/* FNEG: flip the sign bit with xorp[sd], keeping the rest of the value. */
+static void lower_fneg(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 w = vreg_width(ctx, in->result);
+    ByteBuf *b = ctx->buf;
+
+    emit_fp_source_to_xmm0(ctx, in->ops[0], w);
+    if (w == 4)
+    {
+        emit_mov(b, 4, xop_reg(R_ECX), xop_imm(0x80000000));
+        emit_movd_to_xmm(b, R_XMM1, R_ECX, false);
+        emit_sse_xor(b, 0, R_XMM0, R_XMM1);
+    }
+    else
+    {
+        emit_mov(b, 8, xop_reg(R_ECX), xop_imm((i64) 0x8000000000000000ULL));
+        emit_movd_to_xmm(b, R_XMM1, R_ECX, true);
+        emit_sse_xor(b, X86_SSE_66, R_XMM0, R_XMM1);
+    }
+    emit_sse_store(b, w == 4 ? MF_FLOAT : MF_DOUBLE, xop_vreg(in->result).u.mem, R_XMM0);
+}
+
+/* FP compare: ucomi[sd] set ZF/CF/PF (unordered → all three), then a setcc
+   combo per predicate from the verified matrix (§0 of the plan):
+   EQ=sete&setnp, NE=setne|setp, LT=setb&setnp, LE=setbe&setnp,
+   GT=seta, GE=setae. Only predicates needing PF join a second setcc. */
+static void lower_fcmp(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 rw = vreg_width(ctx, in->result);
+    u8 sw = in->ops[0].is_imm ? 8 : vreg_width(ctx, in->ops[0].u.vreg);
+    u8 mf = sw == 4 ? MF_FLOAT : MF_DOUBLE;
+    ByteBuf *b = ctx->buf;
+
+    emit_fp_source_to_xmm0(ctx, in->ops[0], sw);
+    X86Operand rhs = lowered_operand(ctx, in->ops[1], R_EAX);
+    if (rhs.kind == XOP_MEM)
+    {
+        emit_sse_load(b, mf, R_XMM1, rhs.u.mem);
+    }
+    else if (rhs.kind == XOP_IMM)
+    {
+        emit_mov(b, sw == 4 ? 4 : imm_load_width(rhs.u.imm), xop_reg(R_EAX), rhs);
+        emit_movd_to_xmm(b, R_XMM1, R_EAX, sw != 4);
+    }
+    else
+    {
+        codegen_error(ctx, "unexpected operand class for a floating-point compare");
+        return;
+    }
+    emit_sse_ucomis(b, sw == 4 ? 0 : X86_SSE_66, R_XMM0, R_XMM1);
+
+    switch (in->opcode)
+    {
+        case OP_FCMP_GT:
+            emit_setcc_reg(b, CC_A, R_EAX);
+            break;
+        case OP_FCMP_GE:
+            emit_setcc_reg(b, CC_AE, R_EAX);
+            break;
+        case OP_FCMP_LT:
+            emit_setcc_reg(b, CC_B, R_EAX);
+            emit_setcc_reg(b, CC_NP, R_EDX);
+            emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
+            break;
+        case OP_FCMP_LE:
+            emit_setcc_reg(b, CC_BE, R_EAX);
+            emit_setcc_reg(b, CC_NP, R_EDX);
+            emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
+            break;
+        case OP_FCMP_EQ:
+            emit_setcc_reg(b, CC_E, R_EAX);
+            emit_setcc_reg(b, CC_NP, R_EDX);
+            emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
+            break;
+        case OP_FCMP_NE:
+            emit_setcc_reg(b, CC_NE, R_EAX);
+            emit_setcc_reg(b, CC_P, R_EDX);
+            emit_binop_rhs(b, 1, &arith_specs[OP_OR], R_EAX, xop_reg(R_EDX));
+            break;
+        default:
+            codegen_error(ctx, "unsupported FP compare predicate");
+            return;
+    }
+    emit_movzbl_al_eax(b);
+    emit_mov(b, rw, xop_vreg(in->result), xop_reg(R_EAX));
 }
 
 static void lower_gep(IrInstr *in, CodegenCtx *ctx)

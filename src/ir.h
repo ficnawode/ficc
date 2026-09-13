@@ -53,7 +53,18 @@
     X(OP_VA_END)                                                                                   \
     X(OP_ITOF)                                                                                     \
     X(OP_FTOI)                                                                                     \
-    X(OP_FCONV)
+    X(OP_FCONV)                                                                                    \
+    X(OP_FADD)                                                                                     \
+    X(OP_FSUB)                                                                                     \
+    X(OP_FMUL)                                                                                     \
+    X(OP_FDIV)                                                                                     \
+    X(OP_FNEG)                                                                                     \
+    X(OP_FCMP_EQ)                                                                                  \
+    X(OP_FCMP_NE)                                                                                  \
+    X(OP_FCMP_LT)                                                                                  \
+    X(OP_FCMP_GT)                                                                                  \
+    X(OP_FCMP_LE)                                                                                  \
+    X(OP_FCMP_GE)
 
 typedef enum
 {

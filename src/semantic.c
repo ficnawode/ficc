@@ -83,24 +83,11 @@ static bool check_value_used(ASTNode *node, SemanticCtx *ctx)
     return true;
 }
 
-/* A float in a not-yet-lowered lane must error, not lower as an integer op. */
-static bool check_not_fp(SemanticCtx *ctx, Loc loc, Type *t, const char *what)
-{
-    if (type_is_fp(type_rvalue(t)))
-    {
-        return sem_error(ctx, loc, "floating-point %s is not supported yet (phase 19)", what);
-    }
-    return true;
-}
-
-/* A condition operand; bit-testing a float for truthiness mis-evaluates -0.0/NaN. */
+/* A condition operand; floats are admitted now — the IR builder boolifies them
+   with FCMP_NE(x, 0.0), so -0.0/NaN never bit-test. */
 static bool check_condition(SemanticCtx *ctx, ASTNode *cond)
 {
-    if (!check_expr(cond, ctx) || !check_value_used(cond, ctx))
-    {
-        return false;
-    }
-    return check_not_fp(ctx, cond->loc, cond->expr_type, "condition");
+    return check_expr(cond, ctx) && check_value_used(cond, ctx);
 }
 
 static StrMap *current_scope(SemanticCtx *ctx)
@@ -200,6 +187,31 @@ static bool is_comparison_op(BinOpKind op)
 static bool is_compound_assign_op(BinOpKind op)
 {
     return op <= BIN_XOR_ASSIGN && is_compound_assign_table[op];
+}
+
+/* Operators that are integer-only (§6.5.5/% , §6.5.7 shifts, §6.5.12-14
+   bitwise): a floating operand is a constraint violation in every case,
+   including their compound-assignment forms. */
+static bool op_requires_integer(BinOpKind op)
+{
+    switch (op)
+    {
+        case BIN_REM:
+        case BIN_AND:
+        case BIN_OR:
+        case BIN_XOR:
+        case BIN_SHL:
+        case BIN_SHR:
+        case BIN_REM_ASSIGN:
+        case BIN_AND_ASSIGN:
+        case BIN_OR_ASSIGN:
+        case BIN_XOR_ASSIGN:
+        case BIN_SHL_ASSIGN:
+        case BIN_SHR_ASSIGN:
+            return true;
+        default:
+            return false;
+    }
 }
 
 /* §6.5.16.1p1 assignment compatibility (used by `=`, call args, returns,
@@ -318,7 +330,7 @@ static Type *check_compound_assign_expr(ASTBinaryExpr *be, Type *lt, Type *rt, S
                   "'+=' / '-=' and an integer operand)");
         return NULL;
     }
-    if (!type_is_ptr(lt) && !type_is_integer(rt))
+    if (!type_is_ptr(lt) && !type_is_integer(rt) && !type_is_fp(rt))
     {
         sem_error(ctx, be->base.loc, "invalid operands to compound assignment");
         return NULL;
@@ -383,9 +395,18 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     if (binary_expr->op != BIN_ASSIGN && binary_expr->op != BIN_COMMA &&
         (type_is_fp(lt) || type_is_fp(rt)))
     {
-        /* FP math is a loud diagnostic; plain assignment is storage. */
-        return sem_error(ctx, binary_expr->base.loc,
-                         "floating-point operands in a binary operator are not supported yet");
+        /* FP arithmetic/comparisons/logical lower as float; %/shifts/bitwise
+           are integer-only and a float mix is a plain constraint violation. */
+        if (op_requires_integer(binary_expr->op))
+        {
+            return sem_error(ctx, binary_expr->base.loc,
+                             "invalid operands to operator (floating-point operands)");
+        }
+        if ((type_is_fp(lt) && type_is_ptr(rt)) || (type_is_ptr(lt) && type_is_fp(rt)))
+        {
+            return sem_error(ctx, binary_expr->base.loc,
+                             "invalid operands to operator (floating-point and pointer)");
+        }
     }
     Type *result;
     BinOpKind op = binary_expr->op;
@@ -471,12 +492,11 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
         return false;
     }
     Type *op_type = unary_expr->operand->expr_type;
-    if ((unary_expr->op == UN_NEG || unary_expr->op == UN_LOG_NOT) &&
-        type_is_fp(type_rvalue(op_type)))
+    if (unary_expr->op == UN_BIT_NOT && type_is_fp(type_rvalue(op_type)))
     {
-        /* FP negate/log-not are not lowered yet — no integer op on FP bytes. */
+        /* §6.5.3.3p4: `~` is integer-only; FP floor is not `~`. */
         return sem_error(ctx, unary_expr->base.loc,
-                         "floating-point operand in a unary operator is not supported yet");
+                         "invalid operand to '~' (integer type required)");
     }
     if (unary_expr->op == UN_LOG_NOT)
     {
@@ -532,7 +552,7 @@ static bool check_incdec_expr(ASTIncDecExpr *incdec, SemanticCtx *ctx)
         return false;
     }
     Type *t = operand->expr_type;
-    if (!type_is_integer(t) && !type_is_ptr(t))
+    if (!type_is_integer(t) && !type_is_ptr(t) && !type_is_fp(t))
     {
         return sem_error(ctx, incdec->base.loc,
                          "invalid operand to '%s' (arithmetic or pointer type required)",
@@ -2302,12 +2322,6 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     }
     Type *tt = type_decay(type_rvalue(ternary->then_expr->expr_type));
     Type *te = type_decay(type_rvalue(ternary->else_expr->expr_type));
-    /* A conditional mixing FP classes would select between wrong immediates. */
-    if (type_is_fp(tt) != type_is_fp(te) || (type_is_fp(tt) && tt->kind != te->kind))
-    {
-        return sem_error(ctx, ternary->base.loc,
-                         "floating-point conversion in a conditional is not supported yet");
-    }
     if (type_is_record(tt) || type_is_record(te))
     {
         /* §6.5.15p5: a conditional on two operands of the same compatible
