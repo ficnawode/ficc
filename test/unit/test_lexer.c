@@ -828,14 +828,53 @@ TEST(finalize, wide_char_rejected)
     arena_free(a);
 }
 
-TEST(finalize, float_literals_rejected)
+TEST(finalize, float_literals_lex)
 {
     Arena *a = arena_new();
-    EXPECT_NULL(lex_text("1.5", a).tokens);
-    EXPECT_NULL(lex_text(".5", a).tokens);
-    EXPECT_NULL(lex_text("1e5", a).tokens);
-    EXPECT_NULL(lex_text("0x1p3", a).tokens);
-    EXPECT_NULL(lex_text("2f", a).tokens);
+    LexResult res = lex_text("1.5 .5 1e5 0x1p3 2f", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 6);
+    EXPECT_EQ(t[0].kind, TOK_FLOAT_LIT);
+    EXPECT_EQ(t[0].float_kind, FK_DOUBLE);
+    EXPECT_EQ(t[1].kind, TOK_FLOAT_LIT);
+    EXPECT_EQ(t[1].payload.float_pat, 0x3FE0000000000000ULL); /* .5 */
+    EXPECT_EQ(t[2].kind, TOK_FLOAT_LIT);
+    EXPECT_EQ(t[2].payload.float_pat, 0x40F86A0000000000ULL); /* 1e5 */
+    EXPECT_EQ(t[3].kind, TOK_FLOAT_LIT);
+    EXPECT_EQ(t[3].payload.float_pat, 0x4020000000000000ULL); /* 0x1p3 == 8.0 */
+    EXPECT_EQ(t[3].int_suffix.is_hex, false);
+    EXPECT_EQ(t[4].kind, TOK_FLOAT_LIT);
+    EXPECT_EQ(t[4].float_kind, FK_FLOAT);
+    EXPECT_EQ(t[5].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(finalize, float_suffix_kinds)
+{
+    Arena *a = arena_new();
+    LexResult res = lex_text("1.5f 2.5F", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 3);
+    EXPECT_EQ(t[0].kind, TOK_FLOAT_LIT);
+    EXPECT_EQ(t[0].float_kind, FK_FLOAT);
+    EXPECT_EQ(t[1].kind, TOK_FLOAT_LIT);
+    EXPECT_EQ(t[1].float_kind, FK_FLOAT);
+    EXPECT_EQ(t[2].kind, TOK_EOF);
+    /* Long-double literals are recognized and rejected. */
+    EXPECT_NULL(lex_text("3e10l", a).tokens);
+    EXPECT_NULL(lex_text("1.5L", a).tokens);
+    arena_free(a);
+}
+
+TEST(finalize, float_malformed_rejected)
+{
+    Arena *a = arena_new();
+    /* `0x1.5` (no p exponent) and `1e` reject instead of half-parsing. */
+    EXPECT_NULL(lex_text("0x1.5", a).tokens);
+    EXPECT_NULL(lex_text("1e", a).tokens);
+    EXPECT_NULL(lex_text(".5j", a).tokens);
     arena_free(a);
 }
 

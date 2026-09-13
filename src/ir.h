@@ -50,7 +50,10 @@
     X(OP_UNREACHABLE)                                                                              \
     X(OP_VA_START)                                                                                 \
     X(OP_VA_ARG)                                                                                   \
-    X(OP_VA_END)
+    X(OP_VA_END)                                                                                   \
+    X(OP_ITOF)                                                                                     \
+    X(OP_FTOI)                                                                                     \
+    X(OP_FCONV)
 
 typedef enum
 {
@@ -223,6 +226,7 @@ struct IrModule
     Vec *globals;     /* Vec<IrGlobal*> */
     u8 *widths;       /* value-width table, indexed by vreg id */
     bool *signedness; /* signedness table, indexed by vreg id (parallel to widths) */
+    bool *floatness;  /* FP-class table, indexed by vreg id (parallel to widths) */
     u32 width_count;
     u32 width_cap;
     u32 next_vreg; /* module-wide vreg allocator */
@@ -236,8 +240,10 @@ IrFunction *ir_module_add_func(IrModule *m, const char *name, Type *ret_type);
 IrBlock *ir_func_add_block(IrFunction *f, const char *label);
 
 /* vreg allocation */
-u32 ir_alloc_vreg(IrModule *m, u8 width, bool is_signed);
+u32 ir_alloc_vreg(IrModule *m, u8 width, bool is_signed, bool is_float);
+u32 ir_alloc_fp_vreg(IrModule *m, u8 width);
 bool ir_vreg_signed(const IrModule *m, u32 vreg);
+bool ir_vreg_float(const IrModule *m, u32 vreg);
 
 /* instruction creation */
 IrInstr *ir_emit_ret(IrBlock *bb, IrOperand val);

@@ -124,6 +124,18 @@ typedef enum
     X86_REX_W = 0x48,
     X86_REP = 0xF3,
 
+    X86_SSE_F2 = 0xF2,     /* cvtsd2ss/cvttsd2si/movsd/addsd mandatory prefix */
+    X86_SSE_66 = 0x66,     /* movd/movq to/from xmm */
+    X86_SSE_MOV = 0x10,    /* movss (F3) / movsd (F2), ->reg=load, ->mem=store */
+    X86_SSE_CVTSI2 = 0x2A, /* cvtsi2sd (F2, REX.W for 64) / cvtsi2ss (F3) */
+    X86_SSE_CVTT = 0x2C,   /* cvttsd2si (F2, REX.W for 64) / cvttss2si (F3) */
+    X86_SSE_CVTS2S = 0x5A, /* cvtsd2ss (F2) / cvtss2sd (F3) */
+    X86_SSE_ADD = 0x58,    /* addsd (F2) / addss (F3) */
+    X86_SSE_SUB = 0x5C,    /* subsd (F2) */
+    X86_SSE_UCOMIS = 0x2E, /* ucomisd (66) / ucomiss (no prefix) */
+    X86_SSE_MOVD = 0x6E,   /* movd/movq xmm, r/m (66 prefix, REX.W for 64) */
+    X86_BIT_BASE = 0xBA,   /* 0F BA /digit ib: bt/bts/btr on r/m64 */
+
     X86_PUSH_RBP = 0x55,
     X86_LEAVE = 0xC9,
     X86_RET = 0xC3,
@@ -175,6 +187,23 @@ typedef enum
 } X86Opcode;
 
 #define NO_REG 0xFF
+
+/* SSE scratch: only xmm0/xmm1 are ever used as values. */
+#define R_XMM0 0
+#define R_XMM1 1
+
+/* Mandatory prefixes: float lanes use F3, double lanes F2. */
+#define MF_FLOAT 0xF3
+#define MF_DOUBLE 0xF2
+
+/* IEEE bit patterns of 2^63, added back by the u64 int→FP sequence. */
+#define F32_BITS_2POW63 0x5F000000
+#define F64_BITS_2POW63 0x43E0000000000000
+
+/* 0F BA /digit ib: bt=4, bts=5, btr=6. */
+#define X86_XOP_BT 4
+#define X86_XOP_BTS 5
+#define X86_XOP_BTR 6
 
 static bool reg_is_extended(u8 reg)
 {
@@ -768,6 +797,112 @@ static void patch_rel32(ByteBuf *buf, size_t field_off, size_t target)
     bytebuf_poke_u32(buf, field_off, (u32) rel);
 }
 
+/* movss/movsd xmm ← r/m (0F 10); the source is always a vreg slot. */
+static void emit_sse_load(ByteBuf *buf, u8 mf, u8 xmm, X86Mem mem)
+{
+    bytebuf_append(buf, mf);
+    bytebuf_append(buf,
+                   rex(false, xmm >= 8, reg_is_extended(mem.index), reg_is_extended(mem.base)));
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_MOV);
+    emit_mem_operand(buf, xmm, mem);
+}
+
+/* movss/movsd r/m ← xmm (0F 11). */
+static void emit_sse_store(ByteBuf *buf, u8 mf, X86Mem mem, u8 xmm)
+{
+    bytebuf_append(buf, mf);
+    bytebuf_append(buf,
+                   rex(false, xmm >= 8, reg_is_extended(mem.index), reg_is_extended(mem.base)));
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, (u8) (X86_SSE_MOV + 1));
+    emit_mem_operand(buf, xmm, mem);
+}
+
+/* cvtss2sd/cvtsd2ss xmm, xmm; the prefix selects the source precision. */
+static void emit_sse_cvt(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
+{
+    bytebuf_append(buf, mf);
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_CVTS2S);
+    bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
+}
+
+/* cvtsi2sd/cvtsi2ss xmm, r/m64 (REX.W); src is a sign/zero-extended GP reg. */
+static void emit_cvtsi2d(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_reg)
+{
+    bytebuf_append(buf, mf);
+    bytebuf_append(buf, X86_REX_W);
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_CVTSI2);
+    bytebuf_append(buf, modrm(3, dst_xmm, src_reg));
+}
+
+/* cvttsd2si/cvttss2si dst, xmm; w selects the 64-bit destination window. */
+static void emit_cvtts2i(ByteBuf *buf, u8 mf, u8 dst_reg, u8 src_xmm, bool w)
+{
+    bytebuf_append(buf, mf);
+    if (w)
+    {
+        bytebuf_append(buf, X86_REX_W);
+    }
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_CVTT);
+    bytebuf_append(buf, modrm(3, dst_reg, src_xmm));
+}
+
+/* ucomiss/ucomisd lhs, rhs; unordered (NaN) sets ZF, CF and PF. */
+static void emit_sse_ucomis(ByteBuf *buf, u8 mand, u8 lhs_xmm, u8 rhs_xmm)
+{
+    if (mand)
+    {
+        bytebuf_append(buf, mand);
+    }
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_UCOMIS);
+    bytebuf_append(buf, modrm(3, lhs_xmm, rhs_xmm));
+}
+
+/* addsd/addss xmm, xmm. */
+static void emit_sse_add(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
+{
+    bytebuf_append(buf, mf);
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_ADD);
+    bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
+}
+
+/* subsd/subss xmm, xmm. */
+static void emit_sse_sub(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
+{
+    bytebuf_append(buf, mf);
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_SUB);
+    bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
+}
+
+/* movd (w=false) / movq (w=true): xmm ← GP r/m. */
+static void emit_movd_to_xmm(ByteBuf *buf, u8 dst_xmm, u8 src_reg, bool w)
+{
+    bytebuf_append(buf, X86_SSE_66);
+    if (w)
+    {
+        bytebuf_append(buf, X86_REX_W);
+    }
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_MOVD);
+    bytebuf_append(buf, modrm(3, dst_xmm, src_reg));
+}
+
+static void emit_bit_imm(ByteBuf *buf, u8 digit, u8 dst_reg, u8 imm)
+{
+    bytebuf_append(buf, X86_REX_W);
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_BIT_BASE);
+    bytebuf_append(buf, modrm(3, digit, dst_reg));
+    bytebuf_append_i8(buf, (i8) imm);
+}
+
 /* FF /4: jmp r/m64 — indirect jump to the absolute address in a register. */
 static void emit_jmp_reg(ByteBuf *buf, u8 reg)
 {
@@ -813,6 +948,9 @@ static void lower_zext(IrInstr *in, CodegenCtx *ctx);
 static void lower_sext(IrInstr *in, CodegenCtx *ctx);
 static void lower_load(IrInstr *in, CodegenCtx *ctx);
 static void lower_store(IrInstr *in, CodegenCtx *ctx);
+static void lower_itof(IrInstr *in, CodegenCtx *ctx);
+static void lower_ftoi(IrInstr *in, CodegenCtx *ctx);
+static void lower_fconv(IrInstr *in, CodegenCtx *ctx);
 static void lower_gep(IrInstr *in, CodegenCtx *ctx);
 static void lower_alloca(IrInstr *in, CodegenCtx *ctx);
 static void lower_memcpy(IrInstr *in, CodegenCtx *ctx);
@@ -864,7 +1002,10 @@ static X86Mem load_ptr(CodegenCtx *ctx, IrOperand ptr);
     X(OP_MEMCPY, lower_memcpy)                                                                     \
     X(OP_VA_START, lower_va_start)                                                                 \
     X(OP_VA_ARG, lower_va_arg)                                                                     \
-    X(OP_VA_END, lower_va_end)
+    X(OP_VA_END, lower_va_end)                                                                     \
+    X(OP_ITOF, lower_itof)                                                                         \
+    X(OP_FTOI, lower_ftoi)                                                                         \
+    X(OP_FCONV, lower_fconv)
 
 /* Dispatch table indexed by opcode; unlisted opcodes hit the error path in lower_instr. */
 static const LowerFn lower_fns[] = {
@@ -1151,6 +1292,11 @@ static void lower_ret(IrInstr *in, CodegenCtx *ctx)
     {
         IrOperand val = in->ops[0];
         u8 w = operand_width(ctx, val);
+        if (val.is_imm)
+        {
+            /* A 64-bit immediate return must not truncate to the imm32 encoding. */
+            w = imm_load_width(val.u.imm);
+        }
         emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, val, R_ECX));
     }
     else
@@ -1484,6 +1630,146 @@ static void lower_store(IrInstr *in, CodegenCtx *ctx)
     }
     X86Mem indirect = load_ptr(ctx, in->ops[1]);
     emit_mov(ctx->buf, w, xop_mem(indirect), val);
+}
+
+/* A conversion source is a slot vreg; a bare immediate is treated as double. */
+static u8 fconv_src_width(CodegenCtx *ctx, IrOperand op)
+{
+    return op.is_imm ? 8 : vreg_width(ctx, op.u.vreg);
+}
+
+/* Move an FP operand's bits into xmm0; a bare immediate rides GP mov + movd/movq. */
+static void emit_fp_source_to_xmm0(CodegenCtx *ctx, IrOperand op, u8 w)
+{
+    ByteBuf *b = ctx->buf;
+    u8 mf = w == 4 ? MF_FLOAT : MF_DOUBLE;
+    X86Operand src = lowered_operand(ctx, op, R_EAX);
+    if (src.kind == XOP_MEM)
+    {
+        emit_sse_load(b, mf, R_XMM0, src.u.mem);
+        return;
+    }
+    if (src.kind == XOP_IMM)
+    {
+        emit_mov(b, w == 4 ? 4 : imm_load_width(src.u.imm), xop_reg(R_EAX), src);
+        emit_movd_to_xmm(b, R_XMM0, R_EAX, w != 4);
+        return;
+    }
+    codegen_error(ctx, "unexpected operand class for a floating-point conversion");
+}
+
+static void emit_load_2pow63(ByteBuf *buf, bool is_f32)
+{
+    if (is_f32)
+    {
+        emit_mov(buf, 4, xop_reg(R_ECX), xop_imm(F32_BITS_2POW63));
+        emit_movd_to_xmm(buf, R_XMM1, R_ECX, false);
+    }
+    else
+    {
+        emit_mov(buf, 8, xop_reg(R_ECX), xop_imm(F64_BITS_2POW63));
+        emit_movd_to_xmm(buf, R_XMM1, R_ECX, true);
+    }
+}
+
+static void lower_itof(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 dw = vreg_width(ctx, in->result);
+    u8 mf = dw == 4 ? MF_FLOAT : MF_DOUBLE;
+    IrOperand sx = in->ops[0];
+    u8 sw;
+    bool is_signed;
+    if (sx.is_imm)
+    {
+        sw = 8;
+        is_signed = true;
+        emit_mov(ctx->buf, 8, xop_reg(R_EAX), xop_imm(sx.u.imm));
+    }
+    else
+    {
+        sw = vreg_width(ctx, sx.u.vreg);
+        is_signed = ir_vreg_signed(ctx->mod, sx.u.vreg);
+        emit_mov(ctx->buf, sw, xop_reg(R_EAX), lowered_operand(ctx, sx, R_EAX));
+        if (sw == 1 || sw == 2)
+        {
+            if (is_signed)
+            {
+                emit_movsx(ctx->buf, sw, 8, R_EAX, xop_reg(R_EAX));
+            }
+            else
+            {
+                emit_movzx(ctx->buf, sw, 8, R_EAX, xop_reg(R_EAX));
+            }
+        }
+        else if (sw == 4 && is_signed)
+        {
+            emit_movsx(ctx->buf, 4, 8, R_EAX, xop_reg(R_EAX));
+        }
+    }
+
+    if (sw == 8 && !is_signed)
+    {
+        /* u64 ≥ 2^63: clear the top bit, convert, add back the exact 2^63. */
+        emit_test_reg(ctx->buf, 8, R_EAX);
+        size_t js_field = emit_jcc_pending(ctx->buf, CC_S);
+        emit_cvtsi2d(ctx->buf, mf, R_XMM0, R_EAX);
+        size_t jmp_field = emit_jmp_pending(ctx->buf);
+        size_t big_off = bytebuf_len(ctx->buf);
+        emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_reg(R_EAX));
+        emit_bit_imm(ctx->buf, X86_XOP_BTR, R_ECX, 63);
+        emit_cvtsi2d(ctx->buf, mf, R_XMM0, R_ECX);
+        emit_load_2pow63(ctx->buf, dw == 4);
+        emit_sse_add(ctx->buf, mf, R_XMM0, R_XMM1);
+        size_t done_off = bytebuf_len(ctx->buf);
+        patch_rel32(ctx->buf, js_field, big_off);
+        patch_rel32(ctx->buf, jmp_field, done_off);
+    }
+    else
+    {
+        emit_cvtsi2d(ctx->buf, mf, R_XMM0, R_EAX);
+    }
+    emit_sse_store(ctx->buf, mf, xop_vreg(in->result).u.mem, R_XMM0);
+}
+
+static void lower_ftoi(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 dw = vreg_width(ctx, in->result);
+    bool is_signed = ir_vreg_signed(ctx->mod, in->result);
+    u8 sw = fconv_src_width(ctx, in->ops[0]);
+    u8 mf = sw == 4 ? MF_FLOAT : MF_DOUBLE;
+
+    emit_fp_source_to_xmm0(ctx, in->ops[0], sw);
+
+    ByteBuf *b = ctx->buf;
+    if (dw == 8 && !is_signed)
+    {
+        /* u64: cvttsd2si, then for d ≥ 2^63 subtract 2^63, re-convert, set bit 63. */
+        emit_cvtts2i(b, mf, R_EAX, R_XMM0, true);
+        emit_load_2pow63(b, sw == 4);
+        emit_sse_ucomis(b, sw == 4 ? 0 : X86_SSE_66, R_XMM0, R_XMM1);
+        size_t done_field = emit_jcc_pending(b, CC_B);
+        emit_sse_sub(b, mf, R_XMM0, R_XMM1);
+        emit_cvtts2i(b, mf, R_EAX, R_XMM0, true);
+        emit_bit_imm(b, X86_XOP_BTS, R_EAX, 63);
+        size_t done_off = bytebuf_len(b);
+        patch_rel32(b, done_field, done_off);
+        emit_mov(b, 8, xop_vreg(in->result), xop_reg(R_EAX));
+        return;
+    }
+    /* Signed lanes: i32 window (0x80000000 brand); unsigned narrow: i64 window. */
+    emit_cvtts2i(b, mf, R_EAX, R_XMM0, dw == 8 || !is_signed);
+    emit_mov(b, dw, xop_vreg(in->result), xop_reg(R_EAX));
+}
+
+static void lower_fconv(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 dw = vreg_width(ctx, in->result);
+    u8 sw = fconv_src_width(ctx, in->ops[0]);
+    u8 mf = sw == 4 ? MF_FLOAT : MF_DOUBLE; /* cvt*2s prefix = source precision */
+
+    emit_fp_source_to_xmm0(ctx, in->ops[0], sw);
+    emit_sse_cvt(ctx->buf, mf, R_XMM0, R_XMM0);
+    emit_sse_store(ctx->buf, dw == 4 ? MF_FLOAT : MF_DOUBLE, xop_vreg(in->result).u.mem, R_XMM0);
 }
 
 static void lower_gep(IrInstr *in, CodegenCtx *ctx)

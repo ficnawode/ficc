@@ -140,8 +140,15 @@ static IrBlock *build_stmt(FuncBuilder *ctx, ASTNode *node, IrBlock *bb);
 
 static void ir_error(ASTNode *node, const char *fmt, ...)
 {
-    Loc loc = node->loc;
-    fprintf(stderr, "%s:%u:%u: [ir] error: ", loc.file, loc.line, loc.col);
+    if (node)
+    {
+        Loc loc = node->loc;
+        fprintf(stderr, "%s:%u:%u: [ir] error: ", loc.file, loc.line, loc.col);
+    }
+    else
+    {
+        fprintf(stderr, "[ir] error: ");
+    }
     va_list args;
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
@@ -160,7 +167,7 @@ static u32 alloc_vreg_from_type(FuncBuilder *ctx, Type *type)
 {
     u8 width = type->width / 8;
     ASSERT(width == 1 || width == 2 || width == 4 || width == 8);
-    return ir_alloc_vreg(ctx->mod, width, type_is_signed_int(type));
+    return ir_alloc_vreg(ctx->mod, width, type_is_signed_int(type), type_is_fp(type));
 }
 
 /* Records and arrays are memory objects: addressed by pointer, never loaded
@@ -190,11 +197,52 @@ static inline Type *node_type(ASTNode *n)
     return n->expr_type ? n->expr_type : type_int();
 }
 
+/* Put an immediate in a classed vreg so the conversion opcodes read its class. */
+static u32 materialize_to_vreg(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *type)
+{
+    if (!val.is_imm)
+    {
+        return val.u.vreg;
+    }
+    u32 vreg = alloc_vreg_from_type(ctx, type);
+    ir_emit_unary(bb, OP_ZEXT, vreg, val);
+    return vreg;
+}
+
 static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *src_type,
                             Type *target_type)
 {
     u8 src_w = src_type->width / 8;
     u8 tgt_w = target_type->width / 8;
+
+    /* int↔FP → ITOF/FTOI, float↔double → FCONV; _Bool targets stay integer-only. */
+    if (type_is_fp(src_type) || type_is_fp(target_type))
+    {
+        Type *su = type_unqual(src_type);
+        Type *tu = type_unqual(target_type);
+        if (type_is_fp(su) && type_is_fp(tu))
+        {
+            if (su->kind == tu->kind)
+            {
+                return val;
+            }
+            u32 src_vreg = materialize_to_vreg(ctx, bb, val, su);
+            u32 dst = alloc_vreg_from_type(ctx, tu);
+            ir_emit_unary(bb, OP_FCONV, dst, ir_operand_vreg(src_vreg));
+            return ir_operand_vreg(dst);
+        }
+        if (tu->kind == TYPE_BOOL)
+        {
+            ctx->failed = true;
+            ir_error(NULL, "cannot convert a floating-point value to _Bool yet (phase 19)");
+            return val;
+        }
+        u32 src_vreg = materialize_to_vreg(ctx, bb, val, su);
+        u32 dst = alloc_vreg_from_type(ctx, tu);
+        ir_emit_unary(bb, type_is_fp(su) ? OP_FTOI : OP_ITOF, dst, ir_operand_vreg(src_vreg));
+        return ir_operand_vreg(dst);
+    }
+
     if (target_type->kind == TYPE_BOOL && src_type->kind != TYPE_BOOL)
     {
         /* §6.3.1.2: _Bool holds (val != 0) — ICMP_NE, TRUNC'd when wider than 1. */
@@ -1250,6 +1298,13 @@ static IrBlock *lower_call_arg(FuncBuilder *ctx, ASTNode *arg, Type *param_type,
         return bb;
     }
     *out = promote_to(ctx, bb, arg_res.value, arg_type, param_type);
+    /* A same-width 8-byte imm argument would be moved at the 4-byte imm width. */
+    if (out->is_imm && type_unqual(param_type)->width == 64)
+    {
+        u32 carrier = alloc_vreg_from_type(ctx, type_unqual(param_type));
+        ir_emit_unary(bb, OP_ZEXT, carrier, *out);
+        *out = ir_operand_vreg(carrier);
+    }
     return bb;
 }
 
@@ -2176,6 +2231,12 @@ static ExprResult build_expr(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
     {
         case AST_INT_LITERAL:
             return expr_result(ir_operand_imm(ast_as(ASTIntLiteral, node)->value), bb);
+        case AST_FLOAT_LITERAL:
+        {
+            /* The IEEE bit pattern rides the plain immediate (store width is context). */
+            ASTFloatLiteral *fl = ast_as(ASTFloatLiteral, node);
+            return expr_result(ir_operand_imm((i64) fl->bits), bb);
+        }
         case AST_IDENT:
             return build_ident_expr(ctx, ast_as(ASTIdent, node), bb);
         case AST_BINARY_EXPR:

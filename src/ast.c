@@ -76,6 +76,14 @@ ASTNode *ast_int_literal(i64 value, bool is_unsigned, IntSuffix length, bool is_
     return &n->base;
 }
 
+ASTNode *ast_float_literal(u64 bits, FloatKind kind, Loc loc, Arena *arena)
+{
+    ASTFloatLiteral *n = ast_new_node(sizeof(ASTFloatLiteral), AST_FLOAT_LITERAL, loc, arena);
+    n->bits = bits;
+    n->kind = kind;
+    return &n->base;
+}
+
 ASTNode *ast_program(Vec *decls, Loc loc, Arena *arena)
 {
     ASTProgram *n = ast_new_node(sizeof(ASTProgram), AST_PROGRAM, loc, arena);
@@ -561,6 +569,13 @@ static void ast_dump_rec(ASTNode *node, int depth)
         {
             ASTIntLiteral *int_literal = ast_as(ASTIntLiteral, node);
             printf("INT_LITERAL %lld\n", (long long) int_literal->value);
+            break;
+        }
+        case AST_FLOAT_LITERAL:
+        {
+            ASTFloatLiteral *float_literal = ast_as(ASTFloatLiteral, node);
+            printf("FLOAT_LITERAL %c 0x%llx\n", float_literal->kind == FK_FLOAT ? 'f' : 'd',
+                   (unsigned long long) float_literal->bits);
             break;
         }
         case AST_PROGRAM:

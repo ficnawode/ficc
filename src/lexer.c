@@ -4,8 +4,10 @@
 #include "util/intern.h"
 #include "util/vec.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+/* Decimal/hex→IEEE conversions come from glibc (C11 §6.4.4.2p7). */
 const char *token_kind_name(TokenKind kind)
 {
     switch (kind)
@@ -56,9 +58,11 @@ static const Keyword KEYWORDS[] = {
     {"continue", TOK_KW_CONTINUE},
     {"default", TOK_KW_DEFAULT},
     {"do", TOK_KW_DO},
+    {"double", TOK_KW_DOUBLE},
     {"else", TOK_KW_ELSE},
     {"enum", TOK_KW_ENUM},
     {"extern", TOK_KW_EXTERN},
+    {"float", TOK_KW_FLOAT},
     {"for", TOK_KW_FOR},
     {"goto", TOK_KW_GOTO},
     {"if", TOK_KW_IF},
@@ -482,13 +486,70 @@ static bool pp_number_is_float(const char *s, u32 len)
     return false;
 }
 
+/* §6.4.4.2 floating constant; glibc converts, the whole spelling must parse. */
+static void finalize_float(FinalizeCtx *ctx, const PpToken *tok)
+{
+    const char *s = tok->spell;
+    u32 len = tok->len;
+
+    FloatKind kind = FK_DOUBLE;
+    u32 digits = len;
+    if (len > 0 && (s[len - 1] == 'f' || s[len - 1] == 'F'))
+    {
+        kind = FK_FLOAT;
+        digits = len - 1;
+    }
+    else if (len > 0 && (s[len - 1] == 'l' || s[len - 1] == 'L'))
+    {
+        finalize_error(ctx, tok->loc, "long double literals not supported yet");
+        return;
+    }
+
+    char *buf = arena_alloc(ctx->arena, digits + 1, 1);
+    memcpy(buf, s, digits);
+    buf[digits] = '\0';
+
+    /* strtod accepts a hex-float without its mandatory p exponent; reject (C11 §6.4.4.2p6). */
+    if (digits >= 2 && buf[0] == '0' && (buf[1] == 'x' || buf[1] == 'X') &&
+        !(strchr(buf, 'p') || strchr(buf, 'P')))
+    {
+        finalize_error(ctx, tok->loc,
+                       "hexadecimal floating constant requires a binary exponent (p)");
+        return;
+    }
+
+    /* `1.5f` is `(float)1.5`: strtof rounds it, the 32-bit pattern rides the low half. */
+    char *endptr;
+    u64 pat;
+    if (kind == FK_FLOAT)
+    {
+        float f = strtof(buf, &endptr);
+        memcpy(&pat, &f, sizeof f);
+    }
+    else
+    {
+        double d = strtod(buf, &endptr);
+        memcpy(&pat, &d, sizeof d);
+    }
+    if (endptr != buf + digits)
+    {
+        finalize_error(ctx, tok->loc, "invalid floating literal");
+        return;
+    }
+
+    finalize_push_token(ctx, (Token) {.kind = TOK_FLOAT_LIT,
+                                      .loc = tok->loc,
+                                      .payload = {.float_pat = pat},
+                                      .float_kind = kind});
+}
+
 static void finalize_number(FinalizeCtx *ctx, const PpToken *tok)
 {
     const char *s = tok->spell;
     u32 len = tok->len;
     if (pp_number_is_float(s, len))
     {
-        finalize_error(ctx, tok->loc, "floating literals not supported");
+        finalize_float(ctx, tok);
         return;
     }
 

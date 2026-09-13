@@ -25,6 +25,7 @@ IrModule *ir_module_new(Arena *arena)
     m->globals = vec_new(arena);
     m->widths = NULL;
     m->signedness = NULL;
+    m->floatness = NULL;
     m->width_count = 0;
     m->width_cap = 0;
     m->next_vreg = 0;
@@ -56,32 +57,47 @@ IrBlock *ir_func_add_block(IrFunction *f, const char *label)
     return bb;
 }
 
-u32 ir_alloc_vreg(IrModule *m, u8 width, bool is_signed)
+u32 ir_alloc_vreg(IrModule *m, u8 width, bool is_signed, bool is_float)
 {
     if (m->width_count >= m->width_cap)
     {
         u32 new_cap = m->width_cap ? m->width_cap * 2 : 8;
         u8 *new_widths = arena_alloc(m->arena, new_cap, sizeof(u8));
         bool *new_signed = arena_alloc(m->arena, new_cap, sizeof(bool));
+        bool *new_float = arena_alloc(m->arena, new_cap, sizeof(bool));
         if (m->widths)
         {
             memcpy(new_widths, m->widths, m->width_count);
             memcpy(new_signed, m->signedness, m->width_count);
+            memcpy(new_float, m->floatness, m->width_count);
         }
         m->widths = new_widths;
         m->signedness = new_signed;
+        m->floatness = new_float;
         m->width_cap = new_cap;
     }
     m->widths[m->width_count] = width;
     m->signedness[m->width_count] = is_signed;
+    m->floatness[m->width_count] = is_float;
     m->width_count++;
     return m->next_vreg++;
+}
+
+u32 ir_alloc_fp_vreg(IrModule *m, u8 width)
+{
+    return ir_alloc_vreg(m, width, false, true);
 }
 
 bool ir_vreg_signed(const IrModule *m, u32 vreg)
 {
     ASSERT(vreg < m->width_count);
     return m->signedness[vreg];
+}
+
+bool ir_vreg_float(const IrModule *m, u32 vreg)
+{
+    ASSERT(vreg < m->width_count);
+    return m->floatness[vreg];
 }
 
 static IrInstr *instr_new(IrBlock *bb, IrOpcode opcode, u32 result, u8 nops)
@@ -123,7 +139,8 @@ IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOpera
 
 IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src)
 {
-    ASSERT(op == OP_NEG || op == OP_NOT || op == OP_TRUNC || op == OP_ZEXT || op == OP_SEXT);
+    ASSERT(op == OP_NEG || op == OP_NOT || op == OP_TRUNC || op == OP_ZEXT || op == OP_SEXT ||
+           op == OP_ITOF || op == OP_FTOI || op == OP_FCONV);
     IrInstr *ins = instr_new(bb, op, dst, 1);
     ins->ops[0] = src;
     return ins;
@@ -390,7 +407,8 @@ static void dump_instr(IrInstr *ins, IrModule *m)
     printf("    ");
     if (ins->result != NO_VREG)
     {
-        printf("v%u:w%u = ", ins->result, m->widths[ins->result]);
+        printf("v%u:w%u%s = ", ins->result, m->widths[ins->result],
+               m->floatness[ins->result] ? "f" : "");
     }
 
     const char *name = ir_opcode_name(ins->opcode) + 3;

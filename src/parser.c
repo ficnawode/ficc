@@ -161,7 +161,8 @@ static bool is_type_start(TokenKind k)
 {
     return k == TOK_KW_INT || k == TOK_KW_BOOL || k == TOK_KW_CHAR || k == TOK_KW_SHORT ||
            k == TOK_KW_LONG || k == TOK_KW_UNSIGNED || k == TOK_KW_SIGNED || k == TOK_KW_VOID ||
-           k == TOK_KW_STRUCT || k == TOK_KW_UNION || k == TOK_KW_ENUM;
+           k == TOK_KW_FLOAT || k == TOK_KW_DOUBLE || k == TOK_KW_STRUCT || k == TOK_KW_UNION ||
+           k == TOK_KW_ENUM;
 }
 
 static bool is_typename_start_at(Parser *p, size_t pos)
@@ -554,10 +555,13 @@ static Type *parse_integer_specifiers(Parser *p)
     int n_short = 0;
     int n_int = 0;
     int n_long = 0;
+    int n_float = 0;
+    int n_double = 0;
 
     Token *t = peek_token(p);
     while (t->kind == TOK_KW_SIGNED || t->kind == TOK_KW_UNSIGNED || t->kind == TOK_KW_CHAR ||
-           t->kind == TOK_KW_SHORT || t->kind == TOK_KW_INT || t->kind == TOK_KW_LONG)
+           t->kind == TOK_KW_SHORT || t->kind == TOK_KW_INT || t->kind == TOK_KW_LONG ||
+           t->kind == TOK_KW_FLOAT || t->kind == TOK_KW_DOUBLE)
     {
         switch (t->kind)
         {
@@ -579,6 +583,12 @@ static Type *parse_integer_specifiers(Parser *p)
             case TOK_KW_LONG:
                 n_long++;
                 break;
+            case TOK_KW_FLOAT:
+                n_float++;
+                break;
+            case TOK_KW_DOUBLE:
+                n_double++;
+                break;
             default:
                 break;
         }
@@ -596,6 +606,38 @@ static Type *parse_integer_specifiers(Parser *p)
         parse_error(p, "duplicate type specifier");
         return NULL;
     }
+
+    /* FP specifiers: only `float`, `double`, and the recognized `long double`. */
+    if (n_float || n_double)
+    {
+        if (n_signed || n_unsigned || n_char || n_short || n_int)
+        {
+            parse_error(p, "cannot combine these specifiers with a floating-point type");
+            return NULL;
+        }
+        if (n_float + n_double > 1)
+        {
+            parse_error(p, "cannot combine 'float' and 'double'");
+            return NULL;
+        }
+        if (n_long > 1)
+        {
+            parse_error(p, "too many 'long' type specifiers");
+            return NULL;
+        }
+        if (n_float && n_long)
+        {
+            parse_error(p, "invalid type specifier combination 'long float'");
+            return NULL;
+        }
+        if (n_double && n_long)
+        {
+            parse_error(p, "'long double' is not supported yet (arrives in phase 19)");
+            return NULL;
+        }
+        return n_float ? type_float() : type_double();
+    }
+
     if (n_char && (n_short || n_int || n_long))
     {
         parse_error(p, "cannot combine 'char' with short/int/long");
@@ -734,6 +776,8 @@ static Specs parse_decl_specifiers(Parser *p)
         case TOK_KW_SIGNED:
         case TOK_KW_UNSIGNED:
         case TOK_KW_INT:
+        case TOK_KW_FLOAT:
+        case TOK_KW_DOUBLE:
             s.type = parse_integer_specifiers(p);
             break;
         case TOK_KW_BOOL:
@@ -1951,6 +1995,9 @@ static ASTNode *parse_primary(Parser *p)
             next_token(p);
             return ast_int_literal(t->payload.int_val, t->int_suffix.is_unsigned,
                                    t->int_suffix.length, t->int_suffix.is_hex, t->loc, p->arena);
+        case TOK_FLOAT_LIT:
+            next_token(p);
+            return ast_float_literal(t->payload.float_pat, t->float_kind, t->loc, p->arena);
         case TOK_CHAR_LIT:
             next_token(p);
             return ast_int_literal(t->payload.int_val, false, SUFFIX_NONE, false, t->loc, p->arena);

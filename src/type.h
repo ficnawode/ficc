@@ -33,6 +33,8 @@ typedef enum
     X(TYPE_UINT)                                                                                   \
     X(TYPE_ULONG)                                                                                  \
     X(TYPE_ULLONG)                                                                                 \
+    X(TYPE_FLOAT)                                                                                  \
+    X(TYPE_DOUBLE)                                                                                 \
     X(TYPE_PTR)                                                                                    \
     X(TYPE_ARRAY)                                                                                  \
     X(TYPE_STRUCT)                                                                                 \
@@ -118,10 +120,16 @@ Type *type_uint(void);
 Type *type_ulong(void);
 Type *type_ullong(void);
 
+/* IEEE-754 single/double on SSE2 at their ABI sizes. */
+Type *type_float(void);
+Type *type_double(void);
+
 bool type_is_signed_int(Type *t);
 bool type_is_signed(Type *t);
 bool type_is_unsigned(Type *t);
 bool type_is_integer(Type *t);
+bool type_is_float(Type *t); /* the two SSE float kinds */
+bool type_is_fp(Type *t);    /* any floating type */
 bool type_is_ptr(Type *t);
 bool type_is_array(Type *t);
 bool type_is_record(Type *t);

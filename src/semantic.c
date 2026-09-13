@@ -83,6 +83,26 @@ static bool check_value_used(ASTNode *node, SemanticCtx *ctx)
     return true;
 }
 
+/* A float in a not-yet-lowered lane must error, not lower as an integer op. */
+static bool check_not_fp(SemanticCtx *ctx, Loc loc, Type *t, const char *what)
+{
+    if (type_is_fp(type_rvalue(t)))
+    {
+        return sem_error(ctx, loc, "floating-point %s is not supported yet (phase 19)", what);
+    }
+    return true;
+}
+
+/* A condition operand; bit-testing a float for truthiness mis-evaluates -0.0/NaN. */
+static bool check_condition(SemanticCtx *ctx, ASTNode *cond)
+{
+    if (!check_expr(cond, ctx) || !check_value_used(cond, ctx))
+    {
+        return false;
+    }
+    return check_not_fp(ctx, cond->loc, cond->expr_type, "condition");
+}
+
 static StrMap *current_scope(SemanticCtx *ctx)
 {
     return (StrMap *) vec_last(ctx->scopes);
@@ -360,6 +380,13 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     {
         return sem_error(ctx, binary_expr->base.loc, "invalid operands to operator (record type)");
     }
+    if (binary_expr->op != BIN_ASSIGN && binary_expr->op != BIN_COMMA &&
+        (type_is_fp(lt) || type_is_fp(rt)))
+    {
+        /* FP math is a loud diagnostic; plain assignment is storage. */
+        return sem_error(ctx, binary_expr->base.loc,
+                         "floating-point operands in a binary operator are not supported yet");
+    }
     Type *result;
     BinOpKind op = binary_expr->op;
     if (op == BIN_ASSIGN)
@@ -444,6 +471,13 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
         return false;
     }
     Type *op_type = unary_expr->operand->expr_type;
+    if ((unary_expr->op == UN_NEG || unary_expr->op == UN_LOG_NOT) &&
+        type_is_fp(type_rvalue(op_type)))
+    {
+        /* FP negate/log-not are not lowered yet — no integer op on FP bytes. */
+        return sem_error(ctx, unary_expr->base.loc,
+                         "floating-point operand in a unary operator is not supported yet");
+    }
     if (unary_expr->op == UN_LOG_NOT)
     {
         if (!check_value_used(unary_expr->operand, ctx))
@@ -855,6 +889,15 @@ static bool check_int_literal(ASTIntLiteral *lit, SemanticCtx *ctx)
     return true;
 }
 
+/* A floating constant is typed by its suffix: `f`/`F` → float, else double. */
+static bool check_float_literal(ASTFloatLiteral *fl, SemanticCtx *ctx)
+{
+    ASTNode *node = &fl->base;
+    node->expr_type = fl->kind == FK_FLOAT ? type_float() : type_double();
+    (void) ctx;
+    return true;
+}
+
 static bool check_string_literal(ASTStringLiteral *sl, SemanticCtx *ctx)
 {
     ASTNode *node = &sl->base;
@@ -874,6 +917,11 @@ static bool check_subscript_expr(ASTSubscriptExpr *se, SemanticCtx *ctx)
     if (!type_is_ptr(ptr_type))
     {
         return sem_error(ctx, node->loc, "subscripted value is not a pointer or array");
+    }
+    /* §6.5.2.1p1: a subscript index must be an integer, not an FTOI. */
+    if (!type_is_integer(type_rvalue(se->index->expr_type)))
+    {
+        return sem_error(ctx, se->index->loc, "array subscript is not an integer");
     }
     node->expr_type = type_deref(ptr_type);
     return true;
@@ -994,6 +1042,8 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
     {
         case AST_INT_LITERAL:
             return expr_done(check_int_literal(ast_as(ASTIntLiteral, node), ctx), node);
+        case AST_FLOAT_LITERAL:
+            return expr_done(check_float_literal(ast_as(ASTFloatLiteral, node), ctx), node);
         case AST_IDENT:
             return expr_done(check_identifier_expr(ast_as(ASTIdent, node), ctx), node);
         case AST_BINARY_EXPR:
@@ -1869,7 +1919,7 @@ static bool check_compound_statement(ASTCompoundStmt *compound_stmt, SemanticCtx
 
 static bool check_if_statement(ASTIfStmt *if_stmt, SemanticCtx *ctx, Type *ret_type)
 {
-    if (!check_expr(if_stmt->cond, ctx) || !check_value_used(if_stmt->cond, ctx))
+    if (!check_condition(ctx, if_stmt->cond))
     {
         return false;
     }
@@ -1886,7 +1936,7 @@ static bool check_if_statement(ASTIfStmt *if_stmt, SemanticCtx *ctx, Type *ret_t
 
 static bool check_while_statement(ASTWhileStmt *while_stmt, SemanticCtx *ctx, Type *ret_type)
 {
-    if (!check_expr(while_stmt->cond, ctx) || !check_value_used(while_stmt->cond, ctx))
+    if (!check_condition(ctx, while_stmt->cond))
     {
         return false;
     }
@@ -1905,7 +1955,7 @@ static bool check_do_while_statement(ASTDoWhileStmt *do_stmt, SemanticCtx *ctx, 
     {
         return false;
     }
-    if (!check_expr(do_stmt->cond, ctx) || !check_value_used(do_stmt->cond, ctx))
+    if (!check_condition(ctx, do_stmt->cond))
     {
         return false;
     }
@@ -1923,8 +1973,7 @@ static bool check_for_statement(ASTForStmt *for_stmt, SemanticCtx *ctx, Type *re
     {
         ok = false;
     }
-    else if (for_stmt->cond &&
-             (!check_expr(for_stmt->cond, ctx) || !check_value_used(for_stmt->cond, ctx)))
+    else if (for_stmt->cond && !check_condition(ctx, for_stmt->cond))
     {
         ok = false;
     }
@@ -2240,18 +2289,27 @@ static bool check_label_statement(ASTLabelStmt *label_stmt, SemanticCtx *ctx, Ty
 
 static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
 {
-    if (!check_expr(ternary->cond, ctx) || !check_expr(ternary->then_expr, ctx) ||
-        !check_expr(ternary->else_expr, ctx))
+    if (!check_condition(ctx, ternary->cond))
     {
         return false;
     }
-    if (!check_value_used(ternary->cond, ctx) || !check_value_used(ternary->then_expr, ctx) ||
-        !check_value_used(ternary->else_expr, ctx))
+    if (!check_expr(ternary->then_expr, ctx) || !check_expr(ternary->else_expr, ctx))
+    {
+        return false;
+    }
+    if (!check_value_used(ternary->then_expr, ctx) || !check_value_used(ternary->else_expr, ctx))
     {
         return false;
     }
     Type *tt = type_decay(type_rvalue(ternary->then_expr->expr_type));
     Type *te = type_decay(type_rvalue(ternary->else_expr->expr_type));
+    /* A conditional mixing FP classes would select between wrong immediates. */
+    if (type_is_fp(tt) != type_is_fp(te) ||
+        (type_is_fp(tt) && tt->kind != te->kind))
+    {
+        return sem_error(ctx, ternary->base.loc,
+                         "floating-point conversion in a conditional is not supported yet");
+    }
     if (type_is_record(tt) || type_is_record(te))
     {
         /* §6.5.15p5: a conditional on two operands of the same compatible

@@ -665,6 +665,151 @@ static i64 eval_unreachable(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 1;
 }
 
+/* Exact FP conversion boundaries and the u64 sign bit. */
+#define U64_SIGN_BIT (1ULL << 63)
+#define F32_TWO_63 9223372036854775808.0f
+#define F64_TWO_31 2147483648.0
+#define F64_TWO_63 9223372036854775808.0
+#define F64_TWO_64 18446744073709551616.0
+
+/* FP conversions. */
+static double fp_bits_to_double(i64 bits, u8 width)
+{
+    if (width == 4)
+    {
+        float f;
+        memcpy(&f, &bits, 4);
+        return f;
+    }
+    double d;
+    memcpy(&d, &bits, 8);
+    return d;
+}
+
+/* Write a width-4/8 FP pattern into a vreg cell, high half zeroed. */
+static void store_fp_bits(i64 *regs, u32 vreg, const void *bits, u8 width)
+{
+    regs[vreg] = 0;
+    memcpy(&regs[vreg], bits, width);
+}
+
+static u8 operand_fp_width(InterpCtx *ctx, IrOperand o)
+{
+    return o.is_imm ? 8 : ctx->mod->widths[o.u.vreg];
+}
+
+/* cvttsd2si semantics: truncate toward zero; NaN/out-of-i64-range → INT64_MIN. */
+static i64 trunc_to_i64(double d)
+{
+    if (d != d || d >= F64_TWO_63 || d < -F64_TWO_63)
+    {
+        return INT64_MIN;
+    }
+    return (i64) d;
+}
+
+static i64 eval_itof(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    i64 src = operand_val(ctx, in->ops[0], regs);
+    bool is_signed = in->ops[0].is_imm || ir_vreg_signed(ctx->mod, in->ops[0].u.vreg);
+    u8 dw = ctx->mod->widths[in->result];
+    if (is_signed || (u64) src < U64_SIGN_BIT)
+    {
+        if (dw == 4)
+        {
+            float f = (float) (i64) src;
+            store_fp_bits(regs, in->result, &f, 4);
+        }
+        else
+        {
+            double d = (double) (i64) src;
+            store_fp_bits(regs, in->result, &d, 8);
+        }
+        return 0;
+    }
+    /* u64 ≥ 2^63: clear the top bit, convert, add back 2^63 (codegen mirror). */
+    u64 y = (u64) src & ~U64_SIGN_BIT;
+    if (dw == 4)
+    {
+        float f = (float) (u64) y;
+        f = f + F32_TWO_63;
+        store_fp_bits(regs, in->result, &f, 4);
+    }
+    else
+    {
+        double d = (double) (u64) y + F64_TWO_63;
+        store_fp_bits(regs, in->result, &d, 8);
+    }
+    return 0;
+}
+
+static i64 eval_ftoi(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    i64 bits = operand_val(ctx, in->ops[0], regs);
+    double d = fp_bits_to_double(bits, operand_fp_width(ctx, in->ops[0]));
+    u8 dw = ctx->mod->widths[in->result];
+    bool is_signed = ir_vreg_signed(ctx->mod, in->result);
+    i64 t;
+    if (dw == 8 && is_signed)
+    {
+        /* Signed 64: i64 window; NaN/out-of-range brand INT64_MIN. */
+        t = trunc_to_i64(d);
+    }
+    else if (dw == 8)
+    {
+        /* Unsigned 64: cvttsd2si, then for d ≥ 2^63 subtract 2^63 and set bit 63. */
+        if (d != d || d < -F64_TWO_63 || d >= F64_TWO_64)
+        {
+            t = INT64_MIN;
+        }
+        else if (d < F64_TWO_63)
+        {
+            t = trunc_to_i64(d);
+        }
+        else
+        {
+            t = (i64) ((u64) trunc_to_i64(d - F64_TWO_63) | U64_SIGN_BIT);
+        }
+    }
+    else if (is_signed)
+    {
+        /* Narrow signed: i32 window (x86's 0x80000000 out-of-range brand). */
+        if (d != d || d >= F64_TWO_31 || d < -F64_TWO_31)
+        {
+            t = INT32_MIN;
+        }
+        else
+        {
+            t = (i64) (i32) d;
+        }
+    }
+    else
+    {
+        /* Narrow unsigned: i64 window, masked by the width pass. */
+        t = trunc_to_i64(d);
+    }
+    regs[in->result] = t;
+    apply_vreg_width(ctx, regs, in->result);
+    return 0;
+}
+
+static i64 eval_fconv(IrInstr *in, InterpCtx *ctx, i64 *regs)
+{
+    i64 bits = operand_val(ctx, in->ops[0], regs);
+    double d = fp_bits_to_double(bits, operand_fp_width(ctx, in->ops[0]));
+    u8 dw = ctx->mod->widths[in->result];
+    if (dw == 4)
+    {
+        float f = (float) d;
+        store_fp_bits(regs, in->result, &f, 4);
+    }
+    else
+    {
+        store_fp_bits(regs, in->result, &d, 8);
+    }
+    return 0;
+}
+
 /* Copy at most one register-sized word into/out of a typed slot. */
 static void copy_word(u8 *dst, const void *src, u32 bytes)
 {
@@ -811,7 +956,10 @@ static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
     X(OP_STORE, eval_store)                                                                        \
     X(OP_GEP, eval_gep)                                                                            \
     X(OP_ALLOCA, eval_alloca)                                                                      \
-    X(OP_MEMCPY, eval_memcpy)
+    X(OP_MEMCPY, eval_memcpy)                                                                      \
+    X(OP_ITOF, eval_itof)                                                                          \
+    X(OP_FTOI, eval_ftoi)                                                                          \
+    X(OP_FCONV, eval_fconv)
 
 /* Opcode dispatch table; unlisted opcodes are NULL and diagnosed in run_block. */
 static const EvalFn eval_fns[] = {

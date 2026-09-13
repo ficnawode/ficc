@@ -6,10 +6,18 @@
 #include "util/types.h"
 #include "util/vec.h"
 
+/* Floating constant kinds (§6.4.4.2). */
+typedef enum
+{
+    FK_FLOAT,
+    FK_DOUBLE,
+} FloatKind;
+
 #define TOKEN_KINDS(X)                                                                             \
     X(TOK_EOF)                                                                                     \
     X(TOK_IDENT)                                                                                   \
     X(TOK_INT_LIT)                                                                                 \
+    X(TOK_FLOAT_LIT)                                                                               \
     X(TOK_CHAR_LIT)                                                                                \
     X(TOK_KW_INT)                                                                                  \
     X(TOK_KW_VOID)                                                                                 \
@@ -18,6 +26,8 @@
     X(TOK_KW_LONG)                                                                                 \
     X(TOK_KW_UNSIGNED)                                                                             \
     X(TOK_KW_SIGNED)                                                                               \
+    X(TOK_KW_FLOAT)                                                                                \
+    X(TOK_KW_DOUBLE)                                                                               \
     X(TOK_KW_RETURN)                                                                               \
     X(TOK_KW_IF)                                                                                   \
     X(TOK_KW_ELSE)                                                                                 \
@@ -113,6 +123,7 @@ typedef struct
     {
         i64 int_val;
         const char *str;
+        u64 float_pat; /* IEEE-754 bit pattern: low 32 = float, all 64 = double */
     } payload;
     struct
     {
@@ -120,6 +131,7 @@ typedef struct
         IntSuffix length : 2;
         bool is_hex : 1;
     } int_suffix;
+    FloatKind float_kind; /* valid when kind == TOK_FLOAT_LIT */
     u32 str_len;
 } Token;
 

@@ -20,6 +20,10 @@ static const Type the_uint = {.kind = TYPE_UINT, .width = 32, .align = 4, .size 
 static const Type the_ulong = {.kind = TYPE_ULONG, .width = 64, .align = 8, .size = 8};
 static const Type the_ullong = {.kind = TYPE_ULLONG, .width = 64, .align = 8, .size = 8};
 
+/* IEEE-754 single/double singletons (SSE2 sizes). */
+static const Type the_float = {.kind = TYPE_FLOAT, .width = 32, .align = 4, .size = 4};
+static const Type the_double = {.kind = TYPE_DOUBLE, .width = 64, .align = 8, .size = 8};
+
 /* Composite type intern pool */
 static Arena *type_arena;
 static U64Map *ptr_cache;
@@ -100,6 +104,14 @@ Type *type_ullong(void)
 {
     return (Type *) &the_ullong;
 }
+Type *type_float(void)
+{
+    return (Type *) &the_float;
+}
+Type *type_double(void)
+{
+    return (Type *) &the_double;
+}
 
 bool type_is_signed_int(Type *t)
 {
@@ -128,6 +140,17 @@ bool type_is_unsigned(Type *t)
 bool type_is_integer(Type *t)
 {
     return type_is_signed_int(t) || type_is_unsigned(t);
+}
+
+/* The two SSE floating kinds; `long double` joins this set later. */
+bool type_is_float(Type *t)
+{
+    return t->kind == TYPE_FLOAT || t->kind == TYPE_DOUBLE;
+}
+
+bool type_is_fp(Type *t)
+{
+    return type_is_float(t);
 }
 
 bool type_is_record(Type *t)
@@ -227,6 +250,19 @@ Type *type_promote(Type *t)
 
 Type *type_common(Type *a, Type *b)
 {
+    /* §6.3.1.8: FP wins by flat precedence (double over float) before integers. */
+    a = type_promote(a);
+    b = type_promote(b);
+
+    if (type_is_fp(a) || type_is_fp(b))
+    {
+        if (a->kind == TYPE_DOUBLE || b->kind == TYPE_DOUBLE)
+        {
+            return type_double();
+        }
+        return type_float();
+    }
+
     ASSERT(type_is_integer(a) && type_is_integer(b));
 
     /* Arithmetic results are unqualified rvalues (C11 §6.3.2.1). */

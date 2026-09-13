@@ -19,9 +19,9 @@ TEST(ir, vreg_allocation)
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
 
-    u32 v0 = ir_alloc_vreg(m, 4, true);
-    u32 v1 = ir_alloc_vreg(m, 8, true);
-    u32 v2 = ir_alloc_vreg(m, 1, true);
+    u32 v0 = ir_alloc_vreg(m, 4, true, false);
+    u32 v1 = ir_alloc_vreg(m, 8, true, false);
+    u32 v2 = ir_alloc_vreg(m, 1, true, false);
 
     EXPECT_EQ(v0, 0);
     EXPECT_EQ(v1, 1);
@@ -41,7 +41,7 @@ TEST(ir, vreg_table_growth)
 
     for (int i = 0; i < 20; i++)
     {
-        ir_alloc_vreg(m, (u8) (i + 1), true);
+        ir_alloc_vreg(m, (u8) (i + 1), true, false);
     }
 
     EXPECT_EQ(m->width_count, 20);
@@ -50,6 +50,53 @@ TEST(ir, vreg_table_growth)
         EXPECT_EQ(m->widths[i], (u8) (i + 1));
     }
 
+    arena_free(a);
+}
+
+TEST(ir, floatness_value_class)
+{
+    /* floatness rides parallel to widths/signedness; ir_alloc_fp_vreg sets it. */
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    u32 fi = ir_alloc_fp_vreg(m, 4);
+    u32 di = ir_alloc_fp_vreg(m, 8);
+    u32 ii = ir_alloc_vreg(m, 4, true, false);
+
+    EXPECT_EQ(fi, 0);
+    EXPECT_EQ(di, 1);
+    EXPECT_EQ(ii, 2);
+    EXPECT_TRUE(ir_vreg_float(m, fi));
+    EXPECT_TRUE(ir_vreg_float(m, di));
+    EXPECT_FALSE(ir_vreg_float(m, ii));
+    EXPECT_FALSE(ir_vreg_signed(m, fi));
+    EXPECT_EQ(m->widths[fi], 4);
+    EXPECT_EQ(m->widths[di], 8);
+    EXPECT_EQ(m->floatness[fi], true);
+    EXPECT_EQ(m->floatness[di], true);
+    EXPECT_EQ(m->floatness[ii], false);
+    arena_free(a);
+}
+
+TEST(ir, fp_conversion_unary_opcodes)
+{
+    /* ITOF/FTOI/FCONV are unary opcodes, emitted like the integer extends. */
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+    u32 src = ir_alloc_vreg(m, 4, true, false);
+    u32 dst = ir_alloc_fp_vreg(m, 8);
+
+    IrInstr *itof = ir_emit_unary(bb, OP_ITOF, dst, ir_operand_vreg(src));
+    EXPECT_EQ(itof->opcode, OP_ITOF);
+    EXPECT_EQ(itof->nops, 1);
+    EXPECT_EQ(itof->ops[0].u.vreg, src);
+    IrInstr *ftoi = ir_emit_unary(bb, OP_FTOI, src, ir_operand_vreg(dst));
+    EXPECT_EQ(ftoi->opcode, OP_FTOI);
+    IrInstr *fconv = ir_emit_unary(bb, OP_FCONV, dst, ir_operand_vreg(dst));
+    EXPECT_EQ(fconv->opcode, OP_FCONV);
+    EXPECT_STR_EQ(ir_opcode_name(OP_ITOF), "OP_ITOF");
+    EXPECT_STR_EQ(ir_opcode_name(OP_FCONV), "OP_FCONV");
     arena_free(a);
 }
 

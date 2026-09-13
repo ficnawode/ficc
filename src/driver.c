@@ -128,6 +128,11 @@ static int run_pipeline(const CompilerConfig *cfg, const char *input, Arena *are
             {
                 printf(" %lld", (long long) t->payload.int_val);
             }
+            else if (t->kind == TOK_FLOAT_LIT)
+            {
+                printf(" 0x%08llx%c", (unsigned long long) t->payload.float_pat,
+                       t->float_kind == FK_FLOAT ? 'f' : '\0');
+            }
             else if (t->kind == TOK_IDENT)
             {
                 printf(" %s", t->payload.str);
