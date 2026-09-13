@@ -71,6 +71,25 @@ typedef struct
     u8 *va_overflow; /* class-overflowed args, 8 bytes each */
 } Frame;
 
+/* `regs[v]` is the 64-bit value; width-16 also uses regs[nregs + v]. */
+static void read_cell(InterpCtx *ctx, i64 *regs, u32 vreg, void *dst)
+{
+    memcpy(dst, &regs[vreg], 8);
+    memcpy((u8 *) dst + 8, &regs[ctx->nregs + vreg], 8);
+}
+
+static void write_cell(InterpCtx *ctx, i64 *regs, u32 vreg, const void *src)
+{
+    memcpy(&regs[vreg], src, 8);
+    memcpy(&regs[ctx->nregs + vreg], (const u8 *) src + 8, 8);
+}
+
+static void copy_cell(InterpCtx *ctx, i64 *dst_regs, u32 dst_vreg, i64 *src_regs, u32 src_vreg)
+{
+    memcpy(&dst_regs[dst_vreg], &src_regs[src_vreg], 8);
+    memcpy(&dst_regs[ctx->nregs + dst_vreg], &src_regs[ctx->nregs + src_vreg], 8);
+}
+
 /* --- Function pseudo-addresses --- */
 
 #define FUNC_ADDR_BASE 0x400000000ULL
@@ -148,8 +167,9 @@ static u8 *resolve_ptr(InterpCtx *ctx, IrOperand op, i64 *regs)
 static Frame *frame_new(Arena *arena, u32 nregs)
 {
     Frame *f = arena_alloc(arena, sizeof(Frame), sizeof(void *));
-    f->regs = arena_alloc(arena, nregs * sizeof(i64), sizeof(i64));
-    memset(f->regs, 0, nregs * sizeof(i64));
+    /* The second nregs hold the upper half of width-16 values. */
+    f->regs = arena_alloc(arena, nregs * 2 * sizeof(i64), sizeof(i64));
+    memset(f->regs, 0, nregs * 2 * sizeof(i64));
     f->va_save = NULL;
     f->va_overflow = NULL;
     return f;
@@ -423,10 +443,19 @@ static void bind_args(IrInstr *in, InterpCtx *ctx, i64 *regs, Frame *callee_fram
     for (u32 a = 0; a < in->extra.call.nargs && a < nparams; a++)
     {
         IrParam *p = (IrParam *) vec_get(callee->params, a);
-        i64 v = operand_val(ctx, in->extra.call.args[a], regs);
         u8 width = ctx->mod->widths[p->vreg];
-        callee_frame->regs[p->vreg] =
-            type_is_signed_int(p->type) ? sext_result(v, width) : trunc_result(v, width);
+        if (width == 16)
+        {
+            IrOperand arg = in->extra.call.args[a];
+            ASSERT(!arg.is_imm && !arg.is_global && !arg.is_func); /* width-16 ⇒ vreg */
+            copy_cell(ctx, callee_frame->regs, p->vreg, regs, arg.u.vreg);
+        }
+        else
+        {
+            i64 v = operand_val(ctx, in->extra.call.args[a], regs);
+            callee_frame->regs[p->vreg] =
+                type_is_signed_int(p->type) ? sext_result(v, width) : trunc_result(v, width);
+        }
     }
 }
 
@@ -753,9 +782,14 @@ static double fp_bits_to_double(i64 bits, u8 width)
     return d;
 }
 
-/* Write a width-4/8 FP pattern into a vreg cell, high half zeroed. */
-static void store_fp_bits(i64 *regs, u32 vreg, const void *bits, u8 width)
+/* Write an FP pattern into a vreg: the low `width` bytes, or the pair for 16. */
+static void store_fp_bits(InterpCtx *ctx, i64 *regs, u32 vreg, const void *bits, u8 width)
 {
+    if (width == 16)
+    {
+        write_cell(ctx, regs, vreg, bits);
+        return;
+    }
     regs[vreg] = 0;
     memcpy(&regs[vreg], bits, width);
 }
@@ -785,12 +819,12 @@ static i64 eval_itof(IrInstr *in, InterpCtx *ctx, i64 *regs)
         if (dw == 4)
         {
             float f = (float) (i64) src;
-            store_fp_bits(regs, in->result, &f, 4);
+            store_fp_bits(ctx, regs, in->result, &f, 4);
         }
         else
         {
             double d = (double) (i64) src;
-            store_fp_bits(regs, in->result, &d, 8);
+            store_fp_bits(ctx, regs, in->result, &d, 8);
         }
         return 0;
     }
@@ -800,12 +834,12 @@ static i64 eval_itof(IrInstr *in, InterpCtx *ctx, i64 *regs)
     {
         float f = (float) (u64) y;
         f = f + F32_TWO_63;
-        store_fp_bits(regs, in->result, &f, 4);
+        store_fp_bits(ctx, regs, in->result, &f, 4);
     }
     else
     {
         double d = (double) (u64) y + F64_TWO_63;
-        store_fp_bits(regs, in->result, &d, 8);
+        store_fp_bits(ctx, regs, in->result, &d, 8);
     }
     return 0;
 }
@@ -868,11 +902,11 @@ static i64 eval_fconv(IrInstr *in, InterpCtx *ctx, i64 *regs)
     if (dw == 4)
     {
         float f = (float) d;
-        store_fp_bits(regs, in->result, &f, 4);
+        store_fp_bits(ctx, regs, in->result, &f, 4);
     }
     else
     {
-        store_fp_bits(regs, in->result, &d, 8);
+        store_fp_bits(ctx, regs, in->result, &d, 8);
     }
     return 0;
 }
@@ -919,7 +953,7 @@ static i64 eval_fbin(IrInstr *in, InterpCtx *ctx, i64 *regs)
                 ASSERT(false && "eval_fbin dispatches only to the FP arithmetic opcodes");
                 return 1;
         }
-        store_fp_bits(regs, in->result, &r, 4);
+        store_fp_bits(ctx, regs, in->result, &r, 4);
     }
     else
     {
@@ -944,7 +978,7 @@ static i64 eval_fbin(IrInstr *in, InterpCtx *ctx, i64 *regs)
                 ASSERT(false && "eval_fbin dispatches only to the FP arithmetic opcodes");
                 return 1;
         }
-        store_fp_bits(regs, in->result, &r, 8);
+        store_fp_bits(ctx, regs, in->result, &r, 8);
     }
     return 0;
 }
@@ -958,13 +992,13 @@ static i64 eval_fneg(IrInstr *in, InterpCtx *ctx, i64 *regs)
     {
         float f = (float) fp_bits_to_double(bits, sw);
         f = -f;
-        store_fp_bits(regs, in->result, &f, 4);
+        store_fp_bits(ctx, regs, in->result, &f, 4);
     }
     else
     {
         double d = fp_bits_to_double(bits, sw);
         d = -d;
-        store_fp_bits(regs, in->result, &d, 8);
+        store_fp_bits(ctx, regs, in->result, &d, 8);
     }
     return 0;
 }
@@ -1022,6 +1056,11 @@ static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs)
         return 1;
     }
     u8 w = ctx->mod->widths[in->result];
+    if (w == 16)
+    {
+        write_cell(ctx, regs, in->result, addr); /* 16-byte move into the pair */
+        return 0;
+    }
     i64 val = 0;
     copy_word((u8 *) &val, addr, w);
     regs[in->result] = val;
@@ -1031,13 +1070,22 @@ static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_store(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 val = operand_val(ctx, in->ops[0], regs);
     u8 *addr = resolve_ptr(ctx, in->ops[1], regs);
     if (!addr)
     {
         return 1;
     }
     u32 w = (u32) in->ops[2].u.imm;
+    if (w == 16)
+    {
+        /* width-16 values are always vregs: no immediate has a 16-byte form */
+        ASSERT(!in->ops[0].is_imm && !in->ops[0].is_global && !in->ops[0].is_func);
+        u8 cell[16];
+        read_cell(ctx, regs, in->ops[0].u.vreg, cell);
+        memcpy(addr, cell, 16);
+        return 0;
+    }
+    i64 val = operand_val(ctx, in->ops[0], regs);
     copy_word(addr, &val, w);
     return 0;
 }
@@ -1099,8 +1147,17 @@ static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
         {
             if (strcmp(in->extra.phi.entries[e].label, pred->label) == 0)
             {
-                regs[in->result] = operand_val(ctx, in->extra.phi.entries[e].val, regs);
-                apply_vreg_width(ctx, regs, in->result);
+                if (ctx->mod->widths[in->result] == 16)
+                {
+                    IrOperand v = in->extra.phi.entries[e].val;
+                    ASSERT(!v.is_imm && !v.is_global && !v.is_func); /* width-16 ⇒ vreg */
+                    copy_cell(ctx, regs, in->result, regs, v.u.vreg);
+                }
+                else
+                {
+                    regs[in->result] = operand_val(ctx, in->extra.phi.entries[e].val, regs);
+                    apply_vreg_width(ctx, regs, in->result);
+                }
                 found = true;
                 break;
             }

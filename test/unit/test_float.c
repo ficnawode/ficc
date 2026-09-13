@@ -108,12 +108,40 @@ TEST(float, file_scope_decl_without_init_ok)
                          "int main(void) { return 0; }\n");
 }
 
-TEST(float, long_double_rejected_for_now)
+TEST(float, long_double_type_layout)
 {
-    /* `long double` is recognized but not supported — a loud parse error. */
-    EXPECT_PARSE_FAIL("long double x;\n");
-    EXPECT_PARSE_FAIL("long double x = 1.5L;\n");
-    EXPECT_PARSE_FAIL("double x = 1.5L;\n");
+    /* 80-bit x87 double-extended stored in a 16-byte slot (SysV). */
+    Type *ld = type_long_double();
+    EXPECT_EQ(ld->kind, TYPE_LONG_DOUBLE);
+    EXPECT_EQ(ld->width, 128);
+    EXPECT_EQ(ld->align, 16);
+    EXPECT_EQ(ld->size, 16);
+    EXPECT_TRUE(type_is_complete(ld));
+    EXPECT_TRUE(type_is_fp(ld));
+    EXPECT_FALSE(type_is_float(ld)); /* x87, not an SSE lane */
+    EXPECT_FALSE(type_is_integer(ld));
+    EXPECT_TRUE(type_promote(ld) == ld);
+}
+
+TEST(float, long_double_literals_and_decls)
+{
+    /* `1.5L` is a long-double literal; `long double` parses as a type. */
+    EXPECT_BUILD_SUCCEED("long double x;\n"
+                         "int main(void) { return 0; }\n");
+    EXPECT_BUILD_SUCCEED("long double x = 1.5L;\n"
+                         "int main(void) { return 0; }\n");
+    EXPECT_BUILD_SUCCEED("double d = 1.5L;\n"
+                         "float f = 1.5L;\n"
+                         "int main(void) { return 0; }\n");
+    EXPECT_BUILD_SUCCEED("const long double g = 2.5L;\n"
+                         "static long double s = 1.5L;\n"
+                         "int main(void) { return 0; }\n");
+    /* The usual arithmetic conversions put long double at the top. */
+    EXPECT_TRUE(type_common(type_long_double(), type_double()) == type_long_double());
+    EXPECT_TRUE(type_common(type_float(), type_long_double()) == type_long_double());
+    EXPECT_TRUE(type_common(type_int(), type_long_double()) == type_long_double());
+    EXPECT_TRUE(type_common(type_long_double(), type_long_double()) == type_long_double());
+    EXPECT_TRUE(type_common(type_double(), type_double()) == type_double());
 }
 
 TEST(float, bogus_specifiers_rejected)
@@ -812,4 +840,133 @@ TEST(float, file_scope_fp_nonconstant_rejected)
     EXPECT_BUILD_FAIL("static double y = x;\n"
                       "double x;\n"
                       "int main(void) { return 0; }\n");
+}
+
+/* ---- long double: type, literals, constants, value model (storage-only) ---- */
+
+TEST(float, long_double_sizeof_alignof_folded)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    if (sizeof(long double) != 16) return 1;\n"
+                          "    if (_Alignof(long double) != 16) return 2;\n"
+                          "    struct S { char c; long double d; int i; };\n"
+                          "    if (sizeof(struct S) != 48) return 3;\n"
+                          "    if (_Alignof(struct S) != 16) return 4;\n"
+                          "    unsigned long off = (unsigned long) &((struct S *) 0)->d;\n"
+                          "    if (off != 16) return 5;\n"
+                          "    off = (unsigned long) &((struct S *) 0)->i;\n"
+                          "    if (off != 32) return 6;\n"
+                          "    long double a[2];\n"
+                          "    if (sizeof(a) != 32) return 7;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_global_init_bytes)
+{
+    /* 1.5L = fraction 0xC000000000000000 @ exp 0x3FFF; padding stays zero. */
+    EXPECT_INTERP_AND_ELF("long double g = 1.5L;\n"
+                          "long double gsum = 1.5L + 2.5L;\n" /* 4.0L @ 0x4001 */
+                          "const long double gc = -2.5L;\n"
+                          "int main(void) {\n"
+                          "    unsigned long long lo = *(unsigned long long *) &g;\n"
+                          "    unsigned long long hi = *(unsigned long long *) ((char *) &g + 8);\n"
+                          "    if (lo != 0xC000000000000000ULL) return 1;\n"
+                          "    if (hi != 0x3FFFULL) return 2;\n"
+                          "    unsigned char *p = (unsigned char *) &g;\n"
+                          "    if (p[9] != 0x3F || p[10] != 0 || p[15] != 0) return 3;\n"
+                          "    lo = *(unsigned long long *) &gsum;\n"
+                          "    hi = *(unsigned long long *) ((char *) &gsum + 8);\n"
+                          "    if (lo != 0x8000000000000000ULL) return 4;\n"
+                          "    if (hi != 0x4001ULL) return 5;\n"
+                          "    hi = *(unsigned long long *) ((char *) &gc + 8);\n"
+                          "    if (hi != 0xC000ULL) return 6;\n" /* sign bit in byte 9 */
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_block_scope_copy)
+{
+    /* Address-taken locals store/load the full 16-byte value. */
+    EXPECT_INTERP_AND_ELF("long double g = 1.5L;\n"
+                          "int main(void) {\n"
+                          "    long double x = 0.0L;\n"
+                          "    x = g;\n"
+                          "    unsigned long long lo = *(unsigned long long *) &x;\n"
+                          "    if (lo != 0xC000000000000000ULL) return 1;\n"
+                          "    long double y = g;\n" /* SSA value, no address taken */
+                          "    if (*(unsigned long long *) &y != 0xC000000000000000ULL) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_width16_phi_store)
+{
+    /* A ternary over two width-16 globals feeds a global store through a phi. */
+    EXPECT_INTERP_AND_ELF(
+        "long double ga = 1.5L;\n"
+        "long double gb = 2.5L;\n"
+        "long double gout;\n"
+        "int main(void) {\n"
+        "    int c = *(unsigned char *) ((char *) &ga + 9) == 0x3F;\n"
+        "    gout = c ? ga : gb;\n"
+        "    unsigned long long lo = *(unsigned long long *) &gout;\n"
+        "    if (lo != 0xC000000000000000ULL) return 1;\n"
+        "    unsigned long long hi = *(unsigned long long *) ((char *) &gout + 8);\n"
+        "    if (hi != 0x3FFFULL) return 2;\n"
+        "    gout = c ? gb : ga;\n"
+        "    if (*(unsigned long long *) &gout != 0xA000000000000000ULL) return 3;\n"
+        "    return 42;\n"
+        "}\n",
+        42);
+}
+
+TEST(float, long_double_struct_field_storage)
+{
+    EXPECT_INTERP_AND_ELF("struct S { char c; long double d; int i; };\n"
+                          "struct S s = {1, 2.5L, 3};\n"
+                          "int main(void) {\n"
+                          "    unsigned long long lo =\n"
+                          "        *(unsigned long long *) ((char *) &s + 16);\n"
+                          "    if (lo != 0xA000000000000000ULL) return 1;\n" /* 2.5L */
+                          "    if (*(int *) ((char *) &s + 32) != 3) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_static_block_and_literal_typed_right)
+{
+    EXPECT_INTERP_AND_ELF(
+        "int main(void) {\n"
+        "    static long double bs = 4.5L;\n"
+        "    long double lit = 1.5L;\n"
+        "    unsigned long long lo = *(unsigned long long *) &bs;\n"
+        "    unsigned long long hi = *(unsigned long long *) ((char *) &bs + 8);\n"
+        "    if (lo != 0x9000000000000000ULL) return 1;\n" /* 4.5L */
+        "    if (hi != 0x4001ULL) return 2;\n"
+        "    if (*(unsigned long long *) &lit != 0xC000000000000000ULL) return 3;\n"
+        "    return 42;\n"
+        "}\n",
+        42);
+}
+
+TEST(float, long_double_cast_matrix_builds)
+{
+    /* i/d/ld casts type correctly and build; their runtime lowering is idle. */
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    long double a = (long double) 3;\n"
+                         "    long double b = 1.5;\n"
+                         "    double c = (double) a;\n"
+                         "    float d = (float) a;\n"
+                         "    int e = (int) a;\n"
+                         "    a = (long double) 1.5f;\n"
+                         "    return 0;\n"
+                         "}\n");
+    EXPECT_BUILD_SUCCEED("long double g = (long double) 7;\n"
+                         "long double h = 1.5f;\n"
+                         "int main(void) { return 0; }\n");
 }

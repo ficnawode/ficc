@@ -853,18 +853,31 @@ TEST(finalize, float_literals_lex)
 TEST(finalize, float_suffix_kinds)
 {
     Arena *a = arena_new();
-    LexResult res = lex_text("1.5f 2.5F", a);
+    LexResult res = lex_text("1.5f 2.5F 1.5L 1.5l", a);
     Token *t = res.tokens;
     EXPECT_NOTNULL(t);
-    EXPECT_EQ(res.count, 3);
+    EXPECT_EQ(res.count, 5);
     EXPECT_EQ(t[0].kind, TOK_FLOAT_LIT);
     EXPECT_EQ(t[0].float_kind, FK_FLOAT);
     EXPECT_EQ(t[1].kind, TOK_FLOAT_LIT);
     EXPECT_EQ(t[1].float_kind, FK_FLOAT);
-    EXPECT_EQ(t[2].kind, TOK_EOF);
-    /* Long-double literals are recognized and rejected. */
-    EXPECT_NULL(lex_text("3e10l", a).tokens);
-    EXPECT_NULL(lex_text("1.5L", a).tokens);
+    EXPECT_EQ(t[2].kind, TOK_FLOAT_LIT);
+    EXPECT_EQ(t[2].float_kind, FK_LONG);
+    EXPECT_EQ(t[3].kind, TOK_FLOAT_LIT);
+    EXPECT_EQ(t[3].float_kind, FK_LONG);
+    EXPECT_EQ(t[4].kind, TOK_EOF);
+    /* An 80-bit literal must carry the exact host value (1.5 is exact). */
+    EXPECT_TRUE((double) t[2].payload.ld_val == 1.5);
+    arena_free(a);
+}
+
+/* The whole spelling must parse (C11 §6.4.4.2): malformed suffixes reject. */
+TEST(finalize, float_long_malformed_rejected)
+{
+    Arena *a = arena_new();
+    EXPECT_NULL(lex_text("1.5j", a).tokens);
+    EXPECT_NULL(lex_text(".5Lz", a).tokens);
+    EXPECT_NULL(lex_text("0x1.5L", a).tokens); /* hex long double needs p */
     arena_free(a);
 }
 

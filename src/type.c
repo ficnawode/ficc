@@ -23,6 +23,13 @@ static const Type the_ullong = {.kind = TYPE_ULLONG, .width = 64, .align = 8, .s
 /* IEEE-754 single/double singletons (SSE2 sizes). */
 static const Type the_float = {.kind = TYPE_FLOAT, .width = 32, .align = 4, .size = 4};
 static const Type the_double = {.kind = TYPE_DOUBLE, .width = 64, .align = 8, .size = 8};
+/* x87 80-bit double-extended in a 16-byte slot (align 16, SysV). */
+static const Type the_long_double = {
+    .kind = TYPE_LONG_DOUBLE,
+    .width = 128,
+    .align = 16,
+    .size = 16,
+};
 
 /* Composite type intern pool */
 static Arena *type_arena;
@@ -112,6 +119,10 @@ Type *type_double(void)
 {
     return (Type *) &the_double;
 }
+Type *type_long_double(void)
+{
+    return (Type *) &the_long_double;
+}
 
 bool type_is_signed_int(Type *t)
 {
@@ -142,7 +153,7 @@ bool type_is_integer(Type *t)
     return type_is_signed_int(t) || type_is_unsigned(t);
 }
 
-/* The two SSE floating kinds; `long double` joins this set later. */
+/* The two SSE float kinds; long double joins type_is_fp only. */
 bool type_is_float(Type *t)
 {
     return t->kind == TYPE_FLOAT || t->kind == TYPE_DOUBLE;
@@ -150,7 +161,7 @@ bool type_is_float(Type *t)
 
 bool type_is_fp(Type *t)
 {
-    return type_is_float(t);
+    return type_is_float(t) || t->kind == TYPE_LONG_DOUBLE;
 }
 
 bool type_is_record(Type *t)
@@ -250,12 +261,16 @@ Type *type_promote(Type *t)
 
 Type *type_common(Type *a, Type *b)
 {
-    /* §6.3.1.8: FP wins by flat precedence (double over float) before integers. */
+    /* FP wins by flat precedence (long double > double > float). */
     a = type_promote(a);
     b = type_promote(b);
 
     if (type_is_fp(a) || type_is_fp(b))
     {
+        if (a->kind == TYPE_LONG_DOUBLE || b->kind == TYPE_LONG_DOUBLE)
+        {
+            return type_long_double();
+        }
         if (a->kind == TYPE_DOUBLE || b->kind == TYPE_DOUBLE)
         {
             return type_double();

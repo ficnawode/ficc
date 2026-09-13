@@ -130,8 +130,19 @@ static int run_pipeline(const CompilerConfig *cfg, const char *input, Arena *are
             }
             else if (t->kind == TOK_FLOAT_LIT)
             {
-                printf(" 0x%08llx%c", (unsigned long long) t->payload.float_pat,
-                       t->float_kind == FK_FLOAT ? 'f' : '\0');
+                if (t->float_kind == FK_FLOAT)
+                {
+                    printf(" 0x%08llxf", (unsigned long long) t->payload.float_pat);
+                }
+                else if (t->float_kind == FK_LONG)
+                {
+                    printf(" <ld> 0x%016llx", /* low 8 bytes of the 80-bit value */
+                           (unsigned long long) t->payload.float_pat);
+                }
+                else
+                {
+                    printf(" 0x%016llx", (unsigned long long) t->payload.float_pat);
+                }
             }
             else if (t->kind == TOK_IDENT)
             {

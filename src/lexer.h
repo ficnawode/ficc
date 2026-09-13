@@ -11,6 +11,7 @@ typedef enum
 {
     FK_FLOAT,
     FK_DOUBLE,
+    FK_LONG, /* x87 80-bit long double */
 } FloatKind;
 
 #define TOKEN_KINDS(X)                                                                             \
@@ -123,7 +124,8 @@ typedef struct
     {
         i64 int_val;
         const char *str;
-        u64 float_pat; /* IEEE-754 bit pattern: low 32 = float, all 64 = double */
+        u64 float_pat;      /* IEEE-754 bit pattern: low 32 = float, all 64 = double */
+        long double ld_val; /* host 80-bit value (FK_LONG) */
     } payload;
     struct
     {

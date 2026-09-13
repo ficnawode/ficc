@@ -632,8 +632,7 @@ static Type *parse_integer_specifiers(Parser *p)
         }
         if (n_double && n_long)
         {
-            parse_error(p, "'long double' is not supported yet (arrives in phase 19)");
-            return NULL;
+            return type_long_double(); /* the x87 80-bit type */
         }
         return n_float ? type_float() : type_double();
     }
@@ -1997,7 +1996,18 @@ static ASTNode *parse_primary(Parser *p)
                                    t->int_suffix.length, t->int_suffix.is_hex, t->loc, p->arena);
         case TOK_FLOAT_LIT:
             next_token(p);
-            return ast_float_literal(t->payload.float_pat, t->float_kind, t->loc, p->arena);
+            {
+                ASTFloatValue v;
+                if (t->float_kind == FK_LONG)
+                {
+                    v.ld = t->payload.ld_val;
+                }
+                else
+                {
+                    v.bits = t->payload.float_pat;
+                }
+                return ast_float_literal(t->float_kind, v, t->loc, p->arena);
+            }
         case TOK_CHAR_LIT:
             next_token(p);
             return ast_int_literal(t->payload.int_val, false, SUFFIX_NONE, false, t->loc, p->arena);

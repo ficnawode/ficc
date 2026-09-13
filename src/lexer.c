@@ -501,8 +501,8 @@ static void finalize_float(FinalizeCtx *ctx, const PpToken *tok)
     }
     else if (len > 0 && (s[len - 1] == 'l' || s[len - 1] == 'L'))
     {
-        finalize_error(ctx, tok->loc, "long double literals not supported yet");
-        return;
+        kind = FK_LONG;
+        digits = len - 1;
     }
 
     char *buf = arena_alloc(ctx->arena, digits + 1, 1);
@@ -518,13 +518,18 @@ static void finalize_float(FinalizeCtx *ctx, const PpToken *tok)
         return;
     }
 
-    /* `1.5f` is `(float)1.5`: strtof rounds it, the 32-bit pattern rides the low half. */
+    /* strtof/strtod/strtold give the exact host value; floats keep their bits. */
     char *endptr;
-    u64 pat;
+    u64 pat = 0;
+    long double ld = 0.0L;
     if (kind == FK_FLOAT)
     {
         float f = strtof(buf, &endptr);
         memcpy(&pat, &f, sizeof f);
+    }
+    else if (kind == FK_LONG)
+    {
+        ld = strtold(buf, &endptr);
     }
     else
     {
@@ -537,10 +542,16 @@ static void finalize_float(FinalizeCtx *ctx, const PpToken *tok)
         return;
     }
 
-    finalize_push_token(ctx, (Token) {.kind = TOK_FLOAT_LIT,
-                                      .loc = tok->loc,
-                                      .payload = {.float_pat = pat},
-                                      .float_kind = kind});
+    Token token = {.kind = TOK_FLOAT_LIT, .loc = tok->loc, .float_kind = kind};
+    if (kind == FK_LONG)
+    {
+        token.payload.ld_val = ld;
+    }
+    else
+    {
+        token.payload.float_pat = pat;
+    }
+    finalize_push_token(ctx, token);
 }
 
 static void finalize_number(FinalizeCtx *ctx, const PpToken *tok)

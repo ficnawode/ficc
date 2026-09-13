@@ -170,12 +170,18 @@ struct ASTIntLiteral
     bool is_hex : 1;
 };
 
-/* §6.4.4.2 constant: `bits` = IEEE pattern, low 32 bits for a float literal. */
+/* IEEE bits or host long double; only the arm `kind` selects is read. */
+typedef union
+{
+    u64 bits;
+    long double ld;
+} ASTFloatValue;
+
 typedef struct ASTFloatLiteral ASTFloatLiteral;
 struct ASTFloatLiteral
 {
     ASTNode base;
-    u64 bits;
+    ASTFloatValue value;
     FloatKind kind;
 };
 
@@ -560,7 +566,7 @@ ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
 ASTNode *ast_return_stmt(ASTNode *expr, Loc loc, Arena *arena);
 ASTNode *ast_int_literal(i64 value, bool is_unsigned, IntSuffix length, bool is_hex, Loc loc,
                          Arena *arena);
-ASTNode *ast_float_literal(u64 bits, FloatKind kind, Loc loc, Arena *arena);
+ASTNode *ast_float_literal(FloatKind kind, ASTFloatValue value, Loc loc, Arena *arena);
 ASTNode *ast_program(Vec *decls, Loc loc, Arena *arena);
 ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, StorageClass storage, Loc loc,
                       Arena *arena);

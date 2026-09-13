@@ -1,6 +1,7 @@
 #include "ast.h"
 #include "util/assert.h"
 #include <stdio.h>
+#include <string.h>
 
 const char *ast_kind_name(ASTKind kind)
 {
@@ -76,11 +77,11 @@ ASTNode *ast_int_literal(i64 value, bool is_unsigned, IntSuffix length, bool is_
     return &n->base;
 }
 
-ASTNode *ast_float_literal(u64 bits, FloatKind kind, Loc loc, Arena *arena)
+ASTNode *ast_float_literal(FloatKind kind, ASTFloatValue value, Loc loc, Arena *arena)
 {
     ASTFloatLiteral *n = ast_new_node(sizeof(ASTFloatLiteral), AST_FLOAT_LITERAL, loc, arena);
-    n->bits = bits;
     n->kind = kind;
+    n->value = value;
     return &n->base;
 }
 
@@ -574,8 +575,17 @@ static void ast_dump_rec(ASTNode *node, int depth)
         case AST_FLOAT_LITERAL:
         {
             ASTFloatLiteral *float_literal = ast_as(ASTFloatLiteral, node);
-            printf("FLOAT_LITERAL %c 0x%llx\n", float_literal->kind == FK_FLOAT ? 'f' : 'd',
-                   (unsigned long long) float_literal->bits);
+            if (float_literal->kind == FK_LONG)
+            {
+                unsigned long long lo; /* FP-free dump: byte copy of the low half */
+                memcpy(&lo, &float_literal->value.ld, 8);
+                printf("FLOAT_LITERAL l 0x%016llxL\n", lo);
+            }
+            else
+            {
+                printf("FLOAT_LITERAL %c 0x%llx\n", float_literal->kind == FK_FLOAT ? 'f' : 'd',
+                       (unsigned long long) float_literal->value.bits);
+            }
             break;
         }
         case AST_PROGRAM:

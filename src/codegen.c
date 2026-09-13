@@ -28,12 +28,12 @@ typedef struct
     const char **targets;  /* nentries block labels, index = value − min */
 } SwitchTableRec;
 
-/* Per-function frame: vreg i at slot (i+1)*8 below %rbp; variadic funcs add a 176-byte SysV save
- * area. */
+/* Per-function frame: vreg i at (i+1)*8 below %rbp, or `slot_off` when wide. */
 typedef struct
 {
     u32 frame_size;    /* total frame size below %rbp, rounded up to 16 (ABI) */
     u32 save_area_off; /* register save area offset below %rbp, 0 if non-variadic */
+    u32 *slot_off;     /* per-vreg frame offsets, or NULL for the (vreg+1)*8 layout */
 } FrameInfo;
 
 typedef struct CodegenCtx CodegenCtx;
@@ -53,6 +53,7 @@ struct CodegenCtx
     Vec *func_patches;      /* Vec<FuncAddrPatch*> — function-address loads */
     Vec *switch_tables;     /* Vec<SwitchTableRec*> */
     u32 save_area_off;      /* register save area offset below %rbp (variadic fns) */
+    u32 *slot_off;          /* per-vreg frame offsets (see FrameInfo) */
 };
 
 static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
@@ -310,13 +311,23 @@ static X86Mem x86_mem_rcx(i32 disp)
     return m;
 }
 
-/* Immediates stay immediate; vregs live in their frame slot. */
-static X86Operand xop_vreg(u32 vreg)
+/* Frame offset for a vreg: the slot table when present, else (vreg+1)*8. */
+static i32 vreg_frame_disp(u32 vreg, const u32 *slot_off)
 {
-    return xop_mem(x86_mem_rbp(-(i32) ((vreg + 1) * 8)));
+    return slot_off ? -(i32) slot_off[vreg] : -(i32) ((vreg + 1) * 8);
 }
 
-static X86Operand xop_from_operand(IrOperand op)
+static X86Operand xop_vreg_slot(u32 vreg, const u32 *slot_off)
+{
+    return xop_mem(x86_mem_rbp(vreg_frame_disp(vreg, slot_off)));
+}
+
+static X86Operand xop_vreg(CodegenCtx *ctx, u32 vreg)
+{
+    return xop_mem(x86_mem_rbp(vreg_frame_disp(vreg, ctx ? ctx->slot_off : NULL)));
+}
+
+static X86Operand xop_from_operand(CodegenCtx *ctx, IrOperand op)
 {
     if (op.is_global)
     {
@@ -326,7 +337,7 @@ static X86Operand xop_from_operand(IrOperand op)
     {
         return xop_imm(op.u.imm);
     }
-    return xop_vreg(op.u.vreg);
+    return xop_vreg(ctx, op.u.vreg);
 }
 
 static void emit_global_addr_to(ByteBuf *buf, u8 reg, u32 global_idx, Vec *patches, Arena *arena);
@@ -344,7 +355,7 @@ static X86Operand lowered_operand(CodegenCtx *ctx, IrOperand op, u8 reg)
         emit_func_addr_to(ctx->buf, reg, op.u.func_name, ctx->func_patches, ctx->arena);
         return xop_reg(reg);
     }
-    return xop_from_operand(op);
+    return xop_from_operand(ctx, op);
 }
 
 /* Lowered value width: addresses are 8 bytes; a materialized immediate counts as 4 (mov-imm32sx).
@@ -844,6 +855,19 @@ static void emit_sse_store(ByteBuf *buf, u8 mf, X86Mem mem, u8 xmm)
     emit_mem_operand(buf, xmm, mem);
 }
 
+/* movups 16-byte copy: emit_mov_scalar admits only 2|4|8. */
+static void emit_mov16(ByteBuf *buf, X86Mem src, X86Mem dst)
+{
+    bytebuf_append(buf, rex(false, false, reg_is_extended(src.index), reg_is_extended(src.base)));
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_MOV); /* 0F 10 movups xmm0, r/m */
+    emit_mem_operand(buf, R_XMM0, src);
+    bytebuf_append(buf, rex(false, false, reg_is_extended(dst.index), reg_is_extended(dst.base)));
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, (u8) (X86_SSE_MOV + 1)); /* 0F 11 movups r/m, xmm0 */
+    emit_mem_operand(buf, R_XMM0, dst);
+}
+
 /* cvtss2sd/cvtsd2ss xmm, xmm; the prefix selects the source precision. */
 static void emit_sse_cvt(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
 {
@@ -1122,7 +1146,7 @@ static void lower_binary(IrInstr *in, CodegenCtx *ctx)
     {
         emit_binop_rhs(ctx->buf, w, s, R_EAX, rhs);
     }
-    emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
+    emit_mov(ctx->buf, w, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
 static void lower_unary(IrInstr *in, CodegenCtx *ctx)
@@ -1130,7 +1154,7 @@ static void lower_unary(IrInstr *in, CodegenCtx *ctx)
     u8 w = vreg_width(ctx, in->result);
     emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
     emit_unary(ctx->buf, w, R_EAX, unary_digit[in->opcode]);
-    emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
+    emit_mov(ctx->buf, w, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
 static void lower_shift(IrInstr *in, CodegenCtx *ctx)
@@ -1139,7 +1163,7 @@ static void lower_shift(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
     emit_mov(ctx->buf, w, xop_reg(R_ECX), lowered_operand(ctx, in->ops[1], R_ECX));
     emit_shift_cl(ctx->buf, w, R_EAX, shift_digit[in->opcode]);
-    emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
+    emit_mov(ctx->buf, w, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
 static void lower_div(IrInstr *in, CodegenCtx *ctx)
@@ -1161,7 +1185,7 @@ static void lower_div(IrInstr *in, CodegenCtx *ctx)
     {
         emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_reg(R_EDX));
     }
-    emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
+    emit_mov(ctx->buf, w, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
 /* Width of an integer-immediate load: 4 bytes when it fits a sign-extended
@@ -1232,7 +1256,7 @@ static void lower_icmp(IrInstr *in, CodegenCtx *ctx)
     emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, xop_reg(R_ECX));
     emit_setcc(ctx->buf, icmp_cc[in->opcode]);
     emit_movzbl_al_eax(ctx->buf);
-    emit_mov(ctx->buf, rw, xop_vreg(in->result), xop_reg(R_EAX));
+    emit_mov(ctx->buf, rw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
 /* System V AMD64 argument registers. */
@@ -1292,6 +1316,12 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
         u8 aw = operand_width(ctx, arg);
         if (is_fp[i])
         {
+            if (aw == 16)
+            {
+                codegen_error(ctx, "long double arguments are not lowered yet");
+                emit_ud2(ctx->buf);
+                return;
+            }
             emit_fp_source_to_xmm(ctx, arg, aw, R_XMM0);
             emit_sse_store(ctx->buf, aw == 4 ? MF_FLOAT : MF_DOUBLE, x86_mem_rsp((i32) slot[i] * 8),
                            R_XMM0);
@@ -1312,6 +1342,12 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
         u8 aw = operand_width(ctx, arg);
         if (is_fp[i])
         {
+            if (aw == 16)
+            {
+                codegen_error(ctx, "long double arguments are not lowered yet");
+                emit_ud2(ctx->buf);
+                return;
+            }
             emit_fp_source_to_xmm(ctx, arg, aw, (u8) slot[i]);
         }
         else
@@ -1345,13 +1381,20 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
         u8 rw = vreg_width(ctx, in->result);
         if (ir_vreg_float(ctx->mod, in->result))
         {
+            if (rw == 16)
+            {
+                /* long double returns go in %st0. */
+                codegen_error(ctx, "long double call results are not lowered yet");
+                emit_ud2(ctx->buf);
+                return;
+            }
             /* FP returns ride xmm0. */
-            emit_sse_store(ctx->buf, rw == 4 ? MF_FLOAT : MF_DOUBLE, xop_vreg(in->result).u.mem,
-                           R_XMM0);
+            emit_sse_store(ctx->buf, rw == 4 ? MF_FLOAT : MF_DOUBLE,
+                           xop_vreg(ctx, in->result).u.mem, R_XMM0);
         }
         else
         {
-            emit_mov(ctx->buf, rw, xop_vreg(in->result), xop_reg(R_EAX));
+            emit_mov(ctx->buf, rw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
         }
     }
 
@@ -1414,7 +1457,7 @@ static void lower_va_arg(IrInstr *in, CodegenCtx *ctx)
     patch_rel32(b, ovf_jmp_field, done);
 
     emit_mov(b, 8, xop_reg(R_EDX), xop_mem(x86_mem_rcx(0)));
-    emit_mov(b, 8, xop_vreg(in->result), xop_reg(R_EDX));
+    emit_mov(b, 8, xop_vreg(ctx, in->result), xop_reg(R_EDX));
 }
 
 /* va_end: no-op (SysV has no va_end action), kept in the IR for symmetry and future va_copy. */
@@ -1437,6 +1480,13 @@ static void lower_ret(IrInstr *in, CodegenCtx *ctx)
         }
         if (type_is_fp(ctx->func->ret_type))
         {
+            if (w == 16)
+            {
+                /* width-16 returns go in %st0. */
+                codegen_error(ctx, "long double return values are not lowered yet");
+                emit_ud2(ctx->buf);
+                return;
+            }
             /* FP returns leave the value in %xmm0 (SysV). */
             emit_fp_source_to_xmm0(ctx, val, w);
         }
@@ -1601,7 +1651,7 @@ static void lower_trunc(IrInstr *in, CodegenCtx *ctx)
     u8 w = vreg_width(ctx, in->result);
     X86Operand src = lowered_operand(ctx, in->ops[0], R_EAX);
     emit_mov(ctx->buf, w, xop_reg(R_EAX), src);
-    emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EAX));
+    emit_mov(ctx->buf, w, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
 static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src)
@@ -1677,7 +1727,7 @@ static void lower_zext(IrInstr *in, CodegenCtx *ctx)
             emit_movzx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
         }
     }
-    emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
+    emit_mov(ctx->buf, dw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
 static void lower_sext(IrInstr *in, CodegenCtx *ctx)
@@ -1694,7 +1744,7 @@ static void lower_sext(IrInstr *in, CodegenCtx *ctx)
         emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
         emit_movsx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
     }
-    emit_mov(ctx->buf, dw, xop_vreg(in->result), xop_reg(R_EAX));
+    emit_mov(ctx->buf, dw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
 /* `mov reg, imm32sx` (C7 /0): the zero-extension-free encoding GNU ld relocates with R_X86_64_32S.
@@ -1760,13 +1810,26 @@ static void lower_load(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
     X86Mem indirect = load_ptr(ctx, in->ops[0]);
+    if (w == 16)
+    {
+        emit_mov16(ctx->buf, indirect, xop_vreg(ctx, in->result).u.mem);
+        return;
+    }
     emit_mov(ctx->buf, w, xop_reg(R_EDX), xop_mem(indirect));
-    emit_mov(ctx->buf, w, xop_vreg(in->result), xop_reg(R_EDX));
+    emit_mov(ctx->buf, w, xop_vreg(ctx, in->result), xop_reg(R_EDX));
 }
 
 static void lower_store(IrInstr *in, CodegenCtx *ctx)
 {
     u32 w = (u32) in->ops[2].u.imm;
+    if (w == 16)
+    {
+        /* Move the value via xmm0 before the destination address is computed. */
+        X86Operand val = lowered_operand(ctx, in->ops[0], R_ECX);
+        X86Mem indirect = load_ptr(ctx, in->ops[1]);
+        emit_mov16(ctx->buf, val.u.mem, indirect);
+        return;
+    }
     /* Materialize the value first (ECX) so a global-pointer destination can't clobber it. */
     X86Operand val = lowered_operand(ctx, in->ops[0], R_ECX);
     if (val.kind == XOP_MEM || val.kind == XOP_IMM)
@@ -1788,6 +1851,13 @@ static u8 fconv_src_width(CodegenCtx *ctx, IrOperand op)
 static void emit_fp_source_to_xmm(CodegenCtx *ctx, IrOperand op, u8 w, u8 xmm)
 {
     ByteBuf *b = ctx->buf;
+    if (w == 16)
+    {
+        /* 80-bit values never travel through XMM lanes (x87 is the carrier). */
+        codegen_error(ctx, "long double operands are not lowered yet");
+        emit_ud2(b);
+        return;
+    }
     u8 mf = w == 4 ? MF_FLOAT : MF_DOUBLE;
     X86Operand src = lowered_operand(ctx, op, R_EAX);
     if (src.kind == XOP_MEM)
@@ -1879,7 +1949,7 @@ static void lower_itof(IrInstr *in, CodegenCtx *ctx)
     {
         emit_cvtsi2d(ctx->buf, mf, R_XMM0, R_EAX);
     }
-    emit_sse_store(ctx->buf, mf, xop_vreg(in->result).u.mem, R_XMM0);
+    emit_sse_store(ctx->buf, mf, xop_vreg(ctx, in->result).u.mem, R_XMM0);
 }
 
 static void lower_ftoi(IrInstr *in, CodegenCtx *ctx)
@@ -1904,12 +1974,12 @@ static void lower_ftoi(IrInstr *in, CodegenCtx *ctx)
         emit_bit_imm(b, X86_XOP_BTS, R_EAX, 63);
         size_t done_off = bytebuf_len(b);
         patch_rel32(b, done_field, done_off);
-        emit_mov(b, 8, xop_vreg(in->result), xop_reg(R_EAX));
+        emit_mov(b, 8, xop_vreg(ctx, in->result), xop_reg(R_EAX));
         return;
     }
     /* Signed lanes: i32 window (0x80000000 brand); unsigned narrow: i64 window. */
     emit_cvtts2i(b, mf, R_EAX, R_XMM0, dw == 8 || !is_signed);
-    emit_mov(b, dw, xop_vreg(in->result), xop_reg(R_EAX));
+    emit_mov(b, dw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
 static void lower_fconv(IrInstr *in, CodegenCtx *ctx)
@@ -1920,7 +1990,8 @@ static void lower_fconv(IrInstr *in, CodegenCtx *ctx)
 
     emit_fp_source_to_xmm0(ctx, in->ops[0], sw);
     emit_sse_cvt(ctx->buf, mf, R_XMM0, R_XMM0);
-    emit_sse_store(ctx->buf, dw == 4 ? MF_FLOAT : MF_DOUBLE, xop_vreg(in->result).u.mem, R_XMM0);
+    emit_sse_store(ctx->buf, dw == 4 ? MF_FLOAT : MF_DOUBLE, xop_vreg(ctx, in->result).u.mem,
+                   R_XMM0);
 }
 
 /* FP arithmetic: `mov[sd] xmm0, lhs; <op>[sd] xmm0, rhs; mov[sd] dst, xmm0`,
@@ -1949,7 +2020,7 @@ static void lower_fbin(IrInstr *in, CodegenCtx *ctx)
         emit_movd_to_xmm(b, R_XMM1, R_EAX, w != 4);
         emit_sse_op_reg(b, mf, s->mem, R_XMM0, R_XMM1);
     }
-    emit_sse_store(b, mf, xop_vreg(in->result).u.mem, R_XMM0);
+    emit_sse_store(b, mf, xop_vreg(ctx, in->result).u.mem, R_XMM0);
 }
 
 /* FNEG: flip the sign bit with xorp[sd], keeping the rest of the value. */
@@ -1971,7 +2042,7 @@ static void lower_fneg(IrInstr *in, CodegenCtx *ctx)
         emit_movd_to_xmm(b, R_XMM1, R_ECX, true);
         emit_sse_xor(b, X86_SSE_66, R_XMM0, R_XMM1);
     }
-    emit_sse_store(b, w == 4 ? MF_FLOAT : MF_DOUBLE, xop_vreg(in->result).u.mem, R_XMM0);
+    emit_sse_store(b, w == 4 ? MF_FLOAT : MF_DOUBLE, xop_vreg(ctx, in->result).u.mem, R_XMM0);
 }
 
 /* FP compare: ucomi[sd] set ZF/CF/PF (unordered → all three), then a setcc
@@ -2036,7 +2107,7 @@ static void lower_fcmp(IrInstr *in, CodegenCtx *ctx)
             return;
     }
     emit_movzbl_al_eax(b);
-    emit_mov(b, rw, xop_vreg(in->result), xop_reg(R_EAX));
+    emit_mov(b, rw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
 static void lower_gep(IrInstr *in, CodegenCtx *ctx)
@@ -2049,7 +2120,7 @@ static void lower_gep(IrInstr *in, CodegenCtx *ctx)
         X86Mem base = load_ptr(ctx, in->ops[0]);
         X86Mem m = {.base = base.base, .index = NO_REG, .scale = 1, .disp = (i32) stride};
         emit_lea(ctx->buf, R_EDX, m);
-        emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
+        emit_mov(ctx->buf, 8, xop_vreg(ctx, in->result), xop_reg(R_EDX));
         return;
     }
 
@@ -2059,7 +2130,7 @@ static void lower_gep(IrInstr *in, CodegenCtx *ctx)
         emit_mov(ctx->buf, 8, xop_reg(R_ECX), lowered_operand(ctx, in->ops[1], R_ECX));
         X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = (u8) stride, .disp = 0};
         emit_lea(ctx->buf, R_EDX, scaled);
-        emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
+        emit_mov(ctx->buf, 8, xop_vreg(ctx, in->result), xop_reg(R_EDX));
         return;
     }
 
@@ -2069,7 +2140,7 @@ static void lower_gep(IrInstr *in, CodegenCtx *ctx)
     emit_imul_imm(ctx->buf, 8, R_ECX, stride);
     X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = 1, .disp = 0};
     emit_lea(ctx->buf, R_EDX, scaled);
-    emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
+    emit_mov(ctx->buf, 8, xop_vreg(ctx, in->result), xop_reg(R_EDX));
 }
 
 static void lower_alloca(IrInstr *in, CodegenCtx *ctx)
@@ -2077,7 +2148,7 @@ static void lower_alloca(IrInstr *in, CodegenCtx *ctx)
     i64 aligned = (in->ops[0].u.imm + 15) & ~15;
     emit_binop_rhs(ctx->buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(aligned));
     emit_mov(ctx->buf, 8, xop_reg(R_EDX), xop_reg(R_ESP));
-    emit_mov(ctx->buf, 8, xop_vreg(in->result), xop_reg(R_EDX));
+    emit_mov(ctx->buf, 8, xop_vreg(ctx, in->result), xop_reg(R_EDX));
 }
 
 static void lower_memcpy(IrInstr *in, CodegenCtx *ctx)
@@ -2144,7 +2215,7 @@ static void scan_instr_vregs(u32 *max, IrInstr *in)
     }
 }
 
-static FrameInfo frame_plan(IrFunction *f)
+static FrameInfo frame_plan(IrFunction *f, IrModule *mod, Arena *arena)
 {
     u32 max_vreg = 0;
     size_t nblocks = vec_size(f->blocks);
@@ -2164,7 +2235,37 @@ static FrameInfo frame_plan(IrFunction *f)
     }
 
     FrameInfo fr = {0};
-    u32 total = (max_vreg + 1) * 8;
+
+    /* Width-16 vregs need a slot table; otherwise keep the (vreg+1)*8 layout. */
+    bool has16 = false;
+    if (mod->widths && mod->width_count > 0)
+    {
+        for (u32 v = 0; v <= max_vreg; v++)
+        {
+            if (mod->widths[v] == 16)
+            {
+                has16 = true;
+                break;
+            }
+        }
+    }
+    u32 total;
+    if (has16)
+    {
+        /* Pack slots so each disp −off[v] box clears the previous slot's. */
+        u32 *off = arena_alloc(arena, (max_vreg + 1) * sizeof(u32), sizeof(u32));
+        off[0] = mod->widths[0] == 16 ? 16 : 8; /* clear of the pushed %rbp */
+        for (u32 v = 1; v <= max_vreg; v++)
+        {
+            off[v] = off[v - 1] + (mod->widths[v] == 16 ? 16 : 8);
+        }
+        fr.slot_off = off;
+        total = off[max_vreg]; /* the deepest byte of the last slot */
+    }
+    else
+    {
+        total = (max_vreg + 1) * 8;
+    }
     if (f->is_variadic)
     {
         /* The va_list register save area sits below the vreg slots; the prologue spills into it. */
@@ -2175,8 +2276,8 @@ static FrameInfo frame_plan(IrFunction *f)
     return fr;
 }
 
-/* Move incoming args to param vregs: registers by class; overflow at 16(%rbp)+arg order. */
-static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod)
+/* Incoming args to param vregs: registers by class, overflow at 16(%rbp). */
+static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod, const u32 *slot_off)
 {
     size_t nparams = vec_size(f->params);
     u32 gp_used = 0, fp_used = 0, ovf_slot = 0;
@@ -2185,19 +2286,26 @@ static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod)
         IrParam *p = (IrParam *) vec_get(f->params, i);
         u8 w = mod->widths[p->vreg];
         bool is_fp = mod->floatness[p->vreg];
+        X86Operand dst = xop_vreg_slot(p->vreg, slot_off);
         if (is_fp)
         {
-            u8 mf = w == 4 ? MF_FLOAT : MF_DOUBLE;
-            if (fp_used < VA_NXMM)
+            if (w == 16)
+            {
+                /* 16-byte slot ← the caller's stack slot (16-byte stride). */
+                emit_mov16(buf, x86_mem_rbp(16 + (i32) ovf_slot * 8), dst.u.mem);
+                ovf_slot += 2;
+            }
+            else if (fp_used < VA_NXMM)
             {
                 /* xmm → slot; the value lives in the low 32/64 bits. */
-                emit_sse_store(buf, mf, xop_vreg(p->vreg).u.mem, fp_used);
+                emit_sse_store(buf, w == 4 ? MF_FLOAT : MF_DOUBLE, dst.u.mem, fp_used);
                 fp_used++;
             }
             else
             {
-                emit_sse_load(buf, mf, R_XMM0, x86_mem_rbp(16 + (i32) ovf_slot * 8));
-                emit_sse_store(buf, mf, xop_vreg(p->vreg).u.mem, R_XMM0);
+                emit_sse_load(buf, w == 4 ? MF_FLOAT : MF_DOUBLE, R_XMM0,
+                              x86_mem_rbp(16 + (i32) ovf_slot * 8));
+                emit_sse_store(buf, w == 4 ? MF_FLOAT : MF_DOUBLE, dst.u.mem, R_XMM0);
                 ovf_slot++;
             }
         }
@@ -2205,13 +2313,13 @@ static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod)
         {
             if (gp_used < VA_NGP)
             {
-                emit_mov(buf, w, xop_vreg(p->vreg), xop_reg(abi_arg_regs[gp_used]));
+                emit_mov(buf, w, dst, xop_reg(abi_arg_regs[gp_used]));
                 gp_used++;
             }
             else
             {
                 emit_mov(buf, w, xop_reg(R_EAX), xop_mem(x86_mem_rbp(16 + (i32) ovf_slot * 8)));
-                emit_mov(buf, w, xop_vreg(p->vreg), xop_reg(R_EAX));
+                emit_mov(buf, w, dst, xop_reg(R_EAX));
                 ovf_slot++;
             }
         }
@@ -2242,7 +2350,7 @@ static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, FrameInfo 
         }
     }
 
-    emit_param_shuffle(buf, f, mod);
+    emit_param_shuffle(buf, f, mod, fr->slot_off);
 }
 
 static bool is_terminator(IrOpcode op)
@@ -2286,26 +2394,30 @@ static void collect_phi_copies(IrFunction *f, CodegenCtx *ctx)
     }
 }
 
-/* Copy a PHI source into vreg `dst` at the DST slot's width: an immediate
- * like SIZE_MAX (−1) is 4 bytes wide by operand_width, and an 8-byte φ slot
- * must not keep stale high bytes. */
+/* Copy a PHI source into `dst_vreg` at its width (no stale high bytes). */
 static void emit_phi_copy(CodegenCtx *ctx, IrOperand src, u32 dst_vreg)
 {
     if (src.is_global)
     {
         emit_global_addr(ctx->buf, src.u.global_index, ctx->global_patches, ctx->arena);
-        emit_mov(ctx->buf, 8, xop_vreg(dst_vreg), xop_reg(R_EAX));
+        emit_mov(ctx->buf, 8, xop_vreg(ctx, dst_vreg), xop_reg(R_EAX));
         return;
     }
     if (src.is_func)
     {
         emit_func_addr_to(ctx->buf, R_EAX, src.u.func_name, ctx->func_patches, ctx->arena);
-        emit_mov(ctx->buf, 8, xop_vreg(dst_vreg), xop_reg(R_EAX));
+        emit_mov(ctx->buf, 8, xop_vreg(ctx, dst_vreg), xop_reg(R_EAX));
         return;
     }
     u8 dw = vreg_width(ctx, dst_vreg);
+    if (dw == 16)
+    {
+        X86Operand sv = xop_vreg(ctx, src.u.vreg); /* a width-16 value is a vreg */
+        emit_mov16(ctx->buf, sv.u.mem, xop_vreg(ctx, dst_vreg).u.mem);
+        return;
+    }
     emit_mov(ctx->buf, dw, xop_reg(R_EAX), lowered_operand(ctx, src, R_ECX));
-    emit_mov(ctx->buf, dw, xop_vreg(dst_vreg), xop_reg(R_EAX));
+    emit_mov(ctx->buf, dw, xop_vreg(ctx, dst_vreg), xop_reg(R_EAX));
 }
 
 static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
@@ -2360,7 +2472,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     Vec *global_patches = vec_new(arena);
     Vec *func_patches = vec_new(arena);
 
-    FrameInfo fr = frame_plan(f);
+    FrameInfo fr = frame_plan(f, mod, arena);
     emit_prologue(buf, f, mod, &fr);
 
     size_t nblocks = vec_size(f->blocks);
@@ -2385,6 +2497,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         .func_patches = func_patches,
         .switch_tables = vec_new(arena),
         .save_area_off = fr.save_area_off,
+        .slot_off = fr.slot_off,
     };
 
     for (size_t bi = 0; bi < nblocks; bi++)

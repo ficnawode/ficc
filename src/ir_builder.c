@@ -172,7 +172,7 @@ static IrOperand *box_operand(FuncBuilder *ctx, IrOperand op)
 static u32 alloc_vreg_from_type(FuncBuilder *ctx, Type *type)
 {
     u8 width = type->width / 8;
-    ASSERT(width == 1 || width == 2 || width == 4 || width == 8);
+    ASSERT(width == 1 || width == 2 || width == 4 || width == 8 || width == 16);
     return ir_alloc_vreg(ctx->mod, width, type_is_signed_int(type), type_is_fp(type));
 }
 
@@ -1874,63 +1874,121 @@ static bool fold_constant_ir(ASTNode *node, i64 *out)
     }
 }
 
-static bool fold_float_constant(ASTNode *node, bool *is_float, u64 *bits);
-
-/* Host double ↔ IEEE bit pattern (both end up IEEE-754 on this host). */
-static double fp_bits_to_value(u64 bits, bool is_float)
+/* Folded FP constant: the exact host value at `kind`'s precision. */
+typedef struct
 {
-    if (is_float)
-    {
-        float f;
-        memcpy(&f, &bits, 4);
-        return (double) f;
-    }
-    double d;
-    memcpy(&d, &bits, 8);
-    return d;
+    FloatKind kind;
+    long double ld;
+} FpConst;
+
+static bool fold_float_constant(ASTNode *node, FpConst *out);
+
+static FpConst fp_from_double(double d)
+{
+    FpConst c;
+    c.kind = FK_DOUBLE;
+    c.ld = d;
+    return c;
 }
 
-static u64 fp_value_to_bits(double d, bool is_float)
+static FpConst fp_from_float(float f)
 {
-    if (is_float)
-    {
-        float f = (float) d;
-        u64 bits = 0;
-        memcpy(&bits, &f, 4);
-        return bits;
-    }
-    u64 bits;
-    memcpy(&bits, &d, 8);
-    return bits;
+    FpConst c;
+    c.kind = FK_FLOAT;
+    c.ld = f;
+    return c;
 }
 
-/* Fold an FP constant expression to {is_float, IEEE bits}; ints flow via fold_constant_ir. */
-static bool fold_float_operand(ASTNode *node, bool *is_float, u64 *bits, bool as_double)
+static FpConst fp_from_long(long double ld)
+{
+    FpConst c;
+    c.kind = FK_LONG;
+    c.ld = ld;
+    return c;
+}
+
+static long double fp_const_value(const FpConst *c)
+{
+    return c->ld;
+}
+
+/* Fold an FP constant expression; integer leaves fold as double. */
+static bool fold_float_operand(ASTNode *node, FpConst *out, bool at_least_double)
 {
     if (!node)
     {
         return false;
     }
-    if (fold_float_constant(node, is_float, bits))
+    if (fold_float_constant(node, out))
     {
-        if (as_double && *is_float)
+        if (at_least_double && out->kind == FK_FLOAT)
         {
-            *bits = fp_value_to_bits(fp_bits_to_value(*bits, true), false);
-            *is_float = false;
+            *out = fp_from_double((double) out->ld);
         }
         return true;
     }
     i64 v;
     if (fold_constant_ir(node, &v))
     {
-        *bits = fp_value_to_bits((double) v, false);
-        *is_float = false;
+        *out = fp_from_double((double) v);
         return true;
     }
     return false;
 }
 
-static bool fold_float_constant(ASTNode *node, bool *is_float, u64 *bits)
+/* Arithmetic at the operands' precision; a long double operand uses x87. */
+static bool fp_binary_arith(BinOpKind op, FpConst l, FpConst r, FpConst *out)
+{
+    if (l.kind == FK_LONG || r.kind == FK_LONG)
+    {
+        long double a = fp_const_value(&l);
+        long double b = fp_const_value(&r);
+        long double d;
+        switch (op)
+        {
+            case BIN_ADD:
+                d = a + b;
+                break;
+            case BIN_SUB:
+                d = a - b;
+                break;
+            case BIN_MUL:
+                d = a * b;
+                break;
+            case BIN_DIV:
+                d = a / b;
+                break;
+            default:
+                return false;
+        }
+        *out = fp_from_long(d);
+        return true;
+    }
+    double a = (double) fp_const_value(&l);
+    double b = (double) fp_const_value(&r);
+    double d;
+    switch (op)
+    {
+        case BIN_ADD:
+            d = a + b;
+            break;
+        case BIN_SUB:
+            d = a - b;
+            break;
+        case BIN_MUL:
+            d = a * b;
+            break;
+        case BIN_DIV:
+            d = a / b;
+            break;
+        default:
+            return false;
+    }
+    *out = fp_from_double(d);
+    return true;
+}
+
+static bool fold_float_constant(ASTNode *node, FpConst *out)
 {
     if (!node)
     {
@@ -1941,8 +1999,22 @@ static bool fold_float_constant(ASTNode *node, bool *is_float, u64 *bits)
         case AST_FLOAT_LITERAL:
         {
             ASTFloatLiteral *fl = ast_as(ASTFloatLiteral, node);
-            *bits = fl->bits;
-            *is_float = fl->kind == FK_FLOAT;
+            if (fl->kind == FK_FLOAT)
+            {
+                float f;
+                memcpy(&f, &fl->value.bits, 4);
+                *out = fp_from_float(f);
+            }
+            else if (fl->kind == FK_DOUBLE)
+            {
+                double d;
+                memcpy(&d, &fl->value.bits, 8);
+                *out = fp_from_double(d);
+            }
+            else
+            {
+                *out = fp_from_long(fl->value.ld);
+            }
             return true;
         }
         case AST_UNARY_EXPR:
@@ -1952,14 +2024,23 @@ static bool fold_float_constant(ASTNode *node, bool *is_float, u64 *bits)
             {
                 break;
             }
-            bool f;
-            u64 b;
-            if (!fold_float_operand(u->operand, &f, &b, false))
+            FpConst b;
+            if (!fold_float_operand(u->operand, &b, false))
             {
                 return false;
             }
-            *is_float = f;
-            *bits = b ^ (f ? 0x80000000u : 0x8000000000000000u);
+            switch (b.kind)
+            {
+                case FK_FLOAT:
+                    *out = fp_from_float(-(float) b.ld);
+                    break;
+                case FK_DOUBLE:
+                    *out = fp_from_double(-(double) b.ld);
+                    break;
+                default:
+                    *out = fp_from_long(-b.ld);
+                    break;
+            }
             return true;
         }
         case AST_BINARY_EXPR:
@@ -1972,35 +2053,16 @@ static bool fold_float_constant(ASTNode *node, bool *is_float, u64 *bits)
                 case BIN_MUL:
                 case BIN_DIV:
                 {
-                    bool lf, rf;
-                    u64 lb, rb;
-                    if (!fold_float_operand(b->left, &lf, &lb, true) ||
-                        !fold_float_operand(b->right, &rf, &rb, true))
+                    FpConst l, r;
+                    if (!fold_float_operand(b->left, &l, true) ||
+                        !fold_float_operand(b->right, &r, true))
                     {
                         return false;
                     }
-                    double l = fp_bits_to_value(lb, false);
-                    double r = fp_bits_to_value(rb, false);
-                    double d = 0;
-                    switch (b->op)
+                    if (!fp_binary_arith(b->op, l, r, out))
                     {
-                        case BIN_ADD:
-                            d = l + r;
-                            break;
-                        case BIN_SUB:
-                            d = l - r;
-                            break;
-                        case BIN_MUL:
-                            d = l * r;
-                            break;
-                        case BIN_DIV:
-                            d = l / r;
-                            break;
-                        default:
-                            return false;
+                        return false;
                     }
-                    *bits = fp_value_to_bits(d, false);
-                    *is_float = false;
                     return true;
                 }
                 default:
@@ -2016,32 +2078,32 @@ static bool fold_float_constant(ASTNode *node, bool *is_float, u64 *bits)
             {
                 return false;
             }
-            return fold_float_operand(cond ? te->then_expr : te->else_expr, is_float, bits, false);
+            return fold_float_operand(cond ? te->then_expr : te->else_expr, out, false);
         }
         case AST_CAST_EXPR:
         {
             ASTCastExpr *ce = ast_as(ASTCastExpr, node);
             Type *tt = type_unqual(ce->target_type);
-            if (tt->kind != TYPE_FLOAT && tt->kind != TYPE_DOUBLE)
+            if (!type_is_fp(tt))
             {
                 break;
             }
-            bool f;
-            u64 b;
-            if (!fold_float_operand(ce->operand, &f, &b, false))
+            FpConst b;
+            if (!fold_float_operand(ce->operand, &b, false))
             {
                 return false;
             }
-            double d = fp_bits_to_value(b, f);
-            if (tt->kind == TYPE_FLOAT)
+            switch (tt->kind)
             {
-                *bits = fp_value_to_bits(d, true);
-                *is_float = true;
-            }
-            else
-            {
-                *bits = fp_value_to_bits(d, false);
-                *is_float = false;
+                case TYPE_FLOAT:
+                    *out = fp_from_float((float) fp_const_value(&b));
+                    break;
+                case TYPE_LONG_DOUBLE:
+                    *out = fp_from_long(fp_const_value(&b));
+                    break;
+                default:
+                    *out = fp_from_double((double) fp_const_value(&b));
+                    break;
             }
             return true;
         }
@@ -2051,33 +2113,28 @@ static bool fold_float_constant(ASTNode *node, bool *is_float, u64 *bits)
     return false;
 }
 
-/* FP const bytes at the object's precision (round-trips double ↔ float via the host). */
-static const u8 *encode_fp_object_bytes(Arena *arena, u64 bits, bool is_float, Type *type)
+/* FP const bytes at the object's precision, rounding through float/double. */
+static const u8 *encode_fp_object_bytes(Arena *arena, const FpConst *c, Type *type)
 {
-    u64 v;
     if (type->size == 4)
     {
-        if (is_float)
-        {
-            v = bits & 0xFFFFFFFFu;
-        }
-        else
-        {
-            v = fp_value_to_bits(fp_bits_to_value(bits, false), true);
-        }
+        float f = (float) fp_const_value(c);
+        u32 v;
+        memcpy(&v, &f, 4);
+        return encode_const_bytes(arena, (i64) v, 4);
     }
-    else
+    if (type->size == 8)
     {
-        if (is_float)
-        {
-            v = fp_value_to_bits(fp_bits_to_value(bits, true), false);
-        }
-        else
-        {
-            v = bits;
-        }
+        double d = (double) fp_const_value(c);
+        u64 v;
+        memcpy(&v, &d, 8);
+        return encode_const_bytes(arena, (i64) v, 8);
     }
-    return encode_const_bytes(arena, (i64) v, (u32) type->size);
+    long double ld = fp_const_value(c);
+    u8 *bytes = arena_alloc(arena, 16, 1);
+    memset(bytes, 0, 16);
+    memcpy(bytes, &ld, 10); /* the 80-bit value; the top 6 padding bytes stay zero */
+    return bytes;
 }
 
 static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *arena);
@@ -2276,16 +2333,15 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
         }
         if (type_is_fp(type_unqual(w->type)))
         {
-            /* FP elements fold to their IEEE bits at the object's precision. */
+            /* FP elements fold to their bits at the object's precision. */
             Type *wt = type_unqual(w->type);
-            bool is_fp;
-            u64 bits;
-            if (!fold_float_constant(w->value, &is_fp, &bits))
+            FpConst c;
+            if (!fold_float_constant(w->value, &c))
             {
                 ir_error(w->value, "initializer element is not a constant");
                 return false;
             }
-            const u8 *bytes = encode_fp_object_bytes(arena, bits, is_fp, wt);
+            const u8 *bytes = encode_fp_object_bytes(arena, &c, wt);
             memcpy(buf + w->offset, bytes, wt->size);
             continue;
         }
@@ -2441,6 +2497,23 @@ static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *aren
     return idx;
 }
 
+/* An anonymous `.rodata` blob addressed like a string literal. */
+static u32 ir_add_rodata_blob(IrModule *mod, Arena *arena, const void *bytes, u32 len, u32 align)
+{
+    u32 idx = (u32) vec_size(mod->globals);
+    IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
+    g->name = anon_name(arena, "__ldconst", idx);
+    g->type = type_array(type_char(), len);
+    g->init_data = (const u8 *) bytes;
+    g->init_len = len;
+    g->align = align;
+    g->section = IR_SECTION_RODATA;
+    g->linkage = IR_LINK_LOCAL;
+    g->relocs = NULL;
+    vec_push(mod->globals, g);
+    return idx;
+}
+
 /* A synthesized file-scope zero blob: block-scope aggregate initializers
    zero-fill their alloca slot with one OP_MEMCPY from these bytes. */
 static u32 ir_add_zero_blob(IrModule *mod, Arena *arena, u32 size)
@@ -2585,9 +2658,19 @@ static ExprResult build_expr(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
             return expr_result(ir_operand_imm(ast_as(ASTIntLiteral, node)->value), bb);
         case AST_FLOAT_LITERAL:
         {
-            /* The IEEE bit pattern rides the plain immediate (store width is context). */
+            /* 80-bit constants are memory: a .rodata blob plus a 16-byte load. */
             ASTFloatLiteral *fl = ast_as(ASTFloatLiteral, node);
-            return expr_result(ir_operand_imm((i64) fl->bits), bb);
+            if (fl->kind == FK_LONG)
+            {
+                u8 *blob = arena_alloc(ctx->mod->arena, 16, 1);
+                memset(blob, 0, 16);
+                memcpy(blob, &fl->value.ld, 10); /* 10 valid bytes, padding zero */
+                u32 idx = ir_add_rodata_blob(ctx->mod, ctx->mod->arena, blob, 16, 16);
+                u32 vreg = alloc_vreg_from_type(ctx, type_long_double());
+                ir_emit_load(bb, vreg, ir_operand_global(idx));
+                return expr_result(ir_operand_vreg(vreg), bb);
+            }
+            return expr_result(ir_operand_imm((i64) fl->value.bits), bb);
         }
         case AST_IDENT:
             return build_ident_expr(ctx, ast_as(ASTIdent, node), bb);

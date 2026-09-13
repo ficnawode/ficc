@@ -909,11 +909,22 @@ static bool check_int_literal(ASTIntLiteral *lit, SemanticCtx *ctx)
     return true;
 }
 
-/* A floating constant is typed by its suffix: `f`/`F` → float, else double. */
+/* A floating constant is typed by its suffix (C11 §6.4.4.2). */
 static bool check_float_literal(ASTFloatLiteral *fl, SemanticCtx *ctx)
 {
     ASTNode *node = &fl->base;
-    node->expr_type = fl->kind == FK_FLOAT ? type_float() : type_double();
+    switch (fl->kind)
+    {
+        case FK_FLOAT:
+            node->expr_type = type_float();
+            break;
+        case FK_LONG:
+            node->expr_type = type_long_double();
+            break;
+        default:
+            node->expr_type = type_double();
+            break;
+    }
     (void) ctx;
     return true;
 }
