@@ -1266,8 +1266,8 @@ static u32 plan_frame_nchildren(const PlanFrame *fr)
     return (u32) vec_size(agg->record.fields);
 }
 
-static bool plan_frame_child(const PlanFrame *fr, Type **cty, u32 *coff, bool *is_bf,
-                             u32 *bit_off, u32 *bit_w)
+static bool plan_frame_child(const PlanFrame *fr, Type **cty, u32 *coff, bool *is_bf, u32 *bit_off,
+                             u32 *bit_w)
 {
     Type *agg = type_unqual(fr->agg);
     u32 idx = fr->next;
@@ -2117,8 +2117,7 @@ static bool fold_binary_unsigned(ASTBinaryExpr *b)
     {
         return type_is_unsigned(lt);
     }
-    Type *rt = b->right->expr_type ? type_promote(type_rvalue(b->right->expr_type))
-                                   : type_int();
+    Type *rt = b->right->expr_type ? type_promote(type_rvalue(b->right->expr_type)) : type_int();
     return type_is_unsigned(type_common(lt, rt));
 }
 
@@ -2304,8 +2303,7 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     Type *tt = type_decay(type_rvalue(ternary->then_expr->expr_type));
     Type *te = type_decay(type_rvalue(ternary->else_expr->expr_type));
     /* A conditional mixing FP classes would select between wrong immediates. */
-    if (type_is_fp(tt) != type_is_fp(te) ||
-        (type_is_fp(tt) && tt->kind != te->kind))
+    if (type_is_fp(tt) != type_is_fp(te) || (type_is_fp(tt) && tt->kind != te->kind))
     {
         return sem_error(ctx, ternary->base.loc,
                          "floating-point conversion in a conditional is not supported yet");

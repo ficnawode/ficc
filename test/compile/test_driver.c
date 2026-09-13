@@ -60,8 +60,7 @@ static void drv_run_obj(const char *obj, int expected)
 TEST(driver, o_explicit_object_path)
 {
     char src[128], obj[192];
-    drv_write_src(src, sizeof(src), "explicit",
-                  "int main(void) { return 6 + 36; }\n");
+    drv_write_src(src, sizeof(src), "explicit", "int main(void) { return 6 + 36; }\n");
     drv_path(obj, sizeof(obj), "explicit_obj", "o");
 
     char cmd[2048];
@@ -85,8 +84,7 @@ TEST(driver, o_explicit_object_path)
 TEST(driver, o_joined_equals_form)
 {
     char src[128], obj[192];
-    drv_write_src(src, sizeof(src), "joined",
-                  "int main(void) { return 0x2a; }\n");
+    drv_write_src(src, sizeof(src), "joined", "int main(void) { return 0x2a; }\n");
     drv_path(obj, sizeof(obj), "joined_obj", "o");
 
     char cmd[2048];
@@ -103,8 +101,7 @@ TEST(driver, o_joined_equals_form)
 TEST(driver, no_o_derives_default_object)
 {
     char src[128], defo[192];
-    drv_write_src(src, sizeof(src), "derived",
-                  "int main(void) { return 7 * 6; }\n");
+    drv_write_src(src, sizeof(src), "derived", "int main(void) { return 7 * 6; }\n");
     drv_replace_ext(src, ".o", defo, sizeof(defo));
 
     /* With no -o, the object lands next to the source as <base>.o. */
@@ -129,8 +126,7 @@ TEST(driver, no_o_derives_default_object)
 TEST(driver, multi_input_c_emits_many_objects)
 {
     char a_src[128], b_src[128], a_o[192], b_o[192];
-    drv_write_src(a_src, sizeof(a_src), "multi_a",
-                  "int add(int a, int b) { return a + b; }\n");
+    drv_write_src(a_src, sizeof(a_src), "multi_a", "int add(int a, int b) { return a + b; }\n");
     drv_write_src(b_src, sizeof(b_src), "multi_b",
                   "int add(int, int);\nint main(void) { return add(20, 22); }\n");
     drv_replace_ext(a_src, ".o", a_o, sizeof(a_o));

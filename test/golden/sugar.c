@@ -24,7 +24,7 @@ struct Line
     Point *b;
 };
 
-Point *units = &(Point){1, 2}; /* file-scope compound literal -> anonymous static */
+Point *units = &(Point) {1, 2}; /* file-scope compound literal -> anonymous static */
 
 int sum_pair(Point *p)
 {
@@ -45,11 +45,11 @@ int main(void)
     }
 
     /* Block-scope compound literals: value, member access, address-in-arg. */
-    if ((Point){3, 4}.y != 4)
+    if ((Point) {3, 4}.y != 4)
     {
         return 3;
     }
-    if (sum_pair(&(Point){10, 20}) != 30)
+    if (sum_pair(&(Point) {10, 20}) != 30)
     {
         return 4;
     }
@@ -61,9 +61,9 @@ int main(void)
     }
 
     /* Sew compound literals into a designated list via struct pointers. */
-    Point pa = (Point){.y = 6, .x = 9};
-    Point pb = (Point){.x = 1};
-    struct Line ln = (struct Line){.a = &pa, .b = &pb};
+    Point pa = (Point) {.y = 6, .x = 9};
+    Point pb = (Point) {.x = 1};
+    struct Line ln = (struct Line) {.a = &pa, .b = &pb};
     if (ln.a->x + ln.a->y + ln.b->x + ln.b->y != 16)
     {
         return 6;

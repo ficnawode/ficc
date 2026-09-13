@@ -11,16 +11,16 @@ int tab(int v)
 {
     switch (v)
     {
-    case 0:
-        return 0;
-    case 1:
-        return 1;
-    case 2:
-        return 2;
-    case 3:
-        return 3;
-    default:
-        return 9;
+        case 0:
+            return 0;
+        case 1:
+            return 1;
+        case 2:
+            return 2;
+        case 3:
+            return 3;
+        default:
+            return 9;
     }
 }
 
@@ -29,14 +29,14 @@ int sgn(int v)
 {
     switch (v)
     {
-    case -2:
-        return -2;
-    case 0:
-        return 0;
-    case 2:
-        return 2;
-    default:
-        return 99;
+        case -2:
+            return -2;
+        case 0:
+            return 0;
+        case 2:
+            return 2;
+        default:
+            return 99;
     }
 }
 
@@ -45,12 +45,12 @@ int far(int v)
 {
     switch (v)
     {
-    case 1000000:
-        return 7;
-    case 1000000000:
-        return 6;
-    default:
-        return 3;
+        case 1000000:
+            return 7;
+        case 1000000000:
+            return 6;
+        default:
+            return 3;
     }
 }
 
@@ -59,13 +59,13 @@ int mode(int m)
 {
     switch (m)
     {
-    case 1:
-    case 2:
-        return 10;
-    case 3:
-        return 20;
-    default:
-        return 30;
+        case 1:
+        case 2:
+            return 10;
+        case 3:
+            return 20;
+        default:
+            return 30;
     }
 }
 
@@ -75,23 +75,23 @@ int nest(int outer, int inner)
 {
     switch (outer)
     {
-    case 0:
-        return 100;
-    case 1:
-        switch (inner)
-        {
         case 0:
-            return 1;
+            return 100;
         case 1:
+            switch (inner)
+            {
+                case 0:
+                    return 1;
+                case 1:
+                case 2:
+                    return 2;
+                default:
+                    return 3;
+            }
         case 2:
-            return 2;
+            return 200;
         default:
-            return 3;
-        }
-    case 2:
-        return 200;
-    default:
-        return 999;
+            return 999;
     }
 }
 
@@ -104,16 +104,16 @@ int sum(int n)
     {
         switch (i % 4)
         {
-        case 0:
-            s = s + 1;
-            break;
-        case 1:
-            s = s + 2;
-            break;
-        case 2:
-        case 3:
-            s = s + 3;
-            break;
+            case 0:
+                s = s + 1;
+                break;
+            case 1:
+                s = s + 2;
+                break;
+            case 2:
+            case 3:
+                s = s + 3;
+                break;
         }
         i = i + 1;
     }

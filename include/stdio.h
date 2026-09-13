@@ -1,8 +1,8 @@
 #ifndef FICC_STDIO_H
 #define FICC_STDIO_H
 
-#include <stddef.h>
 #include <stdarg.h>
+#include <stddef.h>
 
 typedef struct __FILE FILE;
 extern FILE *stdin;

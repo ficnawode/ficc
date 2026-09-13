@@ -582,8 +582,8 @@ void elf_write(CodegenModule *cm, const char *path)
         {
             if (strcmp((const char *) vec_get(extern_syms, j), ec->name) == 0)
             {
-                sym_idx = layout.first_global + (u32) layout.nglobal_vars + (u32) layout.nglobal_funcs
-                          + (u32) j;
+                sym_idx = layout.first_global + (u32) layout.nglobal_vars +
+                          (u32) layout.nglobal_funcs + (u32) j;
                 break;
             }
         }

@@ -1,5 +1,5 @@
-#include "harness.h"
 #include "cli.h"
+#include "harness.h"
 #include "util/arena.h"
 #include "util/vec.h"
 
@@ -41,8 +41,8 @@ TEST(cli, single_input)
 TEST(cli, flag_shapes)
 {
     Arena *a = arena_new();
-    char *argv[] = {"ficc", "-E", "-c", "-run", "-tokens", "-pp", "-ast", "-ir", "-nostdinc",
-                    "a.c"};
+    char *argv[] = {"ficc", "-E",   "-c",  "-run",      "-tokens",
+                    "-pp",  "-ast", "-ir", "-nostdinc", "a.c"};
     CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
     EXPECT_NOTNULL(cfg);
     EXPECT_TRUE(cfg->emit_pp);

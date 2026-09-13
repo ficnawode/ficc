@@ -1076,26 +1076,27 @@ TEST(records, bitfield_token_style_stats)
     /* Mirrors the Token int-suffix trio from ficc's own lexer.h/ast.h plus the
        trailing length member; the bit-field reads must reproduce the stored
        values and sizeof must stay gcc-compatible. */
-    EXPECT_INTERP_AND_ELF("typedef _Bool bool;\n"
-                          "typedef enum { LEN_I, LEN_L, LEN_LL } Suffix;\n"
-                          "struct TokenLike {\n"
-                          "    union { long long i; void *p; } payload;\n"
-                          "    struct { bool is_unsigned:1; Suffix length:2; bool is_hex:1; } flags;\n"
-                          "    int str_len;\n"
-                          "};\n"
-                          "int main(void) {\n"
-                          "    struct TokenLike t;\n"
-                          "    t.flags.is_unsigned = 1;\n"
-                          "    t.flags.length = LEN_LL;\n"
-                          "    t.flags.is_hex = 1;\n"
-                          "    t.str_len = 7;\n"
-                          "    int r = (int) sizeof(struct TokenLike);\n"
-                          "    r += (int) t.flags.length * 10;\n"
-                          "    r += (int) t.flags.is_unsigned + (int) t.flags.is_hex;\n"
-                          "    r += t.str_len;\n"
-                          "    return r;\n"
-                          "}\n",
-                          45);
+    EXPECT_INTERP_AND_ELF(
+        "typedef _Bool bool;\n"
+        "typedef enum { LEN_I, LEN_L, LEN_LL } Suffix;\n"
+        "struct TokenLike {\n"
+        "    union { long long i; void *p; } payload;\n"
+        "    struct { bool is_unsigned:1; Suffix length:2; bool is_hex:1; } flags;\n"
+        "    int str_len;\n"
+        "};\n"
+        "int main(void) {\n"
+        "    struct TokenLike t;\n"
+        "    t.flags.is_unsigned = 1;\n"
+        "    t.flags.length = LEN_LL;\n"
+        "    t.flags.is_hex = 1;\n"
+        "    t.str_len = 7;\n"
+        "    int r = (int) sizeof(struct TokenLike);\n"
+        "    r += (int) t.flags.length * 10;\n"
+        "    r += (int) t.flags.is_unsigned + (int) t.flags.is_hex;\n"
+        "    r += t.str_len;\n"
+        "    return r;\n"
+        "}\n",
+        45);
 }
 
 TEST(records, bitfield_arrow_access)

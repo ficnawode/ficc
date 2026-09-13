@@ -374,8 +374,8 @@ CompilerConfig *cli_parse(int argc, char **argv, Arena *arena)
         {
             value++;
         }
-        if (spec->shape != ARG_NONE && *value == '\0'
-            && (spec->shape == ARG_SEPARATE || spec->shape == ARG_EITHER))
+        if (spec->shape != ARG_NONE && *value == '\0' &&
+            (spec->shape == ARG_SEPARATE || spec->shape == ARG_EITHER))
         {
             if (i + 1 >= argc)
             {

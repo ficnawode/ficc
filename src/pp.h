@@ -51,7 +51,7 @@ struct Pp
     Loc physical;
     Loc presumed;
     bool skipping;
-    PPConfig cfg;             /* -I / -D / -U / -include / -nostdinc / -fpedantic */
+    PPConfig cfg; /* -I / -D / -U / -include / -nostdinc / -fpedantic */
     const char *exe_path;
     const char *builtin_dir;
     const char *cooked_date;

@@ -351,7 +351,7 @@ TEST(types, elf_long_return)
                          "    long r = ret_long();\n"
                          "    return r;\n"
                          "}\n"),
-               99);
+              99);
 }
 
 /* Regression: big decimal literals (> 2^63) with UL/ULL suffixes must be typed

@@ -202,7 +202,8 @@ struct ASTVarDecl
     u32 bit_width;         /* bit-field width in bits; 0 = ordinary member (§6.7.2.1) */
 };
 
-/* An init-declarator list `int a = 1, b = 2;` sharing one declaration-specifier sequence (C11 §6.7.6). */
+/* An init-declarator list `int a = 1, b = 2;` sharing one declaration-specifier sequence (C11
+ * §6.7.6). */
 typedef struct ASTDeclList ASTDeclList;
 struct ASTDeclList
 {
@@ -234,7 +235,8 @@ struct ASTUnaryExpr
     ASTNode *operand;
 };
 
-/* Prefix (`++x`) or postfix (`x++`) increment/decrement (C11 §6.5.2.4); its operand is a modifiable lvalue. */
+/* Prefix (`++x`) or postfix (`x++`) increment/decrement (C11 §6.5.2.4); its operand is a modifiable
+ * lvalue. */
 typedef struct ASTIncDecExpr ASTIncDecExpr;
 struct ASTIncDecExpr
 {
@@ -248,9 +250,10 @@ typedef struct ASTCallExpr ASTCallExpr;
 struct ASTCallExpr
 {
     ASTNode base;
-const char *callee;   /* named callee / builtin; NULL when callee_expr is used */
+    const char *callee;   /* named callee / builtin; NULL when callee_expr is used */
     Vec *args;            /* Vec<ASTNode*> */
-    ASTNode *callee_expr; /* indirect callee (function designator / pointer value); NULL for named calls */
+    ASTNode *callee_expr; /* indirect callee (function designator / pointer value); NULL for named
+                             calls */
 };
 
 typedef struct ASTIdent ASTIdent;
@@ -451,7 +454,8 @@ struct ASTMemberAccess
     u32 bit_width;    /* declared width in bits */
 };
 
-/* Cast `(type) expr` (C11 §5.5.4): never an lvalue; a qualified target equals the unqualified type (§6.5.4p4). */
+/* Cast `(type) expr` (C11 §5.5.4): never an lvalue; a qualified target equals the unqualified type
+ * (§6.5.4p4). */
 typedef struct ASTCastExpr ASTCastExpr;
 struct ASTCastExpr
 {
@@ -460,7 +464,8 @@ struct ASTCastExpr
     ASTNode *operand;
 };
 
-/* `__builtin_va_arg(ap, type)`: its second argument is a type-name, so it is a special form, not a call. */
+/* `__builtin_va_arg(ap, type)`: its second argument is a type-name, so it is a special form, not a
+ * call. */
 typedef struct ASTVaArgExpr ASTVaArgExpr;
 struct ASTVaArgExpr
 {
@@ -469,7 +474,8 @@ struct ASTVaArgExpr
     Type *type;
 };
 
-/* A typedef declaration `typedef <type> <name>;` (C11 §6.7.7): the name is an ordinary identifier (§6.2.3). */
+/* A typedef declaration `typedef <type> <name>;` (C11 §6.7.7): the name is an ordinary identifier
+ * (§6.2.3). */
 typedef struct ASTTypedefDecl ASTTypedefDecl;
 struct ASTTypedefDecl
 {
@@ -478,7 +484,8 @@ struct ASTTypedefDecl
     Type *type;
 };
 
-/* Initializer designators (C11 §6.7.9p1): `.field` members / `[idx]` elements, chained outermost-first. */
+/* Initializer designators (C11 §6.7.9p1): `.field` members / `[idx]` elements, chained
+ * outermost-first. */
 typedef enum
 {
     ND_FIELD, /* .field */
@@ -516,7 +523,8 @@ struct InitWrite
     u32 bit_width;    /* field width in bits */
 };
 
-/* A brace-enclosed initializer list `{ ... }` (C11 §6.7.9) with semantic's flattened lowering plan. */
+/* A brace-enclosed initializer list `{ ... }` (C11 §6.7.9) with semantic's flattened lowering plan.
+ */
 typedef struct ASTInitList ASTInitList;
 struct ASTInitList
 {
@@ -528,8 +536,8 @@ struct ASTInitList
 typedef struct InitPlan InitPlan;
 struct InitPlan
 {
-    Vec *writes;    /* Vec<InitWrite*> sorted by offset */
-    u64 total_size; /* byte size of the object being initialized */
+    Vec *writes;      /* Vec<InitWrite*> sorted by offset */
+    u64 total_size;   /* byte size of the object being initialized */
     bool grow_array;  /* outermost array is `[]` — resized from its initializer */
     u64 inferred_len; /* largest element index+1 reached while grow_array */
 };

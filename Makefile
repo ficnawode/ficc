@@ -36,9 +36,17 @@ TEST_CFLAGS := $(CFLAGS) -DFICC_BIN=\"$(abspath $(FICC_BIN))\"
 
 DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_BIN) $(TEST_BIN)))
 
-.PHONY: all clean test selftest dirs compile-commands
+FORMAT_FILES := $(shell find src include test \( -name '*.c' -o -name '*.h' \))
+
+.PHONY: all clean test selftest dirs compile-commands format format-check
 
 all: $(FICC_BIN)
+
+format:
+	clang-format -i $(FORMAT_FILES)
+
+format-check:
+	clang-format --dry-run --Werror $(FORMAT_FILES)
 
 test: $(TEST_BIN) $(FICC_BIN)
 	$(TEST_BIN)

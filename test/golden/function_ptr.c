@@ -49,11 +49,17 @@ int main(void)
     acc += run_slot(2, 49);
 
     if (!is_add10(dispatch[0]))
+    {
         return 1;
+    }
     if (dispatch[1] != mul2)
+    {
         return 2;
+    }
     if ((*dispatch[2])(49) != 42)
+    {
         return 3;
+    }
 
     /* acc = 42 + 42 + 42 = 126 = 3 * 42; scale to 42. */
     return acc / 3;

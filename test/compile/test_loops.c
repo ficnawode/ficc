@@ -264,18 +264,17 @@ TEST(loops, short_circuit_guard)
 
 /* Regression: a loop-carried VALUE_MAX sentinel is a PHI initialized with an
    immediate; the copy must write the full 64-bit slot. */
-static const char *phi_width_src =
-    "#include <stdint.h>\n"
-    "int main(void) {\n"
-    "    unsigned long first = SIZE_MAX;\n"
-    "    unsigned long i;\n"
-    "    for (i = 0; i < 5; i++) {\n"
-    "        if (i == 2) { first = i; }\n"
-    "        if (i < 2) { if (first != SIZE_MAX) { return 1; } }\n"
-    "    }\n"
-    "    if (first != 2) { return 2; }\n"
-    "    return 0;\n"
-    "}\n";
+static const char *phi_width_src = "#include <stdint.h>\n"
+                                   "int main(void) {\n"
+                                   "    unsigned long first = SIZE_MAX;\n"
+                                   "    unsigned long i;\n"
+                                   "    for (i = 0; i < 5; i++) {\n"
+                                   "        if (i == 2) { first = i; }\n"
+                                   "        if (i < 2) { if (first != SIZE_MAX) { return 1; } }\n"
+                                   "    }\n"
+                                   "    if (first != 2) { return 2; }\n"
+                                   "    return 0;\n"
+                                   "}\n";
 
 TEST(loops, phi_sized_sentinel)
 {

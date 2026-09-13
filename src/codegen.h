@@ -13,14 +13,16 @@ typedef struct
     u32 global_index; /* index into IrModule globals */
 } GlobalPatch;
 
-/* Call to a declaration-only extern: rel32 field stays 0; elf.c emits an SHN_UNDEF symbol + R_X86_64_PLT32 relocation. */
+/* Call to a declaration-only extern: rel32 field stays 0; elf.c emits an SHN_UNDEF symbol +
+ * R_X86_64_PLT32 relocation. */
 typedef struct
 {
     const char *name;
     size_t text_offset; /* absolute byte offset of the rel32 field within .text */
 } ExternCall;
 
-/* Taking a function's address (`&f`/designator): `mov $f, imm32sx` with an R_X86_64_32S relocation. */
+/* Taking a function's address (`&f`/designator): `mov $f, imm32sx` with an R_X86_64_32S relocation.
+ */
 typedef struct
 {
     const char *name;

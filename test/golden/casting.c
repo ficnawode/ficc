@@ -10,23 +10,23 @@
 /* Narrowing wraps modulo 2^width (signed input, signed output). */
 int narrow(void)
 {
-    if ((char)300 != 44)
+    if ((char) 300 != 44)
     {
         return 1;
     }
-    if ((char)255 != -1)
+    if ((char) 255 != -1)
     {
         return 2;
     }
-    if ((short)70000 != 4464)
+    if ((short) 70000 != 4464)
     {
         return 3;
     }
-    if ((unsigned char)-1 != 255)
+    if ((unsigned char) -1 != 255)
     {
         return 4;
     }
-    if ((unsigned short)-1 != 65535)
+    if ((unsigned short) -1 != 65535)
     {
         return 5;
     }
@@ -37,16 +37,16 @@ int narrow(void)
 int widen(void)
 {
     int neg = -7;
-    unsigned int all_ones = (unsigned int)-1;
-    if ((long)neg != -7)
+    unsigned int all_ones = (unsigned int) -1;
+    if ((long) neg != -7)
     {
         return 1;
     }
-    if ((unsigned long)all_ones != 4294967295)
+    if ((unsigned long) all_ones != 4294967295)
     {
         return 2;
     }
-    if ((unsigned long)-1 < 1000000)
+    if ((unsigned long) -1 < 1000000)
     {
         return 3;
     }
@@ -58,13 +58,13 @@ int widen(void)
 int int_ptr_int(void)
 {
     unsigned long a = 0x1234;
-    void *v = (void *)a;
-    if ((unsigned long)v != 0x1234)
+    void *v = (void *) a;
+    if ((unsigned long) v != 0x1234)
     {
         return 1;
     }
-    int *p = (int *)(void *)(unsigned long)0x1000;
-    if ((unsigned long)p != 0x1000)
+    int *p = (int *) (void *) (unsigned long) 0x1000;
+    if ((unsigned long) p != 0x1000)
     {
         return 2;
     }
@@ -83,14 +83,14 @@ int ptr_cast(void)
     struct point pt;
     pt.x = 11;
     pt.y = 22;
-    char *base = (char *)&pt;
-    struct point *q = (struct point *)base;
+    char *base = (char *) &pt;
+    struct point *q = (struct point *) base;
     if (q->y != 22)
     {
         return 1;
     }
-    void *v = (void *)&pt;
-    if (((struct point *)v)->x != 11)
+    void *v = (void *) &pt;
+    if (((struct point *) v)->x != 11)
     {
         return 2;
     }
@@ -99,7 +99,7 @@ int ptr_cast(void)
     arr[1] = 2;
     arr[2] = 3;
     arr[3] = 4;
-    if (*(int *)arr != 0x04030201)
+    if (*(int *) arr != 0x04030201)
     {
         return 3;
     }
@@ -114,11 +114,11 @@ void nop(void)
 int discards(void)
 {
     int x = 5;
-    (void)x;
-    (void)123;
+    (void) x;
+    (void) 123;
     struct point pt;
-    (void)pt;
-    (void)nop();
+    (void) pt;
+    (void) nop();
     return 42;
 }
 
@@ -132,17 +132,17 @@ enum mode
 
 int take_mode(enum mode m)
 {
-    return (int)m;
+    return (int) m;
 }
 
 int enum_cast(void)
 {
-    enum mode m = (enum mode)2;
-    if ((int)m != MO_C)
+    enum mode m = (enum mode) 2;
+    if ((int) m != MO_C)
     {
         return 1;
     }
-    if (take_mode((enum mode)1) != MO_B)
+    if (take_mode((enum mode) 1) != MO_B)
     {
         return 2;
     }
@@ -154,25 +154,25 @@ int enum_cast(void)
 int case_cast(void)
 {
     int r = 0;
-    switch ((char)300)
+    switch ((char) 300)
     {
-    case (int)(char)300:
-        r = 42;
-        break;
-    default:
-        r = 1;
-        break;
+        case (int) (char) 300:
+            r = 42;
+            break;
+        default:
+            r = 1;
+            break;
     }
     int arr[10];
     int k = 0;
     switch (40)
     {
-    case (int)sizeof(arr):
-        k = 42;
-        break;
-    default:
-        k = 1;
-        break;
+        case (int) sizeof(arr):
+            k = 42;
+            break;
+        default:
+            k = 1;
+            break;
     }
     if (r != 42 || k != 42)
     {
@@ -188,19 +188,19 @@ int const_cast(void)
 {
     int x = 5;
     int *q = &x;
-    const int *cp = (const int *)q;
+    const int *cp = (const int *) q;
     if (*cp != 5)
     {
         return 1;
     }
     const int ci = 7;
     const int *cc = &ci;
-    int *rp = (int *)(void *)cc;
+    int *rp = (int *) (void *) cc;
     if (*rp != 7)
     {
         return 2;
     }
-    int y = (int)ci;
+    int y = (int) ci;
     if (y != 7)
     {
         return 3;

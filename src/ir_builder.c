@@ -821,8 +821,8 @@ static IrOperand bitfield_read(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Ty
 
 /* Write a bit-field via read-modify-write: clear the field's bits, OR in the
    (truncated) value shifted into place. */
-static void bitfield_store(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *ty,
-                           u32 bit_offset, u32 bit_width, IrOperand val)
+static void bitfield_store(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *ty, u32 bit_offset,
+                           u32 bit_width, IrOperand val)
 {
     u32 tbits = (u32) (ty->size * 8);
     i64 tmask = tbits >= 64 ? -1 : (i64) (((u64) 1 << tbits) - 1);
@@ -854,8 +854,7 @@ static IrOperand load_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot)
     }
     if (slot->is_bitfield)
     {
-        return bitfield_read(ctx, bb, slot->addr, slot->type, slot->bit_offset,
-                             slot->bit_width);
+        return bitfield_read(ctx, bb, slot->addr, slot->type, slot->bit_offset, slot->bit_width);
     }
     u32 dst = alloc_vreg_from_type(ctx, slot->type);
     ir_emit_load(bb, dst, slot->addr);
@@ -1597,8 +1596,7 @@ static bool fold_binary_constant(ASTBinaryExpr *b, i64 l, i64 r, i64 *out)
             }
             if (is_unsigned)
             {
-                *out = b->op == BIN_DIV ? (i64) ((u64) l / (u64) r)
-                                        : (i64) ((u64) l % (u64) r);
+                *out = b->op == BIN_DIV ? (i64) ((u64) l / (u64) r) : (i64) ((u64) l % (u64) r);
             }
             else
             {
@@ -1954,8 +1952,8 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
             {
                 word |= (u64) (u8) buf[w->offset + b] << (8 * b);
             }
-            word = (word & ~(u64) mask) | (((u64) value & bitfield_mask(w->bit_width))
-                                           << w->bit_offset);
+            word = (word & ~(u64) mask) |
+                   (((u64) value & bitfield_mask(w->bit_width)) << w->bit_offset);
             word &= tbits >= 64 ? ~0ULL : ((1ULL << tbits) - 1);
             for (u32 b = 0; b < w->type->size; b++)
             {
@@ -2184,8 +2182,8 @@ static ExprResult build_member_access_expr(FuncBuilder *ctx, ASTMemberAccess *ma
     ExprResult lv = build_member_lvalue(ctx, ma, bb);
     if (ma->is_bitfield)
     {
-        IrOperand v = bitfield_read(ctx, lv.block, lv.value, ma->field_type, ma->bit_offset,
-                                    ma->bit_width);
+        IrOperand v =
+            bitfield_read(ctx, lv.block, lv.value, ma->field_type, ma->bit_offset, ma->bit_width);
         return expr_result(v, lv.block);
     }
     if (type_is_memory(ma->field_type))
