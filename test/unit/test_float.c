@@ -970,3 +970,266 @@ TEST(float, long_double_cast_matrix_builds)
                          "long double h = 1.5f;\n"
                          "int main(void) { return 0; }\n");
 }
+
+/* ---- 19f: x87 arithmetic / compares / converts (both backends) ---- */
+
+TEST(float, long_double_arith_both_backends)
+{
+    /* add/sub/mul/div on the x87 stack, compared via width-16 FCMP. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long double a = 1.5L;\n"
+                          "    long double b = 2.5L;\n"
+                          "    if (a + b != 4.0L) return 1;\n"
+                          "    if (b - a != 1.0L) return 2;\n"
+                          "    if (a * b != 3.75L) return 3;\n"
+                          "    if (b / a != 1.6666666666666666666L) return 4;\n"
+                          "    long double c = (a + b) * b - a; /* 8.5 */\n"
+                          "    if (c != 8.5L) return 5;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_arith_bit_exact)
+{
+    /* Independent gcc oracle: the 80-bit patterns these chains produce. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long double s = 0.0L;\n"
+                          "    s = 0.1L + 0.2L;\n"
+                          "    if (*(unsigned long long *) &s != 0x999999999999999aULL) return 1;\n"
+                          "    if (*(unsigned short *) ((char *) &s + 8) != 0x3FFD) return 2;\n"
+                          "    s = 3.0L / 7.0L;\n"
+                          "    if (*(unsigned long long *) &s != 0xdb6db6db6db6db6eULL) return 3;\n"
+                          "    if (*(unsigned short *) ((char *) &s + 8) != 0x3FFD) return 4;\n"
+                          "    s = 1.0L / 3.0L;\n"
+                          "    if (*(unsigned long long *) &s != 0xaaaaaaaaaaaaaaabULL) return 5;\n"
+                          "    int i;\n"
+                          "    s = 0.0L;\n"
+                          "    for (i = 0; i < 10; i++) { s = s + 0.1L; }\n"
+                          "    if (*(unsigned long long *) &s != 0x8000000000000001ULL) return 6;\n"
+                          "    if (*(unsigned short *) ((char *) &s + 8) != 0x3FFF) return 7;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_precision_beyond_double)
+{
+    /* More than 53 significant bits distinguish ld from double. */
+    EXPECT_INTERP_AND_ELF(
+        "int main(void) {\n"
+        "    long double a = 0x1.0000000000000002p0L;\n"
+        "    if (*(unsigned long long *) &a != 0x8000000000000001ULL) return 1;\n"
+        "    if (*(unsigned short *) ((char *) &a + 8) != 0x3FFF) return 2;\n"
+        "    if (a == (long double) (double) a) return 3;       /* ld keeps the bit */\n"
+        "    if (0.1L == (long double) 0.1) return 4;\n"
+        "    /* accumulate in ld vs double: the results diverge */\n"
+        "    long double s = 0.0L;\n"
+        "    double d = 0.0;\n"
+        "    int i;\n"
+        "    for (i = 0; i < 10; i++) { s = s + 0.1L; d = d + 0.1; }\n"
+        "    if (s == (long double) d) return 5;\n"
+        "    return 42;\n"
+        "}\n",
+        42);
+}
+
+TEST(float, long_double_compare_matrix)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long double a = 2.0L;\n"
+                          "    long double b = 3.0L;\n"
+                          "    if (!(a < b)) return 1;\n"
+                          "    if (!(a <= b)) return 2;\n"
+                          "    if (!(a <= 2.0L)) return 3;\n"
+                          "    if (!(b > a)) return 4;\n"
+                          "    if (!(b >= a)) return 5;\n"
+                          "    if (!(b >= 3.0L)) return 6;\n"
+                          "    if (!(a == 2.0L)) return 7;\n"
+                          "    if (!(a != b)) return 8;\n"
+                          "    if (a == b) return 9;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_nan_compare_semantics)
+{
+    /* NaN is unequal to everything; every ordered predicate is false. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long double z = 0.0L;\n"
+                          "    long double nan = z / z;\n"
+                          "    if (nan == nan) return 1;\n"
+                          "    if (!(nan != nan)) return 2;\n"
+                          "    if (nan < 1.0L) return 3;\n"
+                          "    if (nan > 1.0L) return 4;\n"
+                          "    if (nan <= 1.0L) return 5;\n"
+                          "    if (nan >= 1.0L) return 6;\n"
+                          "    if (!(nan != 1.0L)) return 7;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_boolify_and_conditions)
+{
+    /* -0.0L falsy, NaN truthy, through FCMP_NE/FCMP_EQ. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long double nz = -0.0L;\n"
+                          "    if (nz) return 1;\n"
+                          "    if (!(!nz)) return 2;\n"
+                          "    if (!(1.0L)) return 3;\n"
+                          "    long double z = 0.0L;\n"
+                          "    long double nan = z / z;\n"
+                          "    if (!nan) return 4;\n"
+                          "    if (!(nan || 0.0L)) return 5;\n"
+                          "    if (nan && 0.0L) return 6;\n"
+                          "    _Bool b = nz;\n"
+                          "    if (b) return 7;\n"
+                          "    b = nan;\n"
+                          "    if (!b) return 8;\n"
+                          "    if ((nz ? 7 : 9) != 9) return 9;\n"
+                          "    if ((1.0L ? 7 : 9) != 7) return 10;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_unary_and_compound)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long double a = 1.5L;\n"
+                          "    if (-a != -1.5L) return 1;\n"
+                          "    if (*(unsigned short *) ((char *) &a + 8) != 0x3FFF) return 2;\n"
+                          "    a += 2.5L;\n"
+                          "    if (a != 4.0L) return 3;\n"
+                          "    a *= 2.0L;\n"
+                          "    if (a != 8.0L) return 4;\n"
+                          "    a -= 1.0L;\n"
+                          "    if (a != 7.0L) return 5;\n"
+                          "    a /= 2.0L;\n"
+                          "    if (a != 3.5L) return 6;\n"
+                          "    a++;\n"
+                          "    if (a != 4.5L) return 7;\n"
+                          "    --a;\n"
+                          "    if (a != 3.5L) return 8;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_cast_matrix_runtime)
+{
+    /* The i/d/f ↔ ld cast matrix now lowers on x87. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long double a = (long double) 3;\n"
+                          "    if (a != 3.0L) return 1;\n"
+                          "    long double b = (long double) -7LL;\n"
+                          "    if (b != -7.0L) return 2;\n"
+                          "    long double c = (long double) 1.5f;\n"
+                          "    if (*(unsigned long long *) &c != 0xC000000000000000ULL) return 3;\n"
+                          "    long double d = (long double) 1.5;\n"
+                          "    if (*(unsigned long long *) &d != 0xC000000000000000ULL) return 4;\n"
+                          "    if ((double) 4.25L != 4.25) return 5;\n"
+                          "    if ((float) 4.25L != 4.25f) return 6;\n"
+                          "    if ((int) 4.25L != 4) return 7;\n"
+                          "    if ((long long) -4.5L != -4) return 8;\n"
+                          "    if ((unsigned) 4.25L != 4U) return 9;\n"
+                          "    if ((unsigned long long) 4.25L != 4ULL) return 10;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_int64_edges)
+{
+    EXPECT_INTERP_AND_ELF(
+        "int main(void) {\n"
+        "    long double lo = (long double) (-9223372036854775807LL - 1);\n"
+        "    if (*(unsigned long long *) &lo != 0x8000000000000000ULL) return 1;\n"
+        "    if (*(unsigned short *) ((char *) &lo + 8) != 0xC03E) return 2;\n"
+        "    long double hi = (long double) 9223372036854775807LL;\n"
+        "    if (*(unsigned long long *) &hi != 0xFFFFFFFFFFFFFFFEULL) return 3;\n"
+        "    if (*(unsigned short *) ((char *) &hi + 8) != 0x403D) return 4;\n"
+        "    if (hi != 9223372036854775807.0L) return 5;\n"
+        "    if (lo != -9223372036854775807.0L - 1.0L) return 6;\n"
+        "    return 42;\n"
+        "}\n",
+        42);
+}
+
+TEST(float, long_double_u64_edge)
+{
+    /* u64 ≥ 2^63 takes the add-back-2^63 path. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long double a = (long double) 9223372036854775808ULL;   /* 2^63 */\n"
+                          "    if (*(unsigned long long *) &a != 0x8000000000000000ULL) return 1;\n"
+                          "    if (*(unsigned short *) ((char *) &a + 8) != 0x403E) return 2;\n"
+                          "    long double b = (long double) 0xFFFFFFFFFFFFFFFFULL;\n"
+                          "    if (*(unsigned long long *) &b != 0xFFFFFFFFFFFFFFFFULL) return 3;\n"
+                          "    if (*(unsigned short *) ((char *) &b + 8) != 0x403E) return 4;\n"
+                          "    long double c = (long double) 0x8000000000000005ULL;\n"
+                          "    if (*(unsigned long long *) &c != 0x8000000000000005ULL) return 5;\n"
+                          "    if ((unsigned long long) b != 0xFFFFFFFFFFFFFFFFULL) return 6;\n"
+                          "    if ((unsigned long long) a != 0x8000000000000000ULL) return 7;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_ftoi_brands)
+{
+    /* NaN / out-of-range brand INT_MIN / 0x80000000. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long double z = 0.0L;\n"
+                          "    long double nan = z / z;\n"
+                          "    if ((int) nan != -2147483647 - 1) return 1;\n"
+                          "    if ((long long) nan != (-9223372036854775807LL - 1)) return 2;\n"
+                          "    if ((unsigned) nan != 0U) return 3;\n"
+                          "    if ((unsigned long long) nan != 0x8000000000000000ULL) return 4;\n"
+                          "    if ((int) 1e30L != -2147483647 - 1) return 5;\n"
+                          "    if ((unsigned) 1e30L != 0U) return 6;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_mixed_precision_expressions)
+{
+    /* §6.3.1.8: a long double operand pulls the whole expression to ld. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long double m = 1.5L + 2.5 + 0.5f;   /* 4.5 */\n"
+                          "    if (m != 4.5L) return 1;\n"
+                          "    if (*(unsigned long long *) &m != 0x9000000000000000ULL) return 2;\n"
+                          "    if (3.0L * 7 != 21.0L) return 3;\n"
+                          "    if (21.0L / 4 != 5.25L) return 4;\n"
+                          "    if ((2.5f + 1) * 2.0 + 0.0L != 7.0L) return 5;\n"
+                          "    long double a = 1.0L;\n"
+                          "    double b = 2.0;\n"
+                          "    float c = 3.0f;\n"
+                          "    if (a + b + c != 6.0L) return 6;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_subnormal_and_hex_literals)
+{
+    /* Hex floats are correctly rounded; 2^-16445 is the smallest positive
+       extended subnormal (exponent field 0, significand 1). */
+    EXPECT_INTERP_AND_ELF(
+        "int main(void) {\n"
+        "    long double sub = 0x1p-16445L;\n"
+        "    if (*(unsigned long long *) &sub != 0x0000000000000001ULL) return 1;\n"
+        "    if (*(unsigned short *) ((char *) &sub + 8) != 0x0000) return 2;\n"
+        "    if (sub == 0.0L) return 3;\n"
+        "    long double sub2 = 0x1p-16444L;\n"
+        "    if (*(unsigned long long *) &sub2 != 0x0000000000000002ULL) return 4;\n"
+        "    if (sub2 <= sub) return 5;\n"
+        "    /* 65 significant bits correctly round to 2.0 in 80-bit */\n"
+        "    long double two = 0x1.ffffffffffffffffp0L;\n"
+        "    if (two != 2.0L) return 6;\n"
+        "    return 42;\n"
+        "}\n",
+        42);
+}

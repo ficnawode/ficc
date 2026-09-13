@@ -54,6 +54,7 @@ struct CodegenCtx
     Vec *switch_tables;     /* Vec<SwitchTableRec*> */
     u32 save_area_off;      /* register save area offset below %rbp (variadic fns) */
     u32 *slot_off;          /* per-vreg frame offsets (see FrameInfo) */
+    int fpu_depth;          /* x87 stack depth; lowered sequences leave no residue */
 };
 
 static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
@@ -210,6 +211,27 @@ typedef enum
 /* IEEE bit patterns of 2^63, added back by the u64 int→FP sequence. */
 #define F32_BITS_2POW63 0x5F000000
 #define F64_BITS_2POW63 0x43E0000000000000
+
+/* x87 two-byte memory forms: primary byte then modrm with reg = /digit. */
+#define X87_FLDT 0xDB       /* /5: fldt m80 */
+#define X87_FSTPT 0xDB      /* /7: fstpt m80 (DB /7 — DD /7 is fnstsw m16) */
+#define X87_FLDS 0xD9       /* /0: flds m32 */
+#define X87_FSTPS 0xD9      /* /2: fstps m32 */
+#define X87_FLDL 0xDD       /* /0: fldl m64 */
+#define X87_FSTPL 0xDD      /* /2: fstpl m64 */
+#define X87_FILD_M32 0xDB   /* /0: fild m32int */
+#define X87_FILD_M64 0xDF   /* /5: fild m64int */
+#define X87_FISTTP_M32 0xDB /* /1: fisttp m32int */
+#define X87_FISTTP_M64 0xDD /* /1: fisttp m64int */
+#define X87_DIG_5 5
+#define X87_DIG_7 7
+#define X87_DIG_0 0
+#define X87_DIG_1 1
+#define X87_DIG_2 2
+
+/* 80-bit pattern of 2^63: significand 0x8000000000000000 @ exponent 0x403E. */
+#define LD_EXPONENT_2POW63 0x403E
+#define LD_SIGNIFICAND_2POW63 0x8000000000000000ULL
 
 /* 0F BA /digit ib: bt=4, bts=5, btr=6. */
 #define X86_XOP_BT 4
@@ -973,6 +995,153 @@ static void emit_sse_xor(ByteBuf *buf, u8 mand, u8 dst_xmm, u8 src_xmm)
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_XOR);
     bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
+}
+
+/* ------------------------------------------------------------------ */
+/* x87 (80-bit extended) emission                                      */
+/* ------------------------------------------------------------------ */
+
+/* The x87 stack must balance after every lowering: a leaked st(1) silently
+   poisons every later FP result (NaN accrual in the parity tests). */
+static void x87_push(CodegenCtx *ctx)
+{
+    ctx->fpu_depth++;
+}
+
+static void x87_pop(CodegenCtx *ctx)
+{
+    ctx->fpu_depth--;
+    ASSERT(ctx->fpu_depth >= 0 && "x87 stack underflow");
+}
+
+static void x87_balance(CodegenCtx *ctx)
+{
+    ASSERT(ctx->fpu_depth == 0 && "x87 stack not balanced after a width-16 lowering");
+}
+
+/* Restore the counter to the runtime depth at a branch label: the fall-through
+   and taken paths may carry different x87 residues. */
+static void x87_set_depth(CodegenCtx *ctx, int depth)
+{
+    ctx->fpu_depth = depth;
+}
+
+/* Two-byte memory form: primary byte, then modrm with reg = the /digit. */
+static void emit_x87_mem(CodegenCtx *ctx, u8 primary, u8 digit, X86Mem m)
+{
+    bytebuf_append(ctx->buf, primary);
+    emit_mem_operand(ctx->buf, digit, m);
+}
+
+/* Register form: primary byte followed by a fixed sub-opcode byte. */
+static void emit_x87_reg(CodegenCtx *ctx, u8 primary, u8 opbyte)
+{
+    bytebuf_append(ctx->buf, primary);
+    bytebuf_append(ctx->buf, opbyte);
+}
+
+static void emit_fldt(CodegenCtx *ctx, X86Mem m)
+{
+    emit_x87_mem(ctx, X87_FLDT, X87_DIG_5, m);
+    x87_push(ctx);
+}
+static void emit_fstpt(CodegenCtx *ctx, X86Mem m)
+{
+    emit_x87_mem(ctx, X87_FSTPT, X87_DIG_7, m);
+    x87_pop(ctx);
+}
+static void emit_flds(CodegenCtx *ctx, X86Mem m)
+{
+    emit_x87_mem(ctx, X87_FLDS, X87_DIG_0, m);
+    x87_push(ctx);
+}
+static void emit_fstps(CodegenCtx *ctx, X86Mem m)
+{
+    emit_x87_mem(ctx, X87_FSTPS, X87_DIG_2, m);
+    x87_pop(ctx);
+}
+static void emit_fldl(CodegenCtx *ctx, X86Mem m)
+{
+    emit_x87_mem(ctx, X87_FLDL, X87_DIG_0, m);
+    x87_push(ctx);
+}
+static void emit_fstpl(CodegenCtx *ctx, X86Mem m)
+{
+    emit_x87_mem(ctx, X87_FSTPL, X87_DIG_2, m);
+    x87_pop(ctx);
+}
+static void emit_fild(CodegenCtx *ctx, u8 size, X86Mem m)
+{
+    emit_x87_mem(ctx, size == 4 ? X87_FILD_M32 : X87_FILD_M64, size == 4 ? X87_DIG_0 : X87_DIG_5,
+                 m);
+    x87_push(ctx);
+}
+static void emit_fisttp(CodegenCtx *ctx, u8 size, X86Mem m)
+{
+    emit_x87_mem(ctx, size == 4 ? X87_FISTTP_M32 : X87_FISTTP_M64, X87_DIG_1, m);
+    x87_pop(ctx);
+}
+static void emit_fldz(CodegenCtx *ctx)
+{
+    emit_x87_reg(ctx, 0xD9, 0xEE);
+    x87_push(ctx);
+}
+static void emit_fchs(CodegenCtx *ctx)
+{
+    emit_x87_reg(ctx, 0xD9, 0xE0);
+}
+/* fsubp name matches the x87 semantics used: st(1) ← st(1) − st(0), pop. */
+static void emit_faddp(CodegenCtx *ctx)
+{
+    emit_x87_reg(ctx, 0xDE, 0xC1);
+    x87_pop(ctx);
+}
+static void emit_fsubp(CodegenCtx *ctx)
+{
+    emit_x87_reg(ctx, 0xDE, 0xE9);
+    x87_pop(ctx);
+}
+/* fsubrp st(1), st(0): st(1) ← st(0) − st(1), pop — the reverse of fsubp. */
+static void emit_fsubrp(CodegenCtx *ctx)
+{
+    emit_x87_reg(ctx, 0xDE, 0xE1);
+    x87_pop(ctx);
+}
+static void emit_fmulp(CodegenCtx *ctx)
+{
+    emit_x87_reg(ctx, 0xDE, 0xC9);
+    x87_pop(ctx);
+}
+static void emit_fdivp(CodegenCtx *ctx)
+{
+    emit_x87_reg(ctx, 0xDE, 0xF9);
+    x87_pop(ctx);
+}
+/* fucomip st(0), st(1): unordered compare, sets ZF/CF/PF like ucomis*, pops st(0). */
+static void emit_fucomip(CodegenCtx *ctx)
+{
+    emit_x87_reg(ctx, 0xDF, 0xE9);
+    x87_pop(ctx);
+}
+static void emit_fstp_st0(CodegenCtx *ctx)
+{
+    emit_x87_reg(ctx, 0xDD, 0xD8);
+    x87_pop(ctx);
+}
+
+/* Build the 80-bit 2^63 in a temporary %rsp scratch region, fldt it, release. */
+static void emit_load_2pow63_ld(CodegenCtx *ctx)
+{
+    ByteBuf *b = ctx->buf;
+    emit_binop_rhs(b, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(16));
+    emit_mov(b, 8, xop_reg(R_EAX), xop_imm((i64) LD_SIGNIFICAND_2POW63));
+    emit_mov(b, 8, xop_mem(x86_mem_rsp(0)), xop_reg(R_EAX));
+    emit_mov(b, 8, xop_reg(R_EAX), xop_imm(0));
+    emit_mov(b, 8, xop_mem(x86_mem_rsp(8)), xop_reg(R_EAX));
+    emit_mov(b, 2, xop_reg(R_EAX), xop_imm(LD_EXPONENT_2POW63));
+    emit_mov(b, 2, xop_mem(x86_mem_rsp(8)), xop_reg(R_EAX));
+    emit_fldt(ctx, x86_mem_rsp(0));
+    emit_binop_rhs(b, 8, &arith_specs[OP_ADD], R_ESP, xop_imm(16));
 }
 
 static void emit_bit_imm(ByteBuf *buf, u8 digit, u8 dst_reg, u8 imm)
@@ -1893,9 +2062,84 @@ static void emit_load_2pow63(ByteBuf *buf, bool is_f32)
     }
 }
 
+/* A width-16 operand is always a vreg slot (immediates carry no 16-byte form). */
+static X86Mem x87_slot(CodegenCtx *ctx, IrOperand op)
+{
+    ASSERT(!op.is_imm && !op.is_global && !op.is_func);
+    return xop_vreg(ctx, op.u.vreg).u.mem;
+}
+
 static void lower_itof(IrInstr *in, CodegenCtx *ctx)
 {
     u8 dw = vreg_width(ctx, in->result);
+    if (dw == 16)
+    {
+        /* Extend to 8 bytes, fild qword from the dst slot, fstpt; u64 ≥ 2^63
+           clears bit 63 and adds the exact 2^63 back. */
+        ByteBuf *b = ctx->buf;
+        u8 sw;
+        bool is_signed;
+        if (in->ops[0].is_imm)
+        {
+            sw = 8;
+            is_signed = true;
+            emit_mov(b, 8, xop_reg(R_EAX), xop_imm(in->ops[0].u.imm));
+        }
+        else
+        {
+            sw = vreg_width(ctx, in->ops[0].u.vreg);
+            is_signed = ir_vreg_signed(ctx->mod, in->ops[0].u.vreg);
+            emit_mov(b, sw, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
+            if (sw == 1 || sw == 2)
+            {
+                if (is_signed)
+                {
+                    emit_movsx(b, sw, 8, R_EAX, xop_reg(R_EAX));
+                }
+                else
+                {
+                    emit_movzx(b, sw, 8, R_EAX, xop_reg(R_EAX));
+                }
+            }
+            else if (sw == 4 && is_signed)
+            {
+                emit_movsx(b, 4, 8, R_EAX, xop_reg(R_EAX));
+            }
+        }
+
+        X86Mem scratch = xop_vreg(ctx, in->result).u.mem;
+        if (sw == 8 && !is_signed)
+        {
+            emit_test_reg(b, 8, R_EAX);
+            size_t big_field = emit_jcc_pending(b, CC_S);
+            emit_mov(b, 8, xop_mem(scratch), xop_reg(R_EAX));
+            emit_fild(ctx, 8, scratch);
+            emit_fstpt(ctx, scratch);
+            size_t small_done = emit_jmp_pending(b);
+
+            size_t big_off = bytebuf_len(b);
+            emit_mov(b, 8, xop_reg(R_ECX), xop_reg(R_EAX));
+            emit_bit_imm(b, X86_XOP_BTR, R_ECX, 63);
+            emit_mov(b, 8, xop_mem(scratch), xop_reg(R_ECX));
+            emit_fild(ctx, 8, scratch);
+            emit_load_2pow63_ld(ctx);
+            emit_faddp(ctx);
+            emit_fstpt(ctx, scratch);
+
+            size_t done_off = bytebuf_len(b);
+            patch_rel32(b, big_field, big_off);
+            patch_rel32(b, small_done, done_off);
+        }
+        else
+        {
+            emit_mov(b, 8, xop_mem(scratch), xop_reg(R_EAX));
+            emit_fild(ctx, 8, scratch);
+            emit_fstpt(ctx, scratch);
+        }
+        x87_balance(ctx);
+        return;
+    }
+
     u8 mf = dw == 4 ? MF_FLOAT : MF_DOUBLE;
     IrOperand sx = in->ops[0];
     u8 sw;
@@ -1957,6 +2201,61 @@ static void lower_ftoi(IrInstr *in, CodegenCtx *ctx)
     u8 dw = vreg_width(ctx, in->result);
     bool is_signed = ir_vreg_signed(ctx->mod, in->result);
     u8 sw = fconv_src_width(ctx, in->ops[0]);
+
+    if (sw == 16)
+    {
+        /* fisttp truncates toward zero; the dst slot's low 8 bytes are the target. */
+        ByteBuf *b = ctx->buf;
+        X86Mem src = x87_slot(ctx, in->ops[0]);
+        X86Mem scratch = xop_vreg(ctx, in->result).u.mem;
+        if (dw == 8 && is_signed)
+        {
+            emit_fldt(ctx, src);
+            emit_fisttp(ctx, 8, scratch);
+            emit_mov(b, 8, xop_reg(R_EAX), xop_mem(scratch));
+            emit_mov(b, 8, xop_vreg(ctx, in->result), xop_reg(R_EAX));
+        }
+        else if (dw == 8)
+        {
+            /* v ≥ 2^63: subtract 2^63, re-truncate, set bit 63; else keep the plain truncation. */
+            emit_load_2pow63_ld(ctx);
+            emit_fldt(ctx, src);
+            emit_fucomip(ctx); /* v vs 2^63 */
+            size_t fast_field = emit_jcc_pending(b, CC_B);
+
+            emit_fldt(ctx, src);
+            emit_fsubrp(ctx);
+            emit_fisttp(ctx, 8, scratch);
+            emit_mov(b, 8, xop_reg(R_EAX), xop_mem(scratch));
+            emit_bit_imm(b, X86_XOP_BTS, R_EAX, 63);
+            size_t slow_done = emit_jmp_pending(b);
+
+            /* The fast path re-enters with the leftover 2^63 still on the stack. */
+            x87_set_depth(ctx, 1);
+            size_t fast_off = bytebuf_len(b);
+            emit_fldt(ctx, src);
+            emit_fisttp(ctx, 8, scratch);
+            emit_mov(b, 8, xop_reg(R_EAX), xop_mem(scratch));
+            emit_fstp_st0(ctx); /* drop the leftover 2^63 */
+
+            size_t done_off = bytebuf_len(b);
+            patch_rel32(b, fast_field, fast_off);
+            patch_rel32(b, slow_done, done_off);
+            emit_mov(b, 8, xop_vreg(ctx, in->result), xop_reg(R_EAX));
+        }
+        else
+        {
+            /* Signed: dword window (0x80000000 indefinite); unsigned: qword; the store masks. */
+            bool w32 = is_signed;
+            emit_fldt(ctx, src);
+            emit_fisttp(ctx, w32 ? 4 : 8, scratch);
+            emit_mov(b, w32 ? 4 : 8, xop_reg(R_EAX), xop_mem(scratch));
+            emit_mov(b, dw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
+        }
+        x87_balance(ctx);
+        return;
+    }
+
     u8 mf = sw == 4 ? MF_FLOAT : MF_DOUBLE;
 
     emit_fp_source_to_xmm0(ctx, in->ops[0], sw);
@@ -1986,6 +2285,36 @@ static void lower_fconv(IrInstr *in, CodegenCtx *ctx)
 {
     u8 dw = vreg_width(ctx, in->result);
     u8 sw = fconv_src_width(ctx, in->ops[0]);
+
+    if (dw == 16 || sw == 16)
+    {
+        /* flds/fldl widen to ld; fstps/fstpl round back down. */
+        if (sw == 16)
+        {
+            emit_fldt(ctx, x87_slot(ctx, in->ops[0]));
+            if (dw == 4)
+            {
+                emit_fstps(ctx, xop_vreg(ctx, in->result).u.mem);
+            }
+            else
+            {
+                emit_fstpl(ctx, xop_vreg(ctx, in->result).u.mem);
+            }
+        }
+        else if (sw == 4)
+        {
+            emit_flds(ctx, x87_slot(ctx, in->ops[0]));
+            emit_fstpt(ctx, xop_vreg(ctx, in->result).u.mem);
+        }
+        else
+        {
+            emit_fldl(ctx, x87_slot(ctx, in->ops[0]));
+            emit_fstpt(ctx, xop_vreg(ctx, in->result).u.mem);
+        }
+        x87_balance(ctx);
+        return;
+    }
+
     u8 mf = sw == 4 ? MF_FLOAT : MF_DOUBLE; /* cvt*2s prefix = source precision */
 
     emit_fp_source_to_xmm0(ctx, in->ops[0], sw);
@@ -2000,6 +2329,35 @@ static void lower_fconv(IrInstr *in, CodegenCtx *ctx)
 static void lower_fbin(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
+    if (w == 16)
+    {
+        /* m80 has no memory-operand arithmetic: fldt both, <fop>p st(1), fstpt. */
+        emit_fldt(ctx, x87_slot(ctx, in->ops[0]));
+        emit_fldt(ctx, x87_slot(ctx, in->ops[1]));
+        switch (in->opcode)
+        {
+            case OP_FADD:
+                emit_faddp(ctx);
+                break;
+            case OP_FSUB:
+                emit_fsubp(ctx);
+                break;
+            case OP_FMUL:
+                emit_fmulp(ctx);
+                break;
+            case OP_FDIV:
+                emit_fdivp(ctx);
+                break;
+            default:
+                codegen_error(ctx, "unsupported long-double arithmetic opcode %s",
+                              ir_opcode_name(in->opcode));
+                emit_ud2(ctx->buf);
+                return;
+        }
+        emit_fstpt(ctx, xop_vreg(ctx, in->result).u.mem);
+        x87_balance(ctx);
+        return;
+    }
     u8 mf = w == 4 ? MF_FLOAT : MF_DOUBLE;
     const ArithSpec *s = &arith_specs[in->opcode];
     ByteBuf *b = ctx->buf;
@@ -2027,6 +2385,15 @@ static void lower_fbin(IrInstr *in, CodegenCtx *ctx)
 static void lower_fneg(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
+    if (w == 16)
+    {
+        /* fchs flips the sign bit of st(0) in place. */
+        emit_fldt(ctx, x87_slot(ctx, in->ops[0]));
+        emit_fchs(ctx);
+        emit_fstpt(ctx, xop_vreg(ctx, in->result).u.mem);
+        x87_balance(ctx);
+        return;
+    }
     ByteBuf *b = ctx->buf;
 
     emit_fp_source_to_xmm0(ctx, in->ops[0], w);
@@ -2053,6 +2420,68 @@ static void lower_fcmp(IrInstr *in, CodegenCtx *ctx)
 {
     u8 rw = vreg_width(ctx, in->result);
     u8 sw = in->ops[0].is_imm ? 8 : vreg_width(ctx, in->ops[0].u.vreg);
+
+    if (sw == 16)
+    {
+        /* fucomip lhs vs rhs (rhs pushed first); an imm RHS is 0.0 from fldz. */
+        ByteBuf *b = ctx->buf;
+        IrOperand rhs = in->ops[1];
+        if (rhs.is_imm)
+        {
+            if (rhs.u.imm != 0)
+            {
+                codegen_error(ctx, "nonzero immediate in a long-double compare");
+                emit_ud2(b);
+                return;
+            }
+            emit_fldz(ctx);
+        }
+        else
+        {
+            emit_fldt(ctx, x87_slot(ctx, rhs));
+        }
+        emit_fldt(ctx, x87_slot(ctx, in->ops[0]));
+        emit_fucomip(ctx);
+        emit_fstp_st0(ctx);
+
+        switch (in->opcode)
+        {
+            case OP_FCMP_GT:
+                emit_setcc_reg(b, CC_A, R_EAX);
+                break;
+            case OP_FCMP_GE:
+                emit_setcc_reg(b, CC_AE, R_EAX);
+                break;
+            case OP_FCMP_LT:
+                emit_setcc_reg(b, CC_B, R_EAX);
+                emit_setcc_reg(b, CC_NP, R_EDX);
+                emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
+                break;
+            case OP_FCMP_LE:
+                emit_setcc_reg(b, CC_BE, R_EAX);
+                emit_setcc_reg(b, CC_NP, R_EDX);
+                emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
+                break;
+            case OP_FCMP_EQ:
+                emit_setcc_reg(b, CC_E, R_EAX);
+                emit_setcc_reg(b, CC_NP, R_EDX);
+                emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
+                break;
+            case OP_FCMP_NE:
+                emit_setcc_reg(b, CC_NE, R_EAX);
+                emit_setcc_reg(b, CC_P, R_EDX);
+                emit_binop_rhs(b, 1, &arith_specs[OP_OR], R_EAX, xop_reg(R_EDX));
+                break;
+            default:
+                codegen_error(ctx, "unsupported FP compare predicate");
+                return;
+        }
+        emit_movzbl_al_eax(b);
+        emit_mov(b, rw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
+        x87_balance(ctx);
+        return;
+    }
+
     u8 mf = sw == 4 ? MF_FLOAT : MF_DOUBLE;
     ByteBuf *b = ctx->buf;
 
@@ -2498,6 +2927,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         .switch_tables = vec_new(arena),
         .save_area_off = fr.save_area_off,
         .slot_off = fr.slot_off,
+        .fpu_depth = 0,
     };
 
     for (size_t bi = 0; bi < nblocks; bi++)

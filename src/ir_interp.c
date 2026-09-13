@@ -761,26 +761,11 @@ static i64 eval_unreachable(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 1;
 }
 
-/* Exact FP conversion boundaries and the u64 sign bit. */
+/* Conversion boundaries at long-double precision (2^31/2^63/2^64 exact). */
 #define U64_SIGN_BIT (1ULL << 63)
-#define F32_TWO_63 9223372036854775808.0f
-#define F64_TWO_31 2147483648.0
-#define F64_TWO_63 9223372036854775808.0
-#define F64_TWO_64 18446744073709551616.0
-
-/* FP conversions. */
-static double fp_bits_to_double(i64 bits, u8 width)
-{
-    if (width == 4)
-    {
-        float f;
-        memcpy(&f, &bits, 4);
-        return f;
-    }
-    double d;
-    memcpy(&d, &bits, 8);
-    return d;
-}
+#define LDBL_TWO_31 2147483648.0L
+#define LDBL_TWO_63 9223372036854775808.0L
+#define LDBL_TWO_64 18446744073709551616.0L
 
 /* Write an FP pattern into a vreg: the low `width` bytes, or the pair for 16. */
 static void store_fp_bits(InterpCtx *ctx, i64 *regs, u32 vreg, const void *bits, u8 width)
@@ -799,10 +784,52 @@ static u8 operand_fp_width(InterpCtx *ctx, IrOperand o)
     return o.is_imm ? 8 : ctx->mod->widths[o.u.vreg];
 }
 
-/* cvttsd2si semantics: truncate toward zero; NaN/out-of-i64-range → INT64_MIN. */
-static i64 trunc_to_i64(double d)
+/* Read an FP operand into the host long-double channel at its own width. */
+static long double read_fp_value(InterpCtx *ctx, i64 *regs, IrOperand o, u8 w)
 {
-    if (d != d || d >= F64_TWO_63 || d < -F64_TWO_63)
+    if (w == 16)
+    {
+        ASSERT(!o.is_imm && !o.is_global && !o.is_func); /* width-16 ⇒ vreg */
+        u8 cell[16];
+        read_cell(ctx, regs, o.u.vreg, cell);
+        long double v;
+        memcpy(&v, cell, sizeof(v));
+        return v;
+    }
+    i64 bits = operand_val(ctx, o, regs);
+    if (w == 4)
+    {
+        float f;
+        memcpy(&f, &bits, 4);
+        return (long double) f;
+    }
+    double d;
+    memcpy(&d, &bits, 8);
+    return (long double) d;
+}
+
+/* Round a host long double back to the destination precision (4/8 re-round). */
+static void store_fp_value(InterpCtx *ctx, i64 *regs, u32 vreg, long double v, u8 dw)
+{
+    if (dw == 16)
+    {
+        write_cell(ctx, regs, vreg, &v);
+        return;
+    }
+    if (dw == 4)
+    {
+        float f = (float) v;
+        store_fp_bits(ctx, regs, vreg, &f, 4);
+        return;
+    }
+    double d = (double) v;
+    store_fp_bits(ctx, regs, vreg, &d, 8);
+}
+
+/* cvttsd2si semantics: truncate toward zero; NaN/out-of-i64-range → INT64_MIN. */
+static i64 trunc_to_i64_long(long double d)
+{
+    if (d != d || d >= LDBL_TWO_63 || d < -LDBL_TWO_63)
     {
         return INT64_MIN;
     }
@@ -814,68 +841,52 @@ static i64 eval_itof(IrInstr *in, InterpCtx *ctx, i64 *regs)
     i64 src = operand_val(ctx, in->ops[0], regs);
     bool is_signed = in->ops[0].is_imm || ir_vreg_signed(ctx->mod, in->ops[0].u.vreg);
     u8 dw = ctx->mod->widths[in->result];
+    long double v;
     if (is_signed || (u64) src < U64_SIGN_BIT)
     {
-        if (dw == 4)
-        {
-            float f = (float) (i64) src;
-            store_fp_bits(ctx, regs, in->result, &f, 4);
-        }
-        else
-        {
-            double d = (double) (i64) src;
-            store_fp_bits(ctx, regs, in->result, &d, 8);
-        }
-        return 0;
-    }
-    /* u64 ≥ 2^63: clear the top bit, convert, add back 2^63 (codegen mirror). */
-    u64 y = (u64) src & ~U64_SIGN_BIT;
-    if (dw == 4)
-    {
-        float f = (float) (u64) y;
-        f = f + F32_TWO_63;
-        store_fp_bits(ctx, regs, in->result, &f, 4);
+        v = (long double) (i64) src;
     }
     else
     {
-        double d = (double) (u64) y + F64_TWO_63;
-        store_fp_bits(ctx, regs, in->result, &d, 8);
+        /* u64 ≥ 2^63: clear the top bit, convert, add back 2^63. */
+        u64 y = (u64) src & ~U64_SIGN_BIT;
+        v = (long double) (u64) y + LDBL_TWO_63;
     }
+    store_fp_value(ctx, regs, in->result, v, dw);
     return 0;
 }
 
 static i64 eval_ftoi(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 bits = operand_val(ctx, in->ops[0], regs);
-    double d = fp_bits_to_double(bits, operand_fp_width(ctx, in->ops[0]));
+    long double d = read_fp_value(ctx, regs, in->ops[0], operand_fp_width(ctx, in->ops[0]));
     u8 dw = ctx->mod->widths[in->result];
     bool is_signed = ir_vreg_signed(ctx->mod, in->result);
     i64 t;
     if (dw == 8 && is_signed)
     {
         /* Signed 64: i64 window; NaN/out-of-range brand INT64_MIN. */
-        t = trunc_to_i64(d);
+        t = trunc_to_i64_long(d);
     }
     else if (dw == 8)
     {
         /* Unsigned 64: cvttsd2si, then for d ≥ 2^63 subtract 2^63 and set bit 63. */
-        if (d != d || d < -F64_TWO_63 || d >= F64_TWO_64)
+        if (d != d || d < -LDBL_TWO_63 || d >= LDBL_TWO_64)
         {
             t = INT64_MIN;
         }
-        else if (d < F64_TWO_63)
+        else if (d < LDBL_TWO_63)
         {
-            t = trunc_to_i64(d);
+            t = trunc_to_i64_long(d);
         }
         else
         {
-            t = (i64) ((u64) trunc_to_i64(d - F64_TWO_63) | U64_SIGN_BIT);
+            t = (i64) ((u64) trunc_to_i64_long(d - LDBL_TWO_63) | U64_SIGN_BIT);
         }
     }
     else if (is_signed)
     {
         /* Narrow signed: i32 window (x86's 0x80000000 out-of-range brand). */
-        if (d != d || d >= F64_TWO_31 || d < -F64_TWO_31)
+        if (d != d || d >= LDBL_TWO_31 || d < -LDBL_TWO_31)
         {
             t = INT32_MIN;
         }
@@ -887,7 +898,7 @@ static i64 eval_ftoi(IrInstr *in, InterpCtx *ctx, i64 *regs)
     else
     {
         /* Narrow unsigned: i64 window, masked by the width pass. */
-        t = trunc_to_i64(d);
+        t = trunc_to_i64_long(d);
     }
     regs[in->result] = t;
     apply_vreg_width(ctx, regs, in->result);
@@ -896,18 +907,9 @@ static i64 eval_ftoi(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
 static i64 eval_fconv(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 bits = operand_val(ctx, in->ops[0], regs);
-    double d = fp_bits_to_double(bits, operand_fp_width(ctx, in->ops[0]));
+    long double v = read_fp_value(ctx, regs, in->ops[0], operand_fp_width(ctx, in->ops[0]));
     u8 dw = ctx->mod->widths[in->result];
-    if (dw == 4)
-    {
-        float f = (float) d;
-        store_fp_bits(ctx, regs, in->result, &f, 4);
-    }
-    else
-    {
-        store_fp_bits(ctx, regs, in->result, &d, 8);
-    }
+    store_fp_value(ctx, regs, in->result, v, dw);
     return 0;
 }
 
@@ -918,100 +920,53 @@ static u8 fp_operand_width(InterpCtx *ctx, IrOperand o, u8 dw)
     return o.is_imm ? dw : ctx->mod->widths[o.u.vreg];
 }
 
-/* FP arithmetic. Width 4 re-rounds through `float` at every step — never
-   compute the float operands in double precision (the #1 interp drift trap).
-   Immediates adopt the destination width, so a float-1.0 pattern stays a
-   float. */
+/* FP arithmetic on the host long-double channel, re-rounded per destination width. */
 static i64 eval_fbin(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     u8 dw = ctx->mod->widths[in->result];
-    i64 lb = operand_val(ctx, in->ops[0], regs);
-    i64 rb = operand_val(ctx, in->ops[1], regs);
-    u8 lw = fp_operand_width(ctx, in->ops[0], dw);
-    u8 rw = fp_operand_width(ctx, in->ops[1], dw);
-
-    if (dw == 4)
+    IrOperand l = in->ops[0];
+    IrOperand r = in->ops[1];
+    u8 lw = fp_operand_width(ctx, l, dw);
+    u8 rw = fp_operand_width(ctx, r, dw);
+    long double a = read_fp_value(ctx, regs, l, lw);
+    long double b = read_fp_value(ctx, regs, r, rw);
+    long double rr;
+    switch (in->opcode)
     {
-        float a = (float) fp_bits_to_double(lb, lw);
-        float b = (float) fp_bits_to_double(rb, rw);
-        float r;
-        switch (in->opcode)
-        {
-            case OP_FADD:
-                r = a + b;
-                break;
-            case OP_FSUB:
-                r = a - b;
-                break;
-            case OP_FMUL:
-                r = a * b;
-                break;
-            case OP_FDIV:
-                r = a / b;
-                break;
-            default:
-                ASSERT(false && "eval_fbin dispatches only to the FP arithmetic opcodes");
-                return 1;
-        }
-        store_fp_bits(ctx, regs, in->result, &r, 4);
+        case OP_FADD:
+            rr = a + b;
+            break;
+        case OP_FSUB:
+            rr = a - b;
+            break;
+        case OP_FMUL:
+            rr = a * b;
+            break;
+        case OP_FDIV:
+            rr = a / b;
+            break;
+        default:
+            ASSERT(false && "eval_fbin dispatches only to the FP arithmetic opcodes");
+            return 1;
     }
-    else
-    {
-        double a = fp_bits_to_double(lb, lw);
-        double b = fp_bits_to_double(rb, rw);
-        double r;
-        switch (in->opcode)
-        {
-            case OP_FADD:
-                r = a + b;
-                break;
-            case OP_FSUB:
-                r = a - b;
-                break;
-            case OP_FMUL:
-                r = a * b;
-                break;
-            case OP_FDIV:
-                r = a / b;
-                break;
-            default:
-                ASSERT(false && "eval_fbin dispatches only to the FP arithmetic opcodes");
-                return 1;
-        }
-        store_fp_bits(ctx, regs, in->result, &r, 8);
-    }
+    store_fp_value(ctx, regs, in->result, rr, dw);
     return 0;
 }
 
 static i64 eval_fneg(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 bits = operand_val(ctx, in->ops[0], regs);
     u8 dw = ctx->mod->widths[in->result];
     u8 sw = fp_operand_width(ctx, in->ops[0], dw);
-    if (dw == 4)
-    {
-        float f = (float) fp_bits_to_double(bits, sw);
-        f = -f;
-        store_fp_bits(ctx, regs, in->result, &f, 4);
-    }
-    else
-    {
-        double d = fp_bits_to_double(bits, sw);
-        d = -d;
-        store_fp_bits(ctx, regs, in->result, &d, 8);
-    }
+    long double v = read_fp_value(ctx, regs, in->ops[0], sw);
+    store_fp_value(ctx, regs, in->result, -v, dw);
     return 0;
 }
 
-/* FP compare with C11 NaN semantics: only != is true for a NaN operand.
-   float→double is exact and monotonic, so the host double compares preserve
-   float ordering bit-for-bit. */
+/* C11 NaN semantics on the host long-double channel (float→ld widening is exact). */
 static i64 eval_fcmp(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
-    i64 lb = operand_val(ctx, in->ops[0], regs);
-    i64 rb = operand_val(ctx, in->ops[1], regs);
-    double a = fp_bits_to_double(lb, operand_fp_width(ctx, in->ops[0]));
-    double b = fp_bits_to_double(rb, operand_fp_width(ctx, in->ops[1]));
+    long double a = read_fp_value(ctx, regs, in->ops[0], operand_fp_width(ctx, in->ops[0]));
+    long double b = read_fp_value(ctx, regs, in->ops[1], operand_fp_width(ctx, in->ops[1]));
     bool r;
     switch (in->opcode)
     {

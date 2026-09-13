@@ -971,10 +971,19 @@ static ExprResult build_incdec_expr(FuncBuilder *ctx, ASTIncDecExpr *ie, IrBlock
         u32 res = alloc_vreg_from_type(ctx, prom);
         if (type_is_fp(prom))
         {
-            /* §6.5.2.4: ++ on FP is `f = f + 1.0` in the FP class — the step
-               rides the exact one bit pattern, never the integer `1`. */
-            i64 one = prom->width == 32 ? 0x3F800000 : 0x3FF0000000000000;
-            ir_emit_binop(bb, step == 1 ? OP_FADD : OP_FSUB, res, pold, ir_operand_imm(one));
+            /* §6.5.2.4: ++ on FP is f = f + 1.0; width-16 has no imm, so the step folds through
+             * ITOF. */
+            if (prom->kind == TYPE_LONG_DOUBLE)
+            {
+                u32 onev = alloc_vreg_from_type(ctx, prom);
+                ir_emit_unary(bb, OP_ITOF, onev, ir_operand_imm(1));
+                ir_emit_binop(bb, step == 1 ? OP_FADD : OP_FSUB, res, pold, ir_operand_vreg(onev));
+            }
+            else
+            {
+                i64 one = prom->width == 32 ? 0x3F800000 : 0x3FF0000000000000;
+                ir_emit_binop(bb, step == 1 ? OP_FADD : OP_FSUB, res, pold, ir_operand_imm(one));
+            }
         }
         else
         {
