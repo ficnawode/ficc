@@ -1337,3 +1337,33 @@ TEST(float, long_double_varargs_overflow_only)
                           "    return 42; }\n",
                           42);
 }
+
+TEST(float, float_h_limits)
+{
+    /* <float.h> limits round-trip through the lexer at each suffix's width. */
+    EXPECT_INTERP_AND_ELF(
+        "#include <float.h>\n"
+        "int main(void) {\n"
+        "    if (FLT_RADIX != 2) return 1;\n"
+        "    if (FLT_EVAL_METHOD != 0) return 2;\n"
+        "    if (FLT_MANT_DIG != 24 || DBL_MANT_DIG != 53 || LDBL_MANT_DIG != 64) return 3;\n"
+        "    if (FLT_DIG != 6 || DBL_DIG != 15 || LDBL_DIG != 18) return 4;\n"
+        "    float epsf = FLT_EPSILON;\n"
+        "    double epsd = DBL_EPSILON;\n"
+        "    long double epsl = LDBL_EPSILON;\n"
+        "    if (1.0f + epsf == 1.0f) return 5;\n"
+        "    if (1.0 + epsd == 1.0) return 6;\n"
+        "    if (1.0L + epsl == 1.0L) return 7;\n"
+        "    if (*(unsigned *) &epsf != 0x34000000U) return 8; /* 2^-23 */\n"
+        "    float bigf = FLT_MAX; if (!(bigf > 1e30f)) return 9;\n"
+        "    double bigd = DBL_MAX; if (!(bigd > 1e300)) return 10;\n"
+        "    long double bigl = LDBL_MAX; if (!(bigl > 1e4900L)) return 11;\n"
+        "    long double minl = LDBL_MIN;\n"
+        "    if (!(minl > 0.0L)) return 12;\n"
+        "    if (*(unsigned long long *) &minl == 0ULL) return 13;\n"
+        "    if (FLT_DECIMAL_DIG != 9 || DBL_DECIMAL_DIG != 17 || LDBL_DECIMAL_DIG != 21)\n"
+        "        return 14;\n"
+        "    return 42;\n"
+        "}\n",
+        42);
+}

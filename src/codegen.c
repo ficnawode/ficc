@@ -890,6 +890,15 @@ static void emit_mov16(ByteBuf *buf, X86Mem src, X86Mem dst)
     emit_mem_operand(buf, R_XMM0, dst);
 }
 
+/* movups r/m ← xmm0 (0F 11): the store half of emit_mov16. */
+static void emit_mov16_store(ByteBuf *buf, X86Mem dst)
+{
+    bytebuf_append(buf, rex(false, false, reg_is_extended(dst.index), reg_is_extended(dst.base)));
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, (u8) (X86_SSE_MOV + 1));
+    emit_mem_operand(buf, R_XMM0, dst);
+}
+
 /* cvtss2sd/cvtsd2ss xmm, xmm; the prefix selects the source precision. */
 static void emit_sse_cvt(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
 {
@@ -2024,6 +2033,14 @@ static void lower_store(IrInstr *in, CodegenCtx *ctx)
         /* Move the value via xmm0 before the destination address is computed. */
         X86Operand val = lowered_operand(ctx, in->ops[0], R_ECX);
         X86Mem indirect = load_ptr(ctx, in->ops[1]);
+        if (val.kind == XOP_IMM)
+        {
+            /* width-16 local zero-init: xorps zeros xmm0, movups stores it. */
+            ASSERT(val.u.imm == 0 && "nonzero immediate in a width-16 store");
+            emit_sse_xor(ctx->buf, 0, R_XMM0, R_XMM0);
+            emit_mov16_store(ctx->buf, indirect);
+            return;
+        }
         emit_mov16(ctx->buf, val.u.mem, indirect);
         return;
     }

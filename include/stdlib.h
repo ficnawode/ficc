@@ -12,6 +12,7 @@ void abort(void);
 int atoi(const char *nptr);
 float strtof(const char *str, char **endptr);
 double strtod(const char *str, char **endptr);
+long double strtold(const char *str, char **endptr);
 int abs(int j);
 char *getenv(const char *name);
 
