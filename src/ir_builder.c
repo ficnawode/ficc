@@ -1350,20 +1350,26 @@ static ExprResult build_cast_expr(FuncBuilder *ctx, ASTCastExpr *ce, IrBlock *bb
     return expr_result(promote_to(ctx, bb, src.value, src_type, target), bb);
 }
 
-/* `__builtin_va_arg`: OP_VA_ARG reads the full 8-byte slot (the backends
-   advance ap), then promote_to converts to the requested type. */
+/* `__builtin_va_arg`: read the raw slot, then promote_to narrows it. */
 static ExprResult build_va_arg_expr(FuncBuilder *ctx, ASTVaArgExpr *va, IrBlock *bb)
 {
     ExprResult ap = build_expr(ctx, va->ap, bb);
     Type *target = type_rvalue(va->type);
-    /* FP va_arg narrows the promoted double slot with FCONV, never a bit-TRUNC. */
-    Type *raw_type = type_is_fp(target) ? type_double() : type_long();
+    Type *raw_type;
+    if (type_is_fp(target))
+    {
+        raw_type = target->kind == TYPE_LONG_DOUBLE ? type_long_double() : type_double();
+    }
+    else
+    {
+        raw_type = type_long();
+    }
     u32 raw = alloc_vreg_from_type(ctx, raw_type);
     ir_emit_va_arg(ap.block, raw, ap.value);
     return expr_result(promote_to(ctx, ap.block, ir_operand_vreg(raw), raw_type, target), ap.block);
 }
 
-/* gp_offset = 8 × GP registers used, fp_offset = 48 + 16 × SSE, overflow in arg order. */
+/* gp_offset = 8×GP, fp_offset = 48+16×SSE; named `long double` params add a 16-aligned slot. */
 static void va_layout(IrFunction *f, i64 *gp, i64 *fp, i64 *skip)
 {
     u32 gp_used = 0, fp_used = 0;
@@ -1372,19 +1378,32 @@ static void va_layout(IrFunction *f, i64 *gp, i64 *fp, i64 *skip)
     for (size_t i = 0; i < n; i++)
     {
         IrParam *p = (IrParam *) vec_get(f->params, i);
-        bool is_fp = type_is_fp(p->type);
-        bool in_register = is_fp ? fp_used < VA_NXMM : gp_used < VA_NGP;
-        if (in_register && is_fp)
+        if (p->type->kind == TYPE_LONG_DOUBLE)
         {
-            fp_used++;
+            overflow_bytes = (overflow_bytes + 15) & ~15;
+            overflow_bytes += 16;
         }
-        else if (in_register)
+        else if (type_is_fp(p->type))
         {
-            gp_used++;
+            if (fp_used < VA_NXMM)
+            {
+                fp_used++;
+            }
+            else
+            {
+                overflow_bytes += 8;
+            }
         }
         else
         {
-            overflow_bytes += 8;
+            if (gp_used < VA_NGP)
+            {
+                gp_used++;
+            }
+            else
+            {
+                overflow_bytes += 8;
+            }
         }
     }
     *gp = (i64) gp_used * 8;

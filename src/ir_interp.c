@@ -51,6 +51,9 @@ struct InterpCtx
     InterpGlobal *globals;
     u32 nglobals;
 
+    /* 16-byte return channel between eval_ret and eval_call. */
+    u8 ret_cell[16];
+
     /* Stable synthetic addresses for function designators / `&f`. */
     u64 *func_addrs;
     u32 nfuncs;
@@ -469,81 +472,105 @@ static bool call_arg_is_fp(InterpCtx *ctx, IrOperand arg)
     return ir_vreg_float(ctx->mod, arg.u.vreg);
 }
 
-/* Build a variadic callee's save/overflow areas (GP 0–47, FP 48–175, overflow in arg order). */
+/* A call arg is the X87 class (width 16): never a GP/SSE register. */
+static bool call_arg_is_ld(InterpCtx *ctx, IrOperand arg)
+{
+    if (arg.is_imm || arg.is_global || arg.is_func)
+    {
+        return false;
+    }
+    return ctx->mod->widths[arg.u.vreg] == 16;
+}
+
+/* Spill GP/SSE args and stack the rest; width-16 args use 16-aligned slots. */
 static bool materialize_varargs(IrInstr *in, InterpCtx *ctx, i64 *regs, Frame *callee_frame)
 {
-    u32 n_ovf = 0, gp = 0, fp = 0;
-    for (u32 a = 0; a < in->extra.call.nargs; a++)
+    u32 nargs = in->extra.call.nargs;
+    u32 stack_bytes = 0;
+    u32 gp_reg = 0, fp_reg = 0;
+    for (u32 a = 0; a < nargs; a++)
     {
-        if (call_arg_is_fp(ctx, in->extra.call.args[a]))
+        IrOperand arg = in->extra.call.args[a];
+        if (call_arg_is_ld(ctx, arg))
         {
-            if (fp < VA_XMM_ARGS)
+            stack_bytes = (stack_bytes + 15) & ~15u;
+            stack_bytes += 16;
+        }
+        else if (call_arg_is_fp(ctx, arg))
+        {
+            if (fp_reg < VA_XMM_ARGS)
             {
-                fp++;
+                fp_reg++;
             }
             else
             {
-                n_ovf++;
+                stack_bytes += 8;
             }
         }
         else
         {
-            if (gp < VA_GP_ARGS)
+            if (gp_reg < VA_GP_ARGS)
             {
-                gp++;
+                gp_reg++;
             }
             else
             {
-                n_ovf++;
+                stack_bytes += 8;
             }
         }
     }
 
     u8 *save_area = interp_alloc(ctx, VA_SAVE_BYTES);
-    if (!save_area)
+    /* +16 slack keeps the overflow base 16-aligned (and never NULL). */
+    u8 *raw_ovf = interp_alloc(ctx, stack_bytes + 16);
+    if (!save_area || !raw_ovf)
     {
         return false;
     }
+    u8 *overflow_area = (u8 *) (((uintptr_t) raw_ovf + 15) & ~(uintptr_t) 15);
     memset(save_area, 0, VA_SAVE_BYTES);
-    /* Always allocate one slot, matching the ABI's never-NULL overflow area. */
-    u8 *overflow_area = interp_alloc(ctx, (n_ovf ? n_ovf : 1) * 8);
-    if (!overflow_area)
-    {
-        return false;
-    }
 
-    gp = 0;
-    fp = 0;
-    u32 ovf_slot = 0;
-    for (u32 a = 0; a < in->extra.call.nargs; a++)
+    gp_reg = 0;
+    fp_reg = 0;
+    u32 ovf_off = 0;
+    for (u32 a = 0; a < nargs; a++)
     {
         IrOperand arg = in->extra.call.args[a];
-        i64 v = operand_val(ctx, arg, regs);
-        if (call_arg_is_fp(ctx, arg))
+        if (call_arg_is_ld(ctx, arg))
         {
-            if (fp < VA_XMM_ARGS)
+            ovf_off = (ovf_off + 15) & ~15u;
+            ASSERT(!arg.is_imm && !arg.is_global && !arg.is_func);
+            memcpy(overflow_area + ovf_off, &regs[arg.u.vreg], 8);
+            memcpy(overflow_area + ovf_off + 8, &regs[ctx->nregs + arg.u.vreg], 8);
+            ovf_off += 16;
+        }
+        else if (call_arg_is_fp(ctx, arg))
+        {
+            i64 v = operand_val(ctx, arg, regs);
+            if (fp_reg < VA_XMM_ARGS)
             {
                 /* The promoted double value sits in the low 8 bytes of the 16-byte slot. */
-                memcpy(save_area + VA_GP_BYTES + fp * VA_XMM_STRIDE, &v, 8);
-                fp++;
+                memcpy(save_area + VA_GP_BYTES + fp_reg * VA_XMM_STRIDE, &v, 8);
+                fp_reg++;
             }
             else
             {
-                memcpy(overflow_area + ovf_slot * 8, &v, 8);
-                ovf_slot++;
+                memcpy(overflow_area + ovf_off, &v, 8);
+                ovf_off += 8;
             }
         }
         else
         {
-            if (gp < VA_GP_ARGS)
+            i64 v = operand_val(ctx, arg, regs);
+            if (gp_reg < VA_GP_ARGS)
             {
-                memcpy(save_area + gp * 8, &v, 8);
-                gp++;
+                memcpy(save_area + gp_reg * 8, &v, 8);
+                gp_reg++;
             }
             else
             {
-                memcpy(overflow_area + ovf_slot * 8, &v, 8);
-                ovf_slot++;
+                memcpy(overflow_area + ovf_off, &v, 8);
+                ovf_off += 8;
             }
         }
     }
@@ -581,8 +608,16 @@ static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
     ctx->block_map = saved_block_map;
     if (in->result != NO_VREG)
     {
-        regs[in->result] = ret;
-        apply_vreg_width(ctx, regs, in->result);
+        if (ctx->mod->widths[in->result] == 16)
+        {
+            /* The callee's eval_ret staged the full cell in ctx->ret_cell. */
+            write_cell(ctx, regs, in->result, ctx->ret_cell);
+        }
+        else
+        {
+            regs[in->result] = ret;
+            apply_vreg_width(ctx, regs, in->result);
+        }
     }
     return 0;
 }
@@ -617,7 +652,7 @@ static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* __builtin_va_arg: result floatness picks the fp (16-byte) or gp (8-byte) register walk. */
+/* The result width/class picks the va_arg walk (ld: overflow-only). */
 static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     u8 *ap = resolve_ptr(ctx, in->ops[0], regs);
@@ -627,6 +662,15 @@ static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs)
     }
     VaFields va;
     memcpy(&va, ap, sizeof(va));
+    if (ctx->mod->widths[in->result] == 16)
+    {
+        /* X87 args ride the overflow area only: align up to 16, read 16, bump 16. */
+        u64 src = (va.overflow + 15) & ~15ULL;
+        va.overflow = src + 16;
+        memcpy(ap, &va, sizeof(va));
+        write_cell(ctx, regs, in->result, (u8 *) (uintptr_t) src);
+        return 0;
+    }
     bool is_fp = ir_vreg_float(ctx->mod, in->result);
     u32 *off = is_fp ? &va.fp_offset : &va.gp_offset;
     u32 limit = is_fp ? VA_SAVE_BYTES : VA_GP_BYTES;
@@ -704,7 +748,15 @@ static i64 eval_ret(IrInstr *in, InterpCtx *ctx, i64 *regs)
     i64 result = 0;
     if (in->nops > 0)
     {
-        result = operand_val(ctx, in->ops[0], regs);
+        IrOperand val = in->ops[0];
+        if (!val.is_imm && !val.is_global && !val.is_func && ctx->mod->widths[val.u.vreg] == 16)
+        {
+            read_cell(ctx, regs, val.u.vreg, ctx->ret_cell);
+        }
+        else
+        {
+            result = operand_val(ctx, val, regs);
+        }
     }
     ctx->returned = true;
     return result;

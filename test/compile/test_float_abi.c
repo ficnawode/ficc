@@ -82,3 +82,66 @@ TEST(float_abi, printf_many_doubles_overflow)
         unlink(paths[i]);
     }
 }
+
+TEST(float_abi, printf_long_double_via_glibc)
+{
+    /* A stack-passed ld variadic argument that glibc's va_arg walk reads back. */
+    char src[256], obj[256], bin[256];
+    const char *prog = "int printf(const char *fmt, ...);\n"
+                       "int main(void) {\n"
+                       "    long double x = 1.75L;\n"
+                       "    printf(\"%%.2Lf\\n\", x);\n"
+                       "    printf(\"%%.2Lf %%.2f %%.2Lf %%d\\n\", 2.5L, 3.25, 4.5L, 9);\n"
+                       "    printf(\"%%d %%.2Lf\\n\", 7, 3.5L);\n"
+                       "    return 42;\n"
+                       "}\n";
+    drv_write_src(src, sizeof(src), "plf", prog);
+    drv_path(obj, sizeof(obj), "plf_obj", "o");
+    drv_path(bin, sizeof(bin), "plf_bin", "bin");
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+             "%s -c %s -o %s >/dev/null 2>&1 && gcc -no-pie %s -o %s "
+             ">/dev/null 2>&1 && %s",
+             FICC_BIN, src, obj, obj, bin, bin);
+    int rc = tc_run_shell(cmd);
+    EXPECT_EQ(rc, 42);
+
+    char *paths[] = {src, obj, bin};
+    for (size_t i = 0; i < 3; i++)
+    {
+        unlink(paths[i]);
+    }
+}
+
+TEST(float_abi, long_double_libm_call)
+{
+    /* A `long double` libm call: stack arg in, %st0 return out. */
+    char src[256], obj[256], bin[256];
+    const char *prog = "long double floorl(long double);\n"
+                       "int main(void) {\n"
+                       "    long double r = floorl(3.75L);\n"
+                       "    if (r != 3.0L) return 1;\n"
+                       "    if (floorl(-1.25L) != -2.0L) return 2;\n"
+                       "    long double d = floorl(100.0L);\n"
+                       "    if (d != 100.0L) return 3;\n"
+                       "    return 42;\n"
+                       "}\n";
+    drv_write_src(src, sizeof(src), "floorl", prog);
+    drv_path(obj, sizeof(obj), "floorl_obj", "o");
+    drv_path(bin, sizeof(bin), "floorl_bin", "bin");
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd),
+             "%s -c %s -o %s >/dev/null 2>&1 && gcc -no-pie %s -lm -o %s "
+             ">/dev/null 2>&1 && %s",
+             FICC_BIN, src, obj, obj, bin, bin);
+    int rc = tc_run_shell(cmd);
+    EXPECT_EQ(rc, 42);
+
+    char *paths[] = {src, obj, bin};
+    for (size_t i = 0; i < 3; i++)
+    {
+        unlink(paths[i]);
+    }
+}

@@ -1233,3 +1233,107 @@ TEST(float, long_double_subnormal_and_hex_literals)
         "}\n",
         42);
 }
+
+TEST(float, long_double_abi_args_and_returns)
+{
+    /* Stack-passed ld args and %st0 returns, incl. mixed int/double/float calls. */
+    EXPECT_INTERP_AND_ELF(
+        "long double mul(long double a, long double b)\n"
+        "{ return a * b + 1.0L; }\n"
+        "double grad(int i, double d, long double ld, float f, long double l2)\n"
+        "{ return (double) (i + d + ld + (long double) f + l2); }\n"
+        "int main(void){\n"
+        "    if (mul(1.5L, 2.5L) != 4.75L) return 1;\n"
+        "    if (mul(-3.0L, 4.0L) != -11.0L) return 2;\n"
+        "    if (grad(2, 1.5, 2.5L, 1.25f, 5.0L) != 12.25) return 3;\n"
+        "    if (mul(mul(2.0L, 3.0L), 2.0L) != 15.0L) return 4;\n"
+        "    long double r = mul(100.0L, 0.5L);\n"
+        "    if (r != 51.0L) return 5;\n"
+        "    long double eight = mul(1.0L, 7.0L);\n"
+        "    if (*(unsigned long long *) &eight != 0x8000000000000000ULL) return 6;\n"
+        "    if (*(unsigned short *) ((char *) &eight + 8) != 0x4002) return 7;\n"
+        "    return 42; }\n",
+        42);
+    /* Six ints fill GP, then a stack ld between two stack ints. */
+    EXPECT_INTERP_AND_ELF(
+        "long double seven(int a, int b, int c, int d, int e, int f, long double g, int h,\n"
+        "                   int i)\n"
+        "{ return a + b + c + d + e + f + g + h + i; }\n"
+        "int main(void){\n"
+        "    if (seven(1, 2, 3, 4, 5, 6, 7.5L, 8, 9) != 45.5L) return 1;\n"
+        "    if (seven(0, 0, 0, 0, 0, 0, -1.25L, 0, 0) != -1.25L) return 2;\n"
+        "    return 42; }\n",
+        42);
+    /* A %st0 return read before the caller's next x87 op. */
+    EXPECT_INTERP_AND_ELF("long double f(long double a) { return a + 1.0L; }\n"
+                          "long double g(long double a) { return a * 2.0L; }\n"
+                          "int main(void){\n"
+                          "    long double x = f(g(1.5L));\n"
+                          "    if (x != 4.0L) return 1;\n"
+                          "    long double y = g(f(0.5L)) + f(g(2.0L));\n"
+                          "    if (y != 8.0L) return 2;\n"
+                          "    return 42; }\n",
+                          42);
+}
+
+TEST(float, long_double_varargs_overflow_only)
+{
+    /* va_arg(ap, long double) reads only the overflow area. */
+    EXPECT_INTERP_AND_ELF(
+        "long double vsum(int n, ...)\n"
+        "{\n"
+        "    __builtin_va_list ap;\n"
+        "    __builtin_va_start(ap, n);\n"
+        "    long double s = 0.0L;\n"
+        "    int i;\n"
+        "    for (i = 0; i < n; i++) s += __builtin_va_arg(ap, long double);\n"
+        "    __builtin_va_end(ap);\n"
+        "    return s;\n"
+        "}\n"
+        "int main(void){\n"
+        "    if (vsum(3, 1.0L, 2.0L, 3.0L) != 6.0L) return 1;\n"
+        "    if (vsum(1, -0.5L) != -0.5L) return 2;\n"
+        "    if (vsum(2, 10.0L, 20.0L) != 30.0L) return 3;\n"
+        "    /* 9 tail ld args: 16-byte slots, 144 overflow bytes. */\n"
+        "    if (vsum(9, 1.0L,2.0L,3.0L,4.0L,5.0L,6.0L,7.0L,8.0L,9.0L) != 45.0L)\n"
+        "        return 4;\n"
+        "    return 42; }\n",
+        42);
+    /* Named ld params shift the overflow pointer by their 16-byte layout. */
+    EXPECT_INTERP_AND_ELF("long double vsum(int n, long double named, ...)\n"
+                          "{\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, named);\n"
+                          "    long double s = named;\n"
+                          "    int i;\n"
+                          "    for (i = 0; i < n; i++) s += __builtin_va_arg(ap, long double);\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return s;\n"
+                          "}\n"
+                          "int main(void){\n"
+                          "    if (vsum(3, 0.5L, 1.0L, 2.0L, 3.0L) != 6.5L) return 1;\n"
+                          "    if (vsum(1, 100.0L, 1.0L) != 101.0L) return 2;\n"
+                          "    return 42; }\n",
+                          42);
+    /* Mixed tail reads; the ld walk aligns up mid-sequence. */
+    EXPECT_INTERP_AND_ELF("long double vmix(int n, ...)\n"
+                          "{\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, n);\n"
+                          "    long double s = 0.0L;\n"
+                          "    int i;\n"
+                          "    for (i = 0; i < n; i++)\n"
+                          "    {\n"
+                          "        if (i == 0) s += __builtin_va_arg(ap, int);\n"
+                          "        else if (i == 1) s += __builtin_va_arg(ap, double);\n"
+                          "        else s += __builtin_va_arg(ap, long double);\n"
+                          "    }\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return s;\n"
+                          "}\n"
+                          "int main(void){\n"
+                          "    if (vmix(3, 7, 1.5, 2.5L) != 11.0L) return 1;\n"
+                          "    if (vmix(3, 1, 2.0, 0.5L) != 3.5L) return 2;\n"
+                          "    return 42; }\n",
+                          42);
+}
