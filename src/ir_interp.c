@@ -56,18 +56,19 @@ struct InterpCtx
     u32 nfuncs;
 };
 
-/* --- SysV x86-64 varargs ABI --- (6 GP slots + a 128-byte XMM reservation) */
+/* --- SysV x86-64 varargs ABI --- (6 GP slots + 8 xmm slots at a 16-byte stride) */
 #define VA_GP_ARGS 6
 #define VA_GP_BYTES (VA_GP_ARGS * 8) /* 48 */
-#define VA_XMM_BYTES 128
-#define VA_SAVE_BYTES (VA_GP_BYTES + VA_XMM_BYTES) /* 176 */
+#define VA_XMM_ARGS 8
+#define VA_XMM_STRIDE 16
+#define VA_SAVE_BYTES (VA_GP_BYTES + VA_XMM_ARGS * VA_XMM_STRIDE) /* 176 */
 
 /* Call-stack entry with register file; variadic callees get va_list regions. */
 typedef struct
 {
     i64 *regs;
     u8 *va_save;     /* register save area (VA_SAVE_BYTES), or NULL */
-    u8 *va_overflow; /* stacked (arg-index >= VA_GP_ARGS) values, 8 bytes each */
+    u8 *va_overflow; /* class-overflowed args, 8 bytes each */
 } Frame;
 
 /* --- Function pseudo-addresses --- */
@@ -429,31 +430,93 @@ static void bind_args(IrInstr *in, InterpCtx *ctx, i64 *regs, Frame *callee_fram
     }
 }
 
-/* Materialize a variadic callee's va_list regions like the codegen spill. */
+/* A call arg is FP when it's an FP-classed vreg; immediates/addresses are GP. */
+static bool call_arg_is_fp(InterpCtx *ctx, IrOperand arg)
+{
+    if (arg.is_imm || arg.is_global || arg.is_func)
+    {
+        return false;
+    }
+    return ir_vreg_float(ctx->mod, arg.u.vreg);
+}
+
+/* Build a variadic callee's save/overflow areas (GP 0–47, FP 48–175, overflow in arg order). */
 static bool materialize_varargs(IrInstr *in, InterpCtx *ctx, i64 *regs, Frame *callee_frame)
 {
+    u32 n_ovf = 0, gp = 0, fp = 0;
+    for (u32 a = 0; a < in->extra.call.nargs; a++)
+    {
+        if (call_arg_is_fp(ctx, in->extra.call.args[a]))
+        {
+            if (fp < VA_XMM_ARGS)
+            {
+                fp++;
+            }
+            else
+            {
+                n_ovf++;
+            }
+        }
+        else
+        {
+            if (gp < VA_GP_ARGS)
+            {
+                gp++;
+            }
+            else
+            {
+                n_ovf++;
+            }
+        }
+    }
+
     u8 *save_area = interp_alloc(ctx, VA_SAVE_BYTES);
     if (!save_area)
     {
         return false;
     }
-    for (u32 i = 0; i < VA_GP_ARGS; i++)
-    {
-        i64 v = i < in->extra.call.nargs ? operand_val(ctx, in->extra.call.args[i], regs) : 0;
-        memcpy(save_area + i * 8, &v, 8);
-    }
-    size_t overflow_count =
-        in->extra.call.nargs > VA_GP_ARGS ? (size_t) in->extra.call.nargs - VA_GP_ARGS : 0;
+    memset(save_area, 0, VA_SAVE_BYTES);
     /* Always allocate one slot, matching the ABI's never-NULL overflow area. */
-    u8 *overflow_area = interp_alloc(ctx, (overflow_count ? overflow_count : 1) * 8);
+    u8 *overflow_area = interp_alloc(ctx, (n_ovf ? n_ovf : 1) * 8);
     if (!overflow_area)
     {
         return false;
     }
-    for (size_t j = 0; j < overflow_count; j++)
+
+    gp = 0;
+    fp = 0;
+    u32 ovf_slot = 0;
+    for (u32 a = 0; a < in->extra.call.nargs; a++)
     {
-        i64 v = operand_val(ctx, in->extra.call.args[VA_GP_ARGS + j], regs);
-        memcpy(overflow_area + j * 8, &v, 8);
+        IrOperand arg = in->extra.call.args[a];
+        i64 v = operand_val(ctx, arg, regs);
+        if (call_arg_is_fp(ctx, arg))
+        {
+            if (fp < VA_XMM_ARGS)
+            {
+                /* The promoted double value sits in the low 8 bytes of the 16-byte slot. */
+                memcpy(save_area + VA_GP_BYTES + fp * VA_XMM_STRIDE, &v, 8);
+                fp++;
+            }
+            else
+            {
+                memcpy(overflow_area + ovf_slot * 8, &v, 8);
+                ovf_slot++;
+            }
+        }
+        else
+        {
+            if (gp < VA_GP_ARGS)
+            {
+                memcpy(save_area + gp * 8, &v, 8);
+                gp++;
+            }
+            else
+            {
+                memcpy(overflow_area + ovf_slot * 8, &v, 8);
+                ovf_slot++;
+            }
+        }
     }
     callee_frame->va_overflow = overflow_area;
     callee_frame->va_save = save_area;
@@ -515,7 +578,7 @@ static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs)
     }
     VaFields va = {
         .gp_offset = (u32) in->ops[2].u.imm,
-        .fp_offset = VA_GP_BYTES,
+        .fp_offset = (u32) in->ops[3].u.imm,
         .overflow = frame->va_overflow
                         ? (u64) (uintptr_t) (frame->va_overflow + (u32) in->ops[1].u.imm)
                         : 0,
@@ -525,7 +588,7 @@ static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* __builtin_va_arg(ap, type): the GP-then-overflow walk (SysV sequence). */
+/* __builtin_va_arg: result floatness picks the fp (16-byte) or gp (8-byte) register walk. */
 static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     u8 *ap = resolve_ptr(ctx, in->ops[0], regs);
@@ -535,11 +598,15 @@ static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs)
     }
     VaFields va;
     memcpy(&va, ap, sizeof(va));
+    bool is_fp = ir_vreg_float(ctx->mod, in->result);
+    u32 *off = is_fp ? &va.fp_offset : &va.gp_offset;
+    u32 limit = is_fp ? VA_SAVE_BYTES : VA_GP_BYTES;
+    u32 stride = is_fp ? VA_XMM_STRIDE : 8;
     u64 src;
-    if (va.gp_offset < VA_GP_BYTES)
+    if (*off < limit)
     {
-        src = va.reg_save + va.gp_offset;
-        va.gp_offset += 8;
+        src = va.reg_save + *off;
+        *off += stride;
     }
     else
     {

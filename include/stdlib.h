@@ -10,6 +10,8 @@ void free(void *ptr);
 void exit(int status);
 void abort(void);
 int atoi(const char *nptr);
+float strtof(const char *str, char **endptr);
+double strtod(const char *str, char **endptr);
 int abs(int j);
 char *getenv(const char *name);
 

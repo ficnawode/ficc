@@ -5,6 +5,12 @@
 #include <stdio.h>
 #include <string.h>
 
+/* SysV va_list layout: the xmm save slots begin after the 48-byte GP block. */
+#define VA_GP_BYTES 48
+#define VA_XMM_STRIDE 16
+#define VA_NGP 6
+#define VA_NXMM 8
+
 typedef struct PendingPhi PendingPhi;
 struct PendingPhi
 {
@@ -1341,24 +1347,51 @@ static ExprResult build_va_arg_expr(FuncBuilder *ctx, ASTVaArgExpr *va, IrBlock 
 {
     ExprResult ap = build_expr(ctx, va->ap, bb);
     Type *target = type_rvalue(va->type);
-    u32 raw = alloc_vreg_from_type(ctx, type_long());
+    /* FP va_arg narrows the promoted double slot with FCONV, never a bit-TRUNC. */
+    Type *raw_type = type_is_fp(target) ? type_double() : type_long();
+    u32 raw = alloc_vreg_from_type(ctx, raw_type);
     ir_emit_va_arg(ap.block, raw, ap.value);
-    return expr_result(promote_to(ctx, ap.block, ir_operand_vreg(raw), type_long(), target),
-                       ap.block);
+    return expr_result(promote_to(ctx, ap.block, ir_operand_vreg(raw), raw_type, target), ap.block);
 }
 
-/* va_start/va_end record ap and the offset; the register spill lives in the
-   backends. */
+/* gp_offset = 8 × GP registers used, fp_offset = 48 + 16 × SSE, overflow in arg order. */
+static void va_layout(IrFunction *f, i64 *gp, i64 *fp, i64 *skip)
+{
+    u32 gp_used = 0, fp_used = 0;
+    i64 overflow_bytes = 0;
+    size_t n = vec_size(f->params);
+    for (size_t i = 0; i < n; i++)
+    {
+        IrParam *p = (IrParam *) vec_get(f->params, i);
+        bool is_fp = type_is_fp(p->type);
+        bool in_register = is_fp ? fp_used < VA_NXMM : gp_used < VA_NGP;
+        if (in_register && is_fp)
+        {
+            fp_used++;
+        }
+        else if (in_register)
+        {
+            gp_used++;
+        }
+        else
+        {
+            overflow_bytes += 8;
+        }
+    }
+    *gp = (i64) gp_used * 8;
+    *fp = VA_GP_BYTES + (i64) fp_used * VA_XMM_STRIDE;
+    *skip = overflow_bytes;
+}
+
 static ExprResult build_va_builtin(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *bb)
 {
     if (strcmp(ce->callee, "__builtin_va_start") == 0)
     {
         ExprResult ap = build_expr(ctx, (ASTNode *) vec_get(ce->args, 0), bb);
         (void) build_expr(ctx, (ASTNode *) vec_get(ce->args, 1), ap.block);
-        i64 n_params = (i64) vec_size(ctx->f->params);
-        i64 gp = n_params * 8 < 48 ? n_params * 8 : 48;
-        i64 skip = n_params > 6 ? (n_params - 6) * 8 : 0;
-        ir_emit_va_start(ap.block, ap.value, skip, gp);
+        i64 gp, fp, skip;
+        va_layout(ctx->f, &gp, &fp, &skip);
+        ir_emit_va_start(ap.block, ap.value, skip, gp, fp);
         return expr_void(ap.block);
     }
     if (strcmp(ce->callee, "__builtin_va_end") == 0)
@@ -1389,18 +1422,21 @@ static IrBlock *lower_call_arg(FuncBuilder *ctx, ASTNode *arg, Type *param_type,
         return bb;
     }
     *out = promote_to(ctx, bb, arg_res.value, arg_type, param_type);
-    /* A same-width 8-byte imm argument would be moved at the 4-byte imm width. */
-    if (out->is_imm && type_unqual(param_type)->width == 64)
+    /* An imm arg can't carry class/width to codegen; 8-byte and FP args get a vreg. */
+    if (out->is_imm)
     {
-        u32 carrier = alloc_vreg_from_type(ctx, type_unqual(param_type));
-        ir_emit_unary(bb, OP_ZEXT, carrier, *out);
-        *out = ir_operand_vreg(carrier);
+        Type *pu = type_unqual(param_type);
+        if (pu->width == 64 || type_is_fp(pu))
+        {
+            u32 carrier = alloc_vreg_from_type(ctx, pu);
+            ir_emit_unary(bb, OP_ZEXT, carrier, *out);
+            *out = ir_operand_vreg(carrier);
+        }
     }
     return bb;
 }
 
-/* The parameter type for arg `i`: the signature param, a promotion-ranked
-   variadic tail arg (§6.5.2.2p7), or the arg type. */
+/* Param type for arg `i`: the declared param, a promoted variadic tail arg, or the arg type. */
 static Type *call_param_type(Type *callee_type, size_t i, Type *arg_type)
 {
     size_t n_declared = vec_size(callee_type->func.params);
@@ -1408,7 +1444,12 @@ static Type *call_param_type(Type *callee_type, size_t i, Type *arg_type)
     {
         return (Type *) vec_get(callee_type->func.params, i);
     }
-    return callee_type->func.is_variadic ? type_promote(arg_type) : arg_type;
+    if (!callee_type->func.is_variadic)
+    {
+        return arg_type;
+    }
+    /* §6.5.2.2p7: the variadic tail promotes float → double. */
+    return arg_type->kind == TYPE_FLOAT ? type_double() : type_promote(arg_type);
 }
 
 static ExprResult build_call_expr(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *bb)
@@ -1833,6 +1874,212 @@ static bool fold_constant_ir(ASTNode *node, i64 *out)
     }
 }
 
+static bool fold_float_constant(ASTNode *node, bool *is_float, u64 *bits);
+
+/* Host double ↔ IEEE bit pattern (both end up IEEE-754 on this host). */
+static double fp_bits_to_value(u64 bits, bool is_float)
+{
+    if (is_float)
+    {
+        float f;
+        memcpy(&f, &bits, 4);
+        return (double) f;
+    }
+    double d;
+    memcpy(&d, &bits, 8);
+    return d;
+}
+
+static u64 fp_value_to_bits(double d, bool is_float)
+{
+    if (is_float)
+    {
+        float f = (float) d;
+        u64 bits = 0;
+        memcpy(&bits, &f, 4);
+        return bits;
+    }
+    u64 bits;
+    memcpy(&bits, &d, 8);
+    return bits;
+}
+
+/* Fold an FP constant expression to {is_float, IEEE bits}; ints flow via fold_constant_ir. */
+static bool fold_float_operand(ASTNode *node, bool *is_float, u64 *bits, bool as_double)
+{
+    if (!node)
+    {
+        return false;
+    }
+    if (fold_float_constant(node, is_float, bits))
+    {
+        if (as_double && *is_float)
+        {
+            *bits = fp_value_to_bits(fp_bits_to_value(*bits, true), false);
+            *is_float = false;
+        }
+        return true;
+    }
+    i64 v;
+    if (fold_constant_ir(node, &v))
+    {
+        *bits = fp_value_to_bits((double) v, false);
+        *is_float = false;
+        return true;
+    }
+    return false;
+}
+
+static bool fold_float_constant(ASTNode *node, bool *is_float, u64 *bits)
+{
+    if (!node)
+    {
+        return false;
+    }
+    switch (node->kind)
+    {
+        case AST_FLOAT_LITERAL:
+        {
+            ASTFloatLiteral *fl = ast_as(ASTFloatLiteral, node);
+            *bits = fl->bits;
+            *is_float = fl->kind == FK_FLOAT;
+            return true;
+        }
+        case AST_UNARY_EXPR:
+        {
+            ASTUnaryExpr *u = ast_as(ASTUnaryExpr, node);
+            if (u->op != UN_NEG)
+            {
+                break;
+            }
+            bool f;
+            u64 b;
+            if (!fold_float_operand(u->operand, &f, &b, false))
+            {
+                return false;
+            }
+            *is_float = f;
+            *bits = b ^ (f ? 0x80000000u : 0x8000000000000000u);
+            return true;
+        }
+        case AST_BINARY_EXPR:
+        {
+            ASTBinaryExpr *b = ast_as(ASTBinaryExpr, node);
+            switch (b->op)
+            {
+                case BIN_ADD:
+                case BIN_SUB:
+                case BIN_MUL:
+                case BIN_DIV:
+                {
+                    bool lf, rf;
+                    u64 lb, rb;
+                    if (!fold_float_operand(b->left, &lf, &lb, true) ||
+                        !fold_float_operand(b->right, &rf, &rb, true))
+                    {
+                        return false;
+                    }
+                    double l = fp_bits_to_value(lb, false);
+                    double r = fp_bits_to_value(rb, false);
+                    double d = 0;
+                    switch (b->op)
+                    {
+                        case BIN_ADD:
+                            d = l + r;
+                            break;
+                        case BIN_SUB:
+                            d = l - r;
+                            break;
+                        case BIN_MUL:
+                            d = l * r;
+                            break;
+                        case BIN_DIV:
+                            d = l / r;
+                            break;
+                        default:
+                            return false;
+                    }
+                    *bits = fp_value_to_bits(d, false);
+                    *is_float = false;
+                    return true;
+                }
+                default:
+                    break;
+            }
+            break;
+        }
+        case AST_TERNARY_EXPR:
+        {
+            ASTTernaryExpr *te = ast_as(ASTTernaryExpr, node);
+            i64 cond;
+            if (!fold_constant_ir(te->cond, &cond))
+            {
+                return false;
+            }
+            return fold_float_operand(cond ? te->then_expr : te->else_expr, is_float, bits, false);
+        }
+        case AST_CAST_EXPR:
+        {
+            ASTCastExpr *ce = ast_as(ASTCastExpr, node);
+            Type *tt = type_unqual(ce->target_type);
+            if (tt->kind != TYPE_FLOAT && tt->kind != TYPE_DOUBLE)
+            {
+                break;
+            }
+            bool f;
+            u64 b;
+            if (!fold_float_operand(ce->operand, &f, &b, false))
+            {
+                return false;
+            }
+            double d = fp_bits_to_value(b, f);
+            if (tt->kind == TYPE_FLOAT)
+            {
+                *bits = fp_value_to_bits(d, true);
+                *is_float = true;
+            }
+            else
+            {
+                *bits = fp_value_to_bits(d, false);
+                *is_float = false;
+            }
+            return true;
+        }
+        default:
+            break;
+    }
+    return false;
+}
+
+/* FP const bytes at the object's precision (round-trips double ↔ float via the host). */
+static const u8 *encode_fp_object_bytes(Arena *arena, u64 bits, bool is_float, Type *type)
+{
+    u64 v;
+    if (type->size == 4)
+    {
+        if (is_float)
+        {
+            v = bits & 0xFFFFFFFFu;
+        }
+        else
+        {
+            v = fp_value_to_bits(fp_bits_to_value(bits, false), true);
+        }
+    }
+    else
+    {
+        if (is_float)
+        {
+            v = fp_value_to_bits(fp_bits_to_value(bits, true), false);
+        }
+        else
+        {
+            v = bits;
+        }
+    }
+    return encode_const_bytes(arena, (i64) v, (u32) type->size);
+}
+
 static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *arena);
 
 static GlobalReloc *push_reloc(IrGlobal *g, Arena *arena)
@@ -2025,6 +2272,21 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
         if (target >= 0)
         {
             ir_global_add_reloc(g, w->offset, target, arena);
+            continue;
+        }
+        if (type_is_fp(type_unqual(w->type)))
+        {
+            /* FP elements fold to their IEEE bits at the object's precision. */
+            Type *wt = type_unqual(w->type);
+            bool is_fp;
+            u64 bits;
+            if (!fold_float_constant(w->value, &is_fp, &bits))
+            {
+                ir_error(w->value, "initializer element is not a constant");
+                return false;
+            }
+            const u8 *bytes = encode_fp_object_bytes(arena, bits, is_fp, wt);
+            memcpy(buf + w->offset, bytes, wt->size);
             continue;
         }
         i64 value;

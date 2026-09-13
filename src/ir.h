@@ -267,7 +267,7 @@ IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src);
 IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOperand *args);
 void ir_call_set_variadic(IrInstr *call, bool is_variadic);
 void ir_call_set_indirect(IrInstr *call, IrOperand callee);
-IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offset);
+IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offset, i64 fp_offset);
 IrInstr *ir_emit_va_arg(IrBlock *bb, u32 dst, IrOperand ap);
 IrInstr *ir_emit_va_end(IrBlock *bb, IrOperand ap);
 IrInstr *ir_emit_br(IrBlock *bb, const char *target_label);

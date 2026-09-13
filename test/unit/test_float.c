@@ -85,7 +85,7 @@ TEST(float, keywords_parse)
 {
     EXPECT_PARSE_SUCCEED("float f;\n"
                          "double d;\n");
-    /* Block-scope FP initializers build; file-scope ones are rejected. */
+    /* Block-scope FP initializers build. */
     EXPECT_BUILD_SUCCEED("int main(void) {\n"
                          "    float f = 1.5f;\n"
                          "    double d = 1.5;\n"
@@ -96,8 +96,9 @@ TEST(float, keywords_parse)
                          "    float y = 0x1.8p3f;\n"
                          "    return 0;\n"
                          "}");
-    EXPECT_PARSE_FAIL("double g = 1.5;\n");
-    EXPECT_PARSE_FAIL("static double s = 1.5;\n");
+    /* File-scope and static FP globals serialize through the init machinery. */
+    EXPECT_BUILD_SUCCEED("double g = 1.5;\n");
+    EXPECT_BUILD_SUCCEED("static double s = 1.5;\n");
 }
 
 TEST(float, file_scope_decl_without_init_ok)
@@ -595,4 +596,220 @@ TEST(float, float_subscript_rejected)
     EXPECT_BUILD_SUCCEED("int main(void) { int a[3]; double x; return a[(int)x]; }");
     EXPECT_BUILD_FAIL("int main(void) { int a[3]; double x; return a[x]; }");
     EXPECT_BUILD_FAIL("int main(void) { int a[3]; return a[1.5]; }");
+}
+
+/* ---- SysV FP ABI and file-scope FP globals ---- */
+
+TEST(float, fp_args_mixed_and_overflow_both_backends)
+{
+    /* Independent GP/SSE counters; >8 floats spill to the stack in argument order. */
+    EXPECT_INTERP_AND_ELF("double add(double a, double b) { return a + b; }\n"
+                          "int main(void) { return (int)add(1.5, 2.5); }\n",
+                          4);
+    EXPECT_INTERP_AND_ELF("double mix(int a, double b, int c, double d)\n"
+                          "{ return a + b + c + d; }\n"
+                          "int main(void) { double r = mix(1, 2.0, 3, 4.0);\n"
+                          "    if (r != 10.0) return 1; return 42; }\n",
+                          42);
+    EXPECT_INTERP_AND_ELF("double sum10(double a,double b,double c,double d,double e,double f,\n"
+                          "double g,double h,double i,double j){ return a+b+c+d+e+f+g+h+i+j; }\n"
+                          "int main(void){ double r = sum10(1,2,3,4,5,6,7,8,9,10);\n"
+                          "    if (r != 55.0) return 1; return 42; }\n",
+                          42);
+    EXPECT_INTERP_AND_ELF("int probe(int a,double b,int c,double d,int e,double f,int g,\n"
+                          "double h,int i,double j){ return (int)(a+b+c+d+e+f+g+h+i+j); }\n"
+                          "int main(void){ if (probe(1,1.0,1,1.0,1,1.0,1,1.0,1,1.0) != 10)\n"
+                          "    return 1; if (probe(1,2,3,4,5,6,7,8,9,10) != 55) return 2;\n"
+                          "    return 42; }\n",
+                          42);
+    EXPECT_INTERP_AND_ELF("float fmul(float a, float b) { return a * b; }\n"
+                          "int main(void){ float r = fmul(1.5f, 2.5f);\n"
+                          "    if (r != 3.75f) return 1; return 42; }\n",
+                          42);
+    EXPECT_INTERP_AND_ELF("double ret(double x) { return x; }\n"
+                          "int main(void){ return (int)(ret(42.0)); }\n",
+                          42);
+}
+
+TEST(float, fp_function_pointers)
+{
+    EXPECT_INTERP_AND_ELF("double add(double a, double b) { return a + b; }\n"
+                          "double sub(double a, double b) { return a - b; }\n"
+                          "int main(void){ double (*f)(double,double) = add;\n"
+                          "    if (f(1.5, 2.5) != 4.0) return 1;\n"
+                          "    f = sub;\n"
+                          "    if (f(2.5, 1.5) != 1.0) return 2;\n"
+                          "    return 42; }\n",
+                          42);
+}
+
+TEST(float, variadic_fp_sums)
+{
+    EXPECT_INTERP_AND_ELF("double sum(int n, ...)\n"
+                          "{\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, n);\n"
+                          "    double s = 0.0;\n"
+                          "    for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, double);\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return s;\n"
+                          "}\n"
+                          "int main(void){ double r = sum(4, 1.5, 2.5, 3.5, 4.5);\n"
+                          "    if (r != 12.0) return 1; return 42; }\n",
+                          42);
+    /* Nine trailing doubles cross the SSE save area. */
+    EXPECT_INTERP_AND_ELF(
+        "double sum(int n, ...)\n"
+        "{\n"
+        "    __builtin_va_list ap;\n"
+        "    __builtin_va_start(ap, n);\n"
+        "    double s = 0.0;\n"
+        "    for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, double);\n"
+        "    __builtin_va_end(ap);\n"
+        "    return s;\n"
+        "}\n"
+        "int main(void){ double r = sum(9, 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0);\n"
+        "    if ((int)(r * 10) != 450) return 1; return 42; }\n",
+        42);
+}
+
+TEST(float, variadic_fp_float_promotes_and_narrows)
+{
+    /* A float tail arg promotes to double at the call and va_arg(ap, float) narrows. */
+    EXPECT_INTERP_AND_ELF("float sumf(int n, ...)\n"
+                          "{\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, n);\n"
+                          "    float s = 0.0f;\n"
+                          "    for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, float);\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return s;\n"
+                          "}\n"
+                          "int main(void){ float r = sumf(3, 0.5f, 1.5f, 2.5f);\n"
+                          "    if (r != 4.5f) return 1; return 42; }\n",
+                          42);
+    /* 9 floats → 9 doubles: the last one overflows the SSE save area, narrowing still applies. */
+    EXPECT_INTERP_AND_ELF("float sumf(int n, ...)\n"
+                          "{\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, n);\n"
+                          "    float s = 0.0f;\n"
+                          "    for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, float);\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return s;\n"
+                          "}\n"
+                          "int main(void){ float r = sumf(9, 0.5f,1.5f,2.5f,3.5f,4.5f,5.5f,\n"
+                          "                                 6.5f,7.5f,8.5f);\n"
+                          "    if (r != 40.5f) return 1; return 42; }\n",
+                          42);
+}
+
+TEST(float, variadic_fp_named_params_shift_fp_offset)
+{
+    /* Fixed FP params shift fp_offset to 48 + 16×named, not 48. */
+    EXPECT_INTERP_AND_ELF("double vaf(double first, ...)\n"
+                          "{\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, first);\n"
+                          "    double s = first;\n"
+                          "    s += __builtin_va_arg(ap, double);\n"
+                          "    s += __builtin_va_arg(ap, double);\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return s;\n"
+                          "}\n"
+                          "int main(void){ if (vaf(1.0, 2.0, 3.0) != 6.0) return 1;\n"
+                          "    if (vaf(10.0, 20.0, 30.0) != 60.0) return 2; return 42; }\n",
+                          42);
+    /* Two fixed FP params: the variadic tail starts at slot 80. */
+    EXPECT_INTERP_AND_ELF("double vad(double a, double b, ...)\n"
+                          "{\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, b);\n"
+                          "    return a + b + __builtin_va_arg(ap, double);\n"
+                          "}\n"
+                          "int main(void){ if (vad(1.0, 2.0, 3.0) != 6.0) return 1; return 42; }\n",
+                          42);
+}
+
+TEST(float, variadic_fp_mixed_and_helper_reads)
+{
+    /* Mixed int/double reads in argument order; a va_list walked inside a helper. */
+    EXPECT_INTERP_AND_ELF("double read2(__builtin_va_list ap)\n"
+                          "{\n"
+                          "    double a = __builtin_va_arg(ap, double);\n"
+                          "    double b = __builtin_va_arg(ap, double);\n"
+                          "    return a * 100 + b;\n"
+                          "}\n"
+                          "double via_helper(double first, ...)\n"
+                          "{\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, first);\n"
+                          "    double s = read2(ap);\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return s;\n"
+                          "}\n"
+                          "int main(void){ if (via_helper(1.5, 2.0, 3.0) != 203.0) return 1;\n"
+                          "    return 42; }\n",
+                          42);
+    EXPECT_INTERP_AND_ELF("int named_overflow(int a,int b,int c,int d,int e,int f,int g,\n"
+                          "double x, ...)\n"
+                          "{\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_start(ap, x);\n"
+                          "    double tail = __builtin_va_arg(ap, double);\n"
+                          "    __builtin_va_end(ap);\n"
+                          "    return (int)(a + b + c + d + e + f + g - tail);\n"
+                          "}\n"
+                          "int main(void){ if (named_overflow(1,1,1,1,1,1,1,100.0,200.0) !=\n"
+                          "    7 - 200) return 1; return 42; }\n",
+                          42);
+}
+
+TEST(float, file_scope_fp_globals)
+{
+    /* .data/.rodata/.bss globals, folded const exprs, and the surviving -0.0 sign. */
+    EXPECT_INTERP_AND_ELF("double g = 1.5;\n"
+                          "double gsum = 1.5 + 2.5;\n"
+                          "const double gc = 6.25;\n"
+                          "double gzero;\n"
+                          "double gnzero = -0.0;\n"
+                          "int main(void){\n"
+                          "    if (g != 1.5) return 1;\n"
+                          "    if (gsum != 4.0) return 2;\n"
+                          "    if (gc != 6.25) return 3;\n"
+                          "    if (gzero != 0.0) return 4;\n"
+                          "    if (gnzero != 0.0 || !(1.0 / gnzero < 0.0)) return 5;\n"
+                          "    return 42; }\n",
+                          42);
+    EXPECT_INTERP_AND_ELF("float f = 0.25f;\n"
+                          "float gdiv = 1.0f / 3.0f;\n"
+                          "double garr[3] = {1.5, 2.5, 3.5};\n"
+                          "float farr[4] = {0.5f, 1.5f, 2.5f, 3.5f};\n"
+                          "struct P { double x; int i; double y; } gr = {1.5, 7, 2.5};\n"
+                          "int main(void){\n"
+                          "    if (f != 0.25f) return 1;\n"
+                          "    if (gdiv * 3.0f != 1.0f) return 2;\n"
+                          "    if (garr[1] != 2.5) return 3;\n"
+                          "    if (farr[3] != 3.5f) return 4;\n"
+                          "    if (gr.x != 1.5 || gr.i != 7 || gr.y != 2.5) return 5;\n"
+                          "    if (gr.x + gr.y != 4.0) return 6;\n"
+                          "    return 42; }\n",
+                          42);
+    EXPECT_INTERP_AND_ELF("int main(void)\n"
+                          "{\n"
+                          "    static double blk = 1.75;\n"
+                          "    static float fb = 0.5f;\n"
+                          "    if (blk != 1.75 || fb != 0.5f) return 1;\n"
+                          "    return 42; }\n",
+                          42);
+}
+
+TEST(float, file_scope_fp_nonconstant_rejected)
+{
+    EXPECT_BUILD_FAIL("double g = 1.5;\n"
+                      "static double x = g;\n"
+                      "int main(void) { return 0; }\n");
+    EXPECT_BUILD_FAIL("static double y = x;\n"
+                      "double x;\n"
+                      "int main(void) { return 0; }\n");
 }

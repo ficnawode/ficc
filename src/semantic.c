@@ -1882,6 +1882,17 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
     {
         return PLAN_HANDLED;
     }
+    if (type_is_fp(type_unqual(vd->type)) && vd->init != NULL)
+    {
+        /* FP scalars serialize through the shared plan so all FP folds share one path. */
+        InitPlan *plan = init_plan_new(ctx, vd->type);
+        if (!plan_scalar_write(ctx, plan, type_unqual(vd->type), 0, vd->init, vd->base.loc))
+        {
+            return PLAN_ERROR;
+        }
+        vd->plan = plan;
+        return PLAN_HANDLED;
+    }
     if (vd->init->kind == AST_UNARY_EXPR || vd->init->kind == AST_IDENT)
     {
         return plan_ptr_initializer(ctx, vd) ? PLAN_HANDLED : PLAN_ERROR;

@@ -2790,6 +2790,12 @@ static bool resolve_constant_init(Parser *p, ASTVarDecl *vd, ASTNode *expr)
             return true;
         }
     }
+    /* FP scalars defer to the init planner (ir_builder owns the single FP fold). */
+    if (type_is_fp(type_unqual(vd->type)))
+    {
+        vd->init = expr;
+        return true;
+    }
     i64 value;
     if (folded_const(p, expr, &value))
     {

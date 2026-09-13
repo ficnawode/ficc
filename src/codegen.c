@@ -199,6 +199,13 @@ typedef enum
 #define MF_FLOAT 0xF3
 #define MF_DOUBLE 0xF2
 
+/* SysV va_list register save area: 6 × 8-byte GP slots, then 8 × 16-byte xmm slots. */
+#define VA_GP_BYTES 48
+#define VA_SAVE_BYTES 176
+#define VA_XMM_STRIDE 16
+#define VA_NGP 6
+#define VA_NXMM 8
+
 /* IEEE bit patterns of 2^63, added back by the u64 int→FP sequence. */
 #define F32_BITS_2POW63 0x5F000000
 #define F64_BITS_2POW63 0x43E0000000000000
@@ -980,6 +987,8 @@ typedef void (*LowerFn)(IrInstr *in, CodegenCtx *ctx);
 static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src);
 static void emit_movsx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src);
 static void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src);
+static void emit_fp_source_to_xmm(CodegenCtx *ctx, IrOperand op, u8 w, u8 xmm);
+static void emit_fp_source_to_xmm0(CodegenCtx *ctx, IrOperand op, u8 w);
 
 static void lower_binary(IrInstr *in, CodegenCtx *ctx);
 static void lower_unary(IrInstr *in, CodegenCtx *ctx);
@@ -1232,37 +1241,91 @@ static const u8 abi_arg_regs[6] = {R_EDI, R_ESI, R_EDX, R_ECX, R_R8, R_R9};
 static void lower_call(IrInstr *in, CodegenCtx *ctx)
 {
     u32 nargs = in->extra.call.nargs;
-    u32 n_stack = MAX(nargs, 6) - 6;
-    u32 pad = (n_stack % 2) * 8;
-    u32 total_stack = n_stack * 8 + pad;
+
+    /* Independent GP/SSE counters; class overflows spill to the stack in argument order. */
+    u32 gp_count = 0, fp_count = 0, n_overflow = 0;
+    bool *is_fp = arena_alloc(ctx->arena, nargs, sizeof(bool));
+    bool *overflow = arena_alloc(ctx->arena, nargs, sizeof(bool));
+    u32 *slot = arena_alloc(ctx->arena, nargs * sizeof(u32), sizeof(u32));
+    for (u32 i = 0; i < nargs; i++)
+    {
+        IrOperand arg = in->extra.call.args[i];
+        bool fp =
+            !arg.is_imm && !arg.is_global && !arg.is_func && ir_vreg_float(ctx->mod, arg.u.vreg);
+        is_fp[i] = fp;
+        if (fp && fp_count < VA_NXMM)
+        {
+            overflow[i] = false;
+            slot[i] = fp_count;
+            fp_count++;
+        }
+        else if (!fp && gp_count < VA_NGP)
+        {
+            overflow[i] = false;
+            slot[i] = gp_count;
+            gp_count++;
+        }
+        else
+        {
+            overflow[i] = true;
+            slot[i] = n_overflow;
+            n_overflow++;
+        }
+    }
+
+    u32 pad = (n_overflow % 2) * 8;
+    u32 total_stack = n_overflow * 8 + pad;
 
     if (total_stack > 0)
     {
         emit_binop_rhs(ctx->buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(total_stack));
     }
 
-    for (u32 i = 6; i < nargs; i++)
+    /* Overflow args first (xmm0/%eax scratch free); FP register args load into their own xmm. */
+    for (u32 i = 0; i < nargs; i++)
     {
+        if (!overflow[i])
+        {
+            continue;
+        }
         IrOperand arg = in->extra.call.args[i];
-        u8 w = operand_width(ctx, arg);
-        emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, arg, R_EAX));
-        emit_mov(ctx->buf, 8, xop_mem(x86_mem_rsp((i32) (i - 6) * 8)), xop_reg(R_EAX));
+        u8 aw = operand_width(ctx, arg);
+        if (is_fp[i])
+        {
+            emit_fp_source_to_xmm(ctx, arg, aw, R_XMM0);
+            emit_sse_store(ctx->buf, aw == 4 ? MF_FLOAT : MF_DOUBLE, x86_mem_rsp((i32) slot[i] * 8),
+                           R_XMM0);
+        }
+        else
+        {
+            emit_mov(ctx->buf, aw, xop_reg(R_EAX), lowered_operand(ctx, arg, R_EAX));
+            emit_mov(ctx->buf, 8, xop_mem(x86_mem_rsp((i32) slot[i] * 8)), xop_reg(R_EAX));
+        }
+    }
+    for (u32 i = 0; i < nargs; i++)
+    {
+        if (overflow[i])
+        {
+            continue;
+        }
+        IrOperand arg = in->extra.call.args[i];
+        u8 aw = operand_width(ctx, arg);
+        if (is_fp[i])
+        {
+            emit_fp_source_to_xmm(ctx, arg, aw, (u8) slot[i]);
+        }
+        else
+        {
+            emit_mov(ctx->buf, aw, xop_reg(R_EAX), lowered_operand(ctx, arg, R_EAX));
+            emit_mov(ctx->buf, aw, xop_reg(abi_arg_regs[slot[i]]), xop_reg(R_EAX));
+        }
     }
 
-    u32 n_reg_args = MIN(nargs, 6);
-    for (i32 i = (i32) n_reg_args - 1; i >= 0; i--)
-    {
-        IrOperand arg = in->extra.call.args[i];
-        u8 w = operand_width(ctx, arg);
-        emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, arg, R_EAX));
-        emit_mov(ctx->buf, w, xop_reg(abi_arg_regs[i]), xop_reg(R_EAX));
-    }
-
-    /* SysV: variadic callees get the vector count in %al; no floats yet, so emit 0 here, after the
-     * arg loads clobber %eax. */
+    /* SysV: variadic callees get the vector count in %al, after the arg loads
+       (they clobber %eax). */
     if (in->extra.call.is_variadic)
     {
-        emit_xor_eax_eax(ctx->buf);
+        emit_mov_byte(ctx->buf, xop_reg(R_EAX), xop_imm((i64) fp_count));
     }
 
     if (in->extra.call.is_indirect)
@@ -1280,7 +1343,16 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
     if (in->result != NO_VREG)
     {
         u8 rw = vreg_width(ctx, in->result);
-        emit_mov(ctx->buf, rw, xop_vreg(in->result), xop_reg(R_EAX));
+        if (ir_vreg_float(ctx->mod, in->result))
+        {
+            /* FP returns ride xmm0. */
+            emit_sse_store(ctx->buf, rw == 4 ? MF_FLOAT : MF_DOUBLE, xop_vreg(in->result).u.mem,
+                           R_XMM0);
+        }
+        else
+        {
+            emit_mov(ctx->buf, rw, xop_vreg(in->result), xop_reg(R_EAX));
+        }
     }
 
     if (total_stack > 0)
@@ -1289,14 +1361,13 @@ static void lower_call(IrInstr *in, CodegenCtx *ctx)
     }
 }
 
-/* va_start: record the four va_list fields; the GP regs were spilled by emit_prologue, so this only
- * stores addresses and constants. */
+/* va_start: store the four va_list fields (the prologue already spilled the regs). */
 static void lower_va_start(IrInstr *in, CodegenCtx *ctx)
 {
     (void) load_ptr(ctx, in->ops[0]);                                 /* ap -> %rax */
     emit_mov(ctx->buf, 4, xop_reg(R_EDX), xop_imm(in->ops[2].u.imm)); /* gp_offset */
     emit_mov(ctx->buf, 4, xop_mem(x86_mem_rax(0)), xop_reg(R_EDX));
-    emit_mov(ctx->buf, 4, xop_reg(R_EDX), xop_imm(48)); /* fp_offset: no xmm use */
+    emit_mov(ctx->buf, 4, xop_reg(R_EDX), xop_imm(in->ops[3].u.imm)); /* fp_offset */
     emit_mov(ctx->buf, 4, xop_mem(x86_mem_rax(4)), xop_reg(R_EDX));
 
     u32 skip = (u32) in->ops[1].u.imm;
@@ -1307,23 +1378,26 @@ static void lower_va_start(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, 8, xop_mem(x86_mem_rax(16)), xop_reg(R_EDX));
 }
 
-/* va_arg: GP-then-overflow walk; all slots are 8 bytes and gp_offset is a multiple of 8 below 48,
- * so a signed compare is exact. */
+/* va_arg: result floatness picks the register walk (fp: 16-byte slots to 176; gp: 8-byte to 48). */
 static void lower_va_arg(IrInstr *in, CodegenCtx *ctx)
 {
     ByteBuf *b = ctx->buf;
-    X86Mem ap = load_ptr(ctx, in->ops[0]); /* ap -> %rax */
+    (void) load_ptr(ctx, in->ops[0]); /* ap -> %rax */
+    bool is_fp = ir_vreg_float(ctx->mod, in->result);
+    X86Mem off_mem = is_fp ? x86_mem_rax(4) : x86_mem_rax(0);
+    i64 limit = is_fp ? VA_SAVE_BYTES : VA_GP_BYTES;
+    i64 stride = is_fp ? VA_XMM_STRIDE : 8;
 
-    emit_mov(b, 4, xop_reg(R_EDX), xop_mem(ap)); /* gp = *(u32*)(ap+0) */
-    emit_binop_rhs(b, 4, &cmp_spec, R_EDX, xop_imm(48));
+    emit_mov(b, 4, xop_reg(R_EDX), xop_mem(off_mem)); /* off = *(u32*)(ap+0/4) */
+    emit_binop_rhs(b, 4, &cmp_spec, R_EDX, xop_imm(limit));
 
-    size_t jge_field = emit_jcc_pending(b, CC_GE); /* gp >= 48 -> overflow arm */
+    size_t jge_field = emit_jcc_pending(b, CC_GE); /* off >= limit -> overflow arm */
 
-    /* GP arm: src = regs + gp; ap.gp_offset = gp + 8 */
+    /* Register arm: src = regs + off; ap.off = off + stride */
     emit_mov(b, 8, xop_reg(R_ECX), xop_mem(x86_mem_rax(16)));
-    emit_reg_reg(b, arith_specs[OP_ADD].mem, R_ECX, R_EDX); /* rcx = regs + gp */
-    emit_binop_rhs(b, 4, &arith_specs[OP_ADD], R_EDX, xop_imm(8));
-    emit_mov(b, 4, xop_mem(ap), xop_reg(R_EDX));
+    emit_reg_reg(b, arith_specs[OP_ADD].mem, R_ECX, R_EDX); /* rcx = regs + off */
+    emit_binop_rhs(b, 4, &arith_specs[OP_ADD], R_EDX, xop_imm(stride));
+    emit_mov(b, 4, xop_mem(off_mem), xop_reg(R_EDX));
     size_t ovf_jmp_field = emit_jmp_pending(b);
 
     /* Overflow arm: src reads the saved old ovf; ap.overflow += 8 */
@@ -1334,7 +1408,7 @@ static void lower_va_arg(IrInstr *in, CodegenCtx *ctx)
     emit_mov(b, 8, xop_mem(x86_mem_rax(8)), xop_reg(R_ECX));
     emit_mov(b, 8, xop_reg(R_ECX), xop_reg(R_R8));
 
-    /* done: raw = *(u64*)src, stored to the width-8 result vreg */
+    /* Read the 8-byte slot into the width-8 result vreg. */
     size_t done = bytebuf_len(b);
     patch_rel32(b, jge_field, ovf_arm);
     patch_rel32(b, ovf_jmp_field, done);
@@ -1361,7 +1435,15 @@ static void lower_ret(IrInstr *in, CodegenCtx *ctx)
             /* A 64-bit immediate return must not truncate to the imm32 encoding. */
             w = imm_load_width(val.u.imm);
         }
-        emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, val, R_ECX));
+        if (type_is_fp(ctx->func->ret_type))
+        {
+            /* FP returns leave the value in %xmm0 (SysV). */
+            emit_fp_source_to_xmm0(ctx, val, w);
+        }
+        else
+        {
+            emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, val, R_ECX));
+        }
     }
     else
     {
@@ -1702,24 +1784,29 @@ static u8 fconv_src_width(CodegenCtx *ctx, IrOperand op)
     return op.is_imm ? 8 : vreg_width(ctx, op.u.vreg);
 }
 
-/* Move an FP operand's bits into xmm0; a bare immediate rides GP mov + movd/movq. */
-static void emit_fp_source_to_xmm0(CodegenCtx *ctx, IrOperand op, u8 w)
+/* Move an FP operand's bits into `xmm`; a bare immediate rides GP mov + movd/movq. */
+static void emit_fp_source_to_xmm(CodegenCtx *ctx, IrOperand op, u8 w, u8 xmm)
 {
     ByteBuf *b = ctx->buf;
     u8 mf = w == 4 ? MF_FLOAT : MF_DOUBLE;
     X86Operand src = lowered_operand(ctx, op, R_EAX);
     if (src.kind == XOP_MEM)
     {
-        emit_sse_load(b, mf, R_XMM0, src.u.mem);
+        emit_sse_load(b, mf, xmm, src.u.mem);
         return;
     }
     if (src.kind == XOP_IMM)
     {
         emit_mov(b, w == 4 ? 4 : imm_load_width(src.u.imm), xop_reg(R_EAX), src);
-        emit_movd_to_xmm(b, R_XMM0, R_EAX, w != 4);
+        emit_movd_to_xmm(b, xmm, R_EAX, w != 4);
         return;
     }
     codegen_error(ctx, "unexpected operand class for a floating-point conversion");
+}
+
+static void emit_fp_source_to_xmm0(CodegenCtx *ctx, IrOperand op, u8 w)
+{
+    emit_fp_source_to_xmm(ctx, op, w, R_XMM0);
 }
 
 static void emit_load_2pow63(ByteBuf *buf, bool is_f32)
@@ -2080,33 +2167,54 @@ static FrameInfo frame_plan(IrFunction *f)
     u32 total = (max_vreg + 1) * 8;
     if (f->is_variadic)
     {
-        /* SysV register save area below the vreg slots (48 GP + 128-byte xmm reservation); the
-         * prologue spills into it. */
-        fr.save_area_off = total + 176;
+        /* The va_list register save area sits below the vreg slots; the prologue spills into it. */
+        fr.save_area_off = total + VA_SAVE_BYTES;
         total = fr.save_area_off;
     }
     fr.frame_size = (total + 15) & ~15u;
     return fr;
 }
 
-/* Move incoming args into their param vreg slots; stack args (7+) sit at 16+(i-6)*8(%rbp), routed
- * through %eax. */
+/* Move incoming args to param vregs: registers by class; overflow at 16(%rbp)+arg order. */
 static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod)
 {
     size_t nparams = vec_size(f->params);
-    size_t n_reg = MIN(nparams, 6);
-    for (size_t i = 0; i < n_reg; i++)
+    u32 gp_used = 0, fp_used = 0, ovf_slot = 0;
+    for (size_t i = 0; i < nparams; i++)
     {
         IrParam *p = (IrParam *) vec_get(f->params, i);
         u8 w = mod->widths[p->vreg];
-        emit_mov(buf, w, xop_vreg(p->vreg), xop_reg(abi_arg_regs[i]));
-    }
-    for (size_t i = n_reg; i < nparams; i++)
-    {
-        IrParam *p = (IrParam *) vec_get(f->params, i);
-        u8 w = mod->widths[p->vreg];
-        emit_mov(buf, w, xop_reg(R_EAX), xop_mem(x86_mem_rbp(16 + (i32) ((i - 6) * 8))));
-        emit_mov(buf, w, xop_vreg(p->vreg), xop_reg(R_EAX));
+        bool is_fp = mod->floatness[p->vreg];
+        if (is_fp)
+        {
+            u8 mf = w == 4 ? MF_FLOAT : MF_DOUBLE;
+            if (fp_used < VA_NXMM)
+            {
+                /* xmm → slot; the value lives in the low 32/64 bits. */
+                emit_sse_store(buf, mf, xop_vreg(p->vreg).u.mem, fp_used);
+                fp_used++;
+            }
+            else
+            {
+                emit_sse_load(buf, mf, R_XMM0, x86_mem_rbp(16 + (i32) ovf_slot * 8));
+                emit_sse_store(buf, mf, xop_vreg(p->vreg).u.mem, R_XMM0);
+                ovf_slot++;
+            }
+        }
+        else
+        {
+            if (gp_used < VA_NGP)
+            {
+                emit_mov(buf, w, xop_vreg(p->vreg), xop_reg(abi_arg_regs[gp_used]));
+                gp_used++;
+            }
+            else
+            {
+                emit_mov(buf, w, xop_reg(R_EAX), xop_mem(x86_mem_rbp(16 + (i32) ovf_slot * 8)));
+                emit_mov(buf, w, xop_vreg(p->vreg), xop_reg(R_EAX));
+                ovf_slot++;
+            }
+        }
     }
 }
 
@@ -2118,14 +2226,19 @@ static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, FrameInfo 
     /* The frame always holds at least one 8-byte vreg slot, so it's ≥ 16. */
     emit_binop_rhs(buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(fr->frame_size));
 
-    /* Spill the six GP arg registers here, before emit_param_shuffle's %eax scratch for stack args
-     * (mov reg→[mem] never clobbers the source). */
+    /* Spill register args for va_arg: GP to 0–47, xmm0-7 to 48–175 (16-byte stride). */
     if (f->is_variadic)
     {
-        for (size_t i = 0; i < 6; i++)
+        for (size_t i = 0; i < VA_NGP; i++)
         {
             emit_mov(buf, 8, xop_mem(x86_mem_rbp(-(i32) fr->save_area_off + (i32) i * 8)),
                      xop_reg(abi_arg_regs[i]));
+        }
+        for (size_t i = 0; i < VA_NXMM; i++)
+        {
+            emit_sse_store(
+                buf, MF_DOUBLE,
+                x86_mem_rbp(-(i32) fr->save_area_off + VA_GP_BYTES + (i32) i * VA_XMM_STRIDE), i);
         }
     }
 

@@ -177,17 +177,14 @@ void ir_call_set_indirect(IrInstr *call, IrOperand callee)
     call->extra.call.callee = callee;
 }
 
-/* va_start(ap, last): writes the four va_list fields into *ap. The spill of the
-   incoming GP argument registers happens in the backends (prologue /
-   eval_call); this instruction only records the base-address + compile-time
-   offsets the backends computed: ops[0] = ap, ops[1] = imm stack_skip (bytes of
-   named stack args before the first unnamed one), ops[2] = imm gp_offset. */
-IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offset)
+/* va_start(ap, last): write the four va_list fields; ops = ap, stack_skip, gp_offset, fp_offset. */
+IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offset, i64 fp_offset)
 {
-    IrInstr *ins = instr_new(bb, OP_VA_START, NO_VREG, 3);
+    IrInstr *ins = instr_new(bb, OP_VA_START, NO_VREG, 4);
     ins->ops[0] = ap;
     ins->ops[1] = ir_operand_imm(stack_skip);
     ins->ops[2] = ir_operand_imm(gp_offset);
+    ins->ops[3] = ir_operand_imm(fp_offset);
     return ins;
 }
 
@@ -434,8 +431,9 @@ static void dump_instr(IrInstr *ins, IrModule *m)
             dump_call_args(ins);
             break;
         case OP_VA_START:
-            printf(", stack_skip=%lld, gp_offset=%lld", (long long) ins->ops[1].u.imm,
-                   (long long) ins->ops[2].u.imm);
+            printf(", stack_skip=%lld, gp_offset=%lld, fp_offset=%lld",
+                   (long long) ins->ops[1].u.imm, (long long) ins->ops[2].u.imm,
+                   (long long) ins->ops[3].u.imm);
             break;
         case OP_VA_END:
             printf(" ap");
