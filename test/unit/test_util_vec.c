@@ -112,3 +112,35 @@ TEST(vec, stack_lifo_after_growth)
     EXPECT_EQ(vec_size(v), 0);
     arena_free(a);
 }
+
+TEST(vec, set_overwrites_slot)
+{
+    Arena *a = arena_new();
+    Vec *v = vec_new(a);
+    int x = 1, y = 2, z = 3;
+    vec_push(v, &x);
+    vec_push(v, &y);
+    vec_push(v, &z);
+    vec_set(v, 1, &z);
+    EXPECT_TRUE(vec_get(v, 0) == &x);
+    EXPECT_TRUE(vec_get(v, 1) == &z);
+    EXPECT_TRUE(vec_get(v, 2) == &z);
+    arena_free(a);
+}
+
+TEST(vec, set_on_last_growth_boundary)
+{
+    Arena *a = arena_new();
+    Vec *v = vec_new(a);
+    int vals[10];
+    for (int i = 0; i < 10; i++)
+    {
+        vals[i] = i;
+        vec_push(v, &vals[i]);
+    }
+    int repl = 99;
+    vec_set(v, 9, &repl);
+    EXPECT_TRUE(vec_get(v, 9) == &repl);
+    EXPECT_TRUE(vec_get(v, 8) == &vals[8]);
+    arena_free(a);
+}

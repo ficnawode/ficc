@@ -419,7 +419,7 @@ static void expr_skip(ExprParser *ep, NextLevel next)
 }
 
 static PpExprVal expr_bin_level(ExprParser *ep, NextLevel next, PpPunct op1, PpPunct op2,
-                                PpPunct op3)
+                                PpPunct op3, PpPunct op4)
 {
     PpExprVal l = next(ep);
     for (;;)
@@ -437,6 +437,10 @@ static PpExprVal expr_bin_level(ExprParser *ep, NextLevel next, PpPunct op1, PpP
         {
             op = op3;
         }
+        else if (op4 != PP_PUNCT_NONE && expr_punct(ep, op4))
+        {
+            op = op4;
+        }
         else
         {
             break;
@@ -450,42 +454,46 @@ static PpExprVal expr_bin_level(ExprParser *ep, NextLevel next, PpPunct op1, PpP
 
 static PpExprVal expr_mul(ExprParser *ep)
 {
-    return expr_bin_level(ep, expr_unary, PP_PUNCT_STAR, PP_PUNCT_SLASH, PP_PUNCT_PERCENT);
+    return expr_bin_level(ep, expr_unary, PP_PUNCT_STAR, PP_PUNCT_SLASH, PP_PUNCT_PERCENT,
+                          PP_PUNCT_NONE);
 }
 
 static PpExprVal expr_add(ExprParser *ep)
 {
-    return expr_bin_level(ep, expr_mul, PP_PUNCT_PLUS, PP_PUNCT_MINUS, PP_PUNCT_NONE);
+    return expr_bin_level(ep, expr_mul, PP_PUNCT_PLUS, PP_PUNCT_MINUS, PP_PUNCT_NONE,
+                          PP_PUNCT_NONE);
 }
 
 static PpExprVal expr_shift(ExprParser *ep)
 {
-    return expr_bin_level(ep, expr_add, PP_PUNCT_SHL, PP_PUNCT_SHR, PP_PUNCT_NONE);
+    return expr_bin_level(ep, expr_add, PP_PUNCT_SHL, PP_PUNCT_SHR, PP_PUNCT_NONE, PP_PUNCT_NONE);
 }
 
 static PpExprVal expr_rel(ExprParser *ep)
 {
-    return expr_bin_level(ep, expr_shift, PP_PUNCT_LT, PP_PUNCT_GT, PP_PUNCT_NONE);
+    return expr_bin_level(ep, expr_shift, PP_PUNCT_LT, PP_PUNCT_GT, PP_PUNCT_LE, PP_PUNCT_GE);
 }
 
 static PpExprVal expr_eq(ExprParser *ep)
 {
-    return expr_bin_level(ep, expr_rel, PP_PUNCT_EQ, PP_PUNCT_NE, PP_PUNCT_NONE);
+    return expr_bin_level(ep, expr_rel, PP_PUNCT_EQ, PP_PUNCT_NE, PP_PUNCT_NONE, PP_PUNCT_NONE);
 }
 
 static PpExprVal expr_band(ExprParser *ep)
 {
-    return expr_bin_level(ep, expr_eq, PP_PUNCT_AMP, PP_PUNCT_NONE, PP_PUNCT_NONE);
+    return expr_bin_level(ep, expr_eq, PP_PUNCT_AMP, PP_PUNCT_NONE, PP_PUNCT_NONE, PP_PUNCT_NONE);
 }
 
 static PpExprVal expr_bxor(ExprParser *ep)
 {
-    return expr_bin_level(ep, expr_band, PP_PUNCT_CARET, PP_PUNCT_NONE, PP_PUNCT_NONE);
+    return expr_bin_level(ep, expr_band, PP_PUNCT_CARET, PP_PUNCT_NONE, PP_PUNCT_NONE,
+                          PP_PUNCT_NONE);
 }
 
 static PpExprVal expr_bor(ExprParser *ep)
 {
-    return expr_bin_level(ep, expr_bxor, PP_PUNCT_PIPE, PP_PUNCT_NONE, PP_PUNCT_NONE);
+    return expr_bin_level(ep, expr_bxor, PP_PUNCT_PIPE, PP_PUNCT_NONE, PP_PUNCT_NONE,
+                          PP_PUNCT_NONE);
 }
 
 static PpExprVal expr_land(ExprParser *ep)

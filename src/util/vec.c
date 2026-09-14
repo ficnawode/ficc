@@ -54,6 +54,12 @@ void *vec_get(const Vec *v, size_t i)
     return v->data[i];
 }
 
+void vec_set(Vec *v, size_t i, void *item)
+{
+    ASSERT(i < v->len);
+    v->data[i] = item;
+}
+
 void *vec_last(const Vec *v)
 {
     ASSERT(v->len > 0);

@@ -382,13 +382,19 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     Type *rt = type_decay(binary_expr->right->expr_type);
     bool left_void_ok = binary_expr->op == BIN_COMMA; /* §6.5.17p2: the comma's left
                                         operand is evaluated as a void expression */
-    if ((!left_void_ok && !check_value_used(binary_expr->left, ctx)) ||
-        !check_value_used(binary_expr->right, ctx))
+    if (binary_expr->op == BIN_COMMA)
+    {
+        /* §6.5.17p3: the comma's result is the right operand's value and type. */
+        left_void_ok = true;
+    }
+    else if ((!left_void_ok && !check_value_used(binary_expr->left, ctx)) ||
+             !check_value_used(binary_expr->right, ctx))
     {
         /* `(void)x + 1`, `f() = 5` — operand is void, not a value. */
         return false;
     }
-    if (binary_expr->op != BIN_ASSIGN && (type_is_record(lt) || type_is_record(rt)))
+    if (binary_expr->op != BIN_ASSIGN && binary_expr->op != BIN_COMMA &&
+        (type_is_record(lt) || type_is_record(rt)))
     {
         return sem_error(ctx, binary_expr->base.loc, "invalid operands to operator (record type)");
     }
@@ -980,6 +986,11 @@ static bool check_sizeof_expr(ASTSizeofExpr *se, SemanticCtx *ctx)
         {
             op_type = id->decl->type;
         }
+    }
+    else if (se->operand->kind == AST_STRING_LITERAL)
+    {
+        /* sizeof a string literal is the array length incl. NUL, not char*. */
+        op_type = type_array(type_char(), ast_as(ASTStringLiteral, se->operand)->length + 1);
     }
     else if (se->operand->kind == AST_COMPOUND_LITERAL &&
              type_is_array(ast_as(ASTCompoundLiteral, se->operand)->type))
@@ -2338,12 +2349,19 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     {
         return false;
     }
-    if (!check_value_used(ternary->then_expr, ctx) || !check_value_used(ternary->else_expr, ctx))
+    Type *tt = type_decay(type_rvalue(ternary->then_expr->expr_type));
+    Type *te = type_decay(type_rvalue(ternary->else_expr->expr_type));
+    if (tt->kind == TYPE_VOID && te->kind == TYPE_VOID)
+    {
+        /* Both branches void: legal discarded-value conditional, e.g. `cond ? f() : (void)0`. */
+        ternary->base.expr_type = tt;
+        return true;
+    }
+    if ((tt->kind == TYPE_VOID && !check_value_used(ternary->then_expr, ctx)) ||
+        (te->kind == TYPE_VOID && !check_value_used(ternary->else_expr, ctx)))
     {
         return false;
     }
-    Type *tt = type_decay(type_rvalue(ternary->then_expr->expr_type));
-    Type *te = type_decay(type_rvalue(ternary->else_expr->expr_type));
     if (type_is_record(tt) || type_is_record(te))
     {
         /* §6.5.15p5: a conditional on two operands of the same compatible

@@ -48,6 +48,8 @@ typedef enum
     X(TOK_KW_STATIC)                                                                               \
     X(TOK_KW_EXTERN)                                                                               \
     X(TOK_KW_CONST)                                                                                \
+    X(TOK_KW_VOLATILE)                                                                             \
+    X(TOK_KW_RESTRICT)                                                                             \
     X(TOK_KW_TYPEDEF)                                                                              \
     X(TOK_KW_INLINE)                                                                               \
     X(TOK_KW_ALIGNOF)                                                                              \

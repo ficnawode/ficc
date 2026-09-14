@@ -35,6 +35,10 @@ typedef struct Declarator
 {
     Type *type;
     const char *name;
+    u32 stars; /* explicit `*` count */
+    /* Parameters captured when the outermost suffix folded the signature. */
+    Vec *func_params;
+    bool func_variadic;
 } Declarator;
 
 typedef struct Specs
@@ -184,9 +188,11 @@ static bool is_typename_start_at(Parser *p, size_t pos)
     return false;
 }
 
-static size_t skip_consts(Parser *p, size_t pos)
+static size_t skip_quals(Parser *p, size_t pos)
 {
-    while (pos < p->count && p->tokens[pos].kind == TOK_KW_CONST)
+    while (pos < p->count &&
+           (p->tokens[pos].kind == TOK_KW_CONST || p->tokens[pos].kind == TOK_KW_VOLATILE ||
+            p->tokens[pos].kind == TOK_KW_RESTRICT))
     {
         pos++;
     }
@@ -200,7 +206,7 @@ static bool is_typename_start(Parser *p)
 
 static bool paren_is_typename(Parser *p)
 {
-    return peek_token(p)->kind == TOK_LPAREN && is_typename_start_at(p, skip_consts(p, p->pos + 1));
+    return peek_token(p)->kind == TOK_LPAREN && is_typename_start_at(p, skip_quals(p, p->pos + 1));
 }
 
 static Type *parse_type_specifier(Parser *p);
@@ -682,7 +688,7 @@ static u32 parse_alignas_specifier(Parser *p)
 
     i64 align = 0;
     bool ok;
-    if (is_typename_start_at(p, skip_consts(p, p->pos)))
+    if (is_typename_start_at(p, skip_quals(p, p->pos)))
     {
         Type *ty = parse_abstract_declarator(p, parse_type_specifier(p));
         if (!ty)
@@ -719,16 +725,18 @@ static u32 parse_alignas_specifier(Parser *p)
     return (u32) align;
 }
 
-static bool parse_qualifiers(Parser *p, bool *has_const, u32 *alignas)
+static bool parse_qualifiers(Parser *p, u8 *quals, u32 *alignas)
 {
-    bool saw_const = false;
     for (;;)
     {
         Token *t = peek_token(p);
-        if (t->kind == TOK_KW_CONST)
+        if (t->kind == TOK_KW_CONST || t->kind == TOK_KW_VOLATILE || t->kind == TOK_KW_RESTRICT)
         {
+            u8 q = t->kind == TOK_KW_CONST      ? Q_CONST
+                   : t->kind == TOK_KW_VOLATILE ? Q_VOLATILE
+                                                : Q_RESTRICT;
             next_token(p);
-            saw_const = true;
+            *quals |= q;
         }
         else if (t->kind == TOK_KW_ALIGNAS)
         {
@@ -747,8 +755,24 @@ static bool parse_qualifiers(Parser *p, bool *has_const, u32 *alignas)
             break;
         }
     }
-    *has_const = saw_const;
     return true;
+}
+
+static Type *apply_quals(Type *t, u8 quals)
+{
+    if (quals & Q_CONST)
+    {
+        t = type_const(t);
+    }
+    if (quals & Q_VOLATILE)
+    {
+        t = type_volatile(t);
+    }
+    if (quals & Q_RESTRICT)
+    {
+        t = type_restrict(t);
+    }
+    return t;
 }
 
 static Specs parse_decl_specifiers(Parser *p)
@@ -760,8 +784,8 @@ static Specs parse_decl_specifiers(Parser *p)
     {
         next_token(p);
     }
-    bool lead_const = false;
-    if (!parse_qualifiers(p, &lead_const, &s.alignas))
+    u8 lead_quals = 0;
+    if (!parse_qualifiers(p, &lead_quals, &s.alignas))
     {
         return s;
     }
@@ -815,18 +839,18 @@ static Specs parse_decl_specifiers(Parser *p)
         return s;
     }
 
-    if (lead_const)
+    if (lead_quals)
     {
-        s.type = type_const(s.type);
+        s.type = apply_quals(s.type, lead_quals);
     }
-    bool trail_const = false;
-    if (!parse_qualifiers(p, &trail_const, &s.alignas))
+    u8 trail_quals = 0;
+    if (!parse_qualifiers(p, &trail_quals, &s.alignas))
     {
         return s;
     }
-    if (trail_const)
+    if (trail_quals)
     {
-        s.type = type_const(s.type);
+        s.type = apply_quals(s.type, trail_quals);
     }
     return s;
 }
@@ -857,7 +881,8 @@ static u32 strip_ptrs(Type *t, Type **innermost)
     return n;
 }
 
-static Type *parse_group_suffixes(Parser *p, Type *t, u32 *nptr)
+static Type *parse_group_suffixes(Parser *p, Type *t, u32 *nptr, Vec **captured_params,
+                                  bool *captured_variadic)
 {
     for (;;)
     {
@@ -891,6 +916,12 @@ static Type *parse_group_suffixes(Parser *p, Type *t, u32 *nptr)
                 vec_push(param_types, type_unqual(pd->type));
             }
             t = type_func(ptr_layers(t, *nptr), param_types, variadic);
+            /* Keep the params so a `(name)(params){...}` definition can use them. */
+            if (captured_params)
+            {
+                *captured_params = params;
+                *captured_variadic = variadic;
+            }
             *nptr = 0;
         }
         else
@@ -914,15 +945,28 @@ static bool parse_declarator_group(Parser *p, Type *base, u32 nptr, Declarator *
     }
 
     Type *core;
-    u32 inner_ptrs = strip_ptrs(inner.type, &core);
+    u32 inner_ptrs;
+    /* An explicit `*` wraps the suffix; a base-type pointer stays in the return type. */
+    if (inner.stars > 0)
+    {
+        inner_ptrs = strip_ptrs(inner.type, &core);
+    }
+    else
+    {
+        core = inner.type;
+        inner_ptrs = 0;
+    }
 
-    Type *suffix = parse_group_suffixes(p, core, &nptr);
+    out->func_params = NULL;
+    out->func_variadic = false;
+    Type *suffix = parse_group_suffixes(p, core, &nptr, &out->func_params, &out->func_variadic);
     if (!suffix)
     {
         return false;
     }
     out->type = ptr_layers(ptr_layers(suffix, nptr), inner_ptrs);
     out->name = inner.name;
+    out->stars = 0;
     return true;
 }
 
@@ -942,10 +986,13 @@ static Type *parse_abstract_declarator(Parser *p, Type *base)
     {
         next_token(p);
         base = type_ptr(base);
-        while (peek_token(p)->kind == TOK_KW_CONST)
+        while (peek_token(p)->kind == TOK_KW_CONST || peek_token(p)->kind == TOK_KW_VOLATILE ||
+               peek_token(p)->kind == TOK_KW_RESTRICT)
         {
+            TokenKind qk = peek_token(p)->kind;
+            u8 q = qk == TOK_KW_CONST ? Q_CONST : qk == TOK_KW_VOLATILE ? Q_VOLATILE : Q_RESTRICT;
             next_token(p);
-            base = type_const(base);
+            base = apply_quals(base, q);
         }
     }
     return base;
@@ -955,19 +1002,25 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
 {
     out->type = base;
     out->name = NULL;
+    out->stars = 0;
 
     u32 nptr = 0;
-    u32 nconst = 0;
+    u8 ptr_quals = 0;
     while (peek_token(p)->kind == TOK_STAR)
     {
         next_token(p);
         nptr++;
-        while (peek_token(p)->kind == TOK_KW_CONST)
+        while (peek_token(p)->kind == TOK_KW_CONST || peek_token(p)->kind == TOK_KW_VOLATILE ||
+               peek_token(p)->kind == TOK_KW_RESTRICT)
         {
+            TokenKind qk = peek_token(p)->kind;
+            ptr_quals |= qk == TOK_KW_CONST      ? Q_CONST
+                         : qk == TOK_KW_VOLATILE ? Q_VOLATILE
+                                                 : Q_RESTRICT;
             next_token(p);
-            nconst++;
         }
     }
+    out->stars = nptr;
 
     if (peek_token(p)->kind == TOK_LPAREN)
     {
@@ -996,9 +1049,9 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
         nptr = 0;
     }
     out->type = ptr_layers(out->type, nptr);
-    for (u32 i = 0; i < nconst; i++)
+    if (ptr_quals)
     {
-        out->type = type_const(out->type);
+        out->type = apply_quals(out->type, ptr_quals);
     }
     return true;
 }
@@ -1140,54 +1193,61 @@ static Type *parse_array_suffix(Parser *p, Type *type)
 typedef struct StoragePrefix
 {
     StorageClass storage;
-    u32 lead_consts; /* consts consumed ahead of the storage class */
+    u8 lead_quals; /* qualifiers consumed ahead of the storage class */
 } StoragePrefix;
 
 static StoragePrefix parse_storage_prefix(Parser *p)
 {
     StoragePrefix pre = {SC_NONE, 0};
     Token *t = peek_token(p);
-    if (t->kind != TOK_KW_CONST && t->kind != TOK_KW_STATIC && t->kind != TOK_KW_EXTERN)
+    if (t->kind != TOK_KW_CONST && t->kind != TOK_KW_VOLATILE && t->kind != TOK_KW_RESTRICT &&
+        t->kind != TOK_KW_STATIC && t->kind != TOK_KW_EXTERN)
     {
         return pre;
     }
 
-    u32 nconst = 0;
-    while (p->pos + nconst < p->count && p->tokens[p->pos + nconst].kind == TOK_KW_CONST)
+    u8 lead = 0;
+    size_t i = 0;
+    for (;; i++)
     {
-        nconst++;
+        TokenKind k = (p->pos + i < p->count) ? p->tokens[p->pos + i].kind : TOK_EOF;
+        if (k == TOK_KW_CONST || k == TOK_KW_VOLATILE || k == TOK_KW_RESTRICT)
+        {
+            lead |= k == TOK_KW_CONST ? Q_CONST : k == TOK_KW_VOLATILE ? Q_VOLATILE : Q_RESTRICT;
+        }
+        else if (k == TOK_KW_STATIC || k == TOK_KW_EXTERN)
+        {
+            break;
+        }
+        else
+        {
+            return pre;
+        }
     }
-    TokenKind nxt = (p->pos + nconst < p->count) ? p->tokens[p->pos + nconst].kind : TOK_EOF;
-    if (nxt != TOK_KW_STATIC && nxt != TOK_KW_EXTERN)
-    {
-        return pre;
-    }
-    for (u32 i = 0; i < nconst; i++)
+    for (size_t k = 0; k < i; k++)
     {
         next_token(p);
     }
+    TokenKind nxt = (p->pos < p->count) ? p->tokens[p->pos].kind : TOK_EOF;
     next_token(p);
     pre.storage = nxt == TOK_KW_STATIC ? SC_STATIC : SC_EXTERN;
-    pre.lead_consts = nconst;
+    pre.lead_quals = lead;
     return pre;
 }
 
 static Specs parse_specs_storage(Parser *p, bool storage_ok)
 {
-    u32 lead = 0;
+    u8 lead = 0;
     StorageClass storage = SC_NONE;
     if (storage_ok)
     {
         StoragePrefix pre = parse_storage_prefix(p);
         storage = pre.storage;
-        lead = pre.lead_consts;
+        lead = pre.lead_quals;
     }
 
     Specs s = parse_decl_specifiers(p);
-    for (u32 i = 0; i < lead; i++)
-    {
-        s.type = type_const(s.type);
-    }
+    s.type = apply_quals(s.type, lead);
     s.storage = storage;
     return s;
 }
@@ -1406,6 +1466,72 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
     return ast_func_def(d.type, d.name, params, body, storage, variadic, start, p->arena);
 }
 
+static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start)
+{
+    /* The parenthesized declarator already folded the params; only `;` or `{...}` remains. */
+    if (s.alignas)
+    {
+        parse_error(p, "_Alignas is not permitted on a function");
+        return NULL;
+    }
+    StorageClass storage = s.storage == SC_STATIC ? SC_STATIC : SC_NONE;
+    if (!check_not_enumerator(p, d.name))
+    {
+        return NULL;
+    }
+    if (!declare_name(p, d.name, BIND_FUNC, NULL))
+    {
+        return NULL;
+    }
+    bool is_definition = peek_token(p)->kind == TOK_LBRACE;
+
+    Vec *params;
+    if (d.func_params)
+    {
+        params = d.func_params;
+    }
+    else
+    {
+        /* Rebuild the parameters from the type, unattached to names. */
+        params = vec_new(p->arena);
+        Vec *ptypes = d.type->func.params;
+        for (size_t i = 0; i < vec_size(ptypes); i++)
+        {
+            Type *pt = type_unqual((Type *) vec_get(ptypes, i));
+            vec_push(params, ast_var_decl(type_decay(pt), NULL, NULL, SC_NONE, start, p->arena));
+        }
+    }
+
+    if (!is_definition)
+    {
+        if (!expect_token(p, TOK_SEMI, "';'"))
+        {
+            return NULL;
+        }
+        return ast_func_decl(d.type->func.ret, d.name, params, storage,
+                             d.type->func.is_variadic || d.func_variadic, start, p->arena);
+    }
+
+    for (size_t i = 0; i < vec_size(params); i++)
+    {
+        ASTVarDecl *param = ast_as(ASTVarDecl, (ASTNode *) vec_get(params, i));
+        if (!param->name)
+        {
+            parse_error(p, "parameter %zu in definition of '%s' must have a name", i + 1, d.name);
+            return NULL;
+        }
+    }
+    push_scope(p);
+    ASTNode *body = parse_compound_stmt(p);
+    if (!body)
+    {
+        return NULL;
+    }
+    pop_scope(p);
+    return ast_func_def(d.type->func.ret, d.name, params, body, storage,
+                        d.type->func.is_variadic || d.func_variadic, start, p->arena);
+}
+
 static ASTNode *parse_toplevel_decl(Parser *p)
 {
     Token *start = peek_token(p);
@@ -1443,6 +1569,10 @@ static ASTNode *parse_toplevel_decl(Parser *p)
     if (peek_token(p)->kind == TOK_LPAREN)
     {
         return parse_function(p, s, d, start->loc);
+    }
+    if (d.type->kind == TYPE_FUNC)
+    {
+        return parse_func_from_type(p, s, d, start->loc);
     }
     return parse_file_vars(p, s, d, start->loc);
 }
@@ -1609,7 +1739,8 @@ static ASTNode *parse_for_stmt(Parser *p)
     ASTNode *init = NULL;
     if (peek_token(p)->kind != TOK_SEMI)
     {
-        if (is_typename_start(p) || peek_token(p)->kind == TOK_KW_CONST)
+        if (is_typename_start(p) || peek_token(p)->kind == TOK_KW_CONST ||
+            peek_token(p)->kind == TOK_KW_VOLATILE || peek_token(p)->kind == TOK_KW_RESTRICT)
         {
             Specs s = parse_specs_storage(p, false);
             if (!s.type)
@@ -1843,8 +1974,15 @@ static const struct
 static ASTNode *parse_stmt(Parser *p)
 {
     Token *t = peek_token(p);
+    if (t->kind == TOK_SEMI)
+    {
+        /* C11 §6.8.3: null statement; macro bodies leave a stray `;`. */
+        next_token(p);
+        return ast_compound_stmt(vec_new(p->arena), t->loc, p->arena);
+    }
     if (is_type_start(t->kind) || t->kind == TOK_KW_ALIGNAS || t->kind == TOK_KW_CONST ||
-        t->kind == TOK_KW_STATIC || t->kind == TOK_KW_EXTERN)
+        t->kind == TOK_KW_VOLATILE || t->kind == TOK_KW_RESTRICT || t->kind == TOK_KW_STATIC ||
+        t->kind == TOK_KW_EXTERN)
     {
         Specs s = parse_specs_storage(p, true);
         if (!s.type)
@@ -2631,6 +2769,25 @@ static bool folded_const(Parser *p, ASTNode *node, i64 *out)
         case AST_UNARY_EXPR:
         {
             ASTUnaryExpr *u = ast_as(ASTUnaryExpr, node);
+            if (u->op == UN_ADDR && u->operand->kind == AST_MEMBER_ACCESS)
+            {
+                /* `offsetof` reads the member's byte offset inside the record (§7.19p3). */
+                ASTMemberAccess *ma = ast_as(ASTMemberAccess, u->operand);
+                if (ma->object->kind == AST_CAST_EXPR)
+                {
+                    ASTCastExpr *ce = ast_as(ASTCastExpr, ma->object);
+                    i64 base;
+                    if (ce->target_type && ce->target_type->kind == TYPE_PTR &&
+                        type_is_record(ce->target_type->ptr.pointee) && ce->operand &&
+                        folded_const(p, ce->operand, &base) && base == 0)
+                    {
+                        *out = (i64) type_record_field_offset(ce->target_type->ptr.pointee,
+                                                              ma->member);
+                        return true;
+                    }
+                }
+                return false;
+            }
             i64 v;
             if (!folded_const(p, u->operand, &v))
             {
@@ -2755,6 +2912,17 @@ static bool folded_const(Parser *p, ASTNode *node, i64 *out)
         case AST_SIZEOF_TYPE:
             *out = (i64) type_sizeof(ast_as(ASTSizeofType, node)->type);
             return true;
+        case AST_SIZEOF_EXPR:
+            /* sizeof of a string literal is the array length incl. NUL. */
+            if (ast_as(ASTSizeofExpr, node)->operand &&
+                ast_as(ASTSizeofExpr, node)->operand->kind == AST_STRING_LITERAL)
+            {
+                *out =
+                    (i64) ast_as(ASTStringLiteral, ast_as(ASTSizeofExpr, node)->operand)->length +
+                    1;
+                return true;
+            }
+            return false;
         case AST_ALIGNOF_TYPE:
             *out = (i64) type_alignof(ast_as(ASTAlignofType, node)->type);
             return true;
@@ -2797,6 +2965,18 @@ static bool resolve_constant_init(Parser *p, ASTVarDecl *vd, ASTNode *expr)
             (u->operand->kind == AST_IDENT || u->operand->kind == AST_COMPOUND_LITERAL))
         {
             vd->init = expr;
+            return true;
+        }
+    }
+    if (expr->kind == AST_CAST_EXPR)
+    {
+        /* Null pointer constant spelled with a cast, e.g. `(void*)0` (§6.3.2.3p3). */
+        ASTCastExpr *ce = ast_as(ASTCastExpr, expr);
+        i64 v;
+        if (ce->operand && folded_const(p, ce->operand, &v) && v == 0)
+        {
+            vd->const_init = 0;
+            vd->has_const_init = true;
             return true;
         }
     }

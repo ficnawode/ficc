@@ -167,3 +167,39 @@ TEST(bitset, clear_out_of_range)
     EXPECT_EQ(bitset_count(bs), 0);
     arena_free(a);
 }
+
+TEST(bitset, word_access_matches_bit_ops)
+{
+    Arena *a = arena_new();
+    Bitset *bs = bitset_new(a, 130);
+    EXPECT_EQ(bitset_nwords(bs), 3);
+    bitset_set(bs, 0);
+    bitset_set(bs, 63);
+    bitset_set(bs, 64);
+    bitset_set(bs, 129);
+    u64 *w = bitset_words(bs);
+    /* v0 is bit 0 of word 0; v64 is bit 0 of word 1. */
+    EXPECT_EQ(w[0], (1ULL << 0) | (1ULL << 63));
+    EXPECT_EQ(w[1], 1ULL);
+    EXPECT_EQ(w[2], 1ULL << 1); /* v129 is bit 1 of word 2 */
+    arena_free(a);
+}
+
+TEST(bitset, word_or_and_as_bulk_propagation)
+{
+    Arena *a = arena_new();
+    Bitset *lin = bitset_new(a, 128);
+    Bitset *lout = bitset_new(a, 128);
+    bitset_set(lin, 5);
+    bitset_set(lin, 70);
+    u64 *lo = bitset_words(lout);
+    u64 *li = bitset_words(lin);
+    for (size_t wi = 0; wi < bitset_nwords(lout); wi++)
+    {
+        lo[wi] |= li[wi];
+    }
+    EXPECT_TRUE(bitset_test(lout, 5));
+    EXPECT_TRUE(bitset_test(lout, 70));
+    EXPECT_EQ(bitset_count(lout), 2);
+    arena_free(a);
+}

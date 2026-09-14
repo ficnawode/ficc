@@ -484,6 +484,16 @@ static void fill_phi_entries(FuncBuilder *ctx, IrBlock *bb, ASTVarDecl *var, IrI
     {
         IrBlock *pred = (IrBlock *) vec_get(bb->preds, e);
         IrOperand pval = read_variable(ctx, var, pred);
+        /* Self-reference: fall back to the header's loop-carried value. */
+        if (!pval.is_imm && !pval.is_global && !pval.is_func && pval.u.vreg == phi->result)
+        {
+            BlockLocals *bl = get_block_locals(ctx, bb);
+            IrOperand *cur = u64map_get(bl->locals, (u64) (uintptr_t) var);
+            if (cur)
+            {
+                pval = *cur;
+            }
+        }
         ir_phi_add_entry(phi, pval, pred);
     }
 }
@@ -649,6 +659,23 @@ static ExprResult build_ternary_expr(FuncBuilder *ctx, ASTTernaryExpr *te, IrBlo
 
     IrOperand cval = boolify(ctx, cond.block, cond.value, node_type(te->cond));
     i64 mem_dst = NO_VREG;
+    if (tern_type->kind == TYPE_VOID)
+    {
+        /* §6.5.15: two void branches make the conditional a void expression. */
+        cond_jump(cond.block, cval, then_bb, else_bb);
+        ExprResult then_val = build_expr(ctx, te->then_expr, then_bb);
+        if (!is_terminated(then_val.block))
+        {
+            jump(then_val.block, merge_bb);
+        }
+        ExprResult else_val = build_expr(ctx, te->else_expr, else_bb);
+        if (!is_terminated(else_val.block))
+        {
+            jump(else_val.block, merge_bb);
+        }
+        seal_block(ctx, merge_bb);
+        return expr_void(merge_bb);
+    }
     if (mem_tern)
     {
         /* A record/array result is a memory object (§6.5.15): copy the
@@ -1155,19 +1182,38 @@ static ArithResult lower_arith_into(FuncBuilder *ctx, ArithSpec spec, IrOperand 
     ar.block = bb;
     ar.result_type = spec.result_type;
 
-    if (type_is_ptr(spec.lt) && (spec.op == BIN_ADD || spec.op == BIN_SUB) && !type_is_ptr(spec.rt))
+    if (spec.op == BIN_SUB && type_is_ptr(spec.lt) && !type_is_ptr(spec.rt))
     {
         /* Pointer arithmetic scales by the pointee size (§6.5.6p8). */
         IrOperand lhs = lval;
         IrOperand rhs = promote_to(ctx, bb, rval, spec.rt, type_long());
-        if (spec.op == BIN_SUB)
-        {
-            u32 neg_vreg = alloc_vreg_from_type(ctx, type_long());
-            ir_emit_unary(bb, OP_NEG, neg_vreg, rhs);
-            rhs = ir_operand_vreg(neg_vreg);
-        }
+        u32 neg_vreg = alloc_vreg_from_type(ctx, type_long());
+        ir_emit_unary(bb, OP_NEG, neg_vreg, rhs);
+        rhs = ir_operand_vreg(neg_vreg);
         Type *elem = type_deref(spec.lt);
         u32 gep_vreg = alloc_vreg_from_type(ctx, spec.lt);
+        ir_emit_gep(bb, gep_vreg, lhs, rhs, elem->size);
+        ar.value = ir_operand_vreg(gep_vreg);
+        return ar;
+    }
+    if (spec.op == BIN_ADD && (type_is_ptr(spec.lt) || type_is_ptr(spec.rt)) &&
+        !(type_is_ptr(spec.lt) && type_is_ptr(spec.rt)))
+    {
+        /* Scaled by the pointee size (§6.5.6p8); the pointer may be on either side. */
+        IrOperand lhs = lval;
+        IrOperand rhs = rval;
+        Type *pt = spec.lt;
+        if (!type_is_ptr(pt))
+        {
+            IrOperand tmp = lhs;
+            lhs = rhs;
+            rhs = tmp;
+            pt = spec.rt;
+        }
+        Type *int_t = type_is_ptr(spec.lt) ? spec.rt : spec.lt;
+        rhs = promote_to(ctx, bb, rhs, int_t, type_long());
+        Type *elem = type_deref(pt);
+        u32 gep_vreg = alloc_vreg_from_type(ctx, pt);
         ir_emit_gep(bb, gep_vreg, lhs, rhs, elem->size);
         ar.value = ir_operand_vreg(gep_vreg);
         return ar;
@@ -1890,12 +1936,22 @@ static bool fold_constant_ir(ASTNode *node, i64 *out)
         {
             ASTCastExpr *ce = ast_as(ASTCastExpr, node);
             i64 v;
-            if (!fold_constant_ir(ce->operand, &v) || !type_is_integer(ce->target_type))
+            if (!fold_constant_ir(ce->operand, &v))
             {
                 return false;
             }
-            *out = type_reduce_int(ce->target_type, v);
-            return true;
+            if (type_is_integer(ce->target_type))
+            {
+                *out = type_reduce_int(ce->target_type, v);
+                return true;
+            }
+            /* Null pointer constant spelled with a cast, e.g. `(void*)0`. */
+            if (type_is_ptr(ce->target_type) && v == 0)
+            {
+                *out = 0;
+                return true;
+            }
+            return false;
         }
         default:
             return false;
@@ -2284,14 +2340,14 @@ static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global
             return (int) ir_add_string_global(ast_as(ASTStringLiteral, value), mod, arena);
         case AST_IDENT:
         {
-            /* A bare function designator names its address: `int (*fp)(int) = f;` */
             ASTIdent *id = ast_as(ASTIdent, value);
             if (id->is_func)
             {
                 *out_func = id->name;
                 return -2; /* function-address relocation */
             }
-            break;
+            /* Object/array designators decay to their address (§6.3.2.1). */
+            return serializer_addr_target(value, mod, global_map, static_map, arena, out_func);
         }
         case AST_UNARY_EXPR:
         {
@@ -2356,6 +2412,12 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
         }
         if (target >= 0)
         {
+            if (!type_is_ptr(type_unqual(w->type)))
+            {
+                /* A scalar initializer must not decay into a silent relocation. */
+                ir_error(w->value, "initializer element is not a constant");
+                return false;
+            }
             ir_global_add_reloc(g, w->offset, target, arena);
             continue;
         }
@@ -2899,7 +2961,8 @@ static IrBlock *build_loop_body(FuncBuilder *ctx, ASTNode *body_node, LoopBlocks
     return end;
 }
 
-static IrBlock *finish_loop(FuncBuilder *ctx, ASTNode *cond_node, LoopBlocks *lb)
+static IrBlock *finish_loop(FuncBuilder *ctx, ASTNode *cond_node, LoopBlocks *lb,
+                            IrBlock **out_cond)
 {
     IrBlock *h = lb->header;
     if (cond_node)
@@ -2912,6 +2975,10 @@ static IrBlock *finish_loop(FuncBuilder *ctx, ASTNode *cond_node, LoopBlocks *lb
     else
     {
         ir_emit_br(h, lb->body->label);
+    }
+    if (out_cond)
+    {
+        *out_cond = h;
     }
     declare_pred(lb->exit, h);
     seal_block(ctx, h);
@@ -2936,10 +3003,29 @@ static IrBlock *build_while_stmt(FuncBuilder *ctx, ASTWhileStmt *ws, IrBlock *bb
     LoopBlocks lb = {header_bb, body_bb, header_bb, exit_bb};
 
     jump(bb, lb.header);
-    declare_pred(lb.body, lb.header);
+
+    /* Run the condition in the header first; the body sees its post-cond value. */
+    IrBlock *h = lb.header;
+    if (ws->cond)
+    {
+        ExprResult c = build_expr(ctx, ws->cond, h);
+        h = c.block;
+        IrOperand cval = boolify(ctx, h, c.value, node_type(ws->cond));
+        ir_emit_brcond(h, cval, lb.body->label, lb.exit->label);
+    }
+    else
+    {
+        ir_emit_br(h, lb.body->label);
+    }
+    /* The body's only predecessor is the condition's result block, not the header. */
+    declare_pred(lb.body, h);
+    declare_pred(lb.exit, h);
+
     backedge(build_loop_body(ctx, ws->body, &lb), &lb);
 
-    return finish_loop(ctx, ws->cond, &lb);
+    seal_block(ctx, h);
+    seal_block(ctx, lb.exit);
+    return lb.exit;
 }
 
 static IrBlock *build_do_while_stmt(FuncBuilder *ctx, ASTDoWhileStmt *ds, IrBlock *bb)
@@ -2953,9 +3039,26 @@ static IrBlock *build_do_while_stmt(FuncBuilder *ctx, ASTDoWhileStmt *ds, IrBloc
     jump(bb, lb.body);
     declare_pred(lb.body, lb.header);
     backedge(build_loop_body(ctx, ds->body, &lb), &lb);
+
+    /* Seal after the condition so the back-edge PHI sees its post-cond value. */
+    IrBlock *h = NULL;
+    IrBlock *hret = finish_loop(ctx, ds->cond, &lb, &h);
+    /* The back edge comes from the short-circuited condition's result block. */
+    if (h != lb.header && h != NULL)
+    {
+        size_t npred = vec_size(lb.body->preds);
+        for (size_t p = 0; p < npred; p++)
+        {
+            if (vec_get(lb.body->preds, p) == lb.header)
+            {
+                vec_set(lb.body->preds, p, h);
+            }
+        }
+    }
     seal_block(ctx, lb.body);
 
-    return finish_loop(ctx, ds->cond, &lb);
+    (void) hret;
+    return lb.exit;
 }
 
 static IrBlock *build_for_stmt(FuncBuilder *ctx, ASTForStmt *fs, IrBlock *bb)
@@ -2990,7 +3093,22 @@ static IrBlock *build_for_stmt(FuncBuilder *ctx, ASTForStmt *fs, IrBlock *bb)
         jump(lb.latch, lb.header);
     }
 
-    return finish_loop(ctx, fs->cond, &lb);
+    IrBlock *h = NULL;
+    IrBlock *hret = finish_loop(ctx, fs->cond, &lb, &h);
+    /* Same non-predecessor fixup as do-while for short-circuited conditions. */
+    if (h != lb.header && h != NULL)
+    {
+        size_t npred1 = vec_size(lb.body->preds);
+        for (size_t p = 0; p < npred1; p++)
+        {
+            if (vec_get(lb.body->preds, p) == lb.header)
+            {
+                vec_set(lb.body->preds, p, h);
+            }
+        }
+    }
+    (void) hret;
+    return lb.exit;
 }
 
 static IrBlock *build_break_stmt(FuncBuilder *ctx, ASTBreakStmt *bs, IrBlock *bb)
@@ -3605,6 +3723,40 @@ static void mark_addr_taken_stmt(FuncBuilder *ctx, ASTNode *node)
     }
 }
 
+static void hoist_allocas(IrFunction *func)
+{
+    IrBlock *entry = (IrBlock *) vec_get(func->blocks, 0);
+    /* Keep the leading PHIs first. */
+    size_t ipos = 0;
+    for (; ipos < vec_size(entry->instrs); ipos++)
+    {
+        if (((IrInstr *) vec_get(entry->instrs, ipos))->opcode != OP_PHI)
+        {
+            break;
+        }
+    }
+    size_t nblocks = vec_size(func->blocks);
+    for (size_t b = 1; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(func->blocks, b);
+        size_t nin = vec_size(blk->instrs);
+        Vec *kept = vec_new(func->arena);
+        for (size_t i = 0; i < nin; i++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, i);
+            if (in->opcode == OP_ALLOCA)
+            {
+                vec_insert(entry->instrs, ipos++, in);
+            }
+            else
+            {
+                vec_push(kept, in);
+            }
+        }
+        blk->instrs = kept;
+    }
+}
+
 static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *global_map)
 {
     if (ast->kind != AST_FUNC_DEF)
@@ -3651,6 +3803,7 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
     entry = build_stmt_sequence(&ctx, body->stmts, entry);
 
     finish_func(&ctx, entry);
+    hoist_allocas(func);
 
     return !ctx.failed;
 }

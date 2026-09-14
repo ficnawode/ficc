@@ -11,12 +11,13 @@ typedef enum
     SUFFIX_LL,
 } IntSuffix;
 
-/* Type qualifiers (C11 §6.7.3). `const` today; volatile/restrict land later
-   in the same bitmask (append-only — do not reorder or repurpose bits). */
+/* Type qualifiers (C11 §6.7.3). Bitmask; append-only. */
 typedef enum
 {
     Q_NONE = 0,
     Q_CONST = 1 << 0,
+    Q_VOLATILE = 1 << 1,
+    Q_RESTRICT = 1 << 2,
 } Qualifier;
 
 /* X-macro for type kinds. Append only. */
@@ -184,6 +185,9 @@ u64 type_alignof(Type *t);
    `const int*` and `a[i]` lvalues are const. Qualifying is idempotent.
    `type_unqual` removes every qualifier (rvalues are always unqualified). */
 Type *type_const(Type *t);
+Type *type_volatile(Type *t);
+Type *type_restrict(Type *t);
+Type *type_qualify(Type *t, u8 qbits);
 Type *type_unqual(Type *t);
 Type *type_rvalue(Type *t); /* alias for type_unqual: strip qualifiers on read */
 

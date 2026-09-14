@@ -70,6 +70,7 @@ static const Keyword KEYWORDS[] = {
     {"int", TOK_KW_INT},
     {"long", TOK_KW_LONG},
     {"return", TOK_KW_RETURN},
+    {"restrict", TOK_KW_RESTRICT},
     {"short", TOK_KW_SHORT},
     {"signed", TOK_KW_SIGNED},
     {"sizeof", TOK_KW_SIZEOF},
@@ -80,6 +81,7 @@ static const Keyword KEYWORDS[] = {
     {"union", TOK_KW_UNION},
     {"unsigned", TOK_KW_UNSIGNED},
     {"void", TOK_KW_VOID},
+    {"volatile", TOK_KW_VOLATILE},
     {"while", TOK_KW_WHILE},
 };
 

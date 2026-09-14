@@ -547,38 +547,63 @@ Type *type_va_list(void)
 
 Type *type_const(Type *t)
 {
-    if (t->qualifiers & Q_CONST)
+    return type_qualify(t, Q_CONST);
+}
+
+Type *type_volatile(Type *t)
+{
+    return type_qualify(t, Q_VOLATILE);
+}
+
+Type *type_restrict(Type *t)
+{
+    return type_qualify(t, Q_RESTRICT);
+}
+
+Type *type_qualify(Type *t, u8 qbits)
+{
+    if (qbits == 0)
     {
         return t;
     }
+    if ((t->qualifiers & qbits) == qbits)
+    {
+        return t;
+    }
+    u8 combined = t->qualifiers | qbits;
     /* Qualifying an array qualifies its element type (C11: `const int a[3]`
        is an array of const int). Decay then yields `const int*`, and `a[i]`
        lvalues are const through the element type. */
     if (t->kind == TYPE_ARRAY)
     {
-        return type_array(type_const(t->arr.elem), t->arr.length);
+        return type_array(type_qualify(t->arr.elem, qbits), t->arr.length);
     }
     type_init_pool();
-    Type *cached = u64map_get(qual_cache, (u64) (uintptr_t) t);
+    Type *base = t;
+    while (base->unqual_base)
+    {
+        base = base->unqual_base;
+    }
+    u64 key = (((u64) (uintptr_t) base) << 8) | combined;
+    Type *cached = u64map_get(qual_cache, key);
     if (cached)
     {
         return cached;
     }
     Type *q = arena_alloc(type_arena, sizeof(Type), _Alignof(Type));
-    *q = *t;
-    q->qualifiers |= Q_CONST;
-    q->unqual_base = t;
+    *q = *base;
+    q->qualifiers = combined;
+    q->unqual_base = base;
     if (type_is_record(q))
     {
         q->record.qual_variants = NULL;
-        Type *base = type_base(t);
         if (!base->record.qual_variants)
         {
             base->record.qual_variants = vec_new(type_arena);
         }
         vec_push(base->record.qual_variants, q);
     }
-    u64map_set(qual_cache, (u64) (uintptr_t) t, q);
+    u64map_set(qual_cache, key, q);
     return q;
 }
 

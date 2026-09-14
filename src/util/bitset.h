@@ -16,4 +16,8 @@ size_t bitset_count(const Bitset *bs);
 void bitset_and(Bitset *dst, const Bitset *src);
 void bitset_or(Bitset *dst, const Bitset *src);
 
+/* Word-level access: `bitset_nwords` u64 words, vreg 0 in the low bit. */
+size_t bitset_nwords(const Bitset *bs);
+u64 *bitset_words(Bitset *bs);
+
 #endif

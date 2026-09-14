@@ -98,3 +98,13 @@ void bitset_or(Bitset *dst, const Bitset *src)
         dst->words[i] |= src->words[i];
     }
 }
+
+size_t bitset_nwords(const Bitset *bs)
+{
+    return bs->nwords;
+}
+
+u64 *bitset_words(Bitset *bs)
+{
+    return bs->words;
+}
