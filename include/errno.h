@@ -1,8 +1,7 @@
 #ifndef FICC_ERRNO_H
 #define FICC_ERRNO_H
 
-/* glibc exposes errno as the result of __errno_location(); matching that
-   here lets objects compiled by ficc resolve against the system libc. */
+/* glibc exposes errno as the result of __errno_location() */
 extern int *__errno_location(void);
 #define errno (*__errno_location())
 

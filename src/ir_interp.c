@@ -641,11 +641,11 @@ static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs)
         return 1;
     }
     VaFields va = {
-        .gp_offset = (u32) in->ops[2].u.imm,
-        .fp_offset = (u32) in->ops[3].u.imm,
-        .overflow = frame->va_overflow
-                        ? (u64) (uintptr_t) (frame->va_overflow + (u32) in->ops[1].u.imm)
-                        : 0,
+        .gp_offset = (u32) in->extra.va_start.gp_offset,
+        .fp_offset = (u32) in->extra.va_start.fp_offset,
+        .overflow = frame->va_overflow ? (u64) (uintptr_t) (frame->va_overflow +
+                                                            (u32) in->extra.va_start.stack_skip)
+                                       : 0,
         .reg_save = (u64) (uintptr_t) frame->va_save,
     };
     memcpy(ap, &va, sizeof(va));

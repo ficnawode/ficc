@@ -135,6 +135,14 @@ typedef struct
     const char *false_label;
 } IrBrcondPayload;
 
+/* va_start(ap, last): ap rides ops[0]; the three va_list field values live here. */
+typedef struct
+{
+    i64 stack_skip; /* bytes of stack-passed params before the overflow_arg_area */
+    i64 gp_offset;  /* offset of the first unused GP save slot */
+    i64 fp_offset;  /* offset of the first unused XMM save slot */
+} IrVaStartPayload;
+
 typedef struct
 {
     const char *target_label;
@@ -155,6 +163,7 @@ struct IrInstr
         IrCallPayload call;
         IrBrPayload br;
         IrBrcondPayload brcond;
+        IrVaStartPayload va_start;
     } extra;
 };
 

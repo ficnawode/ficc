@@ -648,8 +648,8 @@ TEST(ir_builder, va_start_emits_op_and_offsets)
             if (in->opcode == OP_VA_START)
             {
                 /* One named param (`int a`): gp_offset = 8, no stack skip. */
-                EXPECT_EQ(in->ops[1].u.imm, 0);
-                EXPECT_EQ(in->ops[2].u.imm, 8);
+                EXPECT_EQ(in->extra.va_start.stack_skip, 0);
+                EXPECT_EQ(in->extra.va_start.gp_offset, 8);
                 saw_start = true;
                 break;
             }
@@ -687,8 +687,8 @@ TEST(ir_builder, va_start_six_named_params_full_gp)
             {
                 /* Six named params consume all six GP regs: gp_offset = 48,
                    the first unnamed arg lands at overflow+0. */
-                EXPECT_EQ(in->ops[1].u.imm, 0);
-                EXPECT_EQ(in->ops[2].u.imm, 48);
+                EXPECT_EQ(in->extra.va_start.stack_skip, 0);
+                EXPECT_EQ(in->extra.va_start.gp_offset, 48);
                 saw_start = true;
                 break;
             }

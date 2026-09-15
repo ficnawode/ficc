@@ -177,14 +177,15 @@ void ir_call_set_indirect(IrInstr *call, IrOperand callee)
     call->extra.call.callee = callee;
 }
 
-/* va_start(ap, last): write the four va_list fields; ops = ap, stack_skip, gp_offset, fp_offset. */
+/* va_start(ap, last): write the four va_list fields; ap rides ops[0], the three offsets live in
+ * extra.va_start (they overflow the 3-slot ops array). */
 IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offset, i64 fp_offset)
 {
-    IrInstr *ins = instr_new(bb, OP_VA_START, NO_VREG, 4);
+    IrInstr *ins = instr_new(bb, OP_VA_START, NO_VREG, 1);
     ins->ops[0] = ap;
-    ins->ops[1] = ir_operand_imm(stack_skip);
-    ins->ops[2] = ir_operand_imm(gp_offset);
-    ins->ops[3] = ir_operand_imm(fp_offset);
+    ins->extra.va_start.stack_skip = stack_skip;
+    ins->extra.va_start.gp_offset = gp_offset;
+    ins->extra.va_start.fp_offset = fp_offset;
     return ins;
 }
 
@@ -432,8 +433,9 @@ static void dump_instr(IrInstr *ins, IrModule *m)
             break;
         case OP_VA_START:
             printf(", stack_skip=%lld, gp_offset=%lld, fp_offset=%lld",
-                   (long long) ins->ops[1].u.imm, (long long) ins->ops[2].u.imm,
-                   (long long) ins->ops[3].u.imm);
+                   (long long) ins->extra.va_start.stack_skip,
+                   (long long) ins->extra.va_start.gp_offset,
+                   (long long) ins->extra.va_start.fp_offset);
             break;
         case OP_VA_END:
             printf(" ap");

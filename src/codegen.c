@@ -30,13 +30,46 @@ typedef struct
     const char **targets;  /* nentries block labels, index = value − min */
 } SwitchTableRec;
 
-/* Per-function frame: vreg i at (i+1)*8 below %rbp, or `slot_off` when wide. */
+/* Per-function frame: slot_off[vreg] is the vreg's offset below %rbp (see frame_plan). */
 typedef struct
 {
     u32 frame_size;    /* total frame size below %rbp, rounded up to 16 (ABI) */
     u32 save_area_off; /* register save area offset below %rbp, 0 if non-variadic */
-    u32 *slot_off;     /* per-vreg frame offsets, or NULL for the (vreg+1)*8 layout */
+    u32 *slot_off;     /* per-vreg frame offsets below %rbp */
 } FrameInfo;
+
+/* Block label -> IrBlock* plus IrBlock* -> index, built once per function. */
+typedef struct
+{
+    size_t nblocks;
+    StrMap *label_to_block; /* block label -> IrBlock* */
+    U64Map *block_to_index; /* IrBlock* -> index into f->blocks */
+} BlockIndex;
+
+static BlockIndex *index_blocks(IrFunction *f, Arena *arena)
+{
+    BlockIndex *bi = arena_alloc(arena, sizeof(BlockIndex), sizeof(void *));
+    bi->nblocks = vec_size(f->blocks);
+    bi->label_to_block = strmap_new(arena);
+    bi->block_to_index = u64map_new(arena);
+    for (size_t i = 0; i < bi->nblocks; i++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, i);
+        strmap_set(bi->label_to_block, blk->label, blk);
+        u64map_set(bi->block_to_index, (u64) (uintptr_t) blk, (void *) (uintptr_t) i);
+    }
+    return bi;
+}
+
+static size_t block_index_of(const BlockIndex *bi, IrBlock *blk)
+{
+    return (size_t) (uintptr_t) u64map_get(bi->block_to_index, (u64) (uintptr_t) blk);
+}
+
+static IrBlock *block_by_label(const BlockIndex *bi, const char *label)
+{
+    return (IrBlock *) strmap_get(bi->label_to_block, label);
+}
 
 typedef struct CodegenCtx CodegenCtx;
 struct CodegenCtx
@@ -45,18 +78,17 @@ struct CodegenCtx
     IrFunction *func;
     IrModule *mod; /* for the per-vreg width table */
     Arena *arena;
-    Vec **phi_copies;       /* per-block Vec<PhiCopy*>, indexed by block index */
-    StrMap *label_to_block; /* block label -> IrBlock* */
-    U64Map *block_to_index; /* IrBlock* -> block index */
-    size_t *block_offsets;  /* per-block offset within the function bytes */
-    Vec *patches;           /* Vec<PatchSite*> — function call rel32 fields */
-    Vec *block_patches;     /* Vec<PatchSite*> — intra-function jump rel32 fields */
-    Vec *global_patches;    /* Vec<GlobalPatch*> */
-    Vec *func_patches;      /* Vec<FuncAddrPatch*> — function-address loads */
-    Vec *switch_tables;     /* Vec<SwitchTableRec*> */
-    u32 save_area_off;      /* register save area offset below %rbp (variadic fns) */
-    u32 *slot_off;          /* per-vreg frame offsets (see FrameInfo) */
-    int fpu_depth;          /* x87 stack depth; lowered sequences leave no residue */
+    Vec **phi_copies;      /* per-block Vec<PhiCopy*>, indexed by block index */
+    BlockIndex *blocks;    /* label/pointer lookup for this function's blocks */
+    size_t *block_offsets; /* per-block offset within the function bytes */
+    Vec *patches;          /* Vec<PatchSite*> — function call rel32 fields */
+    Vec *block_patches;    /* Vec<PatchSite*> — intra-function jump rel32 fields */
+    Vec *global_patches;   /* Vec<GlobalPatch*> */
+    Vec *func_patches;     /* Vec<FuncAddrPatch*> — function-address loads */
+    Vec *switch_tables;    /* Vec<SwitchTableRec*> */
+    u32 save_area_off;     /* register save area offset below %rbp (variadic fns) */
+    u32 *slot_off;         /* per-vreg frame offsets (see FrameInfo) */
+    int fpu_depth;         /* x87 stack depth; lowered sequences leave no residue */
 };
 
 static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
@@ -118,8 +150,7 @@ typedef enum
     CC_G
 } CondCode;
 
-/* Opcode and prefix bytes used by the encoder; values taking a register nibble in the low 3 bits
- * are named *_BASE. */
+/* Opcode/prefix bytes; *_BASE names take a register nibble in the low 3 bits. */
 typedef enum
 {
     X86_TWO_BYTE_ESC = 0x0F,
@@ -195,6 +226,18 @@ typedef enum
 
 #define NO_REG 0xFF
 
+/* Scalar widths in bytes. */
+#define W_BYTE 1
+#define W_WORD 2
+#define W_DWORD 4
+#define W_QWORD 8
+#define W_LD 16
+
+#define BIT_63 63
+
+#define F32_SIGN_BIT 0x80000000
+#define F64_SIGN_BIT 0x8000000000000000ULL
+
 /* SSE scratch: only xmm0/xmm1 are ever used as values. */
 #define R_XMM0 0
 #define R_XMM1 1
@@ -203,12 +246,35 @@ typedef enum
 #define MF_FLOAT 0xF3
 #define MF_DOUBLE 0xF2
 
+/* The mandatory prefix for a floating-point lane width (4 → float, else double). */
+#define MF_OF(w) ((w) == 4 ? MF_FLOAT : MF_DOUBLE)
+
+/* Encoding byte for an 8-bit vs 32-bit /opcode group (F6/F7, D2/D3). */
+#define GRP3_OPCODE(w) ((w) == 1 ? X86_GROUP3_RM8 : X86_GROUP3_RM32)
+#define SHIFT_OPCODE(w) ((w) == 1 ? X86_SHIFT_RM8_CL : X86_SHIFT_RM32_CL)
+
+/* Round a value up to a power-of-two alignment. */
+#define ALIGN_UP(v, align) (((v) + ((align) - 1)) & ~((align) - 1))
+
 /* SysV va_list register save area: 6 × 8-byte GP slots, then 8 × 16-byte xmm slots. */
+#define VA_GP_STRIDE 8
 #define VA_GP_BYTES 48
 #define VA_SAVE_BYTES 176
 #define VA_XMM_STRIDE 16
 #define VA_NGP 6
 #define VA_NXMM 8
+
+/* va_list field offsets. */
+#define VA_FIELD_GP_OFFSET 0
+#define VA_FIELD_FP_OFFSET 4
+#define VA_FIELD_OVF 8
+#define VA_FIELD_REGS 16
+
+/* Caller arguments sit 16 bytes above %rbp (return address + saved %rbp). */
+#define STACK_PARAM_BASE 16
+
+/* %rsp and outgoing call area stay 16-byte aligned (SysV ABI). */
+#define STACK_ALIGN 16
 
 /* IEEE bit patterns of 2^63, added back by the u64 int→FP sequence. */
 #define F32_BITS_2POW63 0x5F000000
@@ -230,6 +296,17 @@ typedef enum
 #define X87_DIG_0 0
 #define X87_DIG_1 1
 #define X87_DIG_2 2
+
+/* x87 register-form opcodes (two bytes: primary then sub-opcode). */
+#define X87_FLDZ 0xD9EE
+#define X87_FCHS 0xD9E0
+#define X87_FADDP 0xDEC1
+#define X87_FSUBP 0xDEE9
+#define X87_FSUBRP 0xDEE1
+#define X87_FMULP 0xDEC9
+#define X87_FDIVP 0xDEF9
+#define X87_FUCOMIP 0xDFE9
+#define X87_FSTP_ST0 0xDDD8
 
 /* 80-bit pattern of 2^63: significand 0x8000000000000000 @ exponent 0x403E. */
 #define LD_EXPONENT_2POW63 0x403E
@@ -335,10 +412,11 @@ static X86Mem x86_mem_rcx(i32 disp)
     return m;
 }
 
-/* Frame offset for a vreg: the slot table when present, else (vreg+1)*8. */
+/* Frame offset for a vreg below %rbp; frame_plan always provides the slot table. */
 static i32 vreg_frame_disp(u32 vreg, const u32 *slot_off)
 {
-    return slot_off ? -(i32) slot_off[vreg] : -(i32) ((vreg + 1) * 8);
+    ASSERT(slot_off != NULL && "frame planner always provides a slot table");
+    return -(i32) slot_off[vreg];
 }
 
 static X86Operand xop_vreg_slot(u32 vreg, const u32 *slot_off)
@@ -348,20 +426,13 @@ static X86Operand xop_vreg_slot(u32 vreg, const u32 *slot_off)
 
 static X86Operand xop_vreg(CodegenCtx *ctx, u32 vreg)
 {
-    return xop_mem(x86_mem_rbp(vreg_frame_disp(vreg, ctx ? ctx->slot_off : NULL)));
+    return xop_mem(x86_mem_rbp(vreg_frame_disp(vreg, ctx->slot_off)));
 }
 
-static X86Operand xop_from_operand(CodegenCtx *ctx, IrOperand op)
+/* Frame memory slot for a vreg; the common `.u.mem` read of xop_vreg. */
+static X86Mem vreg_slot_mem(CodegenCtx *ctx, u32 vreg)
 {
-    if (op.is_global)
-    {
-        return xop_imm(0);
-    }
-    if (op.is_imm)
-    {
-        return xop_imm(op.u.imm);
-    }
-    return xop_vreg(ctx, op.u.vreg);
+    return xop_vreg(ctx, vreg).u.mem;
 }
 
 static void emit_global_addr_to(ByteBuf *buf, u8 reg, u32 global_idx, Vec *patches, Arena *arena);
@@ -379,18 +450,42 @@ static X86Operand lowered_operand(CodegenCtx *ctx, IrOperand op, u8 reg)
         emit_func_addr_to(ctx->buf, reg, op.u.func_name, ctx->func_patches, ctx->arena);
         return xop_reg(reg);
     }
-    return xop_from_operand(ctx, op);
+    if (op.is_imm)
+    {
+        return xop_imm(op.u.imm);
+    }
+    return xop_vreg(ctx, op.u.vreg);
 }
 
-/* Lowered value width: addresses are 8 bytes; a materialized immediate counts as 4 (mov-imm32sx).
- */
+/* True when an operand is a vreg rather than an immediate or a symbol address. */
+static bool operand_is_vreg(IrOperand op)
+{
+    return !op.is_imm && !op.is_global && !op.is_func;
+}
+
+/* Integer-immediate load width: 4 bytes if it fits a sign-extended imm32, else full 64-bit. */
+static bool fits_i32(i64 v)
+{
+    return v >= (i64) INT32_MIN && v <= (i64) INT32_MAX;
+}
+
+static u8 imm_load_width(i64 imm)
+{
+    return fits_i32(imm) ? 4 : 8;
+}
+
+/* Lowered value width: addresses/fn ptrs are 8B, immediates via imm_load_width, vregs their own. */
 static u8 operand_width(CodegenCtx *ctx, IrOperand op)
 {
     if (op.is_global || op.is_func)
     {
         return 8;
     }
-    return op.is_imm ? 4 : vreg_width(ctx, op.u.vreg);
+    if (op.is_imm)
+    {
+        return imm_load_width(op.u.imm);
+    }
+    return vreg_width(ctx, op.u.vreg);
 }
 
 static u8 modrm(u8 mod, u8 reg, u8 rm)
@@ -403,14 +498,15 @@ static u8 rex(bool w, bool r, bool x, bool b)
     return 0x40 | (w ? 0x08 : 0) | (r ? 0x04 : 0) | (x ? 0x02 : 0) | (b ? 0x01 : 0);
 }
 
+/* REX prefix for an instruction whose r/m operand is `m`: R/B come from the SIB index and base. */
+static u8 rex_mem(bool w, bool r, X86Mem m)
+{
+    return rex(w, r, reg_is_extended(m.index), reg_is_extended(m.base));
+}
+
 static bool fits_i8(i32 v)
 {
     return v >= -128 && v <= 127;
-}
-
-static bool fits_i32(i64 v)
-{
-    return v >= (i64) INT32_MIN && v <= (i64) INT32_MAX;
 }
 
 static u8 encode_sib_scale(u8 scale)
@@ -455,9 +551,12 @@ static void emit_mem_operand(ByteBuf *buf, u8 reg, X86Mem m)
         mod = 2;
     }
 
-    bytebuf_append(buf, modrm(mod, reg, need_sib ? 4 : m.base));
+    /* rm = 4 (rsp) always requires a SIB byte; otherwise rm names the base register. */
+    u8 rm = need_sib ? 4 : m.base;
+    bytebuf_append(buf, modrm(mod, reg, rm));
     if (need_sib)
     {
+        /* No index ⇒ SIB index field 4 (rsp); scale bytes come from encode_sib_scale. */
         u8 idx = m.index == NO_REG ? 4 : (m.index & 7);
         u8 scale = encode_sib_scale(m.scale);
         bytebuf_append(buf, (u8) ((scale << 6) | (idx << 3) | (m.base & 7)));
@@ -502,9 +601,10 @@ static void emit_mov_byte(ByteBuf *buf, X86Operand dst, X86Operand src)
     bool to_reg = dst.kind == XOP_REG;
     u8 reg = to_reg ? dst.u.reg : src.u.reg;
     X86Mem mem = to_reg ? src.u.mem : dst.u.mem;
-    bytebuf_append(buf,
-                   rex(false, reg >= 8, reg_is_extended(mem.index), reg_is_extended(mem.base)));
-    bytebuf_append(buf, to_reg ? X86_MOV_REG8_RM8 : X86_MOV_RM8_REG8);
+    /* reg → r/m store (88) vs r/m → reg load (8A). */
+    u8 mov_op = to_reg ? X86_MOV_REG8_RM8 : X86_MOV_RM8_REG8;
+    bytebuf_append(buf, rex_mem(false, reg >= 8, mem));
+    bytebuf_append(buf, mov_op);
     emit_mem_operand(buf, reg, mem);
 }
 
@@ -545,9 +645,10 @@ static void emit_mov_scalar(ByteBuf *buf, u8 width, X86Operand dst, X86Operand s
     bool to_reg = dst.kind == XOP_REG;
     u8 reg = to_reg ? dst.u.reg : src.u.reg;
     X86Mem mem = to_reg ? src.u.mem : dst.u.mem;
-    bytebuf_append(
-        buf, rex(width == 8, reg >= 8, reg_is_extended(mem.index), reg_is_extended(mem.base)));
-    bytebuf_append(buf, to_reg ? X86_MOV_REG32_RM32 : X86_MOV_RM32_REG32);
+    /* reg → r/m store (89) vs r/m → reg load (8B). */
+    u8 mov_op = to_reg ? X86_MOV_REG32_RM32 : X86_MOV_RM32_REG32;
+    bytebuf_append(buf, rex_mem(width == 8, reg >= 8, mem));
+    bytebuf_append(buf, mov_op);
     emit_mem_operand(buf, reg, mem);
 }
 
@@ -580,8 +681,7 @@ static const ArithSpec arith_specs[] = {
     [OP_AND] = {0x23, 0x83, 0x81, 4, false},
     [OP_OR] = {0x0B, 0x83, 0x81, 1, false},
     [OP_XOR] = {0x33, 0x83, 0x81, 6, false},
-    /* FP entry: `mem` is the two-byte (0F) opcode byte; the mandatory prefix
-       and the width come from the vreg at lowering time. */
+    /* FP entry: `mem` is the 0F-prefixed opcode byte; prefix+width come from the vreg. */
     [OP_FADD] = {0x58, 0, 0, 0, true},
     [OP_FSUB] = {0x5C, 0, 0, 0, true},
     [OP_FMUL] = {0x59, 0, 0, 0, true},
@@ -609,52 +709,59 @@ static void emit_reg_reg(ByteBuf *buf, u8 opcode, u8 dst_reg, u8 src_reg)
     bytebuf_append(buf, modrm(3, dst_reg, src_reg));
 }
 
+static void emit_binop_byte(ByteBuf *buf, const ArithSpec *s, u8 dst_reg, X86Operand rhs)
+{
+    if (rhs.kind == XOP_IMM)
+    {
+        bytebuf_append(buf, X86_GROUP1_IMM8);
+        bytebuf_append(buf, modrm(3, s->digit, dst_reg));
+        bytebuf_append_i8(buf, (i8) rhs.u.imm);
+        return;
+    }
+    /* Byte ops use `op r8, r/m8` (mem opcode − 1); a memory RHS is loaded to %cl first. */
+    if (rhs.kind == XOP_MEM)
+    {
+        emit_mov_byte(buf, xop_reg(R_ECX), rhs);
+        rhs = xop_reg(R_ECX);
+    }
+    bytebuf_append(buf, (u8) (s->mem - 1));
+    bytebuf_append(buf, modrm(3, dst_reg, rhs.u.reg));
+}
+
+static void emit_binop_imm(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_reg, i64 v)
+{
+    emit_os16(buf, width);
+    bytebuf_append(buf, rex(width == 8, false, false, dst_reg >= 8));
+    if (fits_i8(v))
+    {
+        bytebuf_append(buf, s->imm8);
+        bytebuf_append(buf, modrm(3, s->digit, dst_reg));
+        bytebuf_append_i8(buf, (i8) v);
+    }
+    else
+    {
+        bytebuf_append(buf, s->imm32);
+        bytebuf_append(buf, modrm(3, s->digit, dst_reg));
+        bytebuf_append_i32(buf, (i32) v);
+    }
+}
+
 /* %reg op= rhs */
 static void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_reg, X86Operand rhs)
 {
     if (width == 1)
     {
-        if (rhs.kind == XOP_IMM)
-        {
-            bytebuf_append(buf, X86_GROUP1_IMM8);
-            bytebuf_append(buf, modrm(3, s->digit, dst_reg));
-            bytebuf_append_i8(buf, (i8) rhs.u.imm);
-            return;
-        }
-        /* Byte ops use `op r8, r/m8` (mem opcode − 1); AL/CL only, no REX, a memory RHS is loaded
-         * to %cl first. */
-        if (rhs.kind == XOP_MEM)
-        {
-            emit_mov_byte(buf, xop_reg(R_ECX), rhs);
-            rhs = xop_reg(R_ECX);
-        }
-        bytebuf_append(buf, (u8) (s->mem - 1));
-        bytebuf_append(buf, modrm(3, dst_reg, rhs.u.reg));
+        emit_binop_byte(buf, s, dst_reg, rhs);
         return;
     }
     if (rhs.kind == XOP_IMM)
     {
-        i64 v = rhs.u.imm;
-        emit_os16(buf, width);
-        bytebuf_append(buf, rex(width == 8, false, false, dst_reg >= 8));
-        if (fits_i8(v))
-        {
-            bytebuf_append(buf, s->imm8);
-            bytebuf_append(buf, modrm(3, s->digit, dst_reg));
-            bytebuf_append_i8(buf, (i8) v);
-        }
-        else
-        {
-            bytebuf_append(buf, s->imm32);
-            bytebuf_append(buf, modrm(3, s->digit, dst_reg));
-            bytebuf_append_i32(buf, (i32) v);
-        }
+        emit_binop_imm(buf, width, s, dst_reg, rhs.u.imm);
         return;
     }
     if (rhs.kind == XOP_REG)
     {
-        /* `%reg op= reg` form: RHS is a global/function address lowered into a register (cf.
-         * lowered_operand). */
+        /* `%reg op= reg`: RHS is a global/function address lowered into a register. */
         emit_os16(buf, width);
         bytebuf_append(buf, rex(width == 8, dst_reg >= 8, false, rhs.u.reg >= 8));
         if (s->mem_0f)
@@ -681,7 +788,7 @@ static void emit_unary(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 {
     emit_os16(buf, width);
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
-    bytebuf_append(buf, width == 1 ? X86_GROUP3_RM8 : X86_GROUP3_RM32);
+    bytebuf_append(buf, GRP3_OPCODE(width));
     bytebuf_append(buf, modrm(3, digit, reg));
 }
 
@@ -690,7 +797,7 @@ static void emit_shift_cl(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 {
     emit_os16(buf, width);
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
-    bytebuf_append(buf, width == 1 ? X86_SHIFT_RM8_CL : X86_SHIFT_RM32_CL);
+    bytebuf_append(buf, SHIFT_OPCODE(width));
     bytebuf_append(buf, modrm(3, digit, reg));
 }
 
@@ -698,8 +805,7 @@ static void emit_cdq(ByteBuf *buf, u8 width, bool is_unsigned)
 {
     if (is_unsigned)
     {
-        /* `div` reads rdx:rax; the high half must be zeroed (cqto/cdq would
-           sign-extend a value with the top bit set). 8-bit uses ax:al. */
+        /* `div` reads rdx:rax; the high half must be zeroed (8-bit uses ax:al). */
         if (width == 1)
         {
             bytebuf_append(buf, X86_XOR_RM8_REG8);
@@ -727,7 +833,7 @@ static void emit_cdq(ByteBuf *buf, u8 width, bool is_unsigned)
 static void emit_idiv(ByteBuf *buf, u8 width, u8 reg)
 {
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
-    bytebuf_append(buf, width == 1 ? X86_GROUP3_RM8 : X86_GROUP3_RM32);
+    bytebuf_append(buf, GRP3_OPCODE(width));
     bytebuf_append(buf, modrm(3, 7, reg));
 }
 
@@ -735,7 +841,7 @@ static void emit_idiv(ByteBuf *buf, u8 width, u8 reg)
 static void emit_div(ByteBuf *buf, u8 width, u8 reg)
 {
     bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
-    bytebuf_append(buf, width == 1 ? X86_GROUP3_RM8 : X86_GROUP3_RM32);
+    bytebuf_append(buf, GRP3_OPCODE(width));
     bytebuf_append(buf, modrm(3, 6, reg));
 }
 
@@ -757,8 +863,7 @@ static void emit_imul_imm(ByteBuf *buf, u8 width, u8 reg, i64 imm)
     }
 }
 
-/* test %reg(width), %reg(width): a 1-byte condition uses `test al, al` so
-   adjacent slot bytes cannot leak into the result. */
+/* test %reg: `test al, al` at width 1 so adjacent slot bytes cannot leak in. */
 static void emit_test_reg(ByteBuf *buf, u8 width, u8 reg)
 {
     if (width == 1)
@@ -861,8 +966,7 @@ static void patch_rel32(ByteBuf *buf, size_t field_off, size_t target)
 static void emit_sse_load(ByteBuf *buf, u8 mf, u8 xmm, X86Mem mem)
 {
     bytebuf_append(buf, mf);
-    bytebuf_append(buf,
-                   rex(false, xmm >= 8, reg_is_extended(mem.index), reg_is_extended(mem.base)));
+    bytebuf_append(buf, rex_mem(false, xmm >= 8, mem));
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_MOV);
     emit_mem_operand(buf, xmm, mem);
@@ -872,8 +976,7 @@ static void emit_sse_load(ByteBuf *buf, u8 mf, u8 xmm, X86Mem mem)
 static void emit_sse_store(ByteBuf *buf, u8 mf, X86Mem mem, u8 xmm)
 {
     bytebuf_append(buf, mf);
-    bytebuf_append(buf,
-                   rex(false, xmm >= 8, reg_is_extended(mem.index), reg_is_extended(mem.base)));
+    bytebuf_append(buf, rex_mem(false, xmm >= 8, mem));
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, (u8) (X86_SSE_MOV + 1));
     emit_mem_operand(buf, xmm, mem);
@@ -882,11 +985,11 @@ static void emit_sse_store(ByteBuf *buf, u8 mf, X86Mem mem, u8 xmm)
 /* movups 16-byte copy: emit_mov_scalar admits only 2|4|8. */
 static void emit_mov16(ByteBuf *buf, X86Mem src, X86Mem dst)
 {
-    bytebuf_append(buf, rex(false, false, reg_is_extended(src.index), reg_is_extended(src.base)));
+    bytebuf_append(buf, rex_mem(false, false, src));
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_MOV); /* 0F 10 movups xmm0, r/m */
     emit_mem_operand(buf, R_XMM0, src);
-    bytebuf_append(buf, rex(false, false, reg_is_extended(dst.index), reg_is_extended(dst.base)));
+    bytebuf_append(buf, rex_mem(false, false, dst));
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, (u8) (X86_SSE_MOV + 1)); /* 0F 11 movups r/m, xmm0 */
     emit_mem_operand(buf, R_XMM0, dst);
@@ -895,7 +998,7 @@ static void emit_mov16(ByteBuf *buf, X86Mem src, X86Mem dst)
 /* movups r/m ← xmm0 (0F 11): the store half of emit_mov16. */
 static void emit_mov16_store(ByteBuf *buf, X86Mem dst)
 {
-    bytebuf_append(buf, rex(false, false, reg_is_extended(dst.index), reg_is_extended(dst.base)));
+    bytebuf_append(buf, rex_mem(false, false, dst));
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, (u8) (X86_SSE_MOV + 1));
     emit_mem_operand(buf, R_XMM0, dst);
@@ -910,8 +1013,8 @@ static void emit_sse_cvt(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
     bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
 }
 
-/* cvtsi2sd/cvtsi2ss xmm, r/m64 (REX.W); src is a sign/zero-extended GP reg. */
-static void emit_cvtsi2d(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_reg)
+/* cvtsi2sd/cvtsi2ss xmm, r/m64 (REX.W); src is a zero-extended GP reg. */
+static void emit_cvtsi2fp(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_reg)
 {
     bytebuf_append(buf, mf);
     bytebuf_append(buf, X86_REX_W);
@@ -933,12 +1036,12 @@ static void emit_cvtts2i(ByteBuf *buf, u8 mf, u8 dst_reg, u8 src_xmm, bool w)
     bytebuf_append(buf, modrm(3, dst_reg, src_xmm));
 }
 
-/* ucomiss/ucomisd lhs, rhs; unordered (NaN) sets ZF, CF and PF. */
-static void emit_sse_ucomis(ByteBuf *buf, u8 mand, u8 lhs_xmm, u8 rhs_xmm)
+/* ucomiss/ucomisd: width 4 omits the 66 prefix; unordered (NaN) sets ZF, CF and PF. */
+static void emit_sse_ucomis(ByteBuf *buf, u8 w, u8 lhs_xmm, u8 rhs_xmm)
 {
-    if (mand)
+    if (w != 4)
     {
-        bytebuf_append(buf, mand);
+        bytebuf_append(buf, X86_SSE_66);
     }
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_UCOMIS);
@@ -980,8 +1083,7 @@ static void emit_movd_to_xmm(ByteBuf *buf, u8 dst_xmm, u8 src_reg, bool w)
 static void emit_sse_op_mem(ByteBuf *buf, u8 mf, u8 op, u8 dst_xmm, X86Mem mem)
 {
     bytebuf_append(buf, mf);
-    bytebuf_append(buf,
-                   rex(false, dst_xmm >= 8, reg_is_extended(mem.index), reg_is_extended(mem.base)));
+    bytebuf_append(buf, rex_mem(false, dst_xmm >= 8, mem));
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, op);
     emit_mem_operand(buf, dst_xmm, mem);
@@ -1012,8 +1114,7 @@ static void emit_sse_xor(ByteBuf *buf, u8 mand, u8 dst_xmm, u8 src_xmm)
 /* x87 (80-bit extended) emission                                      */
 /* ------------------------------------------------------------------ */
 
-/* The x87 stack must balance after every lowering: a leaked st(1) silently
-   poisons every later FP result (NaN accrual in the parity tests). */
+/* A leaked st(1) silently poisons later FP results; every lowering leaves depth 0. */
 static void x87_push(CodegenCtx *ctx)
 {
     ctx->fpu_depth++;
@@ -1030,8 +1131,7 @@ static void x87_balance(CodegenCtx *ctx)
     ASSERT(ctx->fpu_depth == 0 && "x87 stack not balanced after a width-16 lowering");
 }
 
-/* Restore the counter to the runtime depth at a branch label: the fall-through
-   and taken paths may carry different x87 residues. */
+/* Restore the depth counter at a branch label (fall-through vs taken may differ). */
 static void x87_set_depth(CodegenCtx *ctx, int depth)
 {
     ctx->fpu_depth = depth;
@@ -1088,60 +1188,73 @@ static void emit_fstpl(CodegenCtx *ctx, X86Mem m)
 }
 static void emit_fild(CodegenCtx *ctx, u8 size, X86Mem m)
 {
-    emit_x87_mem(ctx, size == 4 ? X87_FILD_M32 : X87_FILD_M64, size == 4 ? X87_DIG_0 : X87_DIG_5,
-                 m);
+    if (size == 4)
+    {
+        emit_x87_mem(ctx, X87_FILD_M32, X87_DIG_0, m);
+    }
+    else
+    {
+        emit_x87_mem(ctx, X87_FILD_M64, X87_DIG_5, m);
+    }
     x87_push(ctx);
 }
 static void emit_fisttp(CodegenCtx *ctx, u8 size, X86Mem m)
 {
-    emit_x87_mem(ctx, size == 4 ? X87_FISTTP_M32 : X87_FISTTP_M64, X87_DIG_1, m);
+    if (size == 4)
+    {
+        emit_x87_mem(ctx, X87_FISTTP_M32, X87_DIG_1, m);
+    }
+    else
+    {
+        emit_x87_mem(ctx, X87_FISTTP_M64, X87_DIG_1, m);
+    }
     x87_pop(ctx);
 }
 static void emit_fldz(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, 0xD9, 0xEE);
+    emit_x87_reg(ctx, X87_FLDZ >> 8, X87_FLDZ & 0xFF);
     x87_push(ctx);
 }
 static void emit_fchs(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, 0xD9, 0xE0);
+    emit_x87_reg(ctx, X87_FCHS >> 8, X87_FCHS & 0xFF);
 }
 /* fsubp name matches the x87 semantics used: st(1) ← st(1) − st(0), pop. */
 static void emit_faddp(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, 0xDE, 0xC1);
+    emit_x87_reg(ctx, X87_FADDP >> 8, X87_FADDP & 0xFF);
     x87_pop(ctx);
 }
 static void emit_fsubp(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, 0xDE, 0xE9);
+    emit_x87_reg(ctx, X87_FSUBP >> 8, X87_FSUBP & 0xFF);
     x87_pop(ctx);
 }
 /* fsubrp st(1), st(0): st(1) ← st(0) − st(1), pop — the reverse of fsubp. */
 static void emit_fsubrp(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, 0xDE, 0xE1);
+    emit_x87_reg(ctx, X87_FSUBRP >> 8, X87_FSUBRP & 0xFF);
     x87_pop(ctx);
 }
 static void emit_fmulp(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, 0xDE, 0xC9);
+    emit_x87_reg(ctx, X87_FMULP >> 8, X87_FMULP & 0xFF);
     x87_pop(ctx);
 }
 static void emit_fdivp(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, 0xDE, 0xF9);
+    emit_x87_reg(ctx, X87_FDIVP >> 8, X87_FDIVP & 0xFF);
     x87_pop(ctx);
 }
 /* fucomip st(0), st(1): unordered compare, sets ZF/CF/PF like ucomis*, pops st(0). */
 static void emit_fucomip(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, 0xDF, 0xE9);
+    emit_x87_reg(ctx, X87_FUCOMIP >> 8, X87_FUCOMIP & 0xFF);
     x87_pop(ctx);
 }
 static void emit_fstp_st0(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, 0xDD, 0xD8);
+    emit_x87_reg(ctx, X87_FSTP_ST0 >> 8, X87_FSTP_ST0 & 0xFF);
     x87_pop(ctx);
 }
 
@@ -1149,15 +1262,15 @@ static void emit_fstp_st0(CodegenCtx *ctx)
 static void emit_load_2pow63_ld(CodegenCtx *ctx)
 {
     ByteBuf *b = ctx->buf;
-    emit_binop_rhs(b, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(16));
-    emit_mov(b, 8, xop_reg(R_EAX), xop_imm((i64) LD_SIGNIFICAND_2POW63));
-    emit_mov(b, 8, xop_mem(x86_mem_rsp(0)), xop_reg(R_EAX));
-    emit_mov(b, 8, xop_reg(R_EAX), xop_imm(0));
-    emit_mov(b, 8, xop_mem(x86_mem_rsp(8)), xop_reg(R_EAX));
-    emit_mov(b, 2, xop_reg(R_EAX), xop_imm(LD_EXPONENT_2POW63));
-    emit_mov(b, 2, xop_mem(x86_mem_rsp(8)), xop_reg(R_EAX));
+    emit_binop_rhs(b, W_QWORD, &arith_specs[OP_SUB], R_ESP, xop_imm(W_LD));
+    emit_mov(b, W_QWORD, xop_reg(R_EAX), xop_imm((i64) LD_SIGNIFICAND_2POW63));
+    emit_mov(b, W_QWORD, xop_mem(x86_mem_rsp(0)), xop_reg(R_EAX));
+    emit_mov(b, W_QWORD, xop_reg(R_EAX), xop_imm(0));
+    emit_mov(b, W_QWORD, xop_mem(x86_mem_rsp(8)), xop_reg(R_EAX));
+    emit_mov(b, W_WORD, xop_reg(R_EAX), xop_imm(LD_EXPONENT_2POW63));
+    emit_mov(b, W_WORD, xop_mem(x86_mem_rsp(8)), xop_reg(R_EAX));
     emit_fldt(ctx, x86_mem_rsp(0));
-    emit_binop_rhs(b, 8, &arith_specs[OP_ADD], R_ESP, xop_imm(16));
+    emit_binop_rhs(b, W_QWORD, &arith_specs[OP_ADD], R_ESP, xop_imm(W_LD));
 }
 
 static void emit_bit_imm(ByteBuf *buf, u8 digit, u8 dst_reg, u8 imm)
@@ -1189,8 +1302,7 @@ static void emit_call_reg(ByteBuf *buf, u8 reg)
 /* IR lowering                                                         */
 /* ------------------------------------------------------------------ */
 
-/* Scratch: lower_* may clobber R_EAX/R_ECX/R_EDX, so the allocator must not schedule live ranges
- * across one lowering. */
+/* Scratch: lower_* may clobber EAX/ECX/EDX, so live ranges must not span a lowering. */
 typedef void (*LowerFn)(IrInstr *in, CodegenCtx *ctx);
 
 static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src);
@@ -1199,6 +1311,7 @@ static void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src);
 static void emit_fp_source_to_xmm(CodegenCtx *ctx, IrOperand op, u8 w, u8 xmm);
 static void emit_fp_source_to_xmm0(CodegenCtx *ctx, IrOperand op, u8 w);
 static X86Mem x87_slot(CodegenCtx *ctx, IrOperand op);
+static u8 load_int_operand(CodegenCtx *ctx, IrOperand op, bool *is_signed);
 
 static void lower_binary(IrInstr *in, CodegenCtx *ctx);
 static void lower_unary(IrInstr *in, CodegenCtx *ctx);
@@ -1302,8 +1415,7 @@ static u8 vreg_width(CodegenCtx *ctx, u32 vreg)
     return ctx->mod->widths[vreg];
 }
 
-/* RHS for an arithmetic/compare whose 64-bit immediate has no imm encoding:
-   moves it through the scratch register (movabs) instead of erroring. */
+/* RHS: a width-8 immediate beyond imm32 is moved through `scratch` (movabs) instead of erroring. */
 static X86Operand lowered_operand_rhs(CodegenCtx *ctx, IrOperand op, u8 width, u8 scratch)
 {
     if (op.is_imm && width == 8 && !fits_i32(op.u.imm))
@@ -1374,45 +1486,15 @@ static void lower_div(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, w, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
-/* Width of an integer-immediate load: 4 bytes when it fits a sign-extended
-   imm32, otherwise a full 64-bit load. */
-static u8 imm_load_width(i64 imm)
-{
-    if (imm >= INT32_MIN && imm <= INT32_MAX)
-    {
-        return 4;
-    }
-    return 8;
-}
-
 static void lower_icmp(IrInstr *in, CodegenCtx *ctx)
 {
-    /* Compare at the widest operand width: a width-1 vreg (`char != 0`) or a
-       width-8 pointer/64-bit immediate vs a small immediate must not truncate
-       to the int result width. Load each operand at its own width; sub-32-bit
-       vregs are zero-extended, immediates wider than imm32 load as full 64-bit. */
+    /* Compare at the widest operand width to keep narrow-vs-imm32 comparisons precise. */
     u8 rw = vreg_width(ctx, in->result);
     IrOperand lhs = in->ops[0];
     IrOperand rhs = in->ops[1];
-    u8 w0;
-    if (lhs.is_imm)
-    {
-        w0 = imm_load_width(lhs.u.imm);
-    }
-    else
-    {
-        w0 = operand_width(ctx, lhs);
-    }
-    u8 w1;
-    if (rhs.is_imm)
-    {
-        w1 = imm_load_width(rhs.u.imm);
-    }
-    else
-    {
-        w1 = operand_width(ctx, rhs);
-    }
-    u8 w = w0 > w1 ? w0 : w1;
+    u8 w0 = operand_width(ctx, lhs);
+    u8 w1 = operand_width(ctx, rhs);
+    u8 w = MAX(w0, w1);
 
     if (lhs.is_imm)
     {
@@ -1448,222 +1530,254 @@ static void lower_icmp(IrInstr *in, CodegenCtx *ctx)
 /* System V AMD64 argument registers. */
 static const u8 abi_arg_regs[6] = {R_EDI, R_ESI, R_EDX, R_ECX, R_R8, R_R9};
 
-static void lower_call(IrInstr *in, CodegenCtx *ctx)
+/* Where a call argument travels: GP/SSE register, or a caller-stack spill slot. */
+typedef enum
+{
+    ARG_GP,
+    ARG_SSE,
+    ARG_X87,   /* width-16: always pushed on the stack, 16-aligned */
+    ARG_STACK, /* overflow: pushed on the stack */
+} ArgClass;
+
+/* One call argument, classified once up front so the stack and register passes agree. */
+typedef struct
+{
+    IrOperand op;
+    ArgClass cls;
+    u8 width;       /* operands load/move at this width */
+    bool is_fp;     /* a floating-point vreg (never true for immediates) */
+    u32 reg_or_off; /* GP/SSE register index, or byte offset below %rsp for stack args */
+} CallArg;
+
+/* Classify each argument (independent GP/SSE counters); returns stack bytes and %al count. */
+static u32 classify_call_args(CodegenCtx *ctx, IrInstr *in, CallArg *args, u32 *fp_count)
 {
     u32 nargs = in->extra.call.nargs;
-
-    /* Independent GP/SSE counters; X87 (width-16) args always go on the stack. */
-    u32 gp_count = 0, fp_count = 0;
-    bool *is_fp = arena_alloc(ctx->arena, nargs, sizeof(bool));
-    bool *is_ld = arena_alloc(ctx->arena, nargs, sizeof(bool));
-    bool *overflow = arena_alloc(ctx->arena, nargs, sizeof(bool));
-    u32 *slot = arena_alloc(ctx->arena, nargs * sizeof(u32), sizeof(u32));
-    u32 stack_off = 0;
+    u32 gp_count = 0, stack_off = 0;
+    *fp_count = 0;
     for (u32 i = 0; i < nargs; i++)
     {
         IrOperand arg = in->extra.call.args[i];
-        bool fp =
-            !arg.is_imm && !arg.is_global && !arg.is_func && ir_vreg_float(ctx->mod, arg.u.vreg);
-        bool ld = fp && vreg_width(ctx, arg.u.vreg) == 16;
-        is_fp[i] = fp;
-        is_ld[i] = ld;
-        if (ld)
+        CallArg *a = &args[i];
+        a->op = arg;
+        a->width = operand_width(ctx, arg);
+        a->is_fp = operand_is_vreg(arg) && ir_vreg_float(ctx->mod, arg.u.vreg);
+        if (a->is_fp && a->width == W_LD)
         {
-            stack_off = (stack_off + 15) & ~15u;
-            overflow[i] = true;
-            slot[i] = stack_off;
-            stack_off += 16;
+            stack_off = ALIGN_UP(stack_off, STACK_ALIGN);
+            a->cls = ARG_X87;
+            a->reg_or_off = stack_off;
+            stack_off += W_LD;
         }
-        else if (fp && fp_count < VA_NXMM)
+        else if (a->is_fp && *fp_count < VA_NXMM)
         {
-            overflow[i] = false;
-            slot[i] = fp_count;
-            fp_count++;
+            a->cls = ARG_SSE;
+            a->reg_or_off = *fp_count;
+            (*fp_count)++;
         }
-        else if (!fp && gp_count < VA_NGP)
+        else if (!a->is_fp && gp_count < VA_NGP)
         {
-            overflow[i] = false;
-            slot[i] = gp_count;
+            a->cls = ARG_GP;
+            a->reg_or_off = gp_count;
             gp_count++;
         }
         else
         {
-            overflow[i] = true;
-            slot[i] = stack_off;
-            stack_off += 8;
+            a->cls = ARG_STACK;
+            a->reg_or_off = stack_off;
+            stack_off += W_QWORD;
         }
     }
+    return stack_off;
+}
 
-    /* Pad the outgoing area to keep %rsp 16-aligned at the call. */
-    u32 pad = stack_off % 16 ? 16 - stack_off % 16 : 0;
-    u32 total_stack = stack_off + pad;
-
-    if (total_stack > 0)
-    {
-        emit_binop_rhs(ctx->buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(total_stack));
-    }
-
-    /* Stack args first (both scratch halves free); each fldt/fstpt self-balances. */
+static void emit_call_stack_args(CodegenCtx *ctx, CallArg *args, u32 nargs)
+{
     for (u32 i = 0; i < nargs; i++)
     {
-        if (!overflow[i])
+        CallArg *a = &args[i];
+        if (a->cls != ARG_STACK && a->cls != ARG_X87)
         {
             continue;
         }
-        IrOperand arg = in->extra.call.args[i];
-        X86Mem dst = x86_mem_rsp((i32) slot[i]);
-        if (is_ld[i])
+        X86Mem dst = x86_mem_rsp((i32) a->reg_or_off);
+        if (a->cls == ARG_X87)
         {
-            emit_fldt(ctx, x87_slot(ctx, arg));
+            emit_fldt(ctx, x87_slot(ctx, a->op));
             emit_fstpt(ctx, dst);
         }
-        else if (is_fp[i])
+        else if (a->is_fp)
         {
-            u8 aw = vreg_width(ctx, arg.u.vreg);
-            emit_fp_source_to_xmm(ctx, arg, aw, R_XMM0);
-            emit_sse_store(ctx->buf, aw == 4 ? MF_FLOAT : MF_DOUBLE, dst, R_XMM0);
+            emit_fp_source_to_xmm(ctx, a->op, a->width, R_XMM0);
+            emit_sse_store(ctx->buf, MF_OF(a->width), dst, R_XMM0);
         }
         else
         {
-            u8 aw = operand_width(ctx, arg);
-            emit_mov(ctx->buf, aw, xop_reg(R_EAX), lowered_operand(ctx, arg, R_EAX));
-            emit_mov(ctx->buf, 8, xop_mem(dst), xop_reg(R_EAX));
+            emit_mov(ctx->buf, a->width, xop_reg(R_EAX), lowered_operand(ctx, a->op, R_EAX));
+            emit_mov(ctx->buf, W_QWORD, xop_mem(dst), xop_reg(R_EAX));
         }
     }
+}
+
+static void emit_call_reg_args(CodegenCtx *ctx, CallArg *args, u32 nargs)
+{
     for (u32 i = 0; i < nargs; i++)
     {
-        if (overflow[i])
+        CallArg *a = &args[i];
+        if (a->cls == ARG_SSE)
         {
-            continue;
+            emit_fp_source_to_xmm(ctx, a->op, a->width, (u8) a->reg_or_off);
         }
-        IrOperand arg = in->extra.call.args[i];
-        u8 aw = operand_width(ctx, arg);
-        if (is_fp[i])
+        else if (a->cls == ARG_GP)
         {
-            emit_fp_source_to_xmm(ctx, arg, aw, (u8) slot[i]);
-        }
-        else
-        {
-            emit_mov(ctx->buf, aw, xop_reg(R_EAX), lowered_operand(ctx, arg, R_EAX));
-            emit_mov(ctx->buf, aw, xop_reg(abi_arg_regs[slot[i]]), xop_reg(R_EAX));
+            emit_mov(ctx->buf, a->width, xop_reg(R_EAX), lowered_operand(ctx, a->op, R_EAX));
+            emit_mov(ctx->buf, a->width, xop_reg(abi_arg_regs[a->reg_or_off]), xop_reg(R_EAX));
         }
     }
+}
 
-    /* SysV: variadic callees get the vector count in %al, after the arg loads
-       (they clobber %eax). */
-    if (in->extra.call.is_variadic)
-    {
-        emit_mov_byte(ctx->buf, xop_reg(R_EAX), xop_imm((i64) fp_count));
-    }
-
+static void emit_call_target(CodegenCtx *ctx, IrInstr *in)
+{
     if (in->extra.call.is_indirect)
     {
-        /* Indirect call: load the callee pointer into %r11 (caller-saved, not an arg register) and
-         * `call *%r11`. */
-        emit_mov(ctx->buf, 8, xop_reg(R_R11), lowered_operand(ctx, in->extra.call.callee, R_R11));
+        emit_mov(ctx->buf, W_QWORD, xop_reg(R_R11),
+                 lowered_operand(ctx, in->extra.call.callee, R_R11));
         emit_call_reg(ctx->buf, R_R11);
     }
     else
     {
         emit_call(ctx->buf, in->extra.call.name, ctx->patches, ctx->arena);
     }
+}
 
-    /* A width-16 return arrives in %st0; read it before the stack unwind. */
-    if (in->result != NO_VREG)
+static void store_call_result(CodegenCtx *ctx, IrInstr *in)
+{
+    if (in->result == NO_VREG)
     {
-        u8 rw = vreg_width(ctx, in->result);
-        if (ir_vreg_float(ctx->mod, in->result))
+        return;
+    }
+    u8 rw = vreg_width(ctx, in->result);
+    if (ir_vreg_float(ctx->mod, in->result))
+    {
+        if (rw == W_LD)
         {
-            if (rw == 16)
-            {
-                emit_fstpt_return(ctx, xop_vreg(ctx, in->result).u.mem);
-            }
-            else
-            {
-                /* FP returns ride xmm0. */
-                emit_sse_store(ctx->buf, rw == 4 ? MF_FLOAT : MF_DOUBLE,
-                               xop_vreg(ctx, in->result).u.mem, R_XMM0);
-            }
+            emit_fstpt_return(ctx, vreg_slot_mem(ctx, in->result));
         }
         else
         {
-            emit_mov(ctx->buf, rw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
+            emit_sse_store(ctx->buf, MF_OF(rw), vreg_slot_mem(ctx, in->result), R_XMM0);
         }
     }
+    else
+    {
+        emit_mov(ctx->buf, rw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
+    }
+}
+
+static void lower_call(IrInstr *in, CodegenCtx *ctx)
+{
+    u32 nargs = in->extra.call.nargs;
+    CallArg *args = arena_alloc(ctx->arena, nargs * sizeof(CallArg), sizeof(void *));
+    u32 fp_count;
+    u32 total_stack = ALIGN_UP(classify_call_args(ctx, in, args, &fp_count), STACK_ALIGN);
 
     if (total_stack > 0)
     {
-        emit_binop_rhs(ctx->buf, 8, &arith_specs[OP_ADD], R_ESP, xop_imm(total_stack));
+        emit_binop_rhs(ctx->buf, W_QWORD, &arith_specs[OP_SUB], R_ESP, xop_imm(total_stack));
+    }
+    emit_call_stack_args(ctx, args, nargs);
+    emit_call_reg_args(ctx, args, nargs);
+
+    if (in->extra.call.is_variadic)
+    {
+        emit_mov_byte(ctx->buf, xop_reg(R_EAX), xop_imm((i64) fp_count));
+    }
+
+    emit_call_target(ctx, in);
+    store_call_result(ctx, in);
+
+    if (total_stack > 0)
+    {
+        emit_binop_rhs(ctx->buf, W_QWORD, &arith_specs[OP_ADD], R_ESP, xop_imm(total_stack));
     }
 }
 
-/* va_start: store the four va_list fields (the prologue already spilled the regs). */
 static void lower_va_start(IrInstr *in, CodegenCtx *ctx)
 {
-    (void) load_ptr(ctx, in->ops[0]);                                 /* ap -> %rax */
-    emit_mov(ctx->buf, 4, xop_reg(R_EDX), xop_imm(in->ops[2].u.imm)); /* gp_offset */
-    emit_mov(ctx->buf, 4, xop_mem(x86_mem_rax(0)), xop_reg(R_EDX));
-    emit_mov(ctx->buf, 4, xop_reg(R_EDX), xop_imm(in->ops[3].u.imm)); /* fp_offset */
-    emit_mov(ctx->buf, 4, xop_mem(x86_mem_rax(4)), xop_reg(R_EDX));
-
-    u32 skip = (u32) in->ops[1].u.imm;
-    emit_lea(ctx->buf, R_EDX, x86_mem_rbp(16 + (i32) skip)); /* overflow_arg_area */
-    emit_mov(ctx->buf, 8, xop_mem(x86_mem_rax(8)), xop_reg(R_EDX));
-
-    emit_lea(ctx->buf, R_EDX, x86_mem_rbp(-(i32) ctx->save_area_off)); /* reg_save_area */
-    emit_mov(ctx->buf, 8, xop_mem(x86_mem_rax(16)), xop_reg(R_EDX));
+    (void) load_ptr(ctx, in->ops[0]);
+    IrVaStartPayload *vd = &in->extra.va_start;
+    emit_mov(ctx->buf, W_DWORD, xop_reg(R_EDX), xop_imm(vd->gp_offset));
+    emit_mov(ctx->buf, W_DWORD, xop_mem(x86_mem_rax(VA_FIELD_GP_OFFSET)), xop_reg(R_EDX));
+    emit_mov(ctx->buf, W_DWORD, xop_reg(R_EDX), xop_imm(vd->fp_offset));
+    emit_mov(ctx->buf, W_DWORD, xop_mem(x86_mem_rax(VA_FIELD_FP_OFFSET)), xop_reg(R_EDX));
+    emit_lea(ctx->buf, R_EDX, x86_mem_rbp(STACK_PARAM_BASE + (i32) vd->stack_skip));
+    emit_mov(ctx->buf, W_QWORD, xop_mem(x86_mem_rax(VA_FIELD_OVF)), xop_reg(R_EDX));
+    emit_lea(ctx->buf, R_EDX, x86_mem_rbp(-(i32) ctx->save_area_off));
+    emit_mov(ctx->buf, W_QWORD, xop_mem(x86_mem_rax(VA_FIELD_REGS)), xop_reg(R_EDX));
 }
 
-/* The result width/class picks the va_arg walk (ld: overflow-only). */
-static void lower_va_arg(IrInstr *in, CodegenCtx *ctx)
+/* ld args ride the overflow area only: align 16, read 16, bump 16. */
+static void emit_va_arg_ld(CodegenCtx *ctx, IrInstr *in)
 {
     ByteBuf *b = ctx->buf;
-    u8 rw = vreg_width(ctx, in->result);
-    if (rw == 16)
+    (void) load_ptr(ctx, in->ops[0]);
+    emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_mem(x86_mem_rax(VA_FIELD_OVF)));
+    emit_binop_rhs(b, W_QWORD, &arith_specs[OP_ADD], R_ECX, xop_imm(STACK_ALIGN - 1));
+    emit_binop_rhs(b, W_QWORD, &arith_specs[OP_AND], R_ECX, xop_imm(-STACK_ALIGN));
+    emit_lea(b, R_EDX, x86_mem_rcx(STACK_ALIGN));
+    emit_mov(b, W_QWORD, xop_mem(x86_mem_rax(VA_FIELD_OVF)), xop_reg(R_EDX));
+    emit_mov16(b, x86_mem_rcx(0), vreg_slot_mem(ctx, in->result));
+}
+
+static void lower_va_arg(IrInstr *in, CodegenCtx *ctx)
+{
+    if (vreg_width(ctx, in->result) == W_LD)
     {
-        /* X87 args ride the overflow area only: align 16, read 16, bump 16. */
-        (void) load_ptr(ctx, in->ops[0]);                        /* ap -> %rax */
-        emit_mov(b, 8, xop_reg(R_ECX), xop_mem(x86_mem_rax(8))); /* ovf */
-        emit_binop_rhs(b, 8, &arith_specs[OP_ADD], R_ECX, xop_imm(15));
-        emit_binop_rhs(b, 8, &arith_specs[OP_AND], R_ECX, xop_imm(-16));
-        emit_lea(b, R_EDX, x86_mem_rcx(16)); /* ap.overflow = aligned + 16 */
-        emit_mov(b, 8, xop_mem(x86_mem_rax(8)), xop_reg(R_EDX));
-        emit_mov16(b, x86_mem_rcx(0), xop_vreg(ctx, in->result).u.mem);
+        emit_va_arg_ld(ctx, in);
         return;
     }
-    (void) load_ptr(ctx, in->ops[0]); /* ap -> %rax */
-    bool is_fp = ir_vreg_float(ctx->mod, in->result);
-    X86Mem off_mem = is_fp ? x86_mem_rax(4) : x86_mem_rax(0);
-    i64 limit = is_fp ? VA_SAVE_BYTES : VA_GP_BYTES;
-    i64 stride = is_fp ? VA_XMM_STRIDE : 8;
+    ByteBuf *b = ctx->buf;
+    (void) load_ptr(ctx, in->ops[0]);
 
-    emit_mov(b, 4, xop_reg(R_EDX), xop_mem(off_mem)); /* off = *(u32*)(ap+0/4) */
-    emit_binop_rhs(b, 4, &cmp_spec, R_EDX, xop_imm(limit));
+    X86Mem off_mem;
+    i64 limit;
+    i64 stride;
+    if (ir_vreg_float(ctx->mod, in->result))
+    {
+        off_mem = x86_mem_rax(VA_FIELD_FP_OFFSET);
+        limit = VA_SAVE_BYTES;
+        stride = VA_XMM_STRIDE;
+    }
+    else
+    {
+        off_mem = x86_mem_rax(VA_FIELD_GP_OFFSET);
+        limit = VA_GP_BYTES;
+        stride = W_QWORD;
+    }
 
-    size_t jge_field = emit_jcc_pending(b, CC_GE); /* off >= limit -> overflow arm */
+    emit_mov(b, W_DWORD, xop_reg(R_EDX), xop_mem(off_mem));
+    emit_binop_rhs(b, W_DWORD, &cmp_spec, R_EDX, xop_imm(limit));
+    size_t jge_field = emit_jcc_pending(b, CC_GE);
 
-    /* Register arm: src = regs + off; ap.off = off + stride */
-    emit_mov(b, 8, xop_reg(R_ECX), xop_mem(x86_mem_rax(16)));
-    emit_reg_reg(b, arith_specs[OP_ADD].mem, R_ECX, R_EDX); /* rcx = regs + off */
-    emit_binop_rhs(b, 4, &arith_specs[OP_ADD], R_EDX, xop_imm(stride));
-    emit_mov(b, 4, xop_mem(off_mem), xop_reg(R_EDX));
+    emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_mem(x86_mem_rax(VA_FIELD_REGS)));
+    emit_reg_reg(b, arith_specs[OP_ADD].mem, R_ECX, R_EDX);
+    emit_binop_rhs(b, W_DWORD, &arith_specs[OP_ADD], R_EDX, xop_imm(stride));
+    emit_mov(b, W_DWORD, xop_mem(off_mem), xop_reg(R_EDX));
     size_t ovf_jmp_field = emit_jmp_pending(b);
 
-    /* Overflow arm: src reads the saved old ovf; ap.overflow += 8 */
     size_t ovf_arm = bytebuf_len(b);
-    emit_mov(b, 8, xop_reg(R_ECX), xop_mem(x86_mem_rax(8)));
-    emit_mov(b, 8, xop_reg(R_R8), xop_reg(R_ECX));
-    emit_binop_rhs(b, 8, &arith_specs[OP_ADD], R_ECX, xop_imm(8));
-    emit_mov(b, 8, xop_mem(x86_mem_rax(8)), xop_reg(R_ECX));
-    emit_mov(b, 8, xop_reg(R_ECX), xop_reg(R_R8));
+    emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_mem(x86_mem_rax(VA_FIELD_OVF)));
+    emit_mov(b, W_QWORD, xop_reg(R_R8), xop_reg(R_ECX));
+    emit_binop_rhs(b, W_QWORD, &arith_specs[OP_ADD], R_ECX, xop_imm(W_QWORD));
+    emit_mov(b, W_QWORD, xop_mem(x86_mem_rax(VA_FIELD_OVF)), xop_reg(R_ECX));
+    emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_reg(R_R8));
 
-    /* Read the 8-byte slot into the width-8 result vreg. */
     size_t done = bytebuf_len(b);
     patch_rel32(b, jge_field, ovf_arm);
     patch_rel32(b, ovf_jmp_field, done);
 
-    emit_mov(b, 8, xop_reg(R_EDX), xop_mem(x86_mem_rcx(0)));
-    emit_mov(b, 8, xop_vreg(ctx, in->result), xop_reg(R_EDX));
+    emit_mov(b, W_QWORD, xop_reg(R_EDX), xop_mem(x86_mem_rcx(0)));
+    emit_mov(b, W_QWORD, xop_vreg(ctx, in->result), xop_reg(R_EDX));
 }
 
 /* va_end: no-op (SysV has no va_end action), kept in the IR for symmetry and future va_copy. */
@@ -1679,11 +1793,6 @@ static void lower_ret(IrInstr *in, CodegenCtx *ctx)
     {
         IrOperand val = in->ops[0];
         u8 w = operand_width(ctx, val);
-        if (val.is_imm)
-        {
-            /* A 64-bit immediate return must not truncate to the imm32 encoding. */
-            w = imm_load_width(val.u.imm);
-        }
         if (type_is_fp(ctx->func->ret_type))
         {
             if (w == 16)
@@ -1705,7 +1814,7 @@ static void lower_ret(IrInstr *in, CodegenCtx *ctx)
     }
     else
     {
-        emit_mov(ctx->buf, 4, xop_reg(R_EAX), xop_imm(0));
+        emit_mov(ctx->buf, W_DWORD, xop_reg(R_EAX), xop_imm(0));
     }
     bytebuf_append(ctx->buf, X86_LEAVE);
     bytebuf_append(ctx->buf, X86_RET);
@@ -1718,9 +1827,7 @@ static void lower_br(IrInstr *in, CodegenCtx *ctx)
 
 static void lower_brcond(IrInstr *in, CodegenCtx *ctx)
 {
-    /* The condition vreg may be width 1 (`while (c)` on a char); test it at
-       that width so the 3 garbage bytes past a byte-sized slot cannot
-       influence the branch. */
+    /* Test at the condition's width so bytes past a byte-sized slot can't influence the branch. */
     u8 cw = operand_width(ctx, in->ops[0]);
     emit_mov(ctx->buf, cw, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
     emit_test_reg(ctx->buf, cw, R_EAX);
@@ -1728,59 +1835,38 @@ static void lower_brcond(IrInstr *in, CodegenCtx *ctx)
     emit_jmp(ctx->buf, in->extra.brcond.true_label, ctx->block_patches, ctx->arena);
 }
 
-/* Jump table only when the case range stays small (range+1 ≤ JT_MAX_RANGE entries); sparse switches
- * use the compare-chain. */
+/* Tables only when the case range is small (≤ JT_MAX_RANGE); sparse switches use a chain. */
 #define JT_MAX_RANGE 256
 
-/* Load the control value into %rax at its exact 64-bit semantic value (sign/zero-extend narrow
- * sources). */
+/* Load the control value into %rax at its exact 64-bit semantic value. */
 static void emit_switch_control(CodegenCtx *ctx, IrOperand src)
 {
-    u8 w = operand_width(ctx, src);
-    if (src.is_imm)
-    {
-        emit_mov(ctx->buf, 8, xop_reg(R_EAX), xop_imm(src.u.imm));
-        return;
-    }
-    emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, src, R_EAX));
-    if (w < 8 && ir_vreg_signed(ctx->mod, src.u.vreg))
-    {
-        emit_movsx(ctx->buf, w, 8, R_EAX, xop_reg(R_EAX));
-    }
-    else if (w < 4)
-    {
-        emit_movzx(ctx->buf, w, 8, R_EAX, xop_reg(R_EAX));
-    }
-    /* w==4 unsigned: mov %eax already zero-extends into %rax */
+    bool is_signed;
+    (void) load_int_operand(ctx, src, &is_signed);
 }
 
-/* Bounds-check %rax to [min,max], subtract min, then jump through the full-range table (gaps →
- * default). */
+/* Bounds-check %rax to [min,max], subtract min, jump through the full-range table. */
 static void emit_switch_table(CodegenCtx *ctx, IrSwitchCase *cases, u32 n, i64 min, i64 max,
                               const char *default_label)
 {
-    /* The wrap-around subtraction is exact because the bounds checks give index < 2^63; negative
-     * ranges need signed ordering. */
     u8 below_cc = min < 0 ? CC_L : CC_B;
     u8 above_cc = min < 0 ? CC_G : CC_A;
     u64 range = (u64) max - (u64) min;
 
-    emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_imm(min));
-    emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX); /* cmp %rax, %rcx */
+    emit_mov(ctx->buf, W_QWORD, xop_reg(R_ECX), xop_imm(min));
+    emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX);
     emit_jcc(ctx->buf, below_cc, default_label, ctx->block_patches, ctx->arena);
-    emit_mov(ctx->buf, 8, xop_reg(R_EDX), xop_imm(max));
-    emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_EDX); /* cmp %rax, %rdx */
+    emit_mov(ctx->buf, W_QWORD, xop_reg(R_EDX), xop_imm(max));
+    emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_EDX);
     emit_jcc(ctx->buf, above_cc, default_label, ctx->block_patches, ctx->arena);
-    emit_reg_reg(ctx->buf, arith_specs[OP_SUB].mem, R_EAX, R_ECX); /* sub %rax, %rcx */
+    emit_reg_reg(ctx->buf, arith_specs[OP_SUB].mem, R_EAX, R_ECX);
 
-    /* lea %rdx,[rip+disp32] patched once the table offset is known; RIP-relative entries need no
-     * relocations. */
     emit_lea(ctx->buf, R_EDX, (X86Mem) {.base = NO_REG, .index = NO_REG, .scale = 1, .disp = 0});
     size_t disp_field_off = bytebuf_len(ctx->buf) - 4;
 
-    emit_mov(ctx->buf, 8, xop_reg(R_EAX),
+    emit_mov(ctx->buf, W_QWORD, xop_reg(R_EAX),
              xop_mem((X86Mem) {.base = R_EDX, .index = R_EAX, .scale = 8, .disp = 0}));
-    emit_reg_reg(ctx->buf, arith_specs[OP_ADD].mem, R_EAX, R_EDX); /* add %rax, %rdx */
+    emit_reg_reg(ctx->buf, arith_specs[OP_ADD].mem, R_EAX, R_EDX);
     emit_jmp_reg(ctx->buf, R_EAX);
 
     size_t nentries = (size_t) range + 1;
@@ -1800,6 +1886,25 @@ static void emit_switch_table(CodegenCtx *ctx, IrSwitchCase *cases, u32 n, i64 m
     vec_push(ctx->switch_tables, rec);
 }
 
+static void emit_switch_chain(CodegenCtx *ctx, IrSwitchCase *cases, u32 n,
+                              const char *default_label)
+{
+    for (u32 i = 0; i < n; i++)
+    {
+        if (fits_i32(cases[i].val))
+        {
+            emit_binop_rhs(ctx->buf, W_QWORD, &cmp_spec, R_EAX, xop_imm(cases[i].val));
+        }
+        else
+        {
+            emit_mov(ctx->buf, W_QWORD, xop_reg(R_ECX), xop_imm(cases[i].val));
+            emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX);
+        }
+        emit_jcc(ctx->buf, CC_E, cases[i].label, ctx->block_patches, ctx->arena);
+    }
+    emit_jmp(ctx->buf, default_label, ctx->block_patches, ctx->arena);
+}
+
 static void lower_switch(IrInstr *in, CodegenCtx *ctx)
 {
     u32 n = in->extra.sw.ncases;
@@ -1816,7 +1921,6 @@ static void lower_switch(IrInstr *in, CodegenCtx *ctx)
             min = MIN(cases[i].val, min);
             max = MAX(cases[i].val, max);
         }
-        /* u64 wrap subtraction gives the true range for |range| < 2^63. */
         u64 range = (u64) max - (u64) min;
         if (range <= JT_MAX_RANGE)
         {
@@ -1824,22 +1928,7 @@ static void lower_switch(IrInstr *in, CodegenCtx *ctx)
             return;
         }
     }
-
-    /* Compare-chain: test %rax against each case in turn, else default. */
-    for (u32 i = 0; i < n; i++)
-    {
-        if (fits_i32(cases[i].val))
-        {
-            emit_binop_rhs(ctx->buf, 8, &cmp_spec, R_EAX, xop_imm(cases[i].val));
-        }
-        else
-        {
-            emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_imm(cases[i].val));
-            emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX); /* cmp %rax, %rcx */
-        }
-        emit_jcc(ctx->buf, CC_E, cases[i].label, ctx->block_patches, ctx->arena);
-    }
-    emit_jmp(ctx->buf, default_label, ctx->block_patches, ctx->arena);
+    emit_switch_chain(ctx, cases, n, default_label);
 }
 
 static void lower_phi(IrInstr *in, CodegenCtx *ctx)
@@ -1862,34 +1951,9 @@ static void lower_trunc(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, w, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
-static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src)
+/* modrm/rm operand encoding for 0F-prefixed reg, r/m forms. */
+static void emit_rm_operand(ByteBuf *buf, u8 dst_reg, X86Operand src)
 {
-    if (dst_w == 1)
-    {
-        /* No widening: a byte-to-byte move. */
-        emit_mov(buf, 1, xop_reg(dst_reg), src);
-        return;
-    }
-    ASSERT(dst_w == 2 || dst_w == 4 || dst_w == 8);
-    if (dst_w == 2)
-    {
-        /* 16-bit destination: 66-prefixed `movzx r16, r/m8|16`. */
-    }
-    emit_os16(buf, dst_w);
-    if (src_w == 1)
-    {
-        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
-                                src.kind == XOP_MEM && reg_is_extended(src.u.mem.base)));
-        bytebuf_append(buf, X86_TWO_BYTE_ESC);
-        bytebuf_append(buf, X86_MOVZX_REG8);
-    }
-    else
-    {
-        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
-                                src.kind == XOP_MEM && reg_is_extended(src.u.mem.base)));
-        bytebuf_append(buf, X86_TWO_BYTE_ESC);
-        bytebuf_append(buf, X86_MOVZX_REG16);
-    }
     if (src.kind == XOP_REG)
     {
         bytebuf_append(buf, modrm(3, dst_reg, src.u.reg));
@@ -1900,39 +1964,49 @@ static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand 
     }
 }
 
+/* REX for a reg, r/m form: the R bit comes from `dst_reg`, the B bit from an extended base. */
+static u8 rex_rm(bool w, u8 dst_reg, X86Operand src)
+{
+    return rex(w, dst_reg >= 8, false, src.kind == XOP_MEM && reg_is_extended(src.u.mem.base));
+}
+
+static void emit_movzx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src)
+{
+    if (dst_w == 1)
+    {
+        /* No widening: a byte-to-byte move. */
+        emit_mov(buf, 1, xop_reg(dst_reg), src);
+        return;
+    }
+    ASSERT(dst_w == 2 || dst_w == 4 || dst_w == 8);
+    emit_os16(buf, dst_w);
+    bytebuf_append(buf, rex_rm(dst_w == 8, dst_reg, src));
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    /* Source width 1 → reg8 form, 2 → reg16 form. */
+    u8 ext_op = src_w == 1 ? X86_MOVZX_REG8 : X86_MOVZX_REG16;
+    bytebuf_append(buf, ext_op);
+    emit_rm_operand(buf, dst_reg, src);
+}
+
 static void emit_movsx(ByteBuf *buf, u8 src_w, u8 dst_w, u8 dst_reg, X86Operand src)
 {
-    if (dst_w == 2)
-    {
-        /* 16-bit destination: 66-prefixed `movsx r16, r/m8|16`. */
-    }
-    else
-    {
-        ASSERT(dst_w == 4 || dst_w == 8);
-    }
+    ASSERT(dst_w == 2 || dst_w == 4 || dst_w == 8);
     emit_os16(buf, dst_w);
     if (src_w == 4)
     {
         ASSERT(dst_w == 8);
-        bytebuf_append(buf, rex(true, dst_reg >= 8, false,
-                                src.kind == XOP_MEM && reg_is_extended(src.u.mem.base)));
+        bytebuf_append(buf, rex_rm(true, dst_reg, src));
         bytebuf_append(buf, X86_MOVSXD_REG32);
     }
     else
     {
-        bytebuf_append(buf, rex(dst_w == 8, dst_reg >= 8, false,
-                                src.kind == XOP_MEM && reg_is_extended(src.u.mem.base)));
+        bytebuf_append(buf, rex_rm(dst_w == 8, dst_reg, src));
         bytebuf_append(buf, X86_TWO_BYTE_ESC);
-        bytebuf_append(buf, src_w == 1 ? X86_MOVSX_REG8 : X86_MOVSX_REG16);
+        /* Source width 1 → reg8 form, 2 → reg16 form. */
+        u8 ext_op = src_w == 1 ? X86_MOVSX_REG8 : X86_MOVSX_REG16;
+        bytebuf_append(buf, ext_op);
     }
-    if (src.kind == XOP_REG)
-    {
-        bytebuf_append(buf, modrm(3, dst_reg, src.u.reg));
-    }
-    else
-    {
-        emit_mem_operand(buf, dst_reg, src.u.mem);
-    }
+    emit_rm_operand(buf, dst_reg, src);
 }
 
 static void lower_zext(IrInstr *in, CodegenCtx *ctx)
@@ -1945,10 +2019,9 @@ static void lower_zext(IrInstr *in, CodegenCtx *ctx)
     }
     else
     {
-        u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
+        u8 sw = vreg_width(ctx, in->ops[0].u.vreg);
         emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
-        /* A 4-byte source needs no MOVZX: writing EAX zero-extends to RAX, and 0F B7 only
-         * zero-extends 16 bits. */
+        /* A 4-byte source needs no MOVZX: writing EAX zero-extends to RAX. */
         if (sw < 4)
         {
             emit_movzx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
@@ -1967,15 +2040,14 @@ static void lower_sext(IrInstr *in, CodegenCtx *ctx)
     }
     else
     {
-        u8 sw = ctx->mod->widths[in->ops[0].u.vreg];
+        u8 sw = vreg_width(ctx, in->ops[0].u.vreg);
         emit_mov(ctx->buf, sw, xop_reg(R_EAX), src);
         emit_movsx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
     }
     emit_mov(ctx->buf, dw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
-/* `mov reg, imm32sx` (C7 /0): the zero-extension-free encoding GNU ld relocates with R_X86_64_32S.
- */
+/* `mov reg, imm32sx` (C7 /0): GNU ld relocates it with R_X86_64_32S. */
 static void emit_addr_mov_imm32(ByteBuf *buf, u8 reg)
 {
     bytebuf_append(buf, rex(true, false, false, reg >= 8));
@@ -2010,8 +2082,7 @@ static void emit_func_addr_to(ByteBuf *buf, u8 reg, const char *name, Vec *patch
 
 static void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src)
 {
-    u8 rex_b = rex(true, dst_reg >= 8, reg_is_extended(src.index), reg_is_extended(src.base));
-    bytebuf_append(buf, rex_b);
+    bytebuf_append(buf, rex_mem(true, dst_reg >= 8, src));
     bytebuf_append(buf, X86_LEA);
     emit_mem_operand(buf, dst_reg, src);
 }
@@ -2028,7 +2099,7 @@ static X86Mem load_ptr(CodegenCtx *ctx, IrOperand ptr)
     }
     else
     {
-        emit_mov(ctx->buf, 8, xop_reg(R_EAX), lowered_operand(ctx, ptr, R_EAX));
+        emit_mov(ctx->buf, W_QWORD, xop_reg(R_EAX), lowered_operand(ctx, ptr, R_EAX));
     }
     return (X86Mem) {.base = R_EAX, .index = NO_REG, .scale = 1, .disp = 0};
 }
@@ -2039,7 +2110,7 @@ static void lower_load(IrInstr *in, CodegenCtx *ctx)
     X86Mem indirect = load_ptr(ctx, in->ops[0]);
     if (w == 16)
     {
-        emit_mov16(ctx->buf, indirect, xop_vreg(ctx, in->result).u.mem);
+        emit_mov16(ctx->buf, indirect, vreg_slot_mem(ctx, in->result));
         return;
     }
     emit_mov(ctx->buf, w, xop_reg(R_EDX), xop_mem(indirect));
@@ -2082,6 +2153,12 @@ static u8 fconv_src_width(CodegenCtx *ctx, IrOperand op)
     return op.is_imm ? 8 : vreg_width(ctx, op.u.vreg);
 }
 
+/* GP load width for an FP immediate: 4 bytes for a float lane, else imm_load_width. */
+static u8 fp_imm_load_width(u8 w, i64 imm)
+{
+    return w == 4 ? 4 : imm_load_width(imm);
+}
+
 /* Move an FP operand's bits into `xmm`; a bare immediate rides GP mov + movd/movq. */
 static void emit_fp_source_to_xmm(CodegenCtx *ctx, IrOperand op, u8 w, u8 xmm)
 {
@@ -2093,7 +2170,7 @@ static void emit_fp_source_to_xmm(CodegenCtx *ctx, IrOperand op, u8 w, u8 xmm)
         emit_ud2(b);
         return;
     }
-    u8 mf = w == 4 ? MF_FLOAT : MF_DOUBLE;
+    u8 mf = MF_OF(w);
     X86Operand src = lowered_operand(ctx, op, R_EAX);
     if (src.kind == XOP_MEM)
     {
@@ -2102,7 +2179,7 @@ static void emit_fp_source_to_xmm(CodegenCtx *ctx, IrOperand op, u8 w, u8 xmm)
     }
     if (src.kind == XOP_IMM)
     {
-        emit_mov(b, w == 4 ? 4 : imm_load_width(src.u.imm), xop_reg(R_EAX), src);
+        emit_mov(b, fp_imm_load_width(w, src.u.imm), xop_reg(R_EAX), src);
         emit_movd_to_xmm(b, xmm, R_EAX, w != 4);
         return;
     }
@@ -2118,12 +2195,12 @@ static void emit_load_2pow63(ByteBuf *buf, bool is_f32)
 {
     if (is_f32)
     {
-        emit_mov(buf, 4, xop_reg(R_ECX), xop_imm(F32_BITS_2POW63));
+        emit_mov(buf, W_DWORD, xop_reg(R_ECX), xop_imm(F32_BITS_2POW63));
         emit_movd_to_xmm(buf, R_XMM1, R_ECX, false);
     }
     else
     {
-        emit_mov(buf, 8, xop_reg(R_ECX), xop_imm(F64_BITS_2POW63));
+        emit_mov(buf, W_QWORD, xop_reg(R_ECX), xop_imm(F64_BITS_2POW63));
         emit_movd_to_xmm(buf, R_XMM1, R_ECX, true);
     }
 }
@@ -2131,220 +2208,231 @@ static void emit_load_2pow63(ByteBuf *buf, bool is_f32)
 /* A width-16 operand is always a vreg slot (immediates carry no 16-byte form). */
 static X86Mem x87_slot(CodegenCtx *ctx, IrOperand op)
 {
-    ASSERT(!op.is_imm && !op.is_global && !op.is_func);
-    return xop_vreg(ctx, op.u.vreg).u.mem;
+    ASSERT(operand_is_vreg(op));
+    return vreg_slot_mem(ctx, op.u.vreg);
+}
+
+/* Load an integer operand into %rax, sign/zero-extended to its 64-bit value; reports signedness. */
+static u8 load_int_operand(CodegenCtx *ctx, IrOperand op, bool *is_signed)
+{
+    if (op.is_imm)
+    {
+        emit_mov(ctx->buf, W_QWORD, xop_reg(R_EAX), xop_imm(op.u.imm));
+        *is_signed = true;
+        return W_QWORD;
+    }
+    if (op.is_global || op.is_func)
+    {
+        emit_mov(ctx->buf, W_QWORD, xop_reg(R_EAX), lowered_operand(ctx, op, R_EAX));
+        *is_signed = true;
+        return W_QWORD;
+    }
+    u8 sw = vreg_width(ctx, op.u.vreg);
+    *is_signed = ir_vreg_signed(ctx->mod, op.u.vreg);
+    emit_mov(ctx->buf, sw, xop_reg(R_EAX), lowered_operand(ctx, op, R_EAX));
+    if (sw == W_BYTE || sw == W_WORD)
+    {
+        if (*is_signed)
+        {
+            emit_movsx(ctx->buf, sw, W_QWORD, R_EAX, xop_reg(R_EAX));
+        }
+        else
+        {
+            emit_movzx(ctx->buf, sw, W_QWORD, R_EAX, xop_reg(R_EAX));
+        }
+    }
+    else if (sw == W_DWORD && *is_signed)
+    {
+        emit_movsx(ctx->buf, W_DWORD, W_QWORD, R_EAX, xop_reg(R_EAX));
+    }
+    return sw;
+}
+
+/* u64 ≥ 2^63 to long double: clear bit 63, convert, add the exact 2^63 back. */
+static void emit_itof_u64_x87(CodegenCtx *ctx, X86Mem scratch)
+{
+    ByteBuf *b = ctx->buf;
+    emit_test_reg(b, W_QWORD, R_EAX);
+    size_t big_field = emit_jcc_pending(b, CC_S);
+    emit_mov(b, W_QWORD, xop_mem(scratch), xop_reg(R_EAX));
+    emit_fild(ctx, W_QWORD, scratch);
+    emit_fstpt(ctx, scratch);
+    size_t small_done = emit_jmp_pending(b);
+
+    size_t big_off = bytebuf_len(b);
+    emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_reg(R_EAX));
+    emit_bit_imm(b, X86_XOP_BTR, R_ECX, BIT_63);
+    emit_mov(b, W_QWORD, xop_mem(scratch), xop_reg(R_ECX));
+    emit_fild(ctx, W_QWORD, scratch);
+    emit_load_2pow63_ld(ctx);
+    emit_faddp(ctx);
+    emit_fstpt(ctx, scratch);
+
+    patch_rel32(b, big_field, big_off);
+    patch_rel32(b, small_done, bytebuf_len(b));
+}
+
+static void lower_itof_x87(IrInstr *in, CodegenCtx *ctx)
+{
+    bool is_signed;
+    u8 sw = load_int_operand(ctx, in->ops[0], &is_signed);
+    X86Mem scratch = vreg_slot_mem(ctx, in->result);
+    if (sw == W_QWORD && !is_signed)
+    {
+        emit_itof_u64_x87(ctx, scratch);
+    }
+    else
+    {
+        emit_mov(ctx->buf, W_QWORD, xop_mem(scratch), xop_reg(R_EAX));
+        emit_fild(ctx, W_QWORD, scratch);
+        emit_fstpt(ctx, scratch);
+    }
+    x87_balance(ctx);
+}
+
+/* u64 ≥ 2^63 to float/double: clear the top bit, convert, add 2^63 back. */
+static void emit_itof_u64_xmm(CodegenCtx *ctx, u8 mf, bool is_f32)
+{
+    ByteBuf *b = ctx->buf;
+    emit_test_reg(b, W_QWORD, R_EAX);
+    size_t js_field = emit_jcc_pending(b, CC_S);
+    emit_cvtsi2fp(b, mf, R_XMM0, R_EAX);
+    size_t jmp_field = emit_jmp_pending(b);
+    size_t big_off = bytebuf_len(b);
+    emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_reg(R_EAX));
+    emit_bit_imm(b, X86_XOP_BTR, R_ECX, BIT_63);
+    emit_cvtsi2fp(b, mf, R_XMM0, R_ECX);
+    emit_load_2pow63(b, is_f32);
+    emit_sse_add(b, mf, R_XMM0, R_XMM1);
+    patch_rel32(b, js_field, big_off);
+    patch_rel32(b, jmp_field, bytebuf_len(b));
+}
+
+static void lower_itof_xmm(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 dw = vreg_width(ctx, in->result);
+    bool is_signed;
+    u8 sw = load_int_operand(ctx, in->ops[0], &is_signed);
+    u8 mf = MF_OF(dw);
+    if (sw == W_QWORD && !is_signed)
+    {
+        emit_itof_u64_xmm(ctx, mf, dw == W_DWORD);
+    }
+    else
+    {
+        emit_cvtsi2fp(ctx->buf, mf, R_XMM0, R_EAX);
+    }
+    emit_sse_store(ctx->buf, mf, vreg_slot_mem(ctx, in->result), R_XMM0);
 }
 
 static void lower_itof(IrInstr *in, CodegenCtx *ctx)
 {
-    u8 dw = vreg_width(ctx, in->result);
-    if (dw == 16)
+    if (vreg_width(ctx, in->result) == W_LD)
     {
-        /* Extend to 8 bytes, fild qword from the dst slot, fstpt; u64 ≥ 2^63
-           clears bit 63 and adds the exact 2^63 back. */
-        ByteBuf *b = ctx->buf;
-        u8 sw;
-        bool is_signed;
-        if (in->ops[0].is_imm)
-        {
-            sw = 8;
-            is_signed = true;
-            emit_mov(b, 8, xop_reg(R_EAX), xop_imm(in->ops[0].u.imm));
-        }
-        else
-        {
-            sw = vreg_width(ctx, in->ops[0].u.vreg);
-            is_signed = ir_vreg_signed(ctx->mod, in->ops[0].u.vreg);
-            emit_mov(b, sw, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
-            if (sw == 1 || sw == 2)
-            {
-                if (is_signed)
-                {
-                    emit_movsx(b, sw, 8, R_EAX, xop_reg(R_EAX));
-                }
-                else
-                {
-                    emit_movzx(b, sw, 8, R_EAX, xop_reg(R_EAX));
-                }
-            }
-            else if (sw == 4 && is_signed)
-            {
-                emit_movsx(b, 4, 8, R_EAX, xop_reg(R_EAX));
-            }
-        }
-
-        X86Mem scratch = xop_vreg(ctx, in->result).u.mem;
-        if (sw == 8 && !is_signed)
-        {
-            emit_test_reg(b, 8, R_EAX);
-            size_t big_field = emit_jcc_pending(b, CC_S);
-            emit_mov(b, 8, xop_mem(scratch), xop_reg(R_EAX));
-            emit_fild(ctx, 8, scratch);
-            emit_fstpt(ctx, scratch);
-            size_t small_done = emit_jmp_pending(b);
-
-            size_t big_off = bytebuf_len(b);
-            emit_mov(b, 8, xop_reg(R_ECX), xop_reg(R_EAX));
-            emit_bit_imm(b, X86_XOP_BTR, R_ECX, 63);
-            emit_mov(b, 8, xop_mem(scratch), xop_reg(R_ECX));
-            emit_fild(ctx, 8, scratch);
-            emit_load_2pow63_ld(ctx);
-            emit_faddp(ctx);
-            emit_fstpt(ctx, scratch);
-
-            size_t done_off = bytebuf_len(b);
-            patch_rel32(b, big_field, big_off);
-            patch_rel32(b, small_done, done_off);
-        }
-        else
-        {
-            emit_mov(b, 8, xop_mem(scratch), xop_reg(R_EAX));
-            emit_fild(ctx, 8, scratch);
-            emit_fstpt(ctx, scratch);
-        }
-        x87_balance(ctx);
-        return;
-    }
-
-    u8 mf = dw == 4 ? MF_FLOAT : MF_DOUBLE;
-    IrOperand sx = in->ops[0];
-    u8 sw;
-    bool is_signed;
-    if (sx.is_imm)
-    {
-        sw = 8;
-        is_signed = true;
-        emit_mov(ctx->buf, 8, xop_reg(R_EAX), xop_imm(sx.u.imm));
+        lower_itof_x87(in, ctx);
     }
     else
     {
-        sw = vreg_width(ctx, sx.u.vreg);
-        is_signed = ir_vreg_signed(ctx->mod, sx.u.vreg);
-        emit_mov(ctx->buf, sw, xop_reg(R_EAX), lowered_operand(ctx, sx, R_EAX));
-        if (sw == 1 || sw == 2)
-        {
-            if (is_signed)
-            {
-                emit_movsx(ctx->buf, sw, 8, R_EAX, xop_reg(R_EAX));
-            }
-            else
-            {
-                emit_movzx(ctx->buf, sw, 8, R_EAX, xop_reg(R_EAX));
-            }
-        }
-        else if (sw == 4 && is_signed)
-        {
-            emit_movsx(ctx->buf, 4, 8, R_EAX, xop_reg(R_EAX));
-        }
+        lower_itof_xmm(in, ctx);
     }
-
-    if (sw == 8 && !is_signed)
-    {
-        /* u64 ≥ 2^63: clear the top bit, convert, add back the exact 2^63. */
-        emit_test_reg(ctx->buf, 8, R_EAX);
-        size_t js_field = emit_jcc_pending(ctx->buf, CC_S);
-        emit_cvtsi2d(ctx->buf, mf, R_XMM0, R_EAX);
-        size_t jmp_field = emit_jmp_pending(ctx->buf);
-        size_t big_off = bytebuf_len(ctx->buf);
-        emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_reg(R_EAX));
-        emit_bit_imm(ctx->buf, X86_XOP_BTR, R_ECX, 63);
-        emit_cvtsi2d(ctx->buf, mf, R_XMM0, R_ECX);
-        emit_load_2pow63(ctx->buf, dw == 4);
-        emit_sse_add(ctx->buf, mf, R_XMM0, R_XMM1);
-        size_t done_off = bytebuf_len(ctx->buf);
-        patch_rel32(ctx->buf, js_field, big_off);
-        patch_rel32(ctx->buf, jmp_field, done_off);
-    }
-    else
-    {
-        emit_cvtsi2d(ctx->buf, mf, R_XMM0, R_EAX);
-    }
-    emit_sse_store(ctx->buf, mf, xop_vreg(ctx, in->result).u.mem, R_XMM0);
 }
 
-static void lower_ftoi(IrInstr *in, CodegenCtx *ctx)
+/* u64 result from long double: values ≥ 2^63 subtract 2^63, re-truncate, set bit 63. */
+static void emit_ftoi_u64_x87(CodegenCtx *ctx, X86Mem src, X86Mem scratch)
+{
+    ByteBuf *b = ctx->buf;
+    emit_load_2pow63_ld(ctx);
+    emit_fldt(ctx, src);
+    emit_fucomip(ctx);
+    size_t fast_field = emit_jcc_pending(b, CC_B);
+
+    emit_fldt(ctx, src);
+    emit_fsubrp(ctx);
+    emit_fisttp(ctx, W_QWORD, scratch);
+    emit_mov(b, W_QWORD, xop_reg(R_EAX), xop_mem(scratch));
+    emit_bit_imm(b, X86_XOP_BTS, R_EAX, BIT_63);
+    size_t slow_done = emit_jmp_pending(b);
+
+    x87_set_depth(ctx, 1); /* fast path re-enters with the leftover 2^63 on the stack */
+    size_t fast_off = bytebuf_len(b);
+    emit_fldt(ctx, src);
+    emit_fisttp(ctx, W_QWORD, scratch);
+    emit_mov(b, W_QWORD, xop_reg(R_EAX), xop_mem(scratch));
+    emit_fstp_st0(ctx);
+
+    patch_rel32(b, fast_field, fast_off);
+    patch_rel32(b, slow_done, bytebuf_len(b));
+}
+
+static void lower_ftoi_x87(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 dw = vreg_width(ctx, in->result);
+    bool is_signed = ir_vreg_signed(ctx->mod, in->result);
+    X86Mem src = x87_slot(ctx, in->ops[0]);
+    X86Mem scratch = vreg_slot_mem(ctx, in->result);
+    if (dw == W_QWORD && is_signed)
+    {
+        emit_fldt(ctx, src);
+        emit_fisttp(ctx, W_QWORD, scratch);
+        emit_mov(ctx->buf, W_QWORD, xop_reg(R_EAX), xop_mem(scratch));
+    }
+    else if (dw == W_QWORD)
+    {
+        emit_ftoi_u64_x87(ctx, src, scratch);
+    }
+    else
+    {
+        u8 win_w = is_signed ? W_DWORD : W_QWORD;
+        emit_fldt(ctx, src);
+        emit_fisttp(ctx, win_w, scratch);
+        emit_mov(ctx->buf, win_w, xop_reg(R_EAX), xop_mem(scratch));
+    }
+    emit_mov(ctx->buf, dw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
+    x87_balance(ctx);
+}
+
+/* u64 from float/double: convert, then for ≥ 2^63 subtract 2^63, re-convert, set bit 63. */
+static void emit_ftoi_u64_xmm(CodegenCtx *ctx, u8 mf, u8 sw)
+{
+    ByteBuf *b = ctx->buf;
+    emit_cvtts2i(b, mf, R_EAX, R_XMM0, true);
+    emit_load_2pow63(b, sw == W_DWORD);
+    emit_sse_ucomis(b, sw, R_XMM0, R_XMM1);
+    size_t done_field = emit_jcc_pending(b, CC_B);
+    emit_sse_sub(b, mf, R_XMM0, R_XMM1);
+    emit_cvtts2i(b, mf, R_EAX, R_XMM0, true);
+    emit_bit_imm(b, X86_XOP_BTS, R_EAX, BIT_63);
+    patch_rel32(b, done_field, bytebuf_len(b));
+}
+
+static void lower_ftoi_xmm(IrInstr *in, CodegenCtx *ctx)
 {
     u8 dw = vreg_width(ctx, in->result);
     bool is_signed = ir_vreg_signed(ctx->mod, in->result);
     u8 sw = fconv_src_width(ctx, in->ops[0]);
-
-    if (sw == 16)
-    {
-        /* fisttp truncates toward zero; the dst slot's low 8 bytes are the target. */
-        ByteBuf *b = ctx->buf;
-        X86Mem src = x87_slot(ctx, in->ops[0]);
-        X86Mem scratch = xop_vreg(ctx, in->result).u.mem;
-        if (dw == 8 && is_signed)
-        {
-            emit_fldt(ctx, src);
-            emit_fisttp(ctx, 8, scratch);
-            emit_mov(b, 8, xop_reg(R_EAX), xop_mem(scratch));
-            emit_mov(b, 8, xop_vreg(ctx, in->result), xop_reg(R_EAX));
-        }
-        else if (dw == 8)
-        {
-            /* v ≥ 2^63: subtract 2^63, re-truncate, set bit 63; else keep the plain truncation. */
-            emit_load_2pow63_ld(ctx);
-            emit_fldt(ctx, src);
-            emit_fucomip(ctx); /* v vs 2^63 */
-            size_t fast_field = emit_jcc_pending(b, CC_B);
-
-            emit_fldt(ctx, src);
-            emit_fsubrp(ctx);
-            emit_fisttp(ctx, 8, scratch);
-            emit_mov(b, 8, xop_reg(R_EAX), xop_mem(scratch));
-            emit_bit_imm(b, X86_XOP_BTS, R_EAX, 63);
-            size_t slow_done = emit_jmp_pending(b);
-
-            /* The fast path re-enters with the leftover 2^63 still on the stack. */
-            x87_set_depth(ctx, 1);
-            size_t fast_off = bytebuf_len(b);
-            emit_fldt(ctx, src);
-            emit_fisttp(ctx, 8, scratch);
-            emit_mov(b, 8, xop_reg(R_EAX), xop_mem(scratch));
-            emit_fstp_st0(ctx); /* drop the leftover 2^63 */
-
-            size_t done_off = bytebuf_len(b);
-            patch_rel32(b, fast_field, fast_off);
-            patch_rel32(b, slow_done, done_off);
-            emit_mov(b, 8, xop_vreg(ctx, in->result), xop_reg(R_EAX));
-        }
-        else
-        {
-            /* Signed: dword window (0x80000000 indefinite); unsigned: qword; the store masks. */
-            bool w32 = is_signed;
-            emit_fldt(ctx, src);
-            emit_fisttp(ctx, w32 ? 4 : 8, scratch);
-            emit_mov(b, w32 ? 4 : 8, xop_reg(R_EAX), xop_mem(scratch));
-            emit_mov(b, dw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
-        }
-        x87_balance(ctx);
-        return;
-    }
-
-    u8 mf = sw == 4 ? MF_FLOAT : MF_DOUBLE;
-
+    u8 mf = MF_OF(sw);
     emit_fp_source_to_xmm0(ctx, in->ops[0], sw);
-
-    ByteBuf *b = ctx->buf;
-    if (dw == 8 && !is_signed)
+    if (dw == W_QWORD && !is_signed)
     {
-        /* u64: cvttsd2si, then for d ≥ 2^63 subtract 2^63, re-convert, set bit 63. */
-        emit_cvtts2i(b, mf, R_EAX, R_XMM0, true);
-        emit_load_2pow63(b, sw == 4);
-        emit_sse_ucomis(b, sw == 4 ? 0 : X86_SSE_66, R_XMM0, R_XMM1);
-        size_t done_field = emit_jcc_pending(b, CC_B);
-        emit_sse_sub(b, mf, R_XMM0, R_XMM1);
-        emit_cvtts2i(b, mf, R_EAX, R_XMM0, true);
-        emit_bit_imm(b, X86_XOP_BTS, R_EAX, 63);
-        size_t done_off = bytebuf_len(b);
-        patch_rel32(b, done_field, done_off);
-        emit_mov(b, 8, xop_vreg(ctx, in->result), xop_reg(R_EAX));
-        return;
+        emit_ftoi_u64_xmm(ctx, mf, sw);
     }
-    /* Signed lanes: i32 window (0x80000000 brand); unsigned narrow: i64 window. */
-    emit_cvtts2i(b, mf, R_EAX, R_XMM0, dw == 8 || !is_signed);
-    emit_mov(b, dw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
+    else
+    {
+        emit_cvtts2i(ctx->buf, mf, R_EAX, R_XMM0, dw == W_QWORD || !is_signed);
+    }
+    emit_mov(ctx->buf, dw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
+}
+
+static void lower_ftoi(IrInstr *in, CodegenCtx *ctx)
+{
+    if (fconv_src_width(ctx, in->ops[0]) == W_LD)
+    {
+        lower_ftoi_x87(in, ctx);
+    }
+    else
+    {
+        lower_ftoi_xmm(in, ctx);
+    }
 }
 
 static void lower_fconv(IrInstr *in, CodegenCtx *ctx)
@@ -2352,79 +2440,80 @@ static void lower_fconv(IrInstr *in, CodegenCtx *ctx)
     u8 dw = vreg_width(ctx, in->result);
     u8 sw = fconv_src_width(ctx, in->ops[0]);
 
-    if (dw == 16 || sw == 16)
+    if (dw == W_LD || sw == W_LD)
     {
-        /* flds/fldl widen to ld; fstps/fstpl round back down. */
-        if (sw == 16)
+        if (sw == W_LD)
         {
             emit_fldt(ctx, x87_slot(ctx, in->ops[0]));
-            if (dw == 4)
+            if (dw == W_DWORD)
             {
-                emit_fstps(ctx, xop_vreg(ctx, in->result).u.mem);
+                emit_fstps(ctx, vreg_slot_mem(ctx, in->result));
             }
             else
             {
-                emit_fstpl(ctx, xop_vreg(ctx, in->result).u.mem);
+                emit_fstpl(ctx, vreg_slot_mem(ctx, in->result));
             }
         }
-        else if (sw == 4)
+        else if (sw == W_DWORD)
         {
             emit_flds(ctx, x87_slot(ctx, in->ops[0]));
-            emit_fstpt(ctx, xop_vreg(ctx, in->result).u.mem);
+            emit_fstpt(ctx, vreg_slot_mem(ctx, in->result));
         }
         else
         {
             emit_fldl(ctx, x87_slot(ctx, in->ops[0]));
-            emit_fstpt(ctx, xop_vreg(ctx, in->result).u.mem);
+            emit_fstpt(ctx, vreg_slot_mem(ctx, in->result));
         }
         x87_balance(ctx);
         return;
     }
 
-    u8 mf = sw == 4 ? MF_FLOAT : MF_DOUBLE; /* cvt*2s prefix = source precision */
+    u8 mf = MF_OF(sw); /* cvt*2s prefix = source precision */
 
     emit_fp_source_to_xmm0(ctx, in->ops[0], sw);
     emit_sse_cvt(ctx->buf, mf, R_XMM0, R_XMM0);
-    emit_sse_store(ctx->buf, dw == 4 ? MF_FLOAT : MF_DOUBLE, xop_vreg(ctx, in->result).u.mem,
-                   R_XMM0);
+    emit_sse_store(ctx->buf, MF_OF(dw), vreg_slot_mem(ctx, in->result), R_XMM0);
 }
 
-/* FP arithmetic: `mov[sd] xmm0, lhs; <op>[sd] xmm0, rhs; mov[sd] dst, xmm0`,
-   mirroring the lower_binary shape. The RHS may load straight from memory; a
-   bare immediate rides GP mov + movd/movq into xmm1. */
+/* long-double arithmetic: fldt both, <fop>p st(1), fstpt. */
+static void emit_x87_fbin(IrInstr *in, CodegenCtx *ctx)
+{
+    emit_fldt(ctx, x87_slot(ctx, in->ops[0]));
+    emit_fldt(ctx, x87_slot(ctx, in->ops[1]));
+    switch (in->opcode)
+    {
+        case OP_FADD:
+            emit_faddp(ctx);
+            break;
+        case OP_FSUB:
+            emit_fsubp(ctx);
+            break;
+        case OP_FMUL:
+            emit_fmulp(ctx);
+            break;
+        case OP_FDIV:
+            emit_fdivp(ctx);
+            break;
+        default:
+            codegen_error(ctx, "unsupported long-double arithmetic opcode %s",
+                          ir_opcode_name(in->opcode));
+            emit_ud2(ctx->buf);
+            return;
+    }
+    emit_fstpt(ctx, vreg_slot_mem(ctx, in->result));
+    x87_balance(ctx);
+}
+
+/* FP arithmetic: xmm0 = lhs <op> rhs, stored back to the result slot. */
 static void lower_fbin(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
-    if (w == 16)
+    if (w == W_LD)
     {
-        /* m80 has no memory-operand arithmetic: fldt both, <fop>p st(1), fstpt. */
-        emit_fldt(ctx, x87_slot(ctx, in->ops[0]));
-        emit_fldt(ctx, x87_slot(ctx, in->ops[1]));
-        switch (in->opcode)
-        {
-            case OP_FADD:
-                emit_faddp(ctx);
-                break;
-            case OP_FSUB:
-                emit_fsubp(ctx);
-                break;
-            case OP_FMUL:
-                emit_fmulp(ctx);
-                break;
-            case OP_FDIV:
-                emit_fdivp(ctx);
-                break;
-            default:
-                codegen_error(ctx, "unsupported long-double arithmetic opcode %s",
-                              ir_opcode_name(in->opcode));
-                emit_ud2(ctx->buf);
-                return;
-        }
-        emit_fstpt(ctx, xop_vreg(ctx, in->result).u.mem);
-        x87_balance(ctx);
+        emit_x87_fbin(in, ctx);
         return;
     }
-    u8 mf = w == 4 ? MF_FLOAT : MF_DOUBLE;
+    u8 mf = MF_OF(w);
     const ArithSpec *s = &arith_specs[in->opcode];
     ByteBuf *b = ctx->buf;
 
@@ -2439,170 +2528,141 @@ static void lower_fbin(IrInstr *in, CodegenCtx *ctx)
     {
         if (rhs.kind == XOP_IMM)
         {
-            emit_mov(b, w == 4 ? 4 : 8, xop_reg(R_EAX), rhs);
+            emit_mov(b, fp_imm_load_width(w, rhs.u.imm), xop_reg(R_EAX), rhs);
         }
-        emit_movd_to_xmm(b, R_XMM1, R_EAX, w != 4);
+        emit_movd_to_xmm(b, R_XMM1, R_EAX, w != W_DWORD);
         emit_sse_op_reg(b, mf, s->mem, R_XMM0, R_XMM1);
     }
-    emit_sse_store(b, mf, xop_vreg(ctx, in->result).u.mem, R_XMM0);
+    emit_sse_store(b, mf, vreg_slot_mem(ctx, in->result), R_XMM0);
 }
 
 /* FNEG: flip the sign bit with xorp[sd], keeping the rest of the value. */
+static void emit_x87_fneg(CodegenCtx *ctx, IrInstr *in)
+{
+    emit_fldt(ctx, x87_slot(ctx, in->ops[0]));
+    emit_fchs(ctx);
+    emit_fstpt(ctx, vreg_slot_mem(ctx, in->result));
+    x87_balance(ctx);
+}
+
 static void lower_fneg(IrInstr *in, CodegenCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
-    if (w == 16)
+    if (w == W_LD)
     {
-        /* fchs flips the sign bit of st(0) in place. */
-        emit_fldt(ctx, x87_slot(ctx, in->ops[0]));
-        emit_fchs(ctx);
-        emit_fstpt(ctx, xop_vreg(ctx, in->result).u.mem);
-        x87_balance(ctx);
+        emit_x87_fneg(ctx, in);
         return;
     }
     ByteBuf *b = ctx->buf;
 
     emit_fp_source_to_xmm0(ctx, in->ops[0], w);
-    if (w == 4)
+    if (w == W_DWORD)
     {
-        emit_mov(b, 4, xop_reg(R_ECX), xop_imm(0x80000000));
+        emit_mov(b, W_DWORD, xop_reg(R_ECX), xop_imm(F32_SIGN_BIT));
         emit_movd_to_xmm(b, R_XMM1, R_ECX, false);
         emit_sse_xor(b, 0, R_XMM0, R_XMM1);
     }
     else
     {
-        emit_mov(b, 8, xop_reg(R_ECX), xop_imm((i64) 0x8000000000000000ULL));
+        emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_imm((i64) F64_SIGN_BIT));
         emit_movd_to_xmm(b, R_XMM1, R_ECX, true);
         emit_sse_xor(b, X86_SSE_66, R_XMM0, R_XMM1);
     }
-    emit_sse_store(b, w == 4 ? MF_FLOAT : MF_DOUBLE, xop_vreg(ctx, in->result).u.mem, R_XMM0);
+    emit_sse_store(b, MF_OF(w), vreg_slot_mem(ctx, in->result), R_XMM0);
 }
 
-/* FP compare: ucomi[sd] set ZF/CF/PF (unordered → all three), then a setcc
-   combo per predicate from the verified matrix (§0 of the plan):
-   EQ=sete&setnp, NE=setne|setp, LT=setb&setnp, LE=setbe&setnp,
-   GT=seta, GE=setae. Only predicates needing PF join a second setcc. */
-static void lower_fcmp(IrInstr *in, CodegenCtx *ctx)
+/* FP compare setcc matrix; join=0 predicates need no PF (unordered) fixup. */
+typedef struct
 {
-    u8 rw = vreg_width(ctx, in->result);
-    u8 sw = in->ops[0].is_imm ? 8 : vreg_width(ctx, in->ops[0].u.vreg);
+    u8 cc;   /* primary condition code */
+    u8 join; /* OP_AND/OP_OR to combine the unordered (PF) flag; 0 = none */
+} FcmpSpec;
 
-    if (sw == 16)
-    {
-        /* fucomip lhs vs rhs (rhs pushed first); an imm RHS is 0.0 from fldz. */
-        ByteBuf *b = ctx->buf;
-        IrOperand rhs = in->ops[1];
-        if (rhs.is_imm)
-        {
-            if (rhs.u.imm != 0)
-            {
-                codegen_error(ctx, "nonzero immediate in a long-double compare");
-                emit_ud2(b);
-                return;
-            }
-            emit_fldz(ctx);
-        }
-        else
-        {
-            emit_fldt(ctx, x87_slot(ctx, rhs));
-        }
-        emit_fldt(ctx, x87_slot(ctx, in->ops[0]));
-        emit_fucomip(ctx);
-        emit_fstp_st0(ctx);
+static const FcmpSpec fcmp_specs[OP_FCMP_GE + 1] = {
+    [OP_FCMP_EQ] = {CC_E, OP_AND}, [OP_FCMP_NE] = {CC_NE, OP_OR},  [OP_FCMP_LT] = {CC_B, OP_AND},
+    [OP_FCMP_GT] = {CC_A, 0},      [OP_FCMP_LE] = {CC_BE, OP_AND}, [OP_FCMP_GE] = {CC_AE, 0},
+};
 
-        switch (in->opcode)
-        {
-            case OP_FCMP_GT:
-                emit_setcc_reg(b, CC_A, R_EAX);
-                break;
-            case OP_FCMP_GE:
-                emit_setcc_reg(b, CC_AE, R_EAX);
-                break;
-            case OP_FCMP_LT:
-                emit_setcc_reg(b, CC_B, R_EAX);
-                emit_setcc_reg(b, CC_NP, R_EDX);
-                emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
-                break;
-            case OP_FCMP_LE:
-                emit_setcc_reg(b, CC_BE, R_EAX);
-                emit_setcc_reg(b, CC_NP, R_EDX);
-                emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
-                break;
-            case OP_FCMP_EQ:
-                emit_setcc_reg(b, CC_E, R_EAX);
-                emit_setcc_reg(b, CC_NP, R_EDX);
-                emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
-                break;
-            case OP_FCMP_NE:
-                emit_setcc_reg(b, CC_NE, R_EAX);
-                emit_setcc_reg(b, CC_P, R_EDX);
-                emit_binop_rhs(b, 1, &arith_specs[OP_OR], R_EAX, xop_reg(R_EDX));
-                break;
-            default:
-                codegen_error(ctx, "unsupported FP compare predicate");
-                return;
-        }
-        emit_movzbl_al_eax(b);
-        emit_mov(b, rw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
-        x87_balance(ctx);
-        return;
-    }
-
-    u8 mf = sw == 4 ? MF_FLOAT : MF_DOUBLE;
+/* Emit the setcc result for an FP predicate and store it into `result_vreg`. */
+static void emit_fcmp_result(CodegenCtx *ctx, IrOpcode opcode, u8 rw, u32 result_vreg)
+{
+    const FcmpSpec *spec = &fcmp_specs[opcode];
     ByteBuf *b = ctx->buf;
-
-    emit_fp_source_to_xmm0(ctx, in->ops[0], sw);
-    X86Operand rhs = lowered_operand(ctx, in->ops[1], R_EAX);
-    if (rhs.kind == XOP_MEM)
+    emit_setcc_reg(b, spec->cc, R_EAX);
+    if (spec->join)
     {
-        emit_sse_load(b, mf, R_XMM1, rhs.u.mem);
+        u8 pf_cc = spec->join == OP_AND ? CC_NP : CC_P;
+        emit_setcc_reg(b, pf_cc, R_EDX);
+        emit_binop_rhs(b, W_BYTE, &arith_specs[spec->join], R_EAX, xop_reg(R_EDX));
     }
-    else if (rhs.kind == XOP_IMM)
+    emit_movzbl_al_eax(b);
+    emit_mov(b, rw, xop_vreg(ctx, result_vreg), xop_reg(R_EAX));
+}
+
+static void emit_x87_fcmp(CodegenCtx *ctx, IrInstr *in)
+{
+    ByteBuf *b = ctx->buf;
+    IrOperand rhs = in->ops[1];
+    if (rhs.is_imm)
     {
-        emit_mov(b, sw == 4 ? 4 : imm_load_width(rhs.u.imm), xop_reg(R_EAX), rhs);
-        emit_movd_to_xmm(b, R_XMM1, R_EAX, sw != 4);
+        if (rhs.u.imm != 0)
+        {
+            codegen_error(ctx, "nonzero immediate in a long-double compare");
+            emit_ud2(b);
+            return;
+        }
+        emit_fldz(ctx);
+    }
+    else
+    {
+        emit_fldt(ctx, x87_slot(ctx, rhs));
+    }
+    emit_fldt(ctx, x87_slot(ctx, in->ops[0]));
+    emit_fucomip(ctx);
+    emit_fstp_st0(ctx);
+    emit_fcmp_result(ctx, in->opcode, vreg_width(ctx, in->result), in->result);
+    x87_balance(ctx);
+}
+
+static bool emit_fcmp_rhs_xmm1(CodegenCtx *ctx, IrOperand rhs, u8 sw)
+{
+    ByteBuf *b = ctx->buf;
+    u8 mf = MF_OF(sw);
+    X86Operand src = lowered_operand(ctx, rhs, R_EAX);
+    if (src.kind == XOP_MEM)
+    {
+        emit_sse_load(b, mf, R_XMM1, src.u.mem);
+    }
+    else if (src.kind == XOP_IMM)
+    {
+        emit_mov(b, fp_imm_load_width(sw, src.u.imm), xop_reg(R_EAX), src);
+        emit_movd_to_xmm(b, R_XMM1, R_EAX, sw != W_DWORD);
     }
     else
     {
         codegen_error(ctx, "unexpected operand class for a floating-point compare");
+        return false;
+    }
+    return true;
+}
+
+static void lower_fcmp(IrInstr *in, CodegenCtx *ctx)
+{
+    u8 rw = vreg_width(ctx, in->result);
+    u8 sw = fconv_src_width(ctx, in->ops[0]);
+    if (sw == W_LD)
+    {
+        emit_x87_fcmp(ctx, in);
         return;
     }
-    emit_sse_ucomis(b, sw == 4 ? 0 : X86_SSE_66, R_XMM0, R_XMM1);
-
-    switch (in->opcode)
+    ByteBuf *b = ctx->buf;
+    emit_fp_source_to_xmm0(ctx, in->ops[0], sw);
+    if (!emit_fcmp_rhs_xmm1(ctx, in->ops[1], sw))
     {
-        case OP_FCMP_GT:
-            emit_setcc_reg(b, CC_A, R_EAX);
-            break;
-        case OP_FCMP_GE:
-            emit_setcc_reg(b, CC_AE, R_EAX);
-            break;
-        case OP_FCMP_LT:
-            emit_setcc_reg(b, CC_B, R_EAX);
-            emit_setcc_reg(b, CC_NP, R_EDX);
-            emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
-            break;
-        case OP_FCMP_LE:
-            emit_setcc_reg(b, CC_BE, R_EAX);
-            emit_setcc_reg(b, CC_NP, R_EDX);
-            emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
-            break;
-        case OP_FCMP_EQ:
-            emit_setcc_reg(b, CC_E, R_EAX);
-            emit_setcc_reg(b, CC_NP, R_EDX);
-            emit_binop_rhs(b, 1, &arith_specs[OP_AND], R_EAX, xop_reg(R_EDX));
-            break;
-        case OP_FCMP_NE:
-            emit_setcc_reg(b, CC_NE, R_EAX);
-            emit_setcc_reg(b, CC_P, R_EDX);
-            emit_binop_rhs(b, 1, &arith_specs[OP_OR], R_EAX, xop_reg(R_EDX));
-            break;
-        default:
-            codegen_error(ctx, "unsupported FP compare predicate");
-            return;
+        return;
     }
-    emit_movzbl_al_eax(b);
-    emit_mov(b, rw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
+    emit_sse_ucomis(b, sw, R_XMM0, R_XMM1);
+    emit_fcmp_result(ctx, in->opcode, rw, in->result);
 }
 
 static void lower_gep(IrInstr *in, CodegenCtx *ctx)
@@ -2615,44 +2675,44 @@ static void lower_gep(IrInstr *in, CodegenCtx *ctx)
         X86Mem base = load_ptr(ctx, in->ops[0]);
         X86Mem m = {.base = base.base, .index = NO_REG, .scale = 1, .disp = (i32) stride};
         emit_lea(ctx->buf, R_EDX, m);
-        emit_mov(ctx->buf, 8, xop_vreg(ctx, in->result), xop_reg(R_EDX));
+        emit_mov(ctx->buf, W_QWORD, xop_vreg(ctx, in->result), xop_reg(R_EDX));
         return;
     }
 
     if (stride == 1 || stride == 2 || stride == 4 || stride == 8)
     {
         X86Mem base = load_ptr(ctx, in->ops[0]);
-        emit_mov(ctx->buf, 8, xop_reg(R_ECX), lowered_operand(ctx, in->ops[1], R_ECX));
+        emit_mov(ctx->buf, W_QWORD, xop_reg(R_ECX), lowered_operand(ctx, in->ops[1], R_ECX));
         X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = (u8) stride, .disp = 0};
         emit_lea(ctx->buf, R_EDX, scaled);
-        emit_mov(ctx->buf, 8, xop_vreg(ctx, in->result), xop_reg(R_EDX));
+        emit_mov(ctx->buf, W_QWORD, xop_vreg(ctx, in->result), xop_reg(R_EDX));
         return;
     }
 
     /* General stride: index *= stride, then lea (base, index, 1). */
     X86Mem base = load_ptr(ctx, in->ops[0]);
-    emit_mov(ctx->buf, 8, xop_reg(R_ECX), lowered_operand(ctx, in->ops[1], R_ECX));
-    emit_imul_imm(ctx->buf, 8, R_ECX, stride);
+    emit_mov(ctx->buf, W_QWORD, xop_reg(R_ECX), lowered_operand(ctx, in->ops[1], R_ECX));
+    emit_imul_imm(ctx->buf, W_QWORD, R_ECX, stride);
     X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = 1, .disp = 0};
     emit_lea(ctx->buf, R_EDX, scaled);
-    emit_mov(ctx->buf, 8, xop_vreg(ctx, in->result), xop_reg(R_EDX));
+    emit_mov(ctx->buf, W_QWORD, xop_vreg(ctx, in->result), xop_reg(R_EDX));
 }
 
 static void lower_alloca(IrInstr *in, CodegenCtx *ctx)
 {
-    i64 aligned = (in->ops[0].u.imm + 15) & ~15;
-    emit_binop_rhs(ctx->buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(aligned));
-    emit_mov(ctx->buf, 8, xop_reg(R_EDX), xop_reg(R_ESP));
-    emit_mov(ctx->buf, 8, xop_vreg(ctx, in->result), xop_reg(R_EDX));
+    i64 aligned = ALIGN_UP(in->ops[0].u.imm, STACK_ALIGN);
+    emit_binop_rhs(ctx->buf, W_QWORD, &arith_specs[OP_SUB], R_ESP, xop_imm(aligned));
+    emit_mov(ctx->buf, W_QWORD, xop_reg(R_EDX), xop_reg(R_ESP));
+    emit_mov(ctx->buf, W_QWORD, xop_vreg(ctx, in->result), xop_reg(R_EDX));
 }
 
 static void lower_memcpy(IrInstr *in, CodegenCtx *ctx)
 {
-    (void) load_ptr(ctx, in->ops[0]); /* dst address -> %rax */
-    emit_mov(ctx->buf, 8, xop_reg(R_EDI), xop_reg(R_EAX));
-    (void) load_ptr(ctx, in->ops[1]); /* src address -> %rax */
-    emit_mov(ctx->buf, 8, xop_reg(R_ESI), xop_reg(R_EAX));
-    emit_mov(ctx->buf, 8, xop_reg(R_ECX), xop_imm(in->ops[2].u.imm));
+    (void) load_ptr(ctx, in->ops[0]);
+    emit_mov(ctx->buf, W_QWORD, xop_reg(R_EDI), xop_reg(R_EAX));
+    (void) load_ptr(ctx, in->ops[1]);
+    emit_mov(ctx->buf, W_QWORD, xop_reg(R_ESI), xop_reg(R_EAX));
+    emit_mov(ctx->buf, W_QWORD, xop_reg(R_ECX), xop_imm(in->ops[2].u.imm));
     bytebuf_append(ctx->buf, X86_REP);
     bytebuf_append(ctx->buf, X86_MOVSB);
 }
@@ -2683,7 +2743,7 @@ static void scan_vreg(u32 *max, u32 vreg)
 
 static void scan_operand(u32 *max, IrOperand op)
 {
-    if (op.is_imm || op.is_global || op.is_func)
+    if (!operand_is_vreg(op))
     {
         return;
     }
@@ -2724,15 +2784,15 @@ static u8 slot_width_of(IrModule *m, u32 vreg)
     return (m->widths && vreg < m->width_count && m->widths[vreg] == 16) ? 16 : 8;
 }
 
-static void maybe_use_bfd(Bitset *seen_defs, Bitset *uses, Bitset *bfd, IrOperand op)
+static void record_use(Bitset *seen_defs, Bitset *uses, Bitset *use_before_def, IrOperand op)
 {
-    if (!(op.is_imm || op.is_global || op.is_func))
+    if (operand_is_vreg(op))
     {
         u32 v = op.u.vreg;
         bitset_set(uses, v);
         if (!bitset_test(seen_defs, v))
         {
-            bitset_set(bfd, v);
+            bitset_set(use_before_def, v);
         }
     }
 }
@@ -2752,7 +2812,8 @@ static int slot_range_cmp(const void *a, const void *b)
     return ra->vreg < rb->vreg ? -1 : (ra->vreg > rb->vreg ? 1 : 0);
 }
 
-static FrameInfo frame_plan(IrFunction *f, IrModule *mod, Arena *arena)
+/* Highest vreg index referenced by any instruction or parameter in the function. */
+static u32 scan_max_vreg(IrFunction *f)
 {
     u32 max_vreg = 0;
     size_t nblocks = vec_size(f->blocks);
@@ -2770,348 +2831,372 @@ static FrameInfo frame_plan(IrFunction *f, IrModule *mod, Arena *arena)
     {
         scan_vreg(&max_vreg, ((IrParam *) vec_get(f->params, i))->vreg);
     }
-    u32 nbcl = max_vreg + 1;
+    return max_vreg;
+}
 
-    /* A PHI's result is written by phi-copies in every predecessor block. */
-    u32 *phi_pred_min = arena_alloc(arena, nbcl * sizeof(u32), sizeof(u32));
-    u32 *phi_pred_max = arena_alloc(arena, nbcl * sizeof(u32), sizeof(u32));
-    for (u32 v = 0; v <= max_vreg; v++)
+/* Per-block def/use sets plus the PHI bookkeeping that feeds the live intervals. */
+typedef struct
+{
+    size_t nblocks;
+    u32 nvregs;
+    Bitset **defs;           /* per-block bitsets */
+    Bitset **uses;           /* per-block bitsets */
+    Bitset **use_before_def; /* per-block bitsets */
+    Bitset *has_phi;         /* vregs written by a phi anywhere in the function */
+    u32 *phi_pred_min;       /* lowest predecessor index among a phi's blocks; UINT32_MAX: none */
+    u32 *phi_pred_max;       /* highest predecessor index among a phi's blocks */
+} BlockSets;
+
+static void scan_call_uses(Bitset *seen, Bitset *uses, Bitset *ubd, IrInstr *in)
+{
+    if (in->extra.call.is_indirect)
     {
-        phi_pred_min[v] = UINT32_MAX;
-        phi_pred_max[v] = 0;
+        record_use(seen, uses, ubd, in->extra.call.callee);
+    }
+    for (u32 a = 0; a < in->extra.call.nargs; a++)
+    {
+        record_use(seen, uses, ubd, in->extra.call.args[a]);
+    }
+}
+
+/* A PHI's copies at the predecessors' ends define its result and read its operands there. */
+static void record_phi_edges(const BlockIndex *bi, BlockSets *s, IrInstr *in)
+{
+    for (u32 e = 0; e < in->extra.phi.nentries; e++)
+    {
+        IrBlock *pred = block_by_label(bi, in->extra.phi.entries[e].label);
+        if (!pred)
+        {
+            continue;
+        }
+        size_t pj = block_index_of(bi, pred);
+        if (pj < s->phi_pred_min[in->result])
+        {
+            s->phi_pred_min[in->result] = (u32) pj;
+        }
+        if (pj > s->phi_pred_max[in->result])
+        {
+            s->phi_pred_max[in->result] = (u32) pj;
+        }
+        bitset_set(s->has_phi, in->result);
+        bitset_set(s->defs[pj], in->result);
+        IrOperand op = in->extra.phi.entries[e].val;
+        if (operand_is_vreg(op))
+        {
+            bitset_set(s->uses[pj], op.u.vreg);
+            bitset_set(s->use_before_def[pj], op.u.vreg);
+        }
+    }
+}
+
+static void scan_block_sets(const BlockIndex *bi, BlockSets *s, IrBlock *blk, size_t b,
+                            Arena *arena)
+{
+    Bitset *seen_defs = bitset_new(arena, s->nvregs);
+    size_t ninstr = vec_size(blk->instrs);
+    for (size_t ii = 0; ii < ninstr; ii++)
+    {
+        IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+        if (in->result != NO_VREG && in->opcode != OP_PHI)
+        {
+            bitset_set(seen_defs, in->result);
+            bitset_set(s->defs[b], in->result);
+        }
+        for (u8 oi = 0; oi < in->nops; oi++)
+        {
+            record_use(seen_defs, s->uses[b], s->use_before_def[b], in->ops[oi]);
+        }
+        if (in->opcode == OP_CALL)
+        {
+            scan_call_uses(seen_defs, s->uses[b], s->use_before_def[b], in);
+        }
+        else if (in->opcode == OP_PHI && in->result != NO_VREG)
+        {
+            record_phi_edges(bi, s, in);
+        }
+    }
+}
+
+static BlockSets build_block_sets(IrFunction *f, const BlockIndex *bi, u32 nvregs, Arena *arena)
+{
+    size_t nblocks = bi->nblocks;
+    BlockSets s = {0};
+    s.nblocks = nblocks;
+    s.nvregs = nvregs;
+    s.defs = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
+    s.uses = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
+    s.use_before_def = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
+    s.has_phi = bitset_new(arena, nvregs);
+    s.phi_pred_min = arena_alloc(arena, nvregs * sizeof(u32), sizeof(u32));
+    s.phi_pred_max = arena_alloc(arena, nvregs * sizeof(u32), sizeof(u32));
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        s.defs[b] = bitset_new(arena, nvregs);
+        s.uses[b] = bitset_new(arena, nvregs);
+        s.use_before_def[b] = bitset_new(arena, nvregs);
+    }
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        s.phi_pred_min[v] = UINT32_MAX;
+        s.phi_pred_max[v] = 0;
     }
 
-    /* Def/use sets with "use before first def" tracked for the live-in side. */
-    Bitset **defs_b = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
-    Bitset **uses_b = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
-    Bitset **bfd_b = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
-    for (size_t bi = 0; bi < nblocks; bi++)
-    {
-        defs_b[bi] = bitset_new(arena, nbcl);
-        uses_b[bi] = bitset_new(arena, nbcl);
-        bfd_b[bi] = bitset_new(arena, nbcl);
-    }
+    size_t nparams = vec_size(f->params);
     for (size_t i = 0; i < nparams; i++)
     {
         u32 pv = ((IrParam *) vec_get(f->params, i))->vreg;
         if (pv != NO_VREG && nblocks > 0)
         {
-            bitset_set(defs_b[0], pv); /* constant at entry */
+            bitset_set(s.defs[0], pv);
         }
     }
-    StrMap *label_to_block = strmap_new(arena);
-    for (size_t bi = 0; bi < nblocks; bi++)
-    {
-        strmap_set(label_to_block, ((IrBlock *) vec_get(f->blocks, bi))->label,
-                   (IrBlock *) vec_get(f->blocks, bi));
-    }
 
-    for (size_t bi = 0; bi < nblocks; bi++)
+    for (size_t b = 0; b < nblocks; b++)
     {
-        IrBlock *blk = (IrBlock *) vec_get(f->blocks, bi);
-        Bitset *seen_defs = bitset_new(arena, nbcl);
-        size_t ninstr = vec_size(blk->instrs);
-        for (size_t ii = 0; ii < ninstr; ii++)
+        scan_block_sets(bi, &s, (IrBlock *) vec_get(f->blocks, b), b, arena);
+    }
+    return s;
+}
+
+/* Propagate a block's live-in word-wise into each predecessor's live-out. */
+static void propagate_live_in(IrFunction *f, const BlockIndex *bi, size_t b, Bitset **lvin,
+                              Bitset **lvout, size_t nwords)
+{
+    IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+    size_t npred = vec_size(blk->preds);
+    u64 *lin_w = bitset_words(lvin[b]);
+    for (size_t p = 0; p < npred; p++)
+    {
+        IrBlock *pred = (IrBlock *) vec_get(blk->preds, p);
+        u64 *lout_w = bitset_words(lvout[block_index_of(bi, pred)]);
+        for (size_t wi = 0; wi < nwords; wi++)
         {
-            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
-            /* A PHI defines its result via copies in predecessors, not at the merge block. */
-            if (in->result != NO_VREG && in->opcode != OP_PHI)
-            {
-                bitset_set(seen_defs, in->result);
-                bitset_set(defs_b[bi], in->result);
-            }
-            for (u8 oi = 0; oi < in->nops; oi++)
-            {
-                maybe_use_bfd(seen_defs, uses_b[bi], bfd_b[bi], in->ops[oi]);
-            }
-            if (in->opcode == OP_CALL)
-            {
-                if (in->extra.call.is_indirect)
-                {
-                    maybe_use_bfd(seen_defs, uses_b[bi], bfd_b[bi], in->extra.call.callee);
-                }
-                for (u32 a = 0; a < in->extra.call.nargs; a++)
-                {
-                    maybe_use_bfd(seen_defs, uses_b[bi], bfd_b[bi], in->extra.call.args[a]);
-                }
-            }
-            else if (in->opcode == OP_PHI)
-            {
-                /* Phi operands are consumed at the end of their predecessor. */
-                if (in->result != NO_VREG)
-                {
-                    for (u32 e = 0; e < in->extra.phi.nentries; e++)
-                    {
-                        IrBlock *pred = strmap_get(label_to_block, in->extra.phi.entries[e].label);
-                        if (pred)
-                        {
-                            size_t pj = 0;
-                            for (size_t s = 0; s < nblocks; s++)
-                            {
-                                if ((IrBlock *) vec_get(f->blocks, s) == pred)
-                                {
-                                    pj = s;
-                                    break;
-                                }
-                            }
-                            if (pj < phi_pred_min[in->result])
-                            {
-                                phi_pred_min[in->result] = (u32) pj;
-                            }
-/* Phi-copies write the result at the end of every predecessor. */
-                            if (pj > phi_pred_max[in->result])
-                            {
-                                phi_pred_max[in->result] = (u32) pj;
-                            }
-                        }
-                    }
-                }
-                for (u32 e = 0; e < in->extra.phi.nentries; e++)
-                {
-                    IrBlock *pred = strmap_get(label_to_block, in->extra.phi.entries[e].label);
-                    if (pred)
-                    {
-                        size_t pj = 0;
-                        for (size_t s = 0; s < nblocks; s++)
-                        {
-                            if ((IrBlock *) vec_get(f->blocks, s) == pred)
-                            {
-                                pj = s;
-                                break;
-                            }
-                        }
-                        IrOperand op = in->extra.phi.entries[e].val;
-/* The phi-copy reads the operand before writing the result here. */
-                        if (in->result != NO_VREG)
-                        {
-                            bitset_set(defs_b[pj], in->result);
-                        }
-                        if (!(op.is_imm || op.is_global || op.is_func))
-                        {
-                            bitset_set(uses_b[pj], op.u.vreg);
-                            bitset_set(bfd_b[pj], op.u.vreg);
-                        }
-                    }
-                }
-            }
+            lout_w[wi] |= lin_w[wi];
         }
     }
+}
 
-    /* ---- block-level liveness with the refined live-in ---- */
+/* lvin[b] = (lvout[b] & ~defs) | use_before_def; returns true if it grew. */
+static bool update_block_liveness(const BlockSets *s, size_t b, Bitset **lvin, Bitset **lvout,
+                                  size_t nwords)
+{
+    bool changed = false;
+    u64 *lout_w = bitset_words(lvout[b]);
+    u64 *def_w = bitset_words(s->defs[b]);
+    u64 *ubd_w = bitset_words(s->use_before_def[b]);
+    u64 *lin_w = bitset_words(lvin[b]);
+    for (size_t wi = 0; wi < nwords; wi++)
+    {
+        u64 nb = (lout_w[wi] & ~def_w[wi]) | ubd_w[wi];
+        if (nb & ~lin_w[wi])
+        {
+            changed = true;
+        }
+        lin_w[wi] |= nb;
+    }
+    return changed;
+}
+
+/* Dataflow fixpoint over the block CFG. Word-at-a-time; a per-bit sweep is prohibitively slow. */
+static void solve_liveness(IrFunction *f, const BlockIndex *bi, const BlockSets *s, Arena *arena,
+                           Bitset ***p_lvin, Bitset ***p_lvout)
+{
+    size_t nblocks = bi->nblocks;
     Bitset **lvin = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
     Bitset **lvout = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
-    for (size_t bi = 0; bi < nblocks; bi++)
+    for (size_t b = 0; b < nblocks; b++)
     {
-        lvin[bi] = bitset_new(arena, nbcl);
-        lvout[bi] = bitset_new(arena, nbcl);
+        lvin[b] = bitset_new(arena, s->nvregs);
+        lvout[b] = bitset_new(arena, s->nvregs);
     }
-    /* Word-at-a-time fixpoint; a per-bit sweep is prohibitively slow. */
     size_t nwords = bitset_nwords(lvin[0]);
     for (;;)
     {
         bool changed = false;
-        for (size_t bi = 0; bi < nblocks; bi++)
+        for (size_t b = 0; b < nblocks; b++)
         {
-            IrBlock *blk = (IrBlock *) vec_get(f->blocks, bi);
-            size_t npred = vec_size(blk->preds);
-            u64 *lin_w = bitset_words(lvin[bi]);
-            for (size_t p = 0; p < npred; p++)
-            {
-                IrBlock *pred = (IrBlock *) vec_get(blk->preds, p);
-                size_t pj = 0;
-                for (size_t s = 0; s < nblocks; s++)
-                {
-                    if ((IrBlock *) vec_get(f->blocks, s) == pred)
-                    {
-                        pj = s;
-                        break;
-                    }
-                }
-                u64 *lout_w = bitset_words(lvout[pj]);
-                for (size_t wi = 0; wi < nwords; wi++)
-                {
-                    lout_w[wi] |= lin_w[wi];
-                }
-            }
+            propagate_live_in(f, bi, b, lvin, lvout, nwords);
         }
-        for (size_t bi = 0; bi < nblocks; bi++)
+        for (size_t b = 0; b < nblocks; b++)
         {
-            u64 *lout_w = bitset_words(lvout[bi]);
-            u64 *def_w = bitset_words(defs_b[bi]);
-            u64 *bfd_w = bitset_words(bfd_b[bi]);
-            u64 *lin_w = bitset_words(lvin[bi]);
-            for (size_t wi = 0; wi < nwords; wi++)
-            {
-                u64 nb = (lout_w[wi] & ~def_w[wi]) | bfd_w[wi];
-                if (nb & ~lin_w[wi])
-                {
-                    changed = true;
-                }
-                lin_w[wi] |= nb;
-            }
+            changed |= update_block_liveness(s, b, lvin, lvout, nwords);
         }
         if (!changed)
         {
             break;
         }
     }
+    *p_lvin = lvin;
+    *p_lvout = lvout;
+}
 
-    /* ---- per-vreg live intervals over block indices ---- */
-    u32 *istart = arena_alloc(arena, nbcl * sizeof(u32), sizeof(u32));
-    u32 *iend = arena_alloc(arena, nbcl * sizeof(u32), sizeof(u32));
-    for (u32 v = 0; v <= max_vreg; v++)
+/* Per-vreg live interval over block indices; start == UINT32_MAX means never live. */
+typedef struct
+{
+    u32 *start;
+    u32 *end;
+} LiveIntervals;
+
+/* Index of the lowest set bit (0..63); `v` must be nonzero (portable, self-hostable). */
+static unsigned lowest_set_bit(u64 v)
+{
+    unsigned k = 0;
+    while ((v & 1ULL) == 0)
     {
-        istart[v] = UINT32_MAX;
-        iend[v] = 0;
+        v >>= 1;
+        ++k;
     }
-    for (size_t bi = 0; bi < nblocks; bi++)
+    return k;
+}
+
+/* Fold one block's set bits (from a bitset word) into the per-vreg intervals. */
+static void extend_intervals(LiveIntervals *lv, u32 nvregs, size_t b, u64 bits, u32 vbase)
+{
+    while (bits)
     {
-        u64 *def_w = bitset_words(defs_b[bi]);
-        u64 *use_w = bitset_words(uses_b[bi]);
-        u64 *lin_w = bitset_words(lvin[bi]);
-        u64 *lout_w = bitset_words(lvout[bi]);
+        u32 k = lowest_set_bit(bits);
+        bits &= bits - 1;
+        u32 v = vbase + k;
+        if (v >= nvregs)
+        {
+            continue;
+        }
+        if (b < lv->start[v])
+        {
+            lv->start[v] = (u32) b;
+        }
+        if (b > lv->end[v])
+        {
+            lv->end[v] = (u32) b;
+        }
+    }
+}
+
+static LiveIntervals compute_intervals(const BlockSets *s, Bitset **lvin, Bitset **lvout,
+                                       Arena *arena)
+{
+    size_t nblocks = s->nblocks;
+    u32 nvregs = s->nvregs;
+    LiveIntervals lv = {0};
+    lv.start = arena_alloc(arena, nvregs * sizeof(u32), sizeof(u32));
+    lv.end = arena_alloc(arena, nvregs * sizeof(u32), sizeof(u32));
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        lv.start[v] = UINT32_MAX;
+        lv.end[v] = 0;
+    }
+    size_t nwords = bitset_nwords(lvin[0]);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        u64 *def_w = bitset_words(s->defs[b]);
+        u64 *use_w = bitset_words(s->uses[b]);
+        u64 *lin_w = bitset_words(lvin[b]);
+        u64 *lout_w = bitset_words(lvout[b]);
         for (size_t wi = 0; wi < nwords; wi++)
         {
             u64 bits = def_w[wi] | use_w[wi] | lin_w[wi] | lout_w[wi];
-            if (!bits)
-            {
-                continue;
-            }
-            u32 vbase = (u32) wi * 64;
-            for (u32 k = 0; k < 64; k++)
-            {
-                if (bits & (1ULL << k))
-                {
-                    u32 v = vbase + k;
-                    if (v <= max_vreg)
-                    {
-                        if (bi < istart[v])
-                        {
-                            istart[v] = (u32) bi;
-                        }
-                        if (bi > iend[v])
-                        {
-                            iend[v] = (u32) bi;
-                        }
-                    }
-                }
-            }
+            extend_intervals(&lv, nvregs, b, bits, (u32) wi * 64);
         }
     }
-    for (u32 v = 0; v <= max_vreg; v++)
+    /* A PHI result spans all its predecessors (the copies there read and write it). */
+    for (u32 v = 0; v < nvregs; v++)
     {
-        if (phi_pred_min[v] != UINT32_MAX && phi_pred_min[v] < istart[v])
+        if (bitset_test(s->has_phi, v))
         {
-            istart[v] = phi_pred_min[v];
-        }
-        if (phi_pred_max[v] != 0 && phi_pred_max[v] > iend[v])
-        {
-            iend[v] = phi_pred_max[v];
+            if (s->phi_pred_min[v] < lv.start[v])
+            {
+                lv.start[v] = s->phi_pred_min[v];
+            }
+            if (s->phi_pred_max[v] > lv.end[v])
+            {
+                lv.end[v] = s->phi_pred_max[v];
+            }
         }
     }
+    return lv;
+}
 
-    /* ---- greedy interval-color packing with slot reuse ---- */
-    SlotRange *ranges = arena_alloc(arena, nbcl * sizeof(SlotRange), sizeof(SlotRange));
-    size_t nranges = 0;
-    for (u32 v = 0; v <= max_vreg; v++)
+/* First-fit packing of one slot class (w8 or w16); returns the number of slots used. */
+static u32 pack_slot_class(SlotRange *ranges, size_t nranges, bool is16, u32 base, u32 stride,
+                           u32 *slot_off, Arena *arena)
+{
+    u32 *expire = arena_alloc(arena, nranges * sizeof(u32), sizeof(u32));
+    u32 nslots = 0;
+    for (size_t r = 0; r < nranges; r++)
     {
-        if (istart[v] != UINT32_MAX)
+        SlotRange *ra = &ranges[r];
+        if (ra->is16 != is16)
+        {
+            continue;
+        }
+        u32 slot = 0;
+        bool reused = false;
+        for (u32 i = 0; i < nslots; i++)
+        {
+            if (expire[i] < ra->start)
+            {
+                slot = i;
+                reused = true;
+                break;
+            }
+        }
+        if (!reused)
+        {
+            slot = nslots++;
+        }
+        expire[slot] = ra->end;
+        slot_off[ra->vreg] = base + (slot + 1) * stride;
+    }
+    return nslots;
+}
+
+/* w8 slots tile [0,total8); w16 boxes sit above, never overlapping. Returns frame bytes. */
+static u32 pack_slots(SlotRange *ranges, size_t nranges, u32 *slot_off, Arena *arena)
+{
+    u32 nslots8 = pack_slot_class(ranges, nranges, false, 0, 8, slot_off, arena);
+    u32 total8 = nslots8 * 8;
+    u32 base16 = ALIGN_UP(total8, W_LD); /* w16 region sits above the w8 region */
+    u32 nslots16 = pack_slot_class(ranges, nranges, true, base16, 16, slot_off, arena);
+    if (nslots16 > 0)
+    {
+        return base16 + nslots16 * 16;
+    }
+    return total8;
+}
+
+static FrameInfo frame_plan(IrFunction *f, IrModule *mod, Arena *arena, const BlockIndex *bi)
+{
+    u32 max_vreg = scan_max_vreg(f);
+    u32 nvregs = max_vreg + 1;
+
+    BlockSets bs = build_block_sets(f, bi, nvregs, arena);
+
+    Bitset **lvin;
+    Bitset **lvout;
+    solve_liveness(f, bi, &bs, arena, &lvin, &lvout);
+    LiveIntervals lv = compute_intervals(&bs, lvin, lvout, arena);
+
+    SlotRange *ranges = arena_alloc(arena, nvregs * sizeof(SlotRange), sizeof(SlotRange));
+    size_t nranges = 0;
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        if (lv.start[v] != UINT32_MAX)
         {
             ranges[nranges].vreg = v;
-            ranges[nranges].start = istart[v];
-            ranges[nranges].end = iend[v];
+            ranges[nranges].start = lv.start[v];
+            ranges[nranges].end = lv.end[v];
             ranges[nranges].is16 = slot_width_of(mod, v) == 16;
             nranges++;
         }
     }
     qsort(ranges, nranges, sizeof(SlotRange), slot_range_cmp);
 
-    u32 *slot_off = arena_alloc(arena, nbcl * sizeof(u32), sizeof(u32));
-    for (u32 v = 0; v <= max_vreg; v++)
+    u32 *slot_off = arena_alloc(arena, nvregs * sizeof(u32), sizeof(u32));
+    for (u32 v = 0; v < nvregs; v++)
     {
         slot_off[v] = 8; /* never-live vregs get an unused slot */
     }
-    /* w8 slots tile [0,total8); w16 boxes sit above, never overlapping. */
-    Vec *expire8 = vec_new(arena);  /* Vec<u32*> slot expiries */
-    Vec *expire16 = vec_new(arena); /* Vec<u32*> slot expiries */
-    u32 nslots8 = 0;
-    for (size_t r = 0; r < nranges; r++)
-    {
-        SlotRange *ra = &ranges[r];
-        if (ra->is16)
-        {
-            continue;
-        }
-        u32 slot = 0;
-        bool reused = false;
-        for (u32 i = 0; i < nslots8; i++)
-        {
-            if (*(u32 *) vec_get(expire8, i) < ra->start)
-            {
-                slot = i;
-                reused = true;
-                break;
-            }
-        }
-        if (!reused)
-        {
-            slot = nslots8++;
-            u32 *occupant = arena_alloc(arena, sizeof(u32), sizeof(u32));
-            *occupant = 0;
-            vec_push(expire8, occupant);
-        }
-        *((u32 *) vec_get(expire8, slot)) = ra->end;
-        slot_off[ra->vreg] = (slot + 1) * 8;
-    }
-    u32 total8 = nslots8 * 8;
-    u32 base16 = (total8 + 15) & ~15u; /* w16 region sits above the w8 region */
-    u32 nslots16 = 0;
-    for (size_t r = 0; r < nranges; r++)
-    {
-        SlotRange *ra = &ranges[r];
-        if (!ra->is16)
-        {
-            continue;
-        }
-        u32 slot = 0;
-        bool reused = false;
-        for (u32 i = 0; i < nslots16; i++)
-        {
-            if (*(u32 *) vec_get(expire16, i) < ra->start)
-            {
-                slot = i;
-                reused = true;
-                break;
-            }
-        }
-        if (!reused)
-        {
-            slot = nslots16++;
-            u32 *occupant = arena_alloc(arena, sizeof(u32), sizeof(u32));
-            *occupant = 0;
-            vec_push(expire16, occupant);
-        }
-        *((u32 *) vec_get(expire16, slot)) = ra->end;
-        slot_off[ra->vreg] = base16 + (slot + 1) * 16;
-    }
-    u32 total = nslots16 > 0 ? base16 + nslots16 * 16 : total8;
-
-#if 0
-    if (getenv("FICC_DEBUG_FRAME"))
-    {
-        const char *pat = getenv("FICC_DEBUG_FRAME");
-        if (f->name && !strncmp(f->name, pat, strlen(pat)))
-        {
-            fprintf(stderr, "frame_plan %s: frame_size=0x%x nbcl=%u nblocks=%zu\n", f->name, (total + 15) & ~15u, nbcl, nblocks);
-            for (u32 v = 0; v <= max_vreg; v++)
-            {
-                if (istart[v] != UINT32_MAX)
-                    fprintf(stderr, "  v%-6u off=0x%-4x [%u,%u]%s\n", v, slot_off[v], istart[v], iend[v],
-                            slot_width_of(mod, v) == 16 ? " w16" : "");
-            }
-        }
-    }
-#endif
+    u32 total = pack_slots(ranges, nranges, slot_off, arena);
 
     FrameInfo fr = {0};
     fr.slot_off = slot_off;
@@ -3121,7 +3206,7 @@ static FrameInfo frame_plan(IrFunction *f, IrModule *mod, Arena *arena)
         fr.save_area_off = total + VA_SAVE_BYTES;
         total = fr.save_area_off;
     }
-    fr.frame_size = (total + 15) & ~15u;
+    fr.frame_size = ALIGN_UP(total, STACK_ALIGN);
     return fr;
 }
 
@@ -3140,21 +3225,20 @@ static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod, const
             if (w == 16)
             {
                 /* X87 params arrive on the caller's stack at a 16-aligned slot. */
-                ovf = (ovf + 15) & ~15u;
-                emit_mov16(buf, x86_mem_rbp(16 + (i32) ovf), dst.u.mem);
+                ovf = ALIGN_UP(ovf, W_LD);
+                emit_mov16(buf, x86_mem_rbp(STACK_PARAM_BASE + (i32) ovf), dst.u.mem);
                 ovf += 16;
             }
             else if (fp_used < VA_NXMM)
             {
                 /* xmm → slot; the value lives in the low 32/64 bits. */
-                emit_sse_store(buf, w == 4 ? MF_FLOAT : MF_DOUBLE, dst.u.mem, fp_used);
+                emit_sse_store(buf, MF_OF(w), dst.u.mem, fp_used);
                 fp_used++;
             }
             else
             {
-                emit_sse_load(buf, w == 4 ? MF_FLOAT : MF_DOUBLE, R_XMM0,
-                              x86_mem_rbp(16 + (i32) ovf));
-                emit_sse_store(buf, w == 4 ? MF_FLOAT : MF_DOUBLE, dst.u.mem, R_XMM0);
+                emit_sse_load(buf, MF_OF(w), R_XMM0, x86_mem_rbp(STACK_PARAM_BASE + (i32) ovf));
+                emit_sse_store(buf, MF_OF(w), dst.u.mem, R_XMM0);
                 ovf += 8;
             }
         }
@@ -3167,7 +3251,8 @@ static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod, const
             }
             else
             {
-                emit_mov(buf, w, xop_reg(R_EAX), xop_mem(x86_mem_rbp(16 + (i32) ovf)));
+                emit_mov(buf, w, xop_reg(R_EAX),
+                         xop_mem(x86_mem_rbp(STACK_PARAM_BASE + (i32) ovf)));
                 emit_mov(buf, w, dst, xop_reg(R_EAX));
                 ovf += 8;
             }
@@ -3178,17 +3263,16 @@ static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod, const
 static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, FrameInfo *fr)
 {
     bytebuf_append(buf, X86_PUSH_RBP);
-    emit_mov(buf, 8, xop_reg(R_EBP), xop_reg(R_ESP));
+    emit_mov(buf, W_QWORD, xop_reg(R_EBP), xop_reg(R_ESP));
+    emit_binop_rhs(buf, W_QWORD, &arith_specs[OP_SUB], R_ESP, xop_imm(fr->frame_size));
 
-    /* The frame always holds at least one 8-byte vreg slot, so it's ≥ 16. */
-    emit_binop_rhs(buf, 8, &arith_specs[OP_SUB], R_ESP, xop_imm(fr->frame_size));
-
-    /* Spill register args for va_arg: GP to 0–47, xmm0-7 to 48–175 (16-byte stride). */
+    /* Spill register args for va_arg: GP first, then the xmm slots. */
     if (f->is_variadic)
     {
         for (size_t i = 0; i < VA_NGP; i++)
         {
-            emit_mov(buf, 8, xop_mem(x86_mem_rbp(-(i32) fr->save_area_off + (i32) i * 8)),
+            emit_mov(buf, W_QWORD,
+                     xop_mem(x86_mem_rbp(-(i32) fr->save_area_off + (i32) i * VA_GP_STRIDE)),
                      xop_reg(abi_arg_regs[i]));
         }
         for (size_t i = 0; i < VA_NXMM; i++)
@@ -3214,9 +3298,9 @@ static void add_phi_copies(CodegenCtx *ctx, IrInstr *phi)
     for (u32 e = 0; e < phi->extra.phi.nentries; e++)
     {
         IrPhiEntry *entry = &phi->extra.phi.entries[e];
-        IrBlock *pred = strmap_get(ctx->label_to_block, entry->label);
+        IrBlock *pred = block_by_label(ctx->blocks, entry->label);
         ASSERT(pred != NULL && "phi entry names a real predecessor in this function");
-        size_t pj = (size_t) u64map_get(ctx->block_to_index, (u64) (uintptr_t) pred);
+        size_t pj = block_index_of(ctx->blocks, pred);
         PhiCopy *pc = arena_alloc(ctx->arena, sizeof(PhiCopy), sizeof(void *));
         pc->src = entry->val;
         pc->dst_vreg = phi->result;
@@ -3249,20 +3333,20 @@ static void emit_phi_copy(CodegenCtx *ctx, IrOperand src, u32 dst_vreg)
     if (src.is_global)
     {
         emit_global_addr(ctx->buf, src.u.global_index, ctx->global_patches, ctx->arena);
-        emit_mov(ctx->buf, 8, xop_vreg(ctx, dst_vreg), xop_reg(R_EAX));
+        emit_mov(ctx->buf, W_QWORD, xop_vreg(ctx, dst_vreg), xop_reg(R_EAX));
         return;
     }
     if (src.is_func)
     {
         emit_func_addr_to(ctx->buf, R_EAX, src.u.func_name, ctx->func_patches, ctx->arena);
-        emit_mov(ctx->buf, 8, xop_vreg(ctx, dst_vreg), xop_reg(R_EAX));
+        emit_mov(ctx->buf, W_QWORD, xop_vreg(ctx, dst_vreg), xop_reg(R_EAX));
         return;
     }
     u8 dw = vreg_width(ctx, dst_vreg);
-    if (dw == 16)
+    if (dw == W_LD)
     {
-        X86Operand sv = xop_vreg(ctx, src.u.vreg); /* a width-16 value is a vreg */
-        emit_mov16(ctx->buf, sv.u.mem, xop_vreg(ctx, dst_vreg).u.mem);
+        X86Operand sv = xop_vreg(ctx, src.u.vreg);
+        emit_mov16(ctx->buf, sv.u.mem, vreg_slot_mem(ctx, dst_vreg));
         return;
     }
     emit_mov(ctx->buf, dw, xop_reg(R_EAX), lowered_operand(ctx, src, R_ECX));
@@ -3274,29 +3358,27 @@ static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
     ctx->block_offsets[bi] = bytebuf_len(ctx->buf);
     size_t ninstr = vec_size(blk->instrs);
 
-    /* Non-terminator instructions first. */
+    /* Non-terminator instructions first; the terminator and successor phi copies come last. */
     size_t ii = 0;
     for (; ii < ninstr; ii++)
     {
-        IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
-        if (is_terminator(in->opcode))
+        if (is_terminator(((IrInstr *) vec_get(blk->instrs, ii))->opcode))
         {
             break;
         }
-        lower_instr(in, ctx);
-    }
-
-    /* PHI copies must run in the predecessor, just before its terminator. */
-    if (ii < ninstr)
-    {
-        size_t npc = vec_size(ctx->phi_copies[bi]);
-        for (size_t pi = 0; pi < npc; pi++)
-        {
-            PhiCopy *pc = (PhiCopy *) vec_get(ctx->phi_copies[bi], pi);
-            emit_phi_copy(ctx, pc->src, pc->dst_vreg);
-        }
         lower_instr((IrInstr *) vec_get(blk->instrs, ii), ctx);
     }
+    ASSERT(ii < ninstr && "every block ends in a terminator");
+
+    /* Phi copies for the successors run just before the terminator. */
+    size_t npc = vec_size(ctx->phi_copies[bi]);
+    for (size_t pi = 0; pi < npc; pi++)
+    {
+        PhiCopy *pc = (PhiCopy *) vec_get(ctx->phi_copies[bi], pi);
+        emit_phi_copy(ctx, pc->src, pc->dst_vreg);
+    }
+    lower_instr((IrInstr *) vec_get(blk->instrs, ii), ctx);
+    ASSERT(ii + 1 == ninstr && "the terminator is the last instruction in a block");
 }
 
 static void resolve_block_patches(CodegenCtx *ctx)
@@ -3305,10 +3387,34 @@ static void resolve_block_patches(CodegenCtx *ctx)
     for (size_t pi = 0; pi < npatches; pi++)
     {
         PatchSite *site = (PatchSite *) vec_get(ctx->block_patches, pi);
-        IrBlock *target = strmap_get(ctx->label_to_block, site->target);
+        IrBlock *target = block_by_label(ctx->blocks, site->target);
         ASSERT(target != NULL && "branch target names a block the IR builder created");
-        size_t ti = (size_t) u64map_get(ctx->block_to_index, (u64) (uintptr_t) target);
+        size_t ti = block_index_of(ctx->blocks, target);
         patch_rel32(ctx->buf, site->offset, ctx->block_offsets[ti]);
+    }
+}
+
+/* Append jump tables after the function body; entries store target−table_base offset deltas. */
+static void emit_switch_tables(CodegenCtx *ctx, ByteBuf *buf)
+{
+    size_t nst = vec_size(ctx->switch_tables);
+    if (nst == 0)
+    {
+        return;
+    }
+    bytebuf_align(buf, W_QWORD);
+    for (size_t t = 0; t < nst; t++)
+    {
+        SwitchTableRec *rec = (SwitchTableRec *) vec_get(ctx->switch_tables, t);
+        size_t table_off = bytebuf_len(buf);
+        for (u32 i = 0; i < rec->nentries; i++)
+        {
+            IrBlock *target = block_by_label(ctx->blocks, rec->targets[i]);
+            ASSERT(target != NULL && "switch case targets a real block");
+            size_t ti = block_index_of(ctx->blocks, target);
+            bytebuf_append_u64(buf, (u64) ((i64) ctx->block_offsets[ti] - (i64) table_off));
+        }
+        patch_rel32(buf, rec->disp_field_off, table_off);
     }
 }
 
@@ -3321,7 +3427,8 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     Vec *global_patches = vec_new(arena);
     Vec *func_patches = vec_new(arena);
 
-    FrameInfo fr = frame_plan(f, mod, arena);
+    BlockIndex *blocks = index_blocks(f, arena);
+    FrameInfo fr = frame_plan(f, mod, arena, blocks);
     emit_prologue(buf, f, mod, &fr);
 
     size_t nblocks = vec_size(f->blocks);
@@ -3337,8 +3444,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         .mod = mod,
         .arena = arena,
         .phi_copies = phi_copies,
-        .label_to_block = strmap_new(arena),
-        .block_to_index = u64map_new(arena),
+        .blocks = blocks,
         .block_offsets = arena_alloc(arena, nblocks * sizeof(size_t), sizeof(size_t)),
         .patches = patches,
         .block_patches = block_patches,
@@ -3350,13 +3456,6 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         .fpu_depth = 0,
     };
 
-    for (size_t bi = 0; bi < nblocks; bi++)
-    {
-        IrBlock *blk = (IrBlock *) vec_get(f->blocks, bi);
-        strmap_set(ctx.label_to_block, blk->label, blk);
-        u64map_set(ctx.block_to_index, (u64) (uintptr_t) blk, (void *) bi);
-    }
-
     collect_phi_copies(f, &ctx);
 
     for (size_t bi = 0; bi < nblocks; bi++)
@@ -3364,27 +3463,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         emit_block((IrBlock *) vec_get(f->blocks, bi), bi, &ctx);
     }
 
-    /* Append jump tables after the function body; entries store target−table_base so runtime
-     * resolves table_base + entry, with no relocations. */
-    size_t nst = vec_size(ctx.switch_tables);
-    if (nst > 0)
-    {
-        bytebuf_align(buf, 8);
-    }
-    for (size_t t = 0; t < nst; t++)
-    {
-        SwitchTableRec *rec = (SwitchTableRec *) vec_get(ctx.switch_tables, t);
-        size_t table_off = bytebuf_len(buf);
-        for (u32 i = 0; i < rec->nentries; i++)
-        {
-            IrBlock *target = strmap_get(ctx.label_to_block, rec->targets[i]);
-            ASSERT(target != NULL && "switch case targets a real block");
-            size_t ti = (size_t) u64map_get(ctx.block_to_index, (u64) (uintptr_t) target);
-            bytebuf_append_u64(buf, (u64) ((i64) ctx.block_offsets[ti] - (i64) table_off));
-        }
-        patch_rel32(buf, rec->disp_field_off, table_off);
-    }
-
+    emit_switch_tables(&ctx, buf);
     resolve_block_patches(&ctx);
 
     cf->name = f->name;
@@ -3396,28 +3475,8 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     cf->is_static = f->is_static;
 }
 
-static CodegenFunc *find_codegen_func(CodegenModule *cm, const char *name)
+static size_t emit_all_funcs(CodegenModule *cm, IrModule *ir, Arena *arena)
 {
-    size_t n = vec_size(cm->funcs);
-    for (size_t i = 0; i < n; i++)
-    {
-        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
-        if (strcmp(cf->name, name) == 0)
-        {
-            return cf;
-        }
-    }
-    return NULL;
-}
-
-CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Arena *arena)
-{
-    (void) cfg;
-    CodegenModule *cm = arena_alloc(arena, sizeof(CodegenModule), sizeof(void *));
-    cm->funcs = vec_new(arena);
-    cm->globals = ir->globals;
-    cm->extern_calls = vec_new(arena);
-
     size_t nfuncs = vec_size(ir->funcs);
     for (size_t i = 0; i < nfuncs; i++)
     {
@@ -3426,8 +3485,11 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Are
         emit_func_mc(f, cf, ir, arena);
         vec_push(cm->funcs, cf);
     }
+    return nfuncs;
+}
 
-    /* Compute function offsets in .text */
+static void assign_func_offsets(CodegenModule *cm, size_t nfuncs)
+{
     size_t function_offset = 0;
     for (size_t i = 0; i < nfuncs; i++)
     {
@@ -3435,7 +3497,17 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Are
         cf->offset = function_offset;
         function_offset += bytebuf_len(cf->bytes);
     }
+}
 
+/* Resolve direct calls by name; undefined targets become SHN_UNDEF + R_X86_64_PLT32 in elf.c. */
+static void resolve_direct_calls(CodegenModule *cm, size_t nfuncs, Arena *arena)
+{
+    StrMap *func_by_name = strmap_new(arena);
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
+        strmap_set(func_by_name, cf->name, cf);
+    }
     for (size_t i = 0; i < nfuncs; i++)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
@@ -3443,11 +3515,9 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Are
         for (size_t pi = 0; pi < npatches; pi++)
         {
             PatchSite *site = (PatchSite *) vec_get(cf->patches, pi);
-            CodegenFunc *target = find_codegen_func(cm, site->target);
+            CodegenFunc *target = (CodegenFunc *) strmap_get(func_by_name, site->target);
             if (!target)
             {
-                /* Call to a declaration-only extern: leave rel32 as 0 and let elf.c emit an
-                 * SHN_UNDEF symbol + R_X86_64_PLT32 relocation. */
                 ExternCall *ec = arena_alloc(arena, sizeof(ExternCall), sizeof(void *));
                 ec->name = site->target;
                 ec->text_offset = cf->offset + site->offset;
@@ -3458,6 +3528,18 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Are
             bytebuf_poke_u32(cf->bytes, site->offset, (u32) rel);
         }
     }
+}
 
+CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Arena *arena)
+{
+    (void) cfg;
+    CodegenModule *cm = arena_alloc(arena, sizeof(CodegenModule), sizeof(void *));
+    cm->funcs = vec_new(arena);
+    cm->globals = ir->globals;
+    cm->extern_calls = vec_new(arena);
+
+    size_t nfuncs = emit_all_funcs(cm, ir, arena);
+    assign_func_offsets(cm, nfuncs);
+    resolve_direct_calls(cm, nfuncs, arena);
     return cm;
 }
