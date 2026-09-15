@@ -234,6 +234,17 @@ IrInstr *ir_emit_phi(IrBlock *bb, u32 dst, u32 nentries)
     return ins;
 }
 
+/* A PHI must precede every other instruction in its block. instr_new appends,
+   so emit and then move to the front. */
+IrInstr *ir_emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries)
+{
+    IrInstr *phi = ir_emit_phi(bb, dst, nentries);
+    IrInstr *last = (IrInstr *) vec_pop(bb->instrs);
+    ASSERT(last == phi);
+    vec_insert(bb->instrs, 0, phi);
+    return phi;
+}
+
 void ir_phi_add_entry(IrInstr *phi, IrOperand val, IrBlock *pred)
 {
     ASSERT(phi->opcode == OP_PHI);

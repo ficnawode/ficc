@@ -10,6 +10,9 @@
 #define VA_XMM_STRIDE 16
 #define VA_NGP 6
 #define VA_NXMM 8
+#define VA_SCALAR_SLOT 8
+#define VA_LD_SLOT 16
+#define VA_LD_ALIGN 16
 
 typedef struct PendingPhi PendingPhi;
 struct PendingPhi
@@ -124,12 +127,11 @@ struct FuncBuilder
     bool failed;          /* an error was reported while building this function */
 };
 
-static IrOperand resolve_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb);
+static IrOperand read_var_at_merge(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb);
 static u32 global_index_of(FuncBuilder *ctx, const char *name);
 static u32 block_static_index(FuncBuilder *ctx, ASTVarDecl *var);
 static u32 var_global_index(FuncBuilder *ctx, ASTVarDecl *decl);
 static IrOperand build_phi(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb);
-static IrInstr *emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries);
 static void fill_phi_entries(FuncBuilder *ctx, IrBlock *bb, ASTVarDecl *var, IrInstr *phi);
 static IrBlock *label_block(FuncBuilder *ctx, const char *name);
 static ExprResult build_expr(FuncBuilder *ctx, ASTNode *node, IrBlock *bb);
@@ -162,7 +164,7 @@ static void ir_error(ASTNode *node, const char *fmt, ...)
     fprintf(stderr, "\n");
 }
 
-static IrOperand *box_operand(FuncBuilder *ctx, IrOperand op)
+static IrOperand *persist_operand(FuncBuilder *ctx, IrOperand op)
 {
     IrOperand *p = arena_alloc(ctx->mod->arena, sizeof(IrOperand), sizeof(IrOperand));
     *p = op;
@@ -204,7 +206,7 @@ static inline Type *node_type(ASTNode *n)
 }
 
 /* Put an immediate in a classed vreg so the conversion opcodes read its class. */
-static u32 materialize_to_vreg(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *type)
+static u32 imm_to_vreg(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *type)
 {
     if (!val.is_imm)
     {
@@ -224,10 +226,37 @@ static IrOperand boolify(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *typ
     {
         return val;
     }
-    u32 src = materialize_to_vreg(ctx, bb, val, type);
+    u32 src = imm_to_vreg(ctx, bb, val, type);
     u32 dst = alloc_vreg_from_type(ctx, type_cbool());
     ir_emit_binop(bb, OP_FCMP_NE, dst, ir_operand_vreg(src), ir_operand_imm(0));
     return ir_operand_vreg(dst);
+}
+
+/* The FP literal 1.0 at `type`'s precision: an immediate carrying the IEEE-754
+   bit pattern for float/double, or an ITOF'd vreg for `long double` (no imm
+   encoding). Same trick as `boolify`'s FCMP against imm 0. */
+static IrOperand fp_one(FuncBuilder *ctx, IrBlock *bb, Type *type)
+{
+    if (type->kind == TYPE_LONG_DOUBLE)
+    {
+        u32 vreg = alloc_vreg_from_type(ctx, type);
+        ir_emit_unary(bb, OP_ITOF, vreg, ir_operand_imm(1));
+        return ir_operand_vreg(vreg);
+    }
+    u64 bits;
+    if (type->width == 32)
+    {
+        float one = 1.0f;
+        u32 v;
+        memcpy(&v, &one, sizeof(v));
+        bits = v;
+    }
+    else
+    {
+        double one = 1.0;
+        memcpy(&bits, &one, sizeof(bits));
+    }
+    return ir_operand_imm((i64) bits);
 }
 
 static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *src_type,
@@ -247,7 +276,7 @@ static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *
             {
                 return val;
             }
-            u32 src_vreg = materialize_to_vreg(ctx, bb, val, su);
+            u32 src_vreg = imm_to_vreg(ctx, bb, val, su);
             u32 dst = alloc_vreg_from_type(ctx, tu);
             ir_emit_unary(bb, OP_FCONV, dst, ir_operand_vreg(src_vreg));
             return ir_operand_vreg(dst);
@@ -257,7 +286,7 @@ static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *
             /* §6.3.1.2: _Bool holds (x != 0.0); FCMP_NE handles −0.0/NaN. */
             return boolify(ctx, bb, val, su);
         }
-        u32 src_vreg = materialize_to_vreg(ctx, bb, val, su);
+        u32 src_vreg = imm_to_vreg(ctx, bb, val, su);
         u32 dst = alloc_vreg_from_type(ctx, tu);
         ir_emit_unary(bb, type_is_fp(su) ? OP_FTOI : OP_ITOF, dst, ir_operand_vreg(src_vreg));
         return ir_operand_vreg(dst);
@@ -304,7 +333,18 @@ static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *
 
 static bool is_comparison_op(BinOpKind op)
 {
-    return op >= BIN_EQ && op <= BIN_GE;
+    switch (op)
+    {
+        case BIN_EQ:
+        case BIN_NE:
+        case BIN_LT:
+        case BIN_GT:
+        case BIN_LE:
+        case BIN_GE:
+            return true;
+        default:
+            return false;
+    }
 }
 
 static bool is_shift_op(BinOpKind op)
@@ -339,9 +379,9 @@ static BlockLocals *get_block_locals(FuncBuilder *ctx, IrBlock *bb)
 static IrBlock *new_block(IrFunction *f, const char *prefix)
 {
     size_t idx = vec_size(f->blocks);
-    size_t len = strlen(prefix);
-    char *buf = arena_alloc(f->arena, len + 32, sizeof(char));
-    snprintf(buf, len + 32, "%s_%zu", prefix, idx);
+    int n = snprintf(NULL, 0, "%s_%zu", prefix, idx);
+    char *buf = arena_alloc(f->arena, (size_t) n + 1, sizeof(char));
+    snprintf(buf, (size_t) n + 1, "%s_%zu", prefix, idx);
     return ir_func_add_block(f, buf);
 }
 
@@ -386,6 +426,19 @@ static bool is_spillable_var(ASTVarDecl *decl)
            !type_is_record(decl->type);
 }
 
+static bool already_spilled(FuncBuilder *ctx, ASTVarDecl *decl)
+{
+    size_t n = vec_size(ctx->spilled);
+    for (size_t i = 0; i < n; i++)
+    {
+        if ((ASTVarDecl *) vec_get(ctx->spilled, i) == decl)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static IrOperand *spill_slot(FuncBuilder *ctx, ASTVarDecl *var)
 {
     return u64map_get(ctx->spill_slots, (u64) (uintptr_t) var);
@@ -401,7 +454,7 @@ static void emit_spill_allocas(FuncBuilder *ctx, IrBlock *entry)
         ASTVarDecl *vd = (ASTVarDecl *) vec_get(ctx->spilled, i);
         u32 slot = alloc_vreg_from_type(ctx, type_ptr(vd->type));
         ir_emit_alloca(entry, slot, type_sizeof(vd->type));
-        IrOperand *op = box_operand(ctx, ir_operand_vreg(slot));
+        IrOperand *op = persist_operand(ctx, ir_operand_vreg(slot));
         u64map_set(ctx->spill_slots, (u64) (uintptr_t) vd, op);
     }
 }
@@ -421,10 +474,10 @@ static IrOperand read_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
     {
         return *p;
     }
-    return resolve_variable(ctx, var, bb);
+    return read_var_at_merge(ctx, var, bb);
 }
 
-static IrOperand resolve_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
+static IrOperand read_var_at_merge(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
 {
     BlockLocals *bl = get_block_locals(ctx, bb);
     size_t npreds = vec_size(bb->preds);
@@ -452,7 +505,7 @@ static IrOperand resolve_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb
         vec_push(bl->pending_phis, ip);
         val = ir_operand_vreg(dst);
     }
-    u64map_set(bl->locals, (u64) (uintptr_t) var, box_operand(ctx, val));
+    u64map_set(bl->locals, (u64) (uintptr_t) var, persist_operand(ctx, val));
     return val;
 }
 
@@ -465,16 +518,7 @@ static void write_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb, IrOpe
         return;
     }
     BlockLocals *bl = get_block_locals(ctx, bb);
-    u64map_set(bl->locals, (u64) (uintptr_t) var, box_operand(ctx, val));
-}
-
-static IrInstr *emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries)
-{
-    IrInstr *phi = ir_emit_phi(bb, dst, nentries);
-    IrInstr *last = (IrInstr *) vec_pop(bb->instrs);
-    ASSERT(last == phi);
-    vec_insert(bb->instrs, 0, phi);
-    return phi;
+    u64map_set(bl->locals, (u64) (uintptr_t) var, persist_operand(ctx, val));
 }
 
 static void fill_phi_entries(FuncBuilder *ctx, IrBlock *bb, ASTVarDecl *var, IrInstr *phi)
@@ -502,10 +546,10 @@ static IrOperand build_phi(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
 {
     BlockLocals *bl = get_block_locals(ctx, bb);
     u32 dst = alloc_phi_vreg(ctx, var);
-    IrInstr *phi = emit_phi_at_start(bb, dst, (u32) vec_size(bb->preds));
+    IrInstr *phi = ir_emit_phi_at_start(bb, dst, (u32) vec_size(bb->preds));
     /* Register before filling: a loop header's back-edge can resolve through
        this block while its PHI is being built, which must terminate. */
-    u64map_set(bl->locals, (u64) (uintptr_t) var, box_operand(ctx, ir_operand_vreg(dst)));
+    u64map_set(bl->locals, (u64) (uintptr_t) var, persist_operand(ctx, ir_operand_vreg(dst)));
     fill_phi_entries(ctx, bb, var, phi);
     return ir_operand_vreg(dst);
 }
@@ -513,7 +557,7 @@ static IrOperand build_phi(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
 static void insert_phi(FuncBuilder *ctx, IrBlock *bb, ASTVarDecl *var, u32 dst)
 {
     u32 nentries = (u32) vec_size(bb->preds);
-    IrInstr *phi = emit_phi_at_start(bb, dst, nentries);
+    IrInstr *phi = ir_emit_phi_at_start(bb, dst, nentries);
     fill_phi_entries(ctx, bb, var, phi);
 }
 
@@ -535,24 +579,20 @@ static void seal_block(FuncBuilder *ctx, IrBlock *bb)
     }
 }
 
-static const IrOpcode binop_ir[] = {
-    [BIN_ADD] = OP_ADD, [BIN_SUB] = OP_SUB, [BIN_MUL] = OP_MUL, [BIN_AND] = OP_AND,
-    [BIN_OR] = OP_OR,   [BIN_XOR] = OP_XOR, [BIN_SHL] = OP_SHL, [BIN_SHR] = OP_ASHR,
-    /* BIN_EQ..BIN_GE, BIN_DIV, BIN_REM, BIN_SHR are filled in by arith_opcode */
-};
-
-static const IrOpcode unary_opcodes[] = {
-    [UN_NEG] = OP_NEG,
-    [UN_BIT_NOT] = OP_NOT,
-};
-
 static void emit_unary_op(IrBlock *bb, u32 dst, UnaryOpKind op, IrOperand src, ASTNode *node)
 {
-    IrOpcode code = unary_opcodes[op];
-    if (code == 0)
+    IrOpcode code;
+    switch (op)
     {
-        ir_error(node, "unsupported unary operator");
-        return;
+        case UN_NEG:
+            code = OP_NEG;
+            break;
+        case UN_BIT_NOT:
+            code = OP_NOT;
+            break;
+        default:
+            ir_error(node, "unsupported unary operator");
+            return;
     }
     ir_emit_unary(bb, code, dst, src);
 }
@@ -638,7 +678,7 @@ static ExprResult build_short_circuit(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlo
     seal_block(ctx, true_bb);
 
     u32 dst = alloc_vreg_from_type(ctx, type_int());
-    IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
+    IrInstr *phi = ir_emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, ir_operand_imm(1), true_bb);
     ir_phi_add_entry(phi, ir_operand_imm(0), false_bb);
     seal_block(ctx, merge_bb);
@@ -731,7 +771,7 @@ static ExprResult build_ternary_expr(FuncBuilder *ctx, ASTTernaryExpr *te, IrBlo
     }
 
     u32 dst = alloc_vreg_from_type(ctx, tern_type);
-    IrInstr *phi = emit_phi_at_start(merge_bb, dst, 2);
+    IrInstr *phi = ir_emit_phi_at_start(merge_bb, dst, 2);
     ir_phi_add_entry(phi, t_prom, then_val.block);
     ir_phi_add_entry(phi, e_prom, else_val.block);
     seal_block(ctx, merge_bb);
@@ -998,19 +1038,9 @@ static ExprResult build_incdec_expr(FuncBuilder *ctx, ASTIncDecExpr *ie, IrBlock
         u32 res = alloc_vreg_from_type(ctx, prom);
         if (type_is_fp(prom))
         {
-            /* §6.5.2.4: ++ on FP is f = f + 1.0; width-16 has no imm, so the step folds through
-             * ITOF. */
-            if (prom->kind == TYPE_LONG_DOUBLE)
-            {
-                u32 onev = alloc_vreg_from_type(ctx, prom);
-                ir_emit_unary(bb, OP_ITOF, onev, ir_operand_imm(1));
-                ir_emit_binop(bb, step == 1 ? OP_FADD : OP_FSUB, res, pold, ir_operand_vreg(onev));
-            }
-            else
-            {
-                i64 one = prom->width == 32 ? 0x3F800000 : 0x3FF0000000000000;
-                ir_emit_binop(bb, step == 1 ? OP_FADD : OP_FSUB, res, pold, ir_operand_imm(one));
-            }
+            /* §6.5.2.4: ++ on FP is f = f + 1.0. */
+            IrOperand one = fp_one(ctx, bb, prom);
+            ir_emit_binop(bb, step == 1 ? OP_FADD : OP_FSUB, res, pold, one);
         }
         else
         {
@@ -1027,7 +1057,7 @@ static ExprResult build_incdec_expr(FuncBuilder *ctx, ASTIncDecExpr *ie, IrBlock
     return expr_result(newv, bb);
 }
 
-static BinOpKind plain_op(BinOpKind op)
+static BinOpKind strip_assign_op(BinOpKind op)
 {
     switch (op)
     {
@@ -1136,7 +1166,6 @@ static IrOpcode arith_opcode(BinOpKind op, Type *lt)
                 return 0;
         }
     }
-    IrOpcode opcode = binop_ir[op];
     if (is_comparison_op(op))
     {
         bool is_signed = type_is_signed(lt);
@@ -1155,7 +1184,7 @@ static IrOpcode arith_opcode(BinOpKind op, Type *lt)
             case BIN_GE:
                 return is_signed ? OP_ICMP_SGE : OP_ICMP_UGE;
             default:
-                return opcode;
+                return 0;
         }
     }
     if (is_divrem_op(op))
@@ -1167,11 +1196,27 @@ static IrOpcode arith_opcode(BinOpKind op, Type *lt)
         }
         return is_signed ? OP_SREM : OP_UREM;
     }
-    if (op == BIN_SHR)
+    switch (op)
     {
-        return type_is_unsigned(lt) ? OP_LSHR : OP_ASHR;
+        case BIN_ADD:
+            return OP_ADD;
+        case BIN_SUB:
+            return OP_SUB;
+        case BIN_MUL:
+            return OP_MUL;
+        case BIN_AND:
+            return OP_AND;
+        case BIN_OR:
+            return OP_OR;
+        case BIN_XOR:
+            return OP_XOR;
+        case BIN_SHL:
+            return OP_SHL;
+        case BIN_SHR:
+            return type_is_unsigned(lt) ? OP_LSHR : OP_ASHR;
+        default:
+            return 0;
     }
-    return opcode;
 }
 
 static ArithResult lower_arith_into(FuncBuilder *ctx, ArithSpec spec, IrOperand lval,
@@ -1250,11 +1295,11 @@ static ArithResult lower_arith_into(FuncBuilder *ctx, ArithSpec spec, IrOperand 
            vreg so the backends read float vs double at the right width. */
         if (lhs.is_imm)
         {
-            lhs = ir_operand_vreg(materialize_to_vreg(ctx, bb, lhs, lt));
+            lhs = ir_operand_vreg(imm_to_vreg(ctx, bb, lhs, lt));
         }
         if (rhs.is_imm)
         {
-            rhs = ir_operand_vreg(materialize_to_vreg(ctx, bb, rhs, lt));
+            rhs = ir_operand_vreg(imm_to_vreg(ctx, bb, rhs, lt));
         }
     }
     u32 dst = alloc_vreg_from_type(ctx, spec.result_type);
@@ -1293,7 +1338,7 @@ static ExprResult build_compound_assign(FuncBuilder *ctx, ASTBinaryExpr *be, IrB
     bb = right.block;
     Type *rt = type_decay(node_type(be->right));
 
-    ArithSpec spec = {.op = plain_op(be->op),
+    ArithSpec spec = {.op = strip_assign_op(be->op),
                       .lt = lt,
                       .rt = rt,
                       .result_type =
@@ -1328,7 +1373,7 @@ static ExprResult build_unary_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *
         if (type_is_fp(op_type))
         {
             /* `!x` on FP is `x == 0.0` (−0.0 is falsy, NaN is truthy → 0). */
-            u32 fp = materialize_to_vreg(ctx, src.block, src.value, type_rvalue(op_type));
+            u32 fp = imm_to_vreg(ctx, src.block, src.value, type_rvalue(op_type));
             ir_emit_binop(src.block, OP_FCMP_EQ, dst, ir_operand_vreg(fp), ir_operand_imm(0));
         }
         else
@@ -1426,8 +1471,8 @@ static void va_layout(IrFunction *f, i64 *gp, i64 *fp, i64 *skip)
         IrParam *p = (IrParam *) vec_get(f->params, i);
         if (p->type->kind == TYPE_LONG_DOUBLE)
         {
-            overflow_bytes = (overflow_bytes + 15) & ~15;
-            overflow_bytes += 16;
+            overflow_bytes = (overflow_bytes + VA_LD_ALIGN - 1) & ~(VA_LD_ALIGN - 1);
+            overflow_bytes += VA_LD_SLOT;
         }
         else if (type_is_fp(p->type))
         {
@@ -1437,7 +1482,7 @@ static void va_layout(IrFunction *f, i64 *gp, i64 *fp, i64 *skip)
             }
             else
             {
-                overflow_bytes += 8;
+                overflow_bytes += VA_SCALAR_SLOT;
             }
         }
         else
@@ -1448,11 +1493,11 @@ static void va_layout(IrFunction *f, i64 *gp, i64 *fp, i64 *skip)
             }
             else
             {
-                overflow_bytes += 8;
+                overflow_bytes += VA_SCALAR_SLOT;
             }
         }
     }
-    *gp = (i64) gp_used * 8;
+    *gp = (i64) gp_used * VA_SCALAR_SLOT;
     *fp = VA_GP_BYTES + (i64) fp_used * VA_XMM_STRIDE;
     *skip = overflow_bytes;
 }
@@ -2256,15 +2301,48 @@ static void ir_global_add_func_reloc(IrGlobal *g, u32 offset, const char *func_n
 
 static char *anon_name(Arena *arena, const char *prefix, u32 idx)
 {
-    char *buf = arena_alloc(arena, 32, 1);
-    snprintf(buf, 32, "%s_%u", prefix, idx);
+    int n = snprintf(NULL, 0, "%s_%u", prefix, idx);
+    char *buf = arena_alloc(arena, (size_t) n + 1, 1);
+    snprintf(buf, (size_t) n + 1, "%s_%u", prefix, idx);
     return buf;
 }
 
-/* Resolve an address-constant leaf (§6.6p9) to a global index, -2 with
- *out_func for a function-address relocation, or -1. */
-static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
-                                   U64Map *static_map, Arena *arena, const char **out_func);
+/* An address constant (§6.6p9): a global object, a function designator, or
+   neither. The serializer turns this into a relocation. */
+typedef enum
+{
+    RELOC_TARGET_NONE,   /* not an address constant */
+    RELOC_TARGET_OBJECT, /* `index` selects a global object */
+    RELOC_TARGET_FUNC,   /* `func` names a function */
+} RelocTargetKind;
+
+typedef struct
+{
+    RelocTargetKind kind;
+    u32 index;        /* valid for RELOC_TARGET_OBJECT */
+    const char *func; /* valid for RELOC_TARGET_FUNC */
+} RelocTarget;
+
+static RelocTarget reloc_target_none(void)
+{
+    RelocTarget t = {.kind = RELOC_TARGET_NONE};
+    return t;
+}
+
+static RelocTarget reloc_target_object(u32 index)
+{
+    RelocTarget t = {.kind = RELOC_TARGET_OBJECT, .index = index};
+    return t;
+}
+
+static RelocTarget reloc_target_func(const char *func)
+{
+    RelocTarget t = {.kind = RELOC_TARGET_FUNC, .func = func};
+    return t;
+}
+
+static RelocTarget serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
+                                           U64Map *static_map, Arena *arena);
 
 /* An anonymous file-scope compound literal becomes an IrGlobal whose init
    bytes come from its plan (relocating against other globals / strings). */
@@ -2292,77 +2370,77 @@ static u32 emit_file_scope_compound(ASTCompoundLiteral *cl, IrModule *mod, Arena
 
 /* An `&expr` address constant: an anonymous compound literal, a function
    designator, or the address of a global / block-scope static. */
-static int serializer_addr_target(ASTNode *operand, IrModule *mod, StrMap *global_map,
-                                  U64Map *static_map, Arena *arena, const char **out_func)
+static RelocTarget serializer_addr_target(ASTNode *operand, IrModule *mod, StrMap *global_map,
+                                          U64Map *static_map, Arena *arena)
 {
     switch (operand->kind)
     {
         case AST_COMPOUND_LITERAL:
+        {
             /* `&(type){...}` serializes the literal's anonymous object. */
-            return (int) emit_file_scope_compound(ast_as(ASTCompoundLiteral, operand), mod, arena,
-                                                  global_map, static_map);
+            u32 idx = emit_file_scope_compound(ast_as(ASTCompoundLiteral, operand), mod, arena,
+                                               global_map, static_map);
+            return idx == NO_VREG ? reloc_target_none() : reloc_target_object(idx);
+        }
         case AST_IDENT:
         {
             ASTIdent *id = ast_as(ASTIdent, operand);
             if (id->is_func)
             {
                 /* `&f` is the designator's address, a function reloc. */
-                *out_func = id->name;
-                return -2;
+                return reloc_target_func(id->name);
             }
             ASTVarDecl *decl = id->decl;
             if (!decl)
             {
-                return -1;
+                return reloc_target_none();
             }
             if (decl->is_block_scope)
             {
                 u32 *p = decl->storage == SC_STATIC && static_map
                              ? u64map_get(static_map, (u64) (uintptr_t) decl)
                              : NULL;
-                return p ? (int) *p : -1;
+                return p ? reloc_target_object(*p) : reloc_target_none();
             }
             u32 *p = strmap_get(global_map, decl->name);
-            return p ? (int) *p : -1;
+            return p ? reloc_target_object(*p) : reloc_target_none();
         }
         default:
-            return -1;
+            return reloc_target_none();
     }
 }
 
-static int serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
-                                   U64Map *static_map, Arena *arena, const char **out_func)
+static RelocTarget serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
+                                           U64Map *static_map, Arena *arena)
 {
-    *out_func = NULL;
     switch (value->kind)
     {
         case AST_STRING_LITERAL:
-            return (int) ir_add_string_global(ast_as(ASTStringLiteral, value), mod, arena);
+            return reloc_target_object(
+                ir_add_string_global(ast_as(ASTStringLiteral, value), mod, arena));
         case AST_IDENT:
         {
             ASTIdent *id = ast_as(ASTIdent, value);
             if (id->is_func)
             {
-                *out_func = id->name;
-                return -2; /* function-address relocation */
+                return reloc_target_func(id->name);
             }
             /* Object/array designators decay to their address (§6.3.2.1). */
-            return serializer_addr_target(value, mod, global_map, static_map, arena, out_func);
+            return serializer_addr_target(value, mod, global_map, static_map, arena);
         }
         case AST_UNARY_EXPR:
         {
             ASTUnaryExpr *u = ast_as(ASTUnaryExpr, value);
             if (u->op == UN_ADDR)
             {
-                return serializer_addr_target(u->operand, mod, global_map, static_map, arena,
-                                              out_func);
+                return serializer_addr_target(u->operand, mod, global_map, static_map, arena);
             }
             break;
         }
         default:
             break;
     }
-    return -1;
+    return reloc_target_none();
 }
 
 /* String-fill length, clamped to the array size: the NUL is stored only if
@@ -2402,15 +2480,13 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
             memcpy(buf + w->offset, sl->data, clamped_string_len(sl, w->type));
             continue;
         }
-        const char *func_name = NULL;
-        int target =
-            serializer_reloc_target(w->value, mod, global_map, static_map, arena, &func_name);
-        if (func_name)
+        RelocTarget target = serializer_reloc_target(w->value, mod, global_map, static_map, arena);
+        if (target.kind == RELOC_TARGET_FUNC)
         {
-            ir_global_add_func_reloc(g, w->offset, func_name, arena);
+            ir_global_add_func_reloc(g, w->offset, target.func, arena);
             continue;
         }
-        if (target >= 0)
+        if (target.kind == RELOC_TARGET_OBJECT)
         {
             if (!type_is_ptr(type_unqual(w->type)))
             {
@@ -2418,7 +2494,7 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
                 ir_error(w->value, "initializer element is not a constant");
                 return false;
             }
-            ir_global_add_reloc(g, w->offset, target, arena);
+            ir_global_add_reloc(g, w->offset, target.index, arena);
             continue;
         }
         if (type_is_fp(type_unqual(w->type)))
@@ -2500,14 +2576,13 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
     {
         /* `char *p = "..."`: 8 zero bytes + a relocation against the string
            symbol. */
-        const char *unused_func = NULL;
-        int str_idx =
-            serializer_reloc_target(vd->init, mod, global_map, static_map, arena, &unused_func);
+        RelocTarget str = serializer_reloc_target(vd->init, mod, global_map, static_map, arena);
+        ASSERT(str.kind == RELOC_TARGET_OBJECT);
         g->init_data = encode_const_bytes(arena, 0, 8);
         g->init_len = 8;
         g->section = is_const ? IR_SECTION_RODATA : IR_SECTION_DATA;
         g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;
-        ir_global_add_reloc(g, 0, str_idx, arena);
+        ir_global_add_reloc(g, 0, str.index, arena);
     }
     else if (vd->has_const_init && vd->const_init != 0)
     {
@@ -2717,7 +2792,7 @@ static ExprResult build_member_access_expr(FuncBuilder *ctx, ASTMemberAccess *ma
 
 static ExprResult build_binary_expr(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlock *bb)
 {
-    if (plain_op(be->op) != be->op)
+    if (strip_assign_op(be->op) != be->op)
     {
         /* Not its own plain form: a compound assignment. */
         return build_compound_assign(ctx, be, bb);
@@ -2961,8 +3036,25 @@ static IrBlock *build_loop_body(FuncBuilder *ctx, ASTNode *body_node, LoopBlocks
     return end;
 }
 
-static IrBlock *finish_loop(FuncBuilder *ctx, ASTNode *cond_node, LoopBlocks *lb,
-                            IrBlock **out_cond)
+/* A short-circuiting condition lowers through its own blocks, so the body's
+   notional header edge really arrives from the condition's result block. */
+static void patch_body_pred(LoopBlocks *lb, IrBlock *cond_block)
+{
+    if (!cond_block || cond_block == lb->header)
+    {
+        return;
+    }
+    size_t n = vec_size(lb->body->preds);
+    for (size_t p = 0; p < n; p++)
+    {
+        if (vec_get(lb->body->preds, p) == lb->header)
+        {
+            vec_set(lb->body->preds, p, cond_block);
+        }
+    }
+}
+
+static void finish_loop(FuncBuilder *ctx, ASTNode *cond_node, LoopBlocks *lb, IrBlock **out_cond)
 {
     IrBlock *h = lb->header;
     if (cond_node)
@@ -2983,7 +3075,6 @@ static IrBlock *finish_loop(FuncBuilder *ctx, ASTNode *cond_node, LoopBlocks *lb
     declare_pred(lb->exit, h);
     seal_block(ctx, h);
     seal_block(ctx, lb->exit);
-    return lb->exit;
 }
 
 static void backedge(IrBlock *body_end, LoopBlocks *lb)
@@ -3042,22 +3133,11 @@ static IrBlock *build_do_while_stmt(FuncBuilder *ctx, ASTDoWhileStmt *ds, IrBloc
 
     /* Seal after the condition so the back-edge PHI sees its post-cond value. */
     IrBlock *h = NULL;
-    IrBlock *hret = finish_loop(ctx, ds->cond, &lb, &h);
+    finish_loop(ctx, ds->cond, &lb, &h);
     /* The back edge comes from the short-circuited condition's result block. */
-    if (h != lb.header && h != NULL)
-    {
-        size_t npred = vec_size(lb.body->preds);
-        for (size_t p = 0; p < npred; p++)
-        {
-            if (vec_get(lb.body->preds, p) == lb.header)
-            {
-                vec_set(lb.body->preds, p, h);
-            }
-        }
-    }
+    patch_body_pred(&lb, h);
     seal_block(ctx, lb.body);
 
-    (void) hret;
     return lb.exit;
 }
 
@@ -3094,20 +3174,10 @@ static IrBlock *build_for_stmt(FuncBuilder *ctx, ASTForStmt *fs, IrBlock *bb)
     }
 
     IrBlock *h = NULL;
-    IrBlock *hret = finish_loop(ctx, fs->cond, &lb, &h);
+    finish_loop(ctx, fs->cond, &lb, &h);
     /* Same non-predecessor fixup as do-while for short-circuited conditions. */
-    if (h != lb.header && h != NULL)
-    {
-        size_t npred1 = vec_size(lb.body->preds);
-        for (size_t p = 0; p < npred1; p++)
-        {
-            if (vec_get(lb.body->preds, p) == lb.header)
-            {
-                vec_set(lb.body->preds, p, h);
-            }
-        }
-    }
-    (void) hret;
+    patch_body_pred(&lb, h);
+
     return lb.exit;
 }
 
@@ -3321,27 +3391,37 @@ static IrBlock *build_return_stmt(FuncBuilder *ctx, ASTReturnStmt *ret, IrBlock 
     return bb;
 }
 
-static IrBlock *build_var_decl_stmt(FuncBuilder *ctx, ASTVarDecl *vd, IrBlock *bb)
+/* Materialize the backing global for a block-scope static or an extern local
+   exactly once. Returns false (error reported) on serialization failure. */
+static bool ensure_synthesized_global(FuncBuilder *ctx, ASTVarDecl *vd)
 {
     if (vd->storage == SC_STATIC)
     {
         /* Block-scope statics are file-backed: the loaded image holds their
            constant initializer, so runtime sees a no-op. */
-        if (block_static_index(ctx, vd) == NO_VREG &&
-            emit_block_static(vd, ctx->mod, ctx->mod->arena, ctx->static_map, ctx->global_map) ==
-                NO_VREG)
+        if (block_static_index(ctx, vd) != NO_VREG)
         {
-            ctx->failed = true;
+            return true;
         }
-        return bb;
+        return emit_block_static(vd, ctx->mod, ctx->mod->arena, ctx->static_map, ctx->global_map) !=
+               NO_VREG;
     }
-    if (vd->storage == SC_EXTERN)
+    ASSERT(vd->storage == SC_EXTERN);
+    /* Reference the external entity: emit an undefined global once if no
+       file-scope declaration preceded it. */
+    if (global_index_of(ctx, vd->name) != NO_VREG)
     {
-        /* Reference the external entity: emit an undefined global once if no
-           file-scope declaration preceded it. */
-        if (global_index_of(ctx, vd->name) == NO_VREG &&
-            emit_global_decl(vd, ctx->mod, ctx->mod->arena, ctx->global_map, ctx->static_map) ==
-                NO_VREG)
+        return true;
+    }
+    return emit_global_decl(vd, ctx->mod, ctx->mod->arena, ctx->global_map, ctx->static_map) !=
+           NO_VREG;
+}
+
+static IrBlock *build_var_decl_stmt(FuncBuilder *ctx, ASTVarDecl *vd, IrBlock *bb)
+{
+    if (vd->storage == SC_STATIC || vd->storage == SC_EXTERN)
+    {
+        if (!ensure_synthesized_global(ctx, vd))
         {
             ctx->failed = true;
         }
@@ -3455,6 +3535,15 @@ static IrBlock *build_stmt(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
     }
 }
 
+static void push_param(FuncBuilder *ctx, const char *name, Type *type, u32 vreg)
+{
+    IrParam *p = arena_alloc(ctx->mod->arena, sizeof(IrParam), sizeof(void *));
+    p->name = name;
+    p->type = type;
+    p->vreg = vreg;
+    vec_push(ctx->f->params, p);
+}
+
 static void setup_params(FuncBuilder *ctx, ASTFuncDef *ast, IrBlock *entry)
 {
     ctx->f->is_variadic = ast->sig.is_variadic;
@@ -3463,11 +3552,7 @@ static void setup_params(FuncBuilder *ctx, ASTFuncDef *ast, IrBlock *entry)
     {
         /* Record returns arrive through a hidden sret pointer. */
         u32 vreg = alloc_vreg_for_var(ctx, ast->sig.ret_type);
-        IrParam *p = arena_alloc(ctx->mod->arena, sizeof(IrParam), sizeof(void *));
-        p->name = "__sret";
-        p->type = type_ptr(ast->sig.ret_type);
-        p->vreg = vreg;
-        vec_push(ctx->f->params, p);
+        push_param(ctx, "__sret", type_ptr(ast->sig.ret_type), vreg);
         ctx->sret_vreg = vreg;
     }
 
@@ -3478,11 +3563,7 @@ static void setup_params(FuncBuilder *ctx, ASTFuncDef *ast, IrBlock *entry)
         /* Record params arrive as a pointer to the caller's copy. */
         Type *ssa_type = var_ssa_type(param->type);
         u32 vreg = alloc_vreg_from_type(ctx, ssa_type);
-        IrParam *p = arena_alloc(ctx->mod->arena, sizeof(IrParam), sizeof(void *));
-        p->name = param->name;
-        p->type = ssa_type;
-        p->vreg = vreg;
-        vec_push(ctx->f->params, p);
+        push_param(ctx, param->name, ssa_type, vreg);
         write_variable(ctx, param, entry, ir_operand_vreg(vreg));
     }
 }
@@ -3520,9 +3601,8 @@ static void mark_addr_taken_stmt(FuncBuilder *ctx, ASTNode *node);
 
 static void spill_addr_ident(FuncBuilder *ctx, ASTVarDecl *decl)
 {
-    if (decl && is_spillable_var(decl) && !spill_slot(ctx, decl))
+    if (decl && is_spillable_var(decl) && !already_spilled(ctx, decl))
     {
-        u64map_set(ctx->spill_slots, (u64) (uintptr_t) decl, (void *) 1);
         vec_push(ctx->spilled, decl);
     }
 }

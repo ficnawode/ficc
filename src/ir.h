@@ -283,6 +283,7 @@ IrInstr *ir_emit_br(IrBlock *bb, const char *target_label);
 IrInstr *ir_emit_brcond(IrBlock *bb, IrOperand cond, const char *true_label,
                         const char *false_label);
 IrInstr *ir_emit_phi(IrBlock *bb, u32 dst, u32 nentries);
+IrInstr *ir_emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries);
 void ir_phi_add_entry(IrInstr *phi, IrOperand val, IrBlock *pred);
 IrInstr *ir_emit_switch(IrBlock *bb, IrOperand val, u32 ncases, IrSwitchCase *cases,
                         const char *default_label);
