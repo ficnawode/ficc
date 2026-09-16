@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static char *read_stream(FILE *f, const char *what, Arena *arena)
 {
@@ -201,12 +202,19 @@ static int run_pipeline(const CompilerConfig *cfg, const char *input, Arena *are
         {
             replace_ext(input, outpath, sizeof(outpath), ".o");
         }
-        CfiOutput *cfi = NULL;
+        DwarfOutput *dwarf = NULL;
         if (cfg->codegen.debug)
         {
-            cfi = cfi_build(cm, arena);
+            dwarf = arena_alloc(arena, sizeof(DwarfOutput), sizeof(void *));
+            dwarf->cfi = cfi_build(cm, arena);
+            char cwd[512];
+            if (!getcwd(cwd, sizeof(cwd)))
+            {
+                strcpy(cwd, ".");
+            }
+            dwarf_build(cm, input, cwd, dwarf, arena);
         }
-        elf_write(cm, outpath, cfi);
+        elf_write(cm, outpath, dwarf);
     }
 
     return 0;

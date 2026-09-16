@@ -36,7 +36,7 @@ typedef struct
     u32 line;
 } LineEntry;
 
-/* Measured prologue layout the CFI writer follows, never a hard-coded shape. */
+/* Measured prologue byte offsets the CFI writer follows. */
 typedef struct
 {
     u32 off_push; /* byte offset just past `push rbp` (0 if the frame omits the push) */

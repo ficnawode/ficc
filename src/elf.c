@@ -121,6 +121,7 @@ static u32 strtab_add(ByteBuf *st, const char *s)
     return off;
 }
 
+/* Base sections always exist (indices 1-10); the -g-only sections follow. */
 typedef enum
 {
     SEC_NULL = 0,
@@ -134,14 +135,25 @@ typedef enum
     SEC_RELA_TEXT,
     SEC_RELA_DATA,
     SEC_RELA_RODATA,
+    SEC_EH_FRAME,
+    SEC_RELA_EH_FRAME,
+    SEC_DEBUG_INFO,
+    SEC_DEBUG_LINE,
+    SEC_DEBUG_ABBREV,
+    SEC_DEBUG_STR,
+    SEC_RELA_DEBUG_INFO,
+    SEC_RELA_DEBUG_LINE,
     SEC_COUNT
 } SectionIndex;
+
+/* e_shnum without the -g-only sections (byte-identical non-debug path). */
+#define SEC_BASE_COUNT (SEC_RELA_RODATA + 1)
 
 /* Symbol indices are fixed for determinism (D12):
    0 = null, 1-4 = section symbols (text/rodata/data/bss),
    5+i = global i (definition order), then function symbols. */
 #define FIRST_GLOBAL_SYM 5
-/* Symtab index of .text: target for every .eh_frame FDE relocation. */
+/* Symtab index of .text: target for every .eh_frame FDE and .debug_* RELA. */
 #define TEXT_SECTION_SYM 1
 
 #define SYMTAB_ENTSIZE sizeof(Elf64_Sym)
@@ -311,7 +323,7 @@ static u32 func_sym_index(CodegenModule *cm, const char *name, Vec *extern_syms,
     return 0;
 }
 
-void elf_write(CodegenModule *cm, const char *path, const CfiOutput *cfi)
+void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
 {
     FILE *f = fopen(path, "wb");
     if (!f)
@@ -336,11 +348,22 @@ void elf_write(CodegenModule *cm, const char *path, const CfiOutput *cfi)
     u32 shname_rela_rodata = strtab_add(&shstrtab, ".rela.rodata");
     u32 shname_eh_frame = 0;
     u32 shname_rela_eh_frame = 0;
-    if (cfi)
+    u32 shname_debug_info = 0;
+    u32 shname_debug_line = 0;
+    u32 shname_debug_abbrev = 0;
+    u32 shname_debug_str = 0;
+    u32 shname_rela_debug_info = 0;
+    u32 shname_rela_debug_line = 0;
+    if (dwarf)
     {
-        /* Debug sections append after rela_rodata; base indices stay fixed. */
         shname_eh_frame = strtab_add(&shstrtab, ".eh_frame");
         shname_rela_eh_frame = strtab_add(&shstrtab, ".rela.eh_frame");
+        shname_debug_info = strtab_add(&shstrtab, ".debug_info");
+        shname_debug_line = strtab_add(&shstrtab, ".debug_line");
+        shname_debug_abbrev = strtab_add(&shstrtab, ".debug_abbrev");
+        shname_debug_str = strtab_add(&shstrtab, ".debug_str");
+        shname_rela_debug_info = strtab_add(&shstrtab, ".rela.debug_info");
+        shname_rela_debug_line = strtab_add(&shstrtab, ".rela.debug_line");
     }
 
     ByteBuf strtab;
@@ -668,18 +691,50 @@ void elf_write(CodegenModule *cm, const char *path, const CfiOutput *cfi)
     off += bytebuf_len(&rela_rodata);
     size_t off_eh_frame = 0;
     size_t off_rela_eh_frame = 0;
+    size_t off_debug_info = 0;
+    size_t off_debug_line = 0;
+    size_t off_debug_abbrev = 0;
+    size_t off_debug_str = 0;
+    size_t off_rela_debug_info = 0;
+    size_t off_rela_debug_line = 0;
     u64 eh_frame_size = 0;
     u64 rela_eh_frame_size = 0;
-    u16 nsections = SEC_COUNT;
-    if (cfi)
+    u64 debug_info_size = 0;
+    u64 debug_line_size = 0;
+    u64 debug_abbrev_size = 0;
+    u64 debug_str_size = 0;
+    u64 rela_debug_info_size = 0;
+    u64 rela_debug_line_size = 0;
+    u16 nsections = SEC_BASE_COUNT;
+    if (dwarf)
     {
+        CfiOutput *cfi = dwarf->cfi;
         eh_frame_size = bytebuf_len(&cfi->eh_frame);
         rela_eh_frame_size = (u64) vec_size(cfi->relocs) * sizeof(Elf64_Rela);
+        debug_info_size = bytebuf_len(&dwarf->debug_info);
+        debug_line_size = bytebuf_len(&dwarf->debug_line);
+        debug_abbrev_size = bytebuf_len(&dwarf->debug_abbrev);
+        debug_str_size = bytebuf_len(&dwarf->debug_str);
+        rela_debug_info_size = (u64) vec_size(dwarf->rela_info) * sizeof(Elf64_Rela);
+        rela_debug_line_size = (u64) vec_size(dwarf->rela_line) * sizeof(Elf64_Rela);
         off_eh_frame = align_up(off, 8);
         off = off_eh_frame + eh_frame_size;
         off_rela_eh_frame = off;
         off += rela_eh_frame_size;
-        nsections += 2;
+        off_debug_info = off;
+        off += debug_info_size;
+        off_debug_line = off;
+        off += debug_line_size;
+        off_debug_abbrev = off;
+        off += debug_abbrev_size;
+        off_debug_str = off;
+        off += debug_str_size;
+        off = align_up(off, 8);
+        off_rela_debug_info = off;
+        off += rela_debug_info_size;
+        off_rela_debug_line = off;
+        off += rela_debug_line_size;
+        nsections = SEC_COUNT;
     }
     size_t off_shdr = (off + 7) & ~7;
 
@@ -729,17 +784,39 @@ void elf_write(CodegenModule *cm, const char *path, const CfiOutput *cfi)
     bytebuf_append_bytes(&out, bytebuf_data(&rela_text), bytebuf_len(&rela_text));
     bytebuf_append_bytes(&out, bytebuf_data(&rela_data), bytebuf_len(&rela_data));
     bytebuf_append_bytes(&out, bytebuf_data(&rela_rodata), bytebuf_len(&rela_rodata));
-    if (cfi)
+    if (dwarf)
     {
         /* .eh_frame plus its RELA against the .text section symbol. */
         while ((size_t) bytebuf_len(&out) < off_eh_frame)
         {
             bytebuf_append(&out, 0);
         }
-        bytebuf_append_bytes(&out, bytebuf_data(&cfi->eh_frame), bytebuf_len(&cfi->eh_frame));
-        for (size_t i = 0; i < vec_size(cfi->relocs); i++)
+        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->cfi->eh_frame),
+                             bytebuf_len(&dwarf->cfi->eh_frame));
+        for (size_t i = 0; i < vec_size(dwarf->cfi->relocs); i++)
         {
-            CfiReloc *rel = (CfiReloc *) vec_get(cfi->relocs, i);
+            CfiReloc *rel = (CfiReloc *) vec_get(dwarf->cfi->relocs, i);
+            rela_emit(&out, rel->offset, TEXT_SECTION_SYM, R_X86_64_64, rel->addend);
+        }
+        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_info),
+                             bytebuf_len(&dwarf->debug_info));
+        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_line),
+                             bytebuf_len(&dwarf->debug_line));
+        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_abbrev),
+                             bytebuf_len(&dwarf->debug_abbrev));
+        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_str), bytebuf_len(&dwarf->debug_str));
+        while ((size_t) bytebuf_len(&out) < off_rela_debug_info)
+        {
+            bytebuf_append(&out, 0);
+        }
+        for (size_t i = 0; i < vec_size(dwarf->rela_info); i++)
+        {
+            DwarfReloc *rel = (DwarfReloc *) vec_get(dwarf->rela_info, i);
+            rela_emit(&out, rel->offset, TEXT_SECTION_SYM, R_X86_64_64, rel->addend);
+        }
+        for (size_t i = 0; i < vec_size(dwarf->rela_line); i++)
+        {
+            DwarfReloc *rel = (DwarfReloc *) vec_get(dwarf->rela_line, i);
             rela_emit(&out, rel->offset, TEXT_SECTION_SYM, R_X86_64_64, rel->addend);
         }
     }
@@ -767,12 +844,24 @@ void elf_write(CodegenModule *cm, const char *path, const CfiOutput *cfi)
               bytebuf_len(&rela_data), SEC_SYMTAB, SEC_DATA, 8, sizeof(Elf64_Rela));
     shdr_emit(&out, shname_rela_rodata, SHT_RELA, SHF_INFO_LINK, off_rela_rodata,
               bytebuf_len(&rela_rodata), SEC_SYMTAB, SEC_RODATA, 8, sizeof(Elf64_Rela));
-    if (cfi)
+    if (dwarf)
     {
         shdr_emit(&out, shname_eh_frame, SHT_PROGBITS, SHF_ALLOC, off_eh_frame, eh_frame_size, 0, 0,
                   8, 0);
         shdr_emit(&out, shname_rela_eh_frame, SHT_RELA, SHF_INFO_LINK, off_rela_eh_frame,
-                  rela_eh_frame_size, SEC_SYMTAB, SEC_COUNT, 8, sizeof(Elf64_Rela));
+                  rela_eh_frame_size, SEC_SYMTAB, SEC_EH_FRAME, 8, sizeof(Elf64_Rela));
+        shdr_emit(&out, shname_debug_info, SHT_PROGBITS, 0, off_debug_info, debug_info_size, 0, 0,
+                  1, 0);
+        shdr_emit(&out, shname_debug_line, SHT_PROGBITS, 0, off_debug_line, debug_line_size, 0, 0,
+                  1, 0);
+        shdr_emit(&out, shname_debug_abbrev, SHT_PROGBITS, 0, off_debug_abbrev, debug_abbrev_size,
+                  0, 0, 1, 0);
+        shdr_emit(&out, shname_debug_str, SHT_PROGBITS, 0, off_debug_str, debug_str_size, 0, 0, 1,
+                  0);
+        shdr_emit(&out, shname_rela_debug_info, SHT_RELA, SHF_INFO_LINK, off_rela_debug_info,
+                  rela_debug_info_size, SEC_SYMTAB, SEC_DEBUG_INFO, 8, sizeof(Elf64_Rela));
+        shdr_emit(&out, shname_rela_debug_line, SHT_RELA, SHF_INFO_LINK, off_rela_debug_line,
+                  rela_debug_line_size, SEC_SYMTAB, SEC_DEBUG_LINE, 8, sizeof(Elf64_Rela));
     }
 
     fwrite(bytebuf_data(&out), 1, bytebuf_len(&out), f);
