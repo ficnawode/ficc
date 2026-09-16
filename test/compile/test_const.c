@@ -213,7 +213,7 @@ TEST(const, const_global_elf_rodata_no_write_flag)
         arena_free(arena);
         return;
     }
-    CodegenConfig cg_cfg;
+    CodegenConfig cg_cfg = {0};
     CodegenModule *cm = codegen_ir_to_machine(mod, &cg_cfg, arena);
     EXPECT_NOTNULL(cm);
     if (!cm)
@@ -221,7 +221,7 @@ TEST(const, const_global_elf_rodata_no_write_flag)
         arena_free(arena);
         return;
     }
-    elf_write(cm, "/tmp/ficc_p9_rd.o");
+    elf_write(cm, "/tmp/ficc_p9_rd.o", NULL);
     int rc = tc_run_shell("objdump -h /tmp/ficc_p9_rd.o | grep -q '.rodata' && "
                           "! objdump -h /tmp/ficc_p9_rd.o | grep '.rodata' | grep -q WRITE");
     EXPECT_EQ(rc, 0);

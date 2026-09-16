@@ -40,6 +40,7 @@ IrFunction *ir_module_add_func(IrModule *m, const char *name, Type *ret_type)
     f->arena = m->arena;
     f->params = vec_new(m->arena);
     f->blocks = vec_new(m->arena);
+    f->cur_line = 0;
     vec_push(m->funcs, f);
     return f;
 }
@@ -48,6 +49,7 @@ IrBlock *ir_func_add_block(IrFunction *f, const char *label)
 {
     IrBlock *bb = arena_alloc(f->arena, sizeof(IrBlock), sizeof(void *));
     bb->label = label;
+    bb->func = f;
     bb->arena = f->arena;
     bb->instrs = vec_new(f->arena);
     bb->preds = vec_new(f->arena);
@@ -102,9 +104,11 @@ bool ir_vreg_float(const IrModule *m, u32 vreg)
 
 static IrInstr *instr_new(IrBlock *bb, IrOpcode opcode, u32 result, u8 nops)
 {
+    ASSERT(bb->func && "every block belongs to a function");
     IrInstr *ins = arena_alloc(bb->arena, sizeof(IrInstr), sizeof(void *));
     ins->opcode = opcode;
     ins->result = result;
+    ins->line = bb->func->cur_line;
     ins->nops = nops;
     vec_push(bb->instrs, ins);
     return ins;

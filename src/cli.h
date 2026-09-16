@@ -56,6 +56,7 @@ typedef struct
 
 typedef struct
 {
+    bool debug; /* -g: emit DWARF debug info + .eh_frame CFI in the object */
 } CodegenConfig;
 
 /* ---- top-level config: the product of the arg parse ---- */

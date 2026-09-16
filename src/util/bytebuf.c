@@ -90,7 +90,7 @@ void bytebuf_poke_u32(ByteBuf *bb, size_t off, u32 val)
     bb->data[off + 3] = (u8) ((val >> 24) & 0xFF);
 }
 
-u8 *bytebuf_data(ByteBuf *bb)
+const u8 *bytebuf_data(const ByteBuf *bb)
 {
     return bb->data;
 }

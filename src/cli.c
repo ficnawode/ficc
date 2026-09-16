@@ -99,6 +99,13 @@ static bool set_emit_obj(CompilerConfig *cfg, const char *value)
     return true;
 }
 
+static bool set_debug(CompilerConfig *cfg, const char *value)
+{
+    (void) value;
+    cfg->codegen.debug = true;
+    return true;
+}
+
 static bool set_run_interp(CompilerConfig *cfg, const char *value)
 {
     (void) value;
@@ -186,6 +193,7 @@ static const CLIOption option_table[] = {
     {"--help", ARG_NONE, 0, set_help, "print the option listing and exit"},
     {"-E", ARG_NONE, 0, set_emit_pp, "print the preprocessed source to stdout"},
     {"-c", ARG_NONE, 0, set_emit_obj, "compile to an object file"},
+    {"-g", ARG_NONE, 0, set_debug, "emit DWARF debug info and call-frame info"},
     {"-run", ARG_NONE, 0, set_run_interp, "execute the program in the interpreter"},
     {"-nostdinc", ARG_NONE, 0, set_nostdinc, "do not search the builtin include directory"},
     {"-tokens", ARG_NONE, 0, set_dump_tokens, "dump the token stream"},

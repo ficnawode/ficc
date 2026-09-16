@@ -2817,6 +2817,7 @@ static ExprResult build_binary_expr(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlock
 
 static ExprResult build_expr(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
 {
+    ctx->f->cur_line = node->loc.line;
     switch (node->kind)
     {
         case AST_INT_LITERAL:
@@ -3478,6 +3479,7 @@ static IrBlock *build_expr_stmt(FuncBuilder *ctx, ASTExprStmt *es, IrBlock *bb)
 
 static IrBlock *build_stmt(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
 {
+    ctx->f->cur_line = node->loc.line;
     switch (node->kind)
     {
         case AST_RETURN_STMT:
@@ -3848,6 +3850,7 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
 
     IrFunction *func = ir_module_add_func(mod, func_ast->sig.name, func_ast->sig.ret_type);
     func->is_static = func_ast->sig.storage == SC_STATIC;
+    func->cur_line = func_ast->base.loc.line;
     IrBlock *entry = ir_func_add_block(func, "entry");
 
     if (func_ast->body->kind != AST_COMPOUND_STMT)

@@ -151,7 +151,7 @@ int tc_run_elf(const char *src)
     char obj[256], bin[256];
     tc_temp_path(obj, sizeof(obj), "main.o");
     tc_temp_path(bin, sizeof(bin), "bin");
-    elf_write(cm, obj);
+    elf_write(cm, obj, NULL);
 
     char cmd[1024];
     snprintf(cmd, sizeof(cmd), "gcc -no-pie %s -o %s >/dev/null 2>&1 && %s", obj, bin, bin);
@@ -191,7 +191,7 @@ int tc_run_elf_with_extra_tu(const char *src, const char *extra_src)
     tc_temp_path(extra_c, sizeof(extra_c), "extra.c");
     tc_temp_path(extra_o, sizeof(extra_o), "extra.o");
     tc_temp_path(bin, sizeof(bin), "bin");
-    elf_write(cm, main_o);
+    elf_write(cm, main_o, NULL);
 
     FILE *f = fopen(extra_c, "w");
     if (!f)

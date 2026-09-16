@@ -29,6 +29,21 @@ typedef struct
     size_t offset; /* byte offset of the immediate within the function's bytebuf */
 } FuncAddrPatch;
 
+/* Line boundary: `line` starts at byte `offset`; only recorded with -g. */
+typedef struct
+{
+    size_t offset; /* byte offset within the function's bytes */
+    u32 line;
+} LineEntry;
+
+/* Measured prologue layout the CFI writer follows, never a hard-coded shape. */
+typedef struct
+{
+    u32 off_push; /* byte offset just past `push rbp` (0 if the frame omits the push) */
+    u32 off_mov;  /* byte offset just past `mov rbp, rsp` */
+    u32 off_sub;  /* byte offset just past `sub rsp, N` (== prologue end) */
+} FuncFrame;
+
 /* Per-function machine code record */
 typedef struct CodegenFunc CodegenFunc;
 struct CodegenFunc
@@ -39,6 +54,8 @@ struct CodegenFunc
     Vec *patches;        /* Vec<PatchSite*> — function call patches */
     Vec *global_patches; /* Vec<GlobalPatch*> — global-data reference patches */
     Vec *func_patches;   /* Vec<FuncAddrPatch*> — function-address loads */
+    Vec *lines;          /* Vec<LineEntry*>, NULL without -g */
+    FuncFrame frame;     /* prologue layout for .eh_frame CFI */
     bool is_static;      /* emit as STB_LOCAL in the object file */
 };
 

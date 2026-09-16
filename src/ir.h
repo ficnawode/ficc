@@ -154,6 +154,7 @@ struct IrInstr
 {
     IrOpcode opcode;
     u32 result; /* vreg index, or NO_VREG */
+    u32 line;   /* source line stamped by instr_new from bb->func->cur_line (0: unset) */
     u8 nops;
     IrOperand ops[3];
     union
@@ -167,10 +168,13 @@ struct IrInstr
     } extra;
 };
 
+typedef struct IrFunction IrFunction;
+
 typedef struct IrBlock IrBlock;
 struct IrBlock
 {
     const char *label;
+    IrFunction *func; /* owning function (set in ir_func_add_block) */
     Arena *arena;
     Vec *instrs;         /* Vec<IrInstr*> */
     Vec *preds;          /* Vec<IrBlock*> — predecessor blocks */
@@ -186,7 +190,6 @@ struct IrParam
     u32 vreg;
 };
 
-typedef struct IrFunction IrFunction;
 struct IrFunction
 {
     const char *name;
@@ -194,6 +197,7 @@ struct IrFunction
     Arena *arena;
     Vec *params;      /* Vec<IrParam*> */
     Vec *blocks;      /* Vec<IrBlock*> */
+    u32 cur_line;     /* source line for the next emitted instruction (0 until a stmt/expr) */
     bool is_static;   /* internal linkage (stays local in the object file) */
     bool is_variadic; /* trailing unnamed args beyond the named params (C11 §6.7.6.3p8) */
 };

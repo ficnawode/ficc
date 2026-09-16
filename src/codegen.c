@@ -36,6 +36,9 @@ typedef struct
     u32 frame_size;    /* total frame size below %rbp, rounded up to 16 (ABI) */
     u32 save_area_off; /* register save area offset below %rbp, 0 if non-variadic */
     u32 *slot_off;     /* per-vreg frame offsets below %rbp */
+    u32 off_push;      /* bytes emitted for `push rbp` */
+    u32 off_mov;       /* bytes emitted for `mov rbp, rsp` */
+    u32 off_sub;       /* bytes emitted for `sub rsp, N` */
 } FrameInfo;
 
 /* Block label -> IrBlock* plus IrBlock* -> index, built once per function. */
@@ -88,6 +91,8 @@ struct CodegenCtx
     Vec *switch_tables;    /* Vec<SwitchTableRec*> */
     u32 save_area_off;     /* register save area offset below %rbp (variadic fns) */
     u32 *slot_off;         /* per-vreg frame offsets (see FrameInfo) */
+    Vec *lines;            /* Vec<LineEntry*>, NULL without -g */
+    bool debug;            /* record line boundaries for DWARF */
     int fpu_depth;         /* x87 stack depth; lowered sequences leave no residue */
 };
 
@@ -3262,9 +3267,13 @@ static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod, const
 
 static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, FrameInfo *fr)
 {
+    size_t before_push = bytebuf_len(buf);
     bytebuf_append(buf, X86_PUSH_RBP);
+    fr->off_push = (u32) (bytebuf_len(buf) - before_push);
     emit_mov(buf, W_QWORD, xop_reg(R_EBP), xop_reg(R_ESP));
+    fr->off_mov = (u32) (bytebuf_len(buf) - before_push);
     emit_binop_rhs(buf, W_QWORD, &arith_specs[OP_SUB], R_ESP, xop_imm(fr->frame_size));
+    fr->off_sub = (u32) (bytebuf_len(buf) - before_push);
 
     /* Spill register args for va_arg: GP first, then the xmm slots. */
     if (f->is_variadic)
@@ -3353,6 +3362,19 @@ static void emit_phi_copy(CodegenCtx *ctx, IrOperand src, u32 dst_vreg)
     emit_mov(ctx->buf, dw, xop_vreg(ctx, dst_vreg), xop_reg(R_EAX));
 }
 
+/* Record where `in` starts lowering; skip line-0 (pre-statement) rows. */
+static void record_line_entry(CodegenCtx *ctx, IrInstr *in)
+{
+    if (!ctx->debug || in->line == 0)
+    {
+        return;
+    }
+    LineEntry *le = arena_alloc(ctx->arena, sizeof(LineEntry), sizeof(void *));
+    le->offset = bytebuf_len(ctx->buf);
+    le->line = in->line;
+    vec_push(ctx->lines, le);
+}
+
 static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
 {
     ctx->block_offsets[bi] = bytebuf_len(ctx->buf);
@@ -3366,7 +3388,9 @@ static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
         {
             break;
         }
-        lower_instr((IrInstr *) vec_get(blk->instrs, ii), ctx);
+        IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+        record_line_entry(ctx, in);
+        lower_instr(in, ctx);
     }
     ASSERT(ii < ninstr && "every block ends in a terminator");
 
@@ -3377,7 +3401,9 @@ static void emit_block(IrBlock *blk, size_t bi, CodegenCtx *ctx)
         PhiCopy *pc = (PhiCopy *) vec_get(ctx->phi_copies[bi], pi);
         emit_phi_copy(ctx, pc->src, pc->dst_vreg);
     }
-    lower_instr((IrInstr *) vec_get(blk->instrs, ii), ctx);
+    IrInstr *term = (IrInstr *) vec_get(blk->instrs, ii);
+    record_line_entry(ctx, term);
+    lower_instr(term, ctx);
     ASSERT(ii + 1 == ninstr && "the terminator is the last instruction in a block");
 }
 
@@ -3418,7 +3444,7 @@ static void emit_switch_tables(CodegenCtx *ctx, ByteBuf *buf)
     }
 }
 
-static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *arena)
+static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *arena, bool debug)
 {
     ByteBuf *buf = arena_alloc(arena, sizeof(ByteBuf), sizeof(void *));
     bytebuf_init(buf, arena);
@@ -3426,6 +3452,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     Vec *block_patches = vec_new(arena);
     Vec *global_patches = vec_new(arena);
     Vec *func_patches = vec_new(arena);
+    Vec *lines = debug ? vec_new(arena) : NULL;
 
     BlockIndex *blocks = index_blocks(f, arena);
     FrameInfo fr = frame_plan(f, mod, arena, blocks);
@@ -3453,6 +3480,8 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
         .switch_tables = vec_new(arena),
         .save_area_off = fr.save_area_off,
         .slot_off = fr.slot_off,
+        .lines = lines,
+        .debug = debug,
         .fpu_depth = 0,
     };
 
@@ -3472,17 +3501,21 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     cf->patches = patches;
     cf->global_patches = global_patches;
     cf->func_patches = func_patches;
+    cf->lines = lines;
+    cf->frame.off_push = fr.off_push;
+    cf->frame.off_mov = fr.off_mov;
+    cf->frame.off_sub = fr.off_sub;
     cf->is_static = f->is_static;
 }
 
-static size_t emit_all_funcs(CodegenModule *cm, IrModule *ir, Arena *arena)
+static size_t emit_all_funcs(CodegenModule *cm, IrModule *ir, Arena *arena, bool debug)
 {
     size_t nfuncs = vec_size(ir->funcs);
     for (size_t i = 0; i < nfuncs; i++)
     {
         IrFunction *f = (IrFunction *) vec_get(ir->funcs, i);
         CodegenFunc *cf = arena_alloc(arena, sizeof(CodegenFunc), sizeof(void *));
-        emit_func_mc(f, cf, ir, arena);
+        emit_func_mc(f, cf, ir, arena, debug);
         vec_push(cm->funcs, cf);
     }
     return nfuncs;
@@ -3532,13 +3565,13 @@ static void resolve_direct_calls(CodegenModule *cm, size_t nfuncs, Arena *arena)
 
 CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Arena *arena)
 {
-    (void) cfg;
+    bool debug = cfg && cfg->debug;
     CodegenModule *cm = arena_alloc(arena, sizeof(CodegenModule), sizeof(void *));
     cm->funcs = vec_new(arena);
     cm->globals = ir->globals;
     cm->extern_calls = vec_new(arena);
 
-    size_t nfuncs = emit_all_funcs(cm, ir, arena);
+    size_t nfuncs = emit_all_funcs(cm, ir, arena, debug);
     assign_func_offsets(cm, nfuncs);
     resolve_direct_calls(cm, nfuncs, arena);
     return cm;

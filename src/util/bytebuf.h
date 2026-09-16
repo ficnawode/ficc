@@ -23,7 +23,7 @@ void bytebuf_append_u64(ByteBuf *bb, u64 val);
 void bytebuf_append_bytes(ByteBuf *bb, const u8 *src, size_t n);
 void bytebuf_align(ByteBuf *bb, size_t align);
 void bytebuf_poke_u32(ByteBuf *bb, size_t off, u32 val);
-u8 *bytebuf_data(ByteBuf *bb);
+const u8 *bytebuf_data(const ByteBuf *bb);
 size_t bytebuf_len(const ByteBuf *bb);
 
 #endif

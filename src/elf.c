@@ -141,6 +141,8 @@ typedef enum
    0 = null, 1-4 = section symbols (text/rodata/data/bss),
    5+i = global i (definition order), then function symbols. */
 #define FIRST_GLOBAL_SYM 5
+/* Symtab index of .text: target for every .eh_frame FDE relocation. */
+#define TEXT_SECTION_SYM 1
 
 #define SYMTAB_ENTSIZE sizeof(Elf64_Sym)
 #define SHDR_ENTSIZE sizeof(Elf64_Shdr)
@@ -309,7 +311,7 @@ static u32 func_sym_index(CodegenModule *cm, const char *name, Vec *extern_syms,
     return 0;
 }
 
-void elf_write(CodegenModule *cm, const char *path)
+void elf_write(CodegenModule *cm, const char *path, const CfiOutput *cfi)
 {
     FILE *f = fopen(path, "wb");
     if (!f)
@@ -332,6 +334,14 @@ void elf_write(CodegenModule *cm, const char *path)
     u32 shname_rela_text = strtab_add(&shstrtab, ".rela.text");
     u32 shname_rela_data = strtab_add(&shstrtab, ".rela.data");
     u32 shname_rela_rodata = strtab_add(&shstrtab, ".rela.rodata");
+    u32 shname_eh_frame = 0;
+    u32 shname_rela_eh_frame = 0;
+    if (cfi)
+    {
+        /* Debug sections append after rela_rodata; base indices stay fixed. */
+        shname_eh_frame = strtab_add(&shstrtab, ".eh_frame");
+        shname_rela_eh_frame = strtab_add(&shstrtab, ".rela.eh_frame");
+    }
 
     ByteBuf strtab;
     strtab_init(&strtab, arena);
@@ -656,6 +666,21 @@ void elf_write(CodegenModule *cm, const char *path)
     off += bytebuf_len(&rela_data);
     size_t off_rela_rodata = off;
     off += bytebuf_len(&rela_rodata);
+    size_t off_eh_frame = 0;
+    size_t off_rela_eh_frame = 0;
+    u64 eh_frame_size = 0;
+    u64 rela_eh_frame_size = 0;
+    u16 nsections = SEC_COUNT;
+    if (cfi)
+    {
+        eh_frame_size = bytebuf_len(&cfi->eh_frame);
+        rela_eh_frame_size = (u64) vec_size(cfi->relocs) * sizeof(Elf64_Rela);
+        off_eh_frame = align_up(off, 8);
+        off = off_eh_frame + eh_frame_size;
+        off_rela_eh_frame = off;
+        off += rela_eh_frame_size;
+        nsections += 2;
+    }
     size_t off_shdr = (off + 7) & ~7;
 
     ByteBuf out;
@@ -683,7 +708,7 @@ void elf_write(CodegenModule *cm, const char *path)
     bytebuf_append_u16(&out, 0);
     bytebuf_append_u16(&out, 0);
     bytebuf_append_u16(&out, sizeof(Elf64_Shdr));
-    bytebuf_append_u16(&out, SEC_COUNT);
+    bytebuf_append_u16(&out, nsections);
     bytebuf_append_u16(&out, SEC_SHSTRTAB);
 
     /* Section content */
@@ -704,6 +729,20 @@ void elf_write(CodegenModule *cm, const char *path)
     bytebuf_append_bytes(&out, bytebuf_data(&rela_text), bytebuf_len(&rela_text));
     bytebuf_append_bytes(&out, bytebuf_data(&rela_data), bytebuf_len(&rela_data));
     bytebuf_append_bytes(&out, bytebuf_data(&rela_rodata), bytebuf_len(&rela_rodata));
+    if (cfi)
+    {
+        /* .eh_frame plus its RELA against the .text section symbol. */
+        while ((size_t) bytebuf_len(&out) < off_eh_frame)
+        {
+            bytebuf_append(&out, 0);
+        }
+        bytebuf_append_bytes(&out, bytebuf_data(&cfi->eh_frame), bytebuf_len(&cfi->eh_frame));
+        for (size_t i = 0; i < vec_size(cfi->relocs); i++)
+        {
+            CfiReloc *rel = (CfiReloc *) vec_get(cfi->relocs, i);
+            rela_emit(&out, rel->offset, TEXT_SECTION_SYM, R_X86_64_64, rel->addend);
+        }
+    }
     while ((size_t) bytebuf_len(&out) < off_shdr)
     {
         bytebuf_append(&out, 0);
@@ -728,6 +767,13 @@ void elf_write(CodegenModule *cm, const char *path)
               bytebuf_len(&rela_data), SEC_SYMTAB, SEC_DATA, 8, sizeof(Elf64_Rela));
     shdr_emit(&out, shname_rela_rodata, SHT_RELA, SHF_INFO_LINK, off_rela_rodata,
               bytebuf_len(&rela_rodata), SEC_SYMTAB, SEC_RODATA, 8, sizeof(Elf64_Rela));
+    if (cfi)
+    {
+        shdr_emit(&out, shname_eh_frame, SHT_PROGBITS, SHF_ALLOC, off_eh_frame, eh_frame_size, 0, 0,
+                  8, 0);
+        shdr_emit(&out, shname_rela_eh_frame, SHT_RELA, SHF_INFO_LINK, off_rela_eh_frame,
+                  rela_eh_frame_size, SEC_SYMTAB, SEC_COUNT, 8, sizeof(Elf64_Rela));
+    }
 
     fwrite(bytebuf_data(&out), 1, bytebuf_len(&out), f);
     fclose(f);

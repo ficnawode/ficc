@@ -1,3 +1,4 @@
+#include "cfi.h"
 #include "cli.h"
 #include "codegen.h"
 #include "elf.h"
@@ -200,7 +201,12 @@ static int run_pipeline(const CompilerConfig *cfg, const char *input, Arena *are
         {
             replace_ext(input, outpath, sizeof(outpath), ".o");
         }
-        elf_write(cm, outpath);
+        CfiOutput *cfi = NULL;
+        if (cfg->codegen.debug)
+        {
+            cfi = cfi_build(cm, arena);
+        }
+        elf_write(cm, outpath, cfi);
     }
 
     return 0;
