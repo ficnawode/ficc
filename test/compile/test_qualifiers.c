@@ -74,3 +74,41 @@ TEST(qualifiers, restrict_local_pointers)
                           "}\n",
                           8);
 }
+
+/* Volatile accesses must behave identically in both backends, flag or not. */
+
+TEST(qualifiers, volatile_deref_in_loop)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    volatile int x = 0;\n"
+                          "    volatile int *p = &x;\n"
+                          "    for (int i = 0; i < 5; i = i + 1) *p = *p + 2;\n"
+                          "    return x;\n"
+                          "}\n",
+                          10);
+}
+
+TEST(qualifiers, volatile_through_phi)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    volatile int v = 0;\n"
+                          "    for (int i = 0; i < 3; i = i + 1) {\n"
+                          "        if (i & 1) v = 10;\n"
+                          "        else v = 20;\n"
+                          "    }\n"
+                          "    return v;\n"
+                          "}\n",
+                          20);
+}
+
+TEST(qualifiers, volatile_deref_pointer_casts)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    volatile char c = 'a';\n"
+                          "    volatile char *cp = &c;\n"
+                          "    char *p = (char *) cp;\n"
+                          "    *p = 'z';\n"
+                          "    return c == 'z' ? 0 : 1;\n"
+                          "}\n",
+                          0);
+}

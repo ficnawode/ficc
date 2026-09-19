@@ -143,6 +143,7 @@ bool type_is_union(Type *t);
 bool type_is_enum(Type *t);
 bool type_is_complete(Type *t); /* records + arrays (len-0 = `[]` unspecified, D12.7) */
 bool type_is_const(Type *t);
+bool type_is_volatile(Type *t);
 
 Type *type_ptr(Type *pointee);
 Type *type_array(Type *elem, u64 length);

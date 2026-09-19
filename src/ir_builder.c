@@ -465,7 +465,7 @@ static IrOperand read_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
     if (slot)
     {
         u32 dst = alloc_vreg_from_type(ctx, var->type);
-        ir_emit_load(bb, dst, *slot);
+        ir_emit_load(bb, dst, *slot, type_is_volatile(var->type));
         return ir_operand_vreg(dst);
     }
     BlockLocals *bl = get_block_locals(ctx, bb);
@@ -514,7 +514,7 @@ static void write_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb, IrOpe
     IrOperand *slot = spill_slot(ctx, var);
     if (slot)
     {
-        ir_emit_store(bb, val, *slot, var->type->size);
+        ir_emit_store(bb, val, *slot, var->type->size, type_is_volatile(var->type));
         return;
     }
     BlockLocals *bl = get_block_locals(ctx, bb);
@@ -612,7 +612,7 @@ static ExprResult expr_void(IrBlock *bb)
 static ExprResult load_value(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *type)
 {
     u32 dst = alloc_vreg_from_type(ctx, type);
-    ir_emit_load(bb, dst, addr);
+    ir_emit_load(bb, dst, addr, type_is_volatile(type));
     return expr_result(ir_operand_vreg(dst), bb);
 }
 
@@ -897,7 +897,7 @@ static IrOperand bitfield_read(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Ty
                                u32 bit_offset, u32 bit_width)
 {
     u32 unit = alloc_vreg_from_type(ctx, ty);
-    ir_emit_load(bb, unit, addr);
+    ir_emit_load(bb, unit, addr, type_is_volatile(ty));
     u32 tbits = (u32) (ty->size * 8);
     u32 shifted = alloc_vreg_from_type(ctx, ty);
     ir_emit_binop(bb, OP_LSHR, shifted, ir_operand_vreg(unit), ir_operand_imm(bit_offset));
@@ -928,7 +928,7 @@ static void bitfield_store(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *
     i64 inv = ~field_mask;
 
     u32 unit = alloc_vreg_from_type(ctx, ty);
-    ir_emit_load(bb, unit, addr);
+    ir_emit_load(bb, unit, addr, type_is_volatile(ty));
     u32 keep = alloc_vreg_from_type(ctx, ty);
     ir_emit_binop(bb, OP_AND, keep, ir_operand_vreg(unit), ir_operand_imm(inv));
     u32 vt = alloc_vreg_from_type(ctx, ty);
@@ -939,7 +939,7 @@ static void bitfield_store(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *
     ir_emit_binop(bb, OP_AND, bits, ir_operand_vreg(sh), ir_operand_imm(field_mask));
     u32 nv = alloc_vreg_from_type(ctx, ty);
     ir_emit_binop(bb, OP_OR, nv, ir_operand_vreg(keep), ir_operand_vreg(bits));
-    ir_emit_store(bb, ir_operand_vreg(nv), addr, ty->size);
+    ir_emit_store(bb, ir_operand_vreg(nv), addr, ty->size, type_is_volatile(ty));
 }
 
 /* Read a lowered lvalue: SSA scalars via read_variable (or their spill slot);
@@ -955,7 +955,7 @@ static IrOperand load_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot)
         return bitfield_read(ctx, bb, slot->addr, slot->type, slot->bit_offset, slot->bit_width);
     }
     u32 dst = alloc_vreg_from_type(ctx, slot->type);
-    ir_emit_load(bb, dst, slot->addr);
+    ir_emit_load(bb, dst, slot->addr, type_is_volatile(slot->type));
     return ir_operand_vreg(dst);
 }
 
@@ -978,7 +978,7 @@ static IrBlock *store_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot, Ir
         ir_emit_memcpy(bb, slot->addr, val, slot->type->size);
         return bb;
     }
-    ir_emit_store(bb, val, slot->addr, slot->type->size);
+    ir_emit_store(bb, val, slot->addr, slot->type->size, type_is_volatile(slot->type));
     return bb;
 }
 
@@ -2745,7 +2745,8 @@ static IrBlock *emit_init_plan(FuncBuilder *ctx, IrBlock *bb, IrOperand base, In
                 }
                 else
                 {
-                    ir_emit_store(bb, o, ir_operand_vreg(addr), w->type->size);
+                    ir_emit_store(bb, o, ir_operand_vreg(addr), w->type->size,
+                                  type_is_volatile(w->type));
                 }
             }
         }
@@ -2833,7 +2834,7 @@ static ExprResult build_expr(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
                 memcpy(blob, &fl->value.ld, 10); /* 10 valid bytes, padding zero */
                 u32 idx = ir_add_rodata_blob(ctx->mod, ctx->mod->arena, blob, 16, 16);
                 u32 vreg = alloc_vreg_from_type(ctx, type_long_double());
-                ir_emit_load(bb, vreg, ir_operand_global(idx));
+                ir_emit_load(bb, vreg, ir_operand_global(idx), false); /* .rodata constant */
                 return expr_result(ir_operand_vreg(vreg), bb);
             }
             return expr_result(ir_operand_imm((i64) fl->value.bits), bb);

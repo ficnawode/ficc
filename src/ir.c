@@ -270,19 +270,21 @@ IrInstr *ir_emit_switch(IrBlock *bb, IrOperand val, u32 ncases, IrSwitchCase *ca
     return ins;
 }
 
-IrInstr *ir_emit_load(IrBlock *bb, u32 dst, IrOperand ptr)
+IrInstr *ir_emit_load(IrBlock *bb, u32 dst, IrOperand ptr, bool is_volatile)
 {
     IrInstr *ins = instr_new(bb, OP_LOAD, dst, 1);
     ins->ops[0] = ptr;
+    ins->extra.mem.is_volatile = is_volatile;
     return ins;
 }
 
-IrInstr *ir_emit_store(IrBlock *bb, IrOperand val, IrOperand ptr, u32 width_bytes)
+IrInstr *ir_emit_store(IrBlock *bb, IrOperand val, IrOperand ptr, u32 width_bytes, bool is_volatile)
 {
     IrInstr *ins = instr_new(bb, OP_STORE, NO_VREG, 3);
     ins->ops[0] = val;
     ins->ops[1] = ptr;
     ins->ops[2] = ir_operand_imm((i64) width_bytes);
+    ins->extra.mem.is_volatile = is_volatile;
     return ins;
 }
 

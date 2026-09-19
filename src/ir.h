@@ -148,6 +148,12 @@ typedef struct
     const char *target_label;
 } IrBrPayload;
 
+/* OP_LOAD/OP_STORE: the optimizer may not move, CSE, or forward volatile accesses. */
+typedef struct
+{
+    bool is_volatile;
+} IrMemPayload;
+
 /* Fixed operands in ops[3] cover unary/binary/ternary ops; variable-arity ops use `extra`. */
 typedef struct IrInstr IrInstr;
 struct IrInstr
@@ -165,6 +171,7 @@ struct IrInstr
         IrBrPayload br;
         IrBrcondPayload brcond;
         IrVaStartPayload va_start;
+        IrMemPayload mem;
     } extra;
 };
 
@@ -293,8 +300,9 @@ IrInstr *ir_emit_switch(IrBlock *bb, IrOperand val, u32 ncases, IrSwitchCase *ca
                         const char *default_label);
 
 /* memory ops */
-IrInstr *ir_emit_load(IrBlock *bb, u32 dst, IrOperand ptr);
-IrInstr *ir_emit_store(IrBlock *bb, IrOperand val, IrOperand ptr, u32 width_bytes);
+IrInstr *ir_emit_load(IrBlock *bb, u32 dst, IrOperand ptr, bool is_volatile);
+IrInstr *ir_emit_store(IrBlock *bb, IrOperand val, IrOperand ptr, u32 width_bytes,
+                       bool is_volatile);
 IrInstr *ir_emit_gep(IrBlock *bb, u32 dst, IrOperand base, IrOperand index, u32 stride);
 IrInstr *ir_emit_alloca(IrBlock *bb, u32 dst, u32 size_bytes);
 IrInstr *ir_emit_memcpy(IrBlock *bb, IrOperand dst, IrOperand src, u32 size_bytes);

@@ -209,6 +209,11 @@ bool type_is_const(Type *t)
     return (t->qualifiers & Q_CONST) != 0;
 }
 
+bool type_is_volatile(Type *t)
+{
+    return (t->qualifiers & Q_VOLATILE) != 0;
+}
+
 /* The tag-intermed unqualified record/enum a qualified variant wraps. */
 static Type *type_base(Type *t)
 {

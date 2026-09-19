@@ -374,3 +374,95 @@ TEST(opt, width_zero_result_rejected)
     EXPECT_FALSE(opt_verify(m));
     arena_free(a);
 }
+
+/* --- invariant 7: volatile as a memory-op barrier --- */
+
+/* OP_LOAD/OP_STORE counts from an inspected module, split by the volatile flag. */
+typedef struct
+{
+    u32 volatile_count;
+    u32 plain_count;
+} MemopCounts;
+
+static MemopCounts count_memops(IrModule *m)
+{
+    MemopCounts counts = {0};
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, i);
+        size_t nblocks = vec_size(f->blocks);
+        for (size_t b = 0; b < nblocks; b++)
+        {
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+            size_t ninstr = vec_size(bb->instrs);
+            for (size_t it = 0; it < ninstr; it++)
+            {
+                IrInstr *in = (IrInstr *) vec_get(bb->instrs, it);
+                if (in->opcode != OP_LOAD && in->opcode != OP_STORE)
+                {
+                    continue;
+                }
+                if (in->extra.mem.is_volatile)
+                {
+                    counts.volatile_count++;
+                }
+                else
+                {
+                    counts.plain_count++;
+                }
+            }
+        }
+    }
+    return counts;
+}
+
+/* Volatile programs must flag every memory op and still verify as well-formed. */
+TEST(opt, volatile_global_increment_flags)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("volatile int g;\n"
+                                  "int main(void) {\n"
+                                  "    for (int i = 0; i < 10; i = i + 1) g = g + 1;\n"
+                                  "    return g;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    MemopCounts counts = count_memops(m);
+    EXPECT_TRUE(counts.volatile_count >= 2); /* the load and the store in the loop */
+    EXPECT_TRUE(counts.plain_count == 0);
+    arena_free(a);
+}
+
+TEST(opt, volatile_deref_in_loop_flags)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    volatile int x = 0;\n"
+                                  "    volatile int *p = &x;\n"
+                                  "    for (int i = 0; i < 5; i = i + 1) *p = *p + 2;\n"
+                                  "    return x;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    MemopCounts counts = count_memops(m);
+    EXPECT_TRUE(counts.volatile_count >= 2); /* deref load + deref store inside the loop */
+    arena_free(a);
+}
+
+/* A plain non-volatile program carries the flag clear (even on globals). */
+TEST(opt, plain_global_ops_unflagged)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int g;\n"
+                                  "int main(void) {\n"
+                                  "    g = 40;\n"
+                                  "    return g + 2;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    MemopCounts counts = count_memops(m);
+    EXPECT_TRUE(counts.volatile_count == 0);
+    EXPECT_TRUE(counts.plain_count >= 2);
+    arena_free(a);
+}
