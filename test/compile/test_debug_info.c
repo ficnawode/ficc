@@ -1,3 +1,4 @@
+#include "dwarfcheck.h"
 #include "harness.h"
 #include "testdriver.h"
 
@@ -5,11 +6,13 @@
 #include <string.h>
 #include <unistd.h>
 
+/* Structural .debug_info verification via the in-process decoder (no readelf). */
+
 static unsigned int di_seq;
 
 static void di_path(char *buf, size_t sz, const char *tag, const char *ext)
 {
-    snprintf(buf, sz, "/tmp/ficc_20c_%u_%s.%s", di_seq++, tag, ext);
+    snprintf(buf, sz, "/tmp/ficc_20e_info_%u_%s.%s", di_seq++, tag, ext);
 }
 
 static void di_write_src(char *out, size_t sz, const char *src)
@@ -49,8 +52,20 @@ static char di_src[] = "static int shelf = 100;\n"
                        "    return add3(10, 20, 12) + helper(0) == 142;\n"
                        "}\n";
 
+static DwarfCheckInfo *di_parse(const char *obj, DwarfCheck *out, Arena *a)
+{
+    dwarf_check_load(obj, out, a);
+    EXPECT_TRUE(out->err == NULL);
+    EXPECT_NOTNULL(out->debug_info);
+    EXPECT_NOTNULL(out->debug_abbrev);
+    DwarfCheckInfo *info = dwarf_check_info(out, a);
+    EXPECT_NOTNULL(info);
+    return info;
+}
+
 TEST(debug_info, program_surface_dies)
 {
+    Arena *a = arena_new();
     char src[256], obj[256];
     di_write_src(src, sizeof(src), di_src);
     di_path(obj, sizeof(obj), "dbg", "o");
@@ -59,78 +74,116 @@ TEST(debug_info, program_surface_dies)
     snprintf(cmd, sizeof(cmd), "%s -g -c %s -o %s >/dev/null 2>&1", FICC_BIN, src, obj);
     EXPECT_EQ(tc_run_shell(cmd), 0);
 
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_TAG_compile_unit'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_TAG_subprogram'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_TAG_formal_parameter'",
-             obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_TAG_variable'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_TAG_base_type'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
+    DwarfCheck *out = (DwarfCheck *) arena_alloc(a, sizeof(DwarfCheck), sizeof(void *));
+    DwarfCheckInfo *info = di_parse(obj, out, a);
 
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_AT_name        : add3'",
-             obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_AT_name        : x'",
-             obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_AT_name        : shelf'",
-             obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_OP_call_frame_cfa'",
-             obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_OP_fbreg'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_OP_addr'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd),
-             "readelf --debug-dump=info %s | grep -q 'DW_AT_name        : helper'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd),
-             "readelf --debug-dump=info %s | grep -q 'DW_AT_name        : imported'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
+    /* One compile unit, three subprograms, four named formal parameters. */
+    EXPECT_EQ(vec_size(dwarf_check_dies_by_tag(info, DW_TAG_compile_unit)), 1);
+    EXPECT_EQ(vec_size(dwarf_check_dies_by_tag(info, DW_TAG_subprogram)), 3);
+    EXPECT_EQ(vec_size(dwarf_check_dies_by_tag(info, DW_TAG_formal_parameter)), 4);
 
-    /* The extern (no DW_AT_location) and every DIE parse without warnings. */
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s 2>&1 | grep -q 'Warning'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 1);
+    /* The defined functions arrive as named subprogram DIEs. */
+    EXPECT_NOTNULL(dwarf_check_die_named(info, "add3"));
+    EXPECT_NOTNULL(dwarf_check_die_named(info, "helper"));
+    EXPECT_NOTNULL(dwarf_check_die_named(info, "main"));
+
+    /* Subprograms: low_pc addr, high_pc size, DW_OP_call_frame_cfa frame_base. */
+    DwarfCheckDie *add3 = dwarf_check_die_named(info, "add3");
+    DwarfCheckAttr *low = dwarf_check_attr(add3, DW_AT_low_pc);
+    DwarfCheckAttr *high = dwarf_check_attr(add3, DW_AT_high_pc);
+    DwarfCheckAttr *fb = dwarf_check_attr(add3, DW_AT_frame_base);
+    EXPECT_NOTNULL(low);
+    EXPECT_TRUE(low->kind == DW_ATTR_ADDR);
+    EXPECT_NOTNULL(high);
+    EXPECT_TRUE(high->kind == DW_ATTR_NUM);
+    EXPECT_TRUE(high->num > 0); /* high_pc is a length, not an address */
+    EXPECT_NOTNULL(fb);
+    EXPECT_TRUE(fb->kind == DW_ATTR_LOC);
+    EXPECT_EQ(fb->loc_len, 1);
+    EXPECT_EQ(fb->loc[0], DW_OP_call_frame_cfa);
+
+    /* add3's three parameters are named and live in frame slots (DW_OP_fbreg). */
+    DwarfCheckDie *params[] = {dwarf_check_die_named(info, "x"), dwarf_check_die_named(info, "y"),
+                               dwarf_check_die_named(info, "z")};
+    for (size_t i = 0; i < sizeof(params) / sizeof(params[0]); i++)
+    {
+        DwarfCheckDie *p = params[i];
+        EXPECT_TRUE(p->tag == DW_TAG_formal_parameter);
+        DwarfCheckAttr *loc = dwarf_check_attr(p, DW_AT_location);
+        EXPECT_NOTNULL(loc);
+        EXPECT_TRUE(loc->kind == DW_ATTR_LOC);
+        EXPECT_TRUE(loc->loc_len >= 2);
+        EXPECT_EQ(loc->loc[0], DW_OP_fbreg);
+    }
+
+    /* Globals addressable via DW_OP_addr; the extern declares no location. */
+    DwarfCheckDie *shelf = dwarf_check_die_named(info, "shelf");
+    DwarfCheckDie *counter = dwarf_check_die_named(info, "counter");
+    DwarfCheckDie *imported = dwarf_check_die_named(info, "imported");
+    EXPECT_TRUE(shelf->tag == DW_TAG_variable);
+    EXPECT_TRUE(counter->tag == DW_TAG_variable);
+    EXPECT_TRUE(imported->tag == DW_TAG_variable);
+    EXPECT_NOTNULL(dwarf_check_attr(shelf, DW_AT_location));
+    EXPECT_NOTNULL(dwarf_check_attr(counter, DW_AT_location));
+    EXPECT_NULL(dwarf_check_attr(imported, DW_AT_location));
+
+    /* Every address slot is covered by a section-symbol relocation. */
+    EXPECT_TRUE(dwarf_check_info_relocs_covered(out, info, 1, 4));
 
     char *paths[] = {src, obj};
     di_cleanup(paths, 2);
+    arena_free(a);
 }
 
-/* gdb reads params from their slot and globals via DW_OP_addr at a breakpoint. */
-TEST(debug_info, gdb_prints_params_and_globals)
+TEST(debug_info, external_var_has_no_location)
 {
-    char src[256], obj[256], bin[256];
+    Arena *a = arena_new();
+    char src[256], obj[256];
     di_write_src(src, sizeof(src), di_src);
     di_path(obj, sizeof(obj), "dbg", "o");
-    di_path(bin, sizeof(bin), "dbg", "bin");
 
-    const char *base = strrchr(src, '/') + 1;
-    char breakpoint[64];
-    snprintf(breakpoint, sizeof(breakpoint), "break %s:7", base);
-
-    char cmd[4096];
+    char cmd[2048];
     snprintf(cmd, sizeof(cmd), "%s -g -c %s -o %s >/dev/null 2>&1", FICC_BIN, src, obj);
     EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "gcc -no-pie -g %s -o %s >/dev/null 2>&1", obj, bin);
+
+    DwarfCheck *out = (DwarfCheck *) arena_alloc(a, sizeof(DwarfCheck), sizeof(void *));
+    DwarfCheckInfo *info = di_parse(obj, out, a);
+    DwarfCheckDie *imported = dwarf_check_die_named(info, "imported");
+    EXPECT_NOTNULL(imported);
+    EXPECT_TRUE(imported->tag == DW_TAG_variable);
+    EXPECT_NULL(dwarf_check_attr(imported, DW_AT_location));
+    /* Every non-extern variable carries DW_AT_location. */
+    DwarfCheckDie *shelf = dwarf_check_die_named(info, "shelf");
+    DwarfCheckDie *counter = dwarf_check_die_named(info, "counter");
+    EXPECT_NOTNULL(dwarf_check_attr(shelf, DW_AT_location));
+    EXPECT_NOTNULL(dwarf_check_attr(counter, DW_AT_location));
+
+    char *paths[] = {src, obj};
+    di_cleanup(paths, 2);
+    arena_free(a);
+}
+
+TEST(debug_info, non_debug_object_has_no_debug_sections)
+{
+    Arena *a = arena_new();
+    char src[256], obj[256];
+    di_write_src(src, sizeof(src), di_src);
+    di_path(obj, sizeof(obj), "dbg", "o");
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "%s -c %s -o %s >/dev/null 2>&1", FICC_BIN, src, obj);
     EXPECT_EQ(tc_run_shell(cmd), 0);
 
-    /* Params land in their slots after the prologue; globals are addressable. */
-    snprintf(cmd, sizeof(cmd),
-             "gdb -batch -ex 'set debuginfod enabled off' -ex 'set pagination off' "
-             "-ex '%s' -ex run -ex 'print x' -ex 'print z' -ex 'print shelf' -ex 'print counter' "
-             "-ex bt -ex quit %s "
-             "| awk '/^\\$1 = 10$/ {p1=1} /^\\$2 = 12$/ {p2=1} /^\\$3 = 100$/ {p3=1} "
-             "/^\\$4 = 5$/ {p4=1} /^#0 / && /add3/ {f0=1} /^#1 / && /main/ {f1=1} "
-             "END {exit !(p1 && p2 && p3 && p4 && f0 && f1)}'",
-             breakpoint, bin);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
+    DwarfCheck *out = (DwarfCheck *) arena_alloc(a, sizeof(DwarfCheck), sizeof(void *));
+    dwarf_check_load(obj, out, a);
+    EXPECT_TRUE(out->err == NULL);
+    EXPECT_TRUE(out->debug_info == NULL);
+    EXPECT_TRUE(out->debug_line == NULL);
+    EXPECT_TRUE(out->debug_abbrev == NULL);
+    EXPECT_TRUE(out->eh_frame == NULL);
+    EXPECT_TRUE(out->text != NULL); /* the code itself compiled */
 
-    char *paths[] = {src, obj, bin};
-    di_cleanup(paths, 3);
+    char *paths[] = {src, obj};
+    di_cleanup(paths, 2);
+    arena_free(a);
 }

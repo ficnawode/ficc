@@ -1,3 +1,4 @@
+#include "dwarfcheck.h"
 #include "harness.h"
 #include "testdriver.h"
 
@@ -5,12 +6,13 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Fixture: bit-fields, self-referential struct/array, union, enum, const, function pointer. */
+/* Structural .debug_info type-surface verification (no readelf). */
+
 static unsigned int dt_seq;
 
 static void dt_path(char *buf, size_t sz, const char *tag, const char *ext)
 {
-    snprintf(buf, sz, "/tmp/ficc_20d_%u_%s.%s", dt_seq++, tag, ext);
+    snprintf(buf, sz, "/tmp/ficc_20e_types_%u_%s.%s", dt_seq++, tag, ext);
 }
 
 static void dt_write_src(char *out, size_t sz, const char *src)
@@ -86,9 +88,21 @@ static char dt_src[] = "enum Color { RED = 1, GREEN = 2, BLUE = 3, TOTAL = 4 };\
                        "    return drawn(&node, col, &flags, &const_cap, &u) == 61;\n"
                        "}\n";
 
-/* readelf sees every rich-type tag with clean (warning-free) parse. */
+static DwarfCheckInfo *dt_parse(const char *obj, DwarfCheck *out, Arena *a)
+{
+    dwarf_check_load(obj, out, a);
+    EXPECT_TRUE(out->err == NULL);
+    EXPECT_NOTNULL(out->debug_info);
+    EXPECT_NOTNULL(out->debug_abbrev);
+    DwarfCheckInfo *info = dwarf_check_info(out, a);
+    EXPECT_NOTNULL(info);
+    return info;
+}
+
+/* DIE counts over the fixture; __zero_N blobs add one char[N] array+variable each. */
 TEST(debug_types, rich_type_dies)
 {
+    Arena *a = arena_new();
     char src[256], obj[256];
     dt_write_src(src, sizeof(src), dt_src);
     dt_path(obj, sizeof(obj), "dbg", "o");
@@ -97,141 +111,165 @@ TEST(debug_types, rich_type_dies)
     snprintf(cmd, sizeof(cmd), "%s -g -c %s -o %s >/dev/null 2>&1", FICC_BIN, src, obj);
     EXPECT_EQ(tc_run_shell(cmd), 0);
 
+    DwarfCheck *out = (DwarfCheck *) arena_alloc(a, sizeof(DwarfCheck), sizeof(void *));
+    DwarfCheckInfo *info = dt_parse(obj, out, a);
+
     struct
     {
-        const char *pattern;
-    } tags[] = {
-        {"DW_TAG_pointer_type"},     {"DW_TAG_array_type"}, {"DW_TAG_subrange_type"},
-        {"DW_TAG_structure_type"},   {"DW_TAG_union_type"}, {"DW_TAG_member"},
-        {"DW_TAG_enumeration_type"}, {"DW_TAG_const_type"}, {"DW_TAG_subroutine_type"},
-    };
-    for (size_t i = 0; i < sizeof(tags) / sizeof(tags[0]); i++)
-    {
-        snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q '%s'", obj,
-                 tags[i].pattern);
-        EXPECT_EQ(tc_run_shell(cmd), 0);
-    }
-
-    /* Attributes that only type-rich output carries. */
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_AT_bit_size'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_AT_bit_offset'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd),
-             "readelf --debug-dump=info %s | grep -q 'DW_AT_data_member_location'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_AT_count'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-
-    /* Names of the fixture's record/enum types survive to the DIE tree. */
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_AT_name        : Node'",
-             obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_AT_name        : Flags'",
-             obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd),
-             "readelf --debug-dump=info %s | grep -q 'DW_AT_name        : Tagged'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s | grep -q 'DW_AT_name        : Color'",
-             obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
-
-    /* Deterministic DIE counts for the fixture's type surface. */
-    struct
-    {
-        const char *tag;
-        int count;
+        u32 tag;
+        size_t count;
     } counts[] = {
-        {"DW_TAG_structure_type", 2}, {"DW_TAG_union_type", 1}, {"DW_TAG_enumeration_type", 1},
-        {"DW_TAG_member", 8},         {"DW_TAG_const_type", 1}, {"DW_TAG_subroutine_type", 1},
-        {"DW_TAG_pointer_type", 5},
+        {DW_TAG_structure_type, 2},   /* Node, Flags */
+        {DW_TAG_union_type, 1},       /* Tagged */
+        {DW_TAG_enumeration_type, 1}, /* Color */
+        {DW_TAG_member, 8},           /* 4 Node + 2 Flags + 2 Tagged */
+        {DW_TAG_const_type, 1},       /* const int */
+        {DW_TAG_subroutine_type, 1},  /* int (*)(int) */
+        {DW_TAG_pointer_type, 5},     /* Node*, Flags*, const int*, Tagged*, fn-ptr */
+        {DW_TAG_subprogram, 3},       /* nodal, drawn, main */
     };
     for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]); i++)
     {
-        snprintf(cmd, sizeof(cmd),
-                 "test \"$(readelf --debug-dump=info %s | grep -c '%s')\" = \"%d\"", obj,
-                 counts[i].tag, counts[i].count);
-        EXPECT_EQ(tc_run_shell(cmd), 0);
+        EXPECT_EQ(vec_size(dwarf_check_dies_by_tag(info, counts[i].tag)), counts[i].count);
     }
 
-    /* bit-field rows match gcc's encoding: a is bits 0..3 of a 32-bit unit. */
-    snprintf(cmd, sizeof(cmd),
-             "readelf --debug-dump=info %s | grep -A4 'DW_AT_name        : a' | "
-             "grep -q 'DW_AT_bit_offset  : 29'",
-             obj);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
+    /* The named record/enum types survive into the DIE tree. */
+    struct
+    {
+        const char *name;
+        u32 tag;
+    } named[] = {
+        {"Node", DW_TAG_structure_type},   {"Flags", DW_TAG_structure_type},
+        {"Tagged", DW_TAG_union_type},     {"Color", DW_TAG_enumeration_type},
+        {"static_shelf", DW_TAG_variable}, {"g_counter", DW_TAG_variable},
+        {"const_cap", DW_TAG_variable},    {"g_op", DW_TAG_variable},
+    };
+    for (size_t i = 0; i < sizeof(named) / sizeof(named)[0]; i++)
+    {
+        DwarfCheckDie *d = dwarf_check_die_named(info, named[i].name);
+        EXPECT_NOTNULL(d);
+        if (d)
+        {
+            EXPECT_EQ(d->tag, named[i].tag);
+        }
+    }
 
-    /* A parse that readelf accepts without complaint. */
-    snprintf(cmd, sizeof(cmd), "readelf --debug-dump=info %s 2>&1 | grep -q 'Warning'", obj);
-    EXPECT_EQ(tc_run_shell(cmd), 1);
+    /* payload[4] is an array_type with a subrange carrying count=4. */
+    DwarfCheckDie *node = dwarf_check_die_named(info, "Node");
+    EXPECT_NOTNULL(node);
+    DwarfCheckDie *payload = dwarf_check_die_named(info, "payload");
+    EXPECT_NOTNULL(payload);
+    DwarfCheckAttr *ptype = dwarf_check_attr(payload, DW_AT_type);
+    EXPECT_NOTNULL(ptype);
+    EXPECT_TRUE(ptype->kind == DW_ATTR_REF);
+    DwarfCheckDie *arr = NULL;
+    {
+        size_t n = vec_size(info->dies);
+        for (size_t i = 0; i < n; i++)
+        {
+            DwarfCheckDie *d = (DwarfCheckDie *) vec_get(info->dies, i);
+            if (d->off == ptype->ref)
+            {
+                arr = d;
+                break;
+            }
+        }
+    }
+    EXPECT_NOTNULL(arr);
+    EXPECT_EQ(arr->tag, DW_TAG_array_type);
+    /* count rides the subrange child, emitted immediately after the array. */
+    size_t node_idx = (size_t) -1;
+    for (size_t i = 0; i < vec_size(info->dies); i++)
+    {
+        DwarfCheckDie *d = (DwarfCheckDie *) vec_get(info->dies, i);
+        if (d->off == arr->off)
+        {
+            node_idx = i;
+            break;
+        }
+    }
+    EXPECT_TRUE(node_idx != (size_t) -1 && node_idx + 1 < vec_size(info->dies));
+    if (node_idx != (size_t) -1 && node_idx + 1 < vec_size(info->dies))
+    {
+        DwarfCheckDie *sub = (DwarfCheckDie *) vec_get(info->dies, node_idx + 1);
+        EXPECT_EQ(sub->tag, DW_TAG_subrange_type);
+        DwarfCheckAttr *count = dwarf_check_attr(sub, DW_AT_count);
+        EXPECT_NOTNULL(count);
+        EXPECT_TRUE(count->kind == DW_ATTR_NUM);
+        EXPECT_EQ(count->num, 4);
+    }
+
+    /* Bit-field offsets match gcc: `unsigned a:3` at unit bit 0 -> bit_offset 29. */
+    DwarfCheckDie *a_mem = dwarf_check_die_named(info, "a");
+    DwarfCheckDie *b_mem = dwarf_check_die_named(info, "b");
+    EXPECT_NOTNULL(a_mem);
+    EXPECT_NOTNULL(b_mem);
+    DwarfCheckAttr *asize = dwarf_check_attr(a_mem, DW_AT_bit_size);
+    DwarfCheckAttr *aoff = dwarf_check_attr(a_mem, DW_AT_bit_offset);
+    DwarfCheckAttr *bsize = dwarf_check_attr(b_mem, DW_AT_bit_size);
+    EXPECT_TRUE(asize && asize->num == 3);
+    EXPECT_TRUE(aoff && aoff->num == 29);
+    EXPECT_TRUE(bsize && bsize->num == 5);
+
+    /* Self-referential structs resolve: `next`'s type ref lands on a pointer_type DIE. */
+    DwarfCheckDie *next = dwarf_check_die_named(info, "next");
+    EXPECT_NOTNULL(next);
+    DwarfCheckAttr *ntype = dwarf_check_attr(next, DW_AT_type);
+    EXPECT_NOTNULL(ntype);
+    EXPECT_TRUE(ntype->kind == DW_ATTR_REF);
+    bool is_pointer = false;
+    {
+        size_t n = vec_size(info->dies);
+        for (size_t i = 0; i < n; i++)
+        {
+            DwarfCheckDie *d = (DwarfCheckDie *) vec_get(info->dies, i);
+            if (d->off == ntype->ref)
+            {
+                is_pointer = d->tag == DW_TAG_pointer_type;
+                break;
+            }
+        }
+    }
+    EXPECT_TRUE(is_pointer);
+
+    /* All address slots covered; ref4 chains were validated by the parse itself. */
+    EXPECT_TRUE(dwarf_check_info_relocs_covered(out, info, 1, 4));
 
     char *paths[] = {src, obj};
     dt_cleanup(paths, 2);
+    arena_free(a);
 }
 
-/* gdb resolves every rich type and unwinds a two-function call through the CFI. */
-TEST(debug_types, gdb_rich_types_certificate)
+/* __zero_N blobs from `= {0}` locals must decode like any other global. */
+TEST(debug_types, synthetic_zero_inits_decode_cleanly)
 {
-    char src[256], obj[256], bin[256];
+    Arena *a = arena_new();
+    char src[256], obj[256];
     dt_write_src(src, sizeof(src), dt_src);
     dt_path(obj, sizeof(obj), "dbg", "o");
-    dt_path(bin, sizeof(bin), "dbg", "bin");
 
-    char cmd[4096];
+    char cmd[2048];
     snprintf(cmd, sizeof(cmd), "%s -g -c %s -o %s >/dev/null 2>&1", FICC_BIN, src, obj);
     EXPECT_EQ(tc_run_shell(cmd), 0);
-    snprintf(cmd, sizeof(cmd), "gcc -no-pie -g %s -o %s >/dev/null 2>&1", obj, bin);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
 
-    /* Step once (next homes to the next statement), then continue to the return. */
-    char break_first[320], break_last[320];
-    snprintf(break_first, sizeof(break_first), "break %s:35", src);
-    snprintf(break_last, sizeof(break_last), "break %s:39", src);
-    snprintf(cmd, sizeof(cmd),
-             "gdb -batch -ex 'set debuginfod enabled off' -ex 'set pagination off' "
-             "-ex '%s' -ex '%s' -ex run "
-             "-ex next -ex 'print n->value' -ex bt "
-             "-ex continue "
-             "-ex 'print fl->a' -ex 'print fl->b' -ex 'print c' "
-             "-ex 'print *fl' -ex 'print *n' -ex 'print n->next' -ex 'print n->payload' "
-             "-ex 'print static_shelf' -ex 'print g_counter' -ex 'print const_cap' "
-             "-ex 'print g_op' -ex 'info locals' -ex bt "
-             "-ex quit %s "
-             "| awk "
-             "'/^\\$1 = 10$/ {v1=1} "
-             "/^#0  drawn / && /:36$/ {home=1} "
-             "/^\\$2 = 3$/ {v2=1} "
-             "/^\\$3 = 5$/ {v3=1} "
-             "/^\\$4 = 2$/ {v4=1} "
-             "/^\\$5 = \\{a = 3, b = 5\\}$/ {v5=1} "
-             "/^\\$6 = \\{value = 10, next = 0x0, flags = \\{a = 0, b = 0\\}, "
-             "payload = \\{0, 0, 0, 0\\}\\}$/ {v6=1} "
-             "/^\\$7 = \\(struct Node \\*\\) 0x0$/ {v7=1} "
-             "/^\\$8 = \\{0, 0, 0, 0\\}$/ {v8=1} "
-             "/^\\$9 = 7$/ {v9=1} "
-             "/^\\$10 = 41$/ {v10=1} "
-             "/^\\$11 = 3$/ {v11=1} "
-             "/^\\$12 = \\(int \\(\\*\\)\\(int\\)\\) 0x[0-9a-f]+ <nodal>$/ {v12=1} "
-             "/^No locals\\.$/ {nl=1} "
-             "/^#0 / && /drawn/ {f0=1} "
-             "/^#1 / && /main/ {f1=1} "
-             "END {exit !(v1 && v2 && v3 && v4 && v5 && v6 && v7 && v8 && v9 && v10 && "
-             "v11 && v12 && nl && home && f0 && f1)}'",
-             break_first, break_last, bin);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
+    DwarfCheck *out = (DwarfCheck *) arena_alloc(a, sizeof(DwarfCheck), sizeof(void *));
+    DwarfCheckInfo *info = dt_parse(obj, out, a);
 
-    /* A three-frame backtrace through the CFI (nodal <- drawn <- main). */
-    char break_nodal[320];
-    snprintf(break_nodal, sizeof(break_nodal), "break %s:30", src);
-    snprintf(cmd, sizeof(cmd),
-             "gdb -batch -ex 'set debuginfod enabled off' -ex 'set pagination off' "
-             "-ex '%s' -ex run -ex bt -ex quit %s "
-             "| awk '/^#0 / && /nodal/ {n=1} /^#1 / && /drawn/ {d=1} /^#2 / && /main/ {m=1} "
-             "END {exit !(n && d && m)}'",
-             break_nodal, bin);
-    EXPECT_EQ(tc_run_shell(cmd), 0);
+    size_t nzero = 0;
+    size_t n = vec_size(info->dies);
+    for (size_t i = 0; i < n; i++)
+    {
+        DwarfCheckDie *d = (DwarfCheckDie *) vec_get(info->dies, i);
+        DwarfCheckAttr *name = dwarf_check_attr(d, DW_AT_name);
+        if (name && name->kind == DW_ATTR_STR && strncmp(name->str, "__zero_", 7) == 0)
+        {
+            nzero++;
+            EXPECT_NOTNULL(dwarf_check_attr(d, DW_AT_location));
+        }
+    }
+    EXPECT_EQ(nzero, 3); /* Node (40), Flags (4), Tagged (4) */
 
-    char *paths[] = {src, obj, bin};
-    dt_cleanup(paths, 3);
+    char *paths[] = {src, obj};
+    dt_cleanup(paths, 2);
+    arena_free(a);
 }

@@ -22,7 +22,8 @@ TEST_OBJ_DIR := $(BUILD_DIR)/obj-test
 BIN_DIR      := $(BUILD_DIR)/bin
 
 SRC_ALL  := $(wildcard src/*.c) $(wildcard src/util/*.c)
-SRC_TEST := test/runner.c test/testdriver.c $(wildcard test/unit/*.c) $(wildcard test/compile/*.c)
+SRC_TEST := test/runner.c test/testdriver.c test/dwarfcheck.c \
+            $(wildcard test/unit/*.c) $(wildcard test/compile/*.c)
 
 OBJ_SRC       := $(patsubst src/%.c,$(OBJ_DIR)/src/%.o,$(SRC_ALL))
 OBJ_TEST_SRC  := $(patsubst src/%.c,$(TEST_OBJ_DIR)/src/%.o,$(filter-out src/driver.c,$(SRC_ALL)))
@@ -38,7 +39,7 @@ DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_BIN) $(T
 
 FORMAT_FILES := $(shell find src include test \( -name '*.c' -o -name '*.h' \))
 
-.PHONY: all clean test selftest dirs compile-commands format format-check
+.PHONY: all clean test test-gdb selftest dirs compile-commands format format-check
 
 all: $(FICC_BIN)
 
@@ -50,6 +51,10 @@ format-check:
 
 test: $(TEST_BIN) $(FICC_BIN)
 	$(TEST_BIN)
+
+# Real-debugger certificate (opt-in; skips with a warning when gdb is absent).
+test-gdb: $(FICC_BIN)
+	./test/debug_gdb.sh $(abspath $(FICC_BIN))
 
 $(FICC_BIN): $(OBJ_SRC) | dirs
 	$(CC) $(LDFLAGS) $^ -o $@
