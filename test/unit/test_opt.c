@@ -4,6 +4,7 @@
 #include "optpasses/opt_internal.h"
 
 #include "ir.h"
+#include "ir_interp.h"
 #include "util/arena.h"
 
 /* Exercised one invariant per TEST on hand-built, then corrupted, modules. */
@@ -464,5 +465,374 @@ TEST(opt, plain_global_ops_unflagged)
     MemopCounts counts = count_memops(m);
     EXPECT_TRUE(counts.volatile_count == 0);
     EXPECT_TRUE(counts.plain_count >= 2);
+    arena_free(a);
+}
+
+/* ---- CFG base, dominators, natural loops, canonical shape ---- */
+
+static IrFunction *opt_main_fn(IrModule *m)
+{
+    return (IrFunction *) vec_get(m->funcs, 0);
+}
+
+/* Block whose label starts with `prefix`; the builder suffixes `_N`. */
+static IrBlock *block_with_prefix(IrFunction *f, const char *prefix)
+{
+    size_t n = vec_size(f->blocks);
+    for (size_t i = 0; i < n; i++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, i);
+        if (strncmp(bb->label, prefix, strlen(prefix)) == 0)
+        {
+            return bb;
+        }
+    }
+    return NULL;
+}
+
+static bool succ_contains(CfgInfo *cfg, IrFunction *f, const char *label, IrBlock *target)
+{
+    IrBlock *bb = block_with_prefix(f, label);
+    if (!bb)
+    {
+        return false;
+    }
+    Vec *succs = cfg->succs[opt_block_index(f, bb)];
+    size_t n = vec_size(succs);
+    for (size_t i = 0; i < n; i++)
+    {
+        if (vec_get(succs, i) == target)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+TEST(opt, cfg_successors_of_control)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int x = 1;\n"
+                                  "    if (x) return 1; else return 2;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_cfg_build(f, a);
+    EXPECT_TRUE(cfg->nblocks == 4);
+    IrBlock *then_bb = block_with_prefix(f, "then");
+    IrBlock *else_bb = block_with_prefix(f, "else");
+    EXPECT_TRUE(succ_contains(cfg, f, "entry", then_bb));
+    EXPECT_TRUE(succ_contains(cfg, f, "entry", else_bb));
+    EXPECT_TRUE(vec_size(cfg->succs[opt_block_index(f, then_bb)]) ==
+                0); /* `ret` has no successors */
+    arena_free(a);
+}
+
+TEST(opt, cfg_successors_of_switch)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module(
+        "int main(void) {\n"
+        "    switch (2) { case 1: return 1; case 2: return 2; default: return 0; }\n"
+        "}\n",
+        a);
+    EXPECT_TRUE(m != NULL);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_cfg_build(f, a);
+    size_t nsucc = vec_size(cfg->succs[0]);
+    EXPECT_TRUE(nsucc == 3); /* two cases + default */
+    arena_free(a);
+}
+
+TEST(opt, rpo_entry_first_and_dead_block_excluded)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    return 0;\n"
+                                  "    return 1;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_cfg_build(f, a);
+    EXPECT_TRUE(cfg->rpo[0] == (IrBlock *) vec_get(f->blocks, 0));
+    EXPECT_TRUE(cfg->rpo_index[0] == 0);
+    /* the dead second block stays out of the RPO */
+    EXPECT_TRUE(cfg->rpo_index[1] == UINT32_MAX);
+    arena_free(a);
+}
+
+TEST(opt, dominators_if_else)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    if (1) return 1; else return 2;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_cfg_build(f, a);
+    Dominators *doms = opt_doms_build(cfg, a);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrBlock *then_bb = block_with_prefix(f, "then");
+    IrBlock *else_bb = block_with_prefix(f, "else");
+    u32 ei = opt_block_index(f, entry);
+    u32 ti = opt_block_index(f, then_bb);
+    u32 ai = opt_block_index(f, else_bb);
+    EXPECT_TRUE(doms->idom[ti] == ei);
+    EXPECT_TRUE(doms->idom[ai] == ei);
+    EXPECT_TRUE(doms->depth[ti] == 1);
+    EXPECT_TRUE(doms->depth[ai] == 1);
+    EXPECT_TRUE(opt_doms_dominates(doms, ei, ti));
+    EXPECT_FALSE(opt_doms_dominates(doms, ti, ei));
+    arena_free(a);
+}
+
+TEST(opt, natural_loop_while_recognized)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    int i = 0;\n"
+                                  "    while (i < 10) { i = i + 1; s = s + i; }\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_cfg_build(f, a);
+    Dominators *doms = opt_doms_build(cfg, a);
+    LoopInfo *loops = opt_loops_find(f, cfg, doms, a);
+    EXPECT_TRUE(vec_size(loops->loops) == 1);
+    Loop *l = (Loop *) vec_get(loops->loops, 0);
+    IrBlock *hdr = block_with_prefix(f, "while_header");
+    EXPECT_TRUE(l->header == hdr);
+    IrBlock *body = block_with_prefix(f, "while_body");
+    EXPECT_TRUE(opt_loops_contains(l, body));
+    EXPECT_TRUE(vec_size(l->latches) >= 1);
+    EXPECT_TRUE(doms->idom[opt_block_index(f, hdr)] == 0);
+    arena_free(a);
+}
+
+TEST(opt, nested_loops_nest)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 2; i = i + 1)\n"
+                                  "        for (int j = 0; j < 2; j = j + 1) s = s + 1;\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_cfg_build(f, a);
+    Dominators *doms = opt_doms_build(cfg, a);
+    LoopInfo *loops = opt_loops_find(f, cfg, doms, a);
+    EXPECT_TRUE(vec_size(loops->loops) == 2);
+    Loop *outer = NULL;
+    Loop *inner = NULL;
+    for (size_t i = 0; i < 2; i++)
+    {
+        Loop *l = (Loop *) vec_get(loops->loops, i);
+        if (strncmp(l->header->label, "for_header", 10) == 0)
+        {
+            if (!outer)
+            {
+                outer = l;
+            }
+            else
+            {
+                inner = l;
+            }
+        }
+    }
+    EXPECT_NOTNULL(outer);
+    EXPECT_NOTNULL(inner);
+    if (opt_doms_dominates(doms, opt_block_index(f, outer->header),
+                           opt_block_index(f, inner->header)))
+    {
+        /* outer already wraps inner */
+    }
+    else
+    {
+        Loop *tmp = outer;
+        outer = inner;
+        inner = tmp;
+    }
+    EXPECT_TRUE(inner->outer == outer);
+    arena_free(a);
+}
+
+TEST(opt, do_while_latch_shape)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    int i = 0;\n"
+                                  "    do { i = i + 1; s = s + i; } while (i < 3);\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_cfg_build(f, a);
+    Dominators *doms = opt_doms_build(cfg, a);
+    LoopInfo *loops = opt_loops_find(f, cfg, doms, a);
+    EXPECT_TRUE(vec_size(loops->loops) == 1);
+    Loop *l = (Loop *) vec_get(loops->loops, 0);
+    /* Do-while's natural header is the first-executed body block. */
+    EXPECT_TRUE(l->header == block_with_prefix(f, "do_body"));
+    EXPECT_TRUE(vec_size(l->latches) == 1);
+    EXPECT_TRUE((IrBlock *) vec_get(l->latches, 0) == block_with_prefix(f, "do_header"));
+    EXPECT_TRUE(opt_loops_canonicalize(m, f, loops) == false);
+    EXPECT_TRUE(opt_loops_verify_shapes(loops));
+    EXPECT_TRUE(l->preheader == (IrBlock *) vec_get(f->blocks, 0));
+    EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+/* A continue in a while loop sends the body end and the continue block
+   both back into the header: a multi-latch loop to canonicalize. */
+TEST(opt, canonicalize_multi_latch_preserves_semantics)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    int i = 0;\n"
+                                  "    while (i < 10) {\n"
+                                  "        i = i + 1;\n"
+                                  "        if (i == 3) continue;\n"
+                                  "        s = s + i;\n"
+                                  "    }\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_cfg_build(f, a);
+    Dominators *doms = opt_doms_build(cfg, a);
+    LoopInfo *loops = opt_loops_find(f, cfg, doms, a);
+    EXPECT_TRUE(vec_size(loops->loops) == 1);
+    Loop *l = (Loop *) vec_get(loops->loops, 0);
+    EXPECT_TRUE(vec_size(l->latches) >= 2);
+
+    i64 before = ir_interp_run(m);
+    EXPECT_TRUE(opt_loops_canonicalize(m, f, loops));
+    EXPECT_TRUE(opt_loops_verify_shapes(loops));
+    EXPECT_TRUE(vec_size(l->latches) == 1);
+    EXPECT_TRUE(opt_verify(m));
+    i64 after = ir_interp_run(m);
+    EXPECT_TRUE(after == 52);
+    EXPECT_TRUE(after == before);
+    arena_free(a);
+}
+
+TEST(opt, multi_latch_interp_elf_oracle)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int s = 0;\n"
+                          "    int i = 0;\n"
+                          "    while (i < 10) {\n"
+                          "        i = i + 1;\n"
+                          "        if (i == 3) continue;\n"
+                          "        s = s + i;\n"
+                          "    }\n"
+                          "    return s;\n"
+                          "}\n",
+                          52);
+}
+
+/* A header with two outside predecessors needs a synthetic preheader. */
+static IrModule *build_two_outside_loop(Arena *a)
+{
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    IrBlock *a_bb = ir_func_add_block(f, "a");
+    IrBlock *b_bb = ir_func_add_block(f, "b");
+    IrBlock *hdr = ir_func_add_block(f, "hdr");
+    IrBlock *latch = ir_func_add_block(f, "latch");
+    IrBlock *exit_bb = ir_func_add_block(f, "exit");
+
+    u32 cond = ir_alloc_vreg(m, 8, false, false);
+    u32 x = ir_alloc_vreg(m, 8, true, false);
+
+    ir_emit_br(entry, a_bb->label);
+    vec_push(a_bb->preds, entry);
+
+    ir_emit_binop(a_bb, OP_ICMP_SLT, cond, ir_operand_imm(0), ir_operand_imm(1));
+    ir_emit_brcond(a_bb, ir_operand_vreg(cond), hdr->label, b_bb->label);
+    vec_push(hdr->preds, a_bb);
+    vec_push(b_bb->preds, a_bb);
+
+    ir_emit_br(b_bb, hdr->label);
+    vec_push(hdr->preds, b_bb);
+
+    hdr->is_loop_header = true;
+    IrInstr *phi = ir_emit_phi_at_start(hdr, x, 3);
+    ir_phi_add_entry(phi, ir_operand_imm(10), a_bb);
+    ir_phi_add_entry(phi, ir_operand_imm(20), b_bb);
+    ir_phi_add_entry(phi, ir_operand_imm(1), latch);
+    u32 c2 = ir_alloc_vreg(m, 8, false, false);
+    ir_emit_binop(hdr, OP_ICMP_SLT, c2, ir_operand_imm(1), ir_operand_imm(0));
+    ir_emit_brcond(hdr, ir_operand_vreg(c2), latch->label, exit_bb->label);
+    vec_push(latch->preds, hdr);
+    vec_push(exit_bb->preds, hdr);
+
+    ir_emit_br(latch, hdr->label);
+    vec_push(hdr->preds, latch);
+
+    ir_emit_ret(exit_bb, ir_operand_vreg(x));
+    return m;
+}
+
+TEST(opt, canonicalize_preheader_synthesis)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_two_outside_loop(a);
+    EXPECT_TRUE(opt_verify(m));
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_cfg_build(f, a);
+    Dominators *doms = opt_doms_build(cfg, a);
+    LoopInfo *loops = opt_loops_find(f, cfg, doms, a);
+    EXPECT_TRUE(vec_size(loops->loops) == 1);
+    Loop *l = (Loop *) vec_get(loops->loops, 0);
+    EXPECT_NULL(l->preheader);
+
+    i64 before = ir_interp_run(m);
+    EXPECT_TRUE(opt_loops_canonicalize(m, f, loops));
+    EXPECT_TRUE(opt_loops_verify_shapes(loops));
+    EXPECT_NOTNULL(l->preheader);
+    EXPECT_TRUE(opt_verify(m));
+    i64 after = ir_interp_run(m);
+    EXPECT_TRUE(after == 10);
+    EXPECT_TRUE(after == before);
+    arena_free(a);
+}
+
+TEST(opt, for_loop_preheader_is_entry)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 4; i = i + 1) s = s + i;\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_cfg_build(f, a);
+    Dominators *doms = opt_doms_build(cfg, a);
+    LoopInfo *loops = opt_loops_find(f, cfg, doms, a);
+    EXPECT_TRUE(vec_size(loops->loops) == 1);
+    Loop *l = (Loop *) vec_get(loops->loops, 0);
+    EXPECT_TRUE(vec_size(l->latches) == 1);
+    opt_loops_canonicalize(m, f, loops);
+    EXPECT_TRUE(l->preheader == (IrBlock *) vec_get(f->blocks, 0));
+    EXPECT_TRUE(opt_loops_verify_shapes(loops));
+    EXPECT_TRUE(opt_verify(m));
     arena_free(a);
 }
