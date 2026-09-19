@@ -21,7 +21,7 @@ OBJ_DIR      := $(BUILD_DIR)/obj
 TEST_OBJ_DIR := $(BUILD_DIR)/obj-test
 BIN_DIR      := $(BUILD_DIR)/bin
 
-SRC_ALL  := $(wildcard src/*.c) $(wildcard src/util/*.c)
+SRC_ALL  := $(wildcard src/*.c) $(wildcard src/util/*.c) $(wildcard src/optpasses/*.c)
 SRC_TEST := test/runner.c test/testdriver.c test/dwarfcheck.c \
             $(wildcard test/unit/*.c) $(wildcard test/compile/*.c)
 
@@ -103,21 +103,24 @@ SELF_OBJ1 := $(SELF_DIR)/obj/stage1
 SELF_OBJ2 := $(SELF_DIR)/obj/stage2
 FICC1_BIN := $(SELF_DIR)/ficc1
 FICC2_BIN := $(SELF_DIR)/ficc2
-SELF_FILES := $(wildcard src/*.c src/*.h src/util/*.c src/util/*.h)
+SELF_FILES := $(wildcard src/*.c src/*.h src/util/*.c src/util/*.h \
+                     src/optpasses/*.c src/optpasses/*.h)
 
 $(SELF_DIR)/.staged: $(SELF_FILES) | dirs
 	@rm -rf $(SELF_DIR)
-	@mkdir -p $(SELF_SRC)/util
+	@mkdir -p $(SELF_SRC)/util $(SELF_SRC)/optpasses
 	@cp src/*.c src/*.h $(SELF_SRC)/
-	@cp src/util/*.c src/util/*.h $(SELF_SRC)/util/
+	@cp -r src/util/. $(SELF_SRC)/util/
+	@cp -r src/optpasses/. $(SELF_SRC)/optpasses/
 	@touch $@
 
 # $1 = compiler binary, $2 = target object dir. Compile each source from the staged
-# dir (relative names, so __FILE__ matches) but write each .o into $(2).
+# dir (relative names, so __FILE__ matches) but write each .o into $(2). -I. covers
+# the staged src root, so optpasses/ sources can reach sibling and util headers.
 define self-compile-loop
-	@rm -rf $(2) && mkdir -p $(2)/util
-	@cd $(SELF_SRC) && for c in *.c util/*.c; do \
-		SOURCE_DATE_EPOCH=0 $(1) -c "-DFICC_BUILTIN_INCLUDE=\"$(abspath include)\"" \
+	@rm -rf $(2) && mkdir -p $(2)/util $(2)/optpasses
+	@cd $(SELF_SRC) && for c in *.c util/*.c $$(ls optpasses/*.c 2>/dev/null); do \
+		SOURCE_DATE_EPOCH=0 $(1) -I. -c "-DFICC_BUILTIN_INCLUDE=\"$(abspath include)\"" \
 			"$$c" -o "$(2)/$${c%.c}.o" \
 		|| { echo "selftest: stage $(2) failed to compile $$c"; exit 1; }; \
 	done
@@ -126,10 +129,10 @@ endef
 selftest: $(FICC_BIN) $(SELF_DIR)/.staged
 	@echo "== selftest stage 1: compile with $(notdir $(FICC_BIN)) =="
 	$(call self-compile-loop,$(abspath $(FICC_BIN)),$(abspath $(SELF_OBJ1)))
-	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ1)/*.o $(SELF_OBJ1)/util/*.o -o $(FICC1_BIN)
+	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ1)/*.o $(SELF_OBJ1)/util/*.o $(wildcard $(SELF_OBJ1)/optpasses/*.o) -o $(FICC1_BIN)
 	@echo "== selftest stage 2: rebuild with ficc1 =="
 	$(call self-compile-loop,$(abspath $(FICC1_BIN)),$(abspath $(SELF_OBJ2)))
-	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ2)/*.o $(SELF_OBJ2)/util/*.o -o $(FICC2_BIN)
+	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ2)/*.o $(SELF_OBJ2)/util/*.o $(wildcard $(SELF_OBJ2)/optpasses/*.o) -o $(FICC2_BIN)
 	@if diff -r --brief $(SELF_OBJ1) $(SELF_OBJ2); then \
 		echo "selftest: OK — stage1 and stage2 object trees are byte-identical"; \
 	else \

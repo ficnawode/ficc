@@ -5,6 +5,7 @@
 #include "ir_builder.h"
 #include "ir_interp.h"
 #include "lexer.h"
+#include "optpasses/opt_internal.h"
 #include "parser.h"
 #include "pp.h"
 #include "semantic.h"
@@ -57,7 +58,13 @@ IrModule *tc_build_module(const char *src, Arena *arena)
     {
         return NULL;
     }
-    return ir_build_module(ast, NULL, arena);
+    IrModule *mod = ir_build_module(ast, NULL, arena);
+    if (mod && !opt_verify(mod))
+    {
+        fprintf(stderr, "  [testdriver] opt_verify failed for: %s\n", src);
+        return NULL;
+    }
+    return mod;
 }
 
 /* tc_build_module over a concrete file path with -I-style include dirs, so
@@ -93,7 +100,13 @@ IrModule *tc_build_module_with_dirs(const char *src, const char *file, const cha
     {
         return NULL;
     }
-    return ir_build_module(ast, NULL, arena);
+    IrModule *mod = ir_build_module(ast, NULL, arena);
+    if (mod && !opt_verify(mod))
+    {
+        fprintf(stderr, "  [testdriver] opt_verify failed for: %s\n", src);
+        return NULL;
+    }
+    return mod;
 }
 
 i64 tc_run_interp(const char *src)
