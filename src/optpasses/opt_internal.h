@@ -1,19 +1,20 @@
 #ifndef FICC_OPT_INTERNAL_H
 #define FICC_OPT_INTERNAL_H
 
-/* Private opt surface for the passes and the unit tests. */
+/* Private optimizer surface shared by opt.c, its passes, and the opt tests. */
+#include "cli.h"
+#include "ir.h"
+#include "util/arena.h"
 #include "util/types.h"
 #include "util/vec.h"
 #include <stdbool.h>
 
-struct IrModule;
-struct IrFunction;
-struct IrBlock;
-
 bool opt_verify(struct IrModule *mod);
 
-/* CFG base: successors derived from terminators (real edges), plus an
-   iterative reverse postorder from the entry block. */
+/* Variadic module error helper (the optimizer's own, like each pass module's). */
+void opt_error(const char *fmt, ...);
+
+/* CFG base: successors (from terminators) plus reverse postorder from entry. */
 typedef struct CfgInfo
 {
     struct IrFunction *func;
@@ -54,13 +55,107 @@ typedef struct
 LoopInfo *opt_loops_find(struct IrFunction *f, CfgInfo *cfg, Dominators *doms, Arena *arena);
 bool opt_loops_contains(const Loop *loop, struct IrBlock *bb);
 
-/* Canonical shape: at most one latch (merged through a synthetic block with
-   value-merging PHIs) and at most one non-latch pred (spliced through a
-   synthetic preheader). */
+/* At most one latch and one non-latch pred per loop, via synthetic blocks. */
 bool opt_loops_canonicalize(struct IrModule *mod, struct IrFunction *f, LoopInfo *loops);
 bool opt_loops_verify_shapes(LoopInfo *loops);
 
 u32 opt_block_index(struct IrFunction *f, struct IrBlock *bb);
 struct IrBlock *opt_block_by_label(struct IrFunction *f, const char *label);
+
+/* ---- optimizer context and shared magic (opt.c) ---- */
+
+typedef struct OptimizerContext OptimizerContext;
+
+/* The optimizer's pass vocabulary; a level selects a sublist (reserved slots skip). */
+typedef enum
+{
+    OPT_PASS_FOLD_CONST = 1,
+    OPT_PASS_IDENTITY,
+    OPT_PASS_CAST,
+    OPT_PASS_CPROP,
+    OPT_PASS_PHI_SIMP,
+    OPT_PASS_DCE,
+    OPT_PASS_CFG_CLEAN,
+    OPT_PASS_PREHEADER,
+    OPT_PASS_GVN,
+    OPT_PASS_LICM,
+    OPT_PASS_MEM_FWD,
+    OPT_PASS_REASSOC,
+    OPT_PASS_STRENGTH,
+} OptPassId;
+
+/* A pass selection: the list and its length together. */
+typedef struct
+{
+    const OptPassId *passes;
+    u32 count;
+} OptPassList;
+
+/* The exact passes to run plus the fixpoint iteration budget they get. */
+typedef struct
+{
+    OptPassList passlist;
+    u32 max_iterations;
+} OptConfig;
+
+/* The concrete config each -O level expands to (static; level not stored). */
+const OptConfig *opt_config_for(OptLevel level);
+
+/* Registry row: id (config lookup), name (diagnostics), fn (NULL = reserved). */
+typedef bool (*OptPassFn)(OptimizerContext *ctx);
+typedef struct OptPass
+{
+    OptPassId id;
+    const char *name;
+    OptPassFn fn;
+} OptPass;
+
+struct OptimizerContext
+{
+    struct IrModule *mod;
+    Arena *arena;
+    bool changed;               /* a pass in the last table iteration changed the IR */
+    const OptConfig *opts;      /* the pass selection driving the optimizer */
+    struct IrFunction *cache_f; /* function the caches below describe (NULL: none) */
+    u32 cfg_epoch;              /* bumped whenever a pass mutates the CFG */
+    u32 cache_epoch;            /* cfg_epoch the caches were built at */
+    CfgInfo *cfg;
+    Dominators *doms;
+    LoopInfo *loops;
+    struct IrInstr **def_vreg; /* producing instruction per vreg */
+    u32 *use_count;            /* operand-reference count per vreg */
+};
+
+/* Cached per-function analysis, rebuilt when the function or cfg_epoch changes. */
+CfgInfo *opt_get_cfg(OptimizerContext *ctx, struct IrFunction *f);
+Dominators *opt_get_doms(OptimizerContext *ctx, struct IrFunction *f);
+LoopInfo *opt_get_loops(OptimizerContext *ctx, struct IrFunction *f);
+
+/* Blocks of f reachable from the entry, dominator-first reverse postorder. */
+Vec *opt_rpo_order(OptimizerContext *ctx, struct IrFunction *f);
+
+/* ---- instruction algebra (opt.c) ---- */
+
+u32 opt_instr_index(struct IrBlock *bb, struct IrInstr *in);
+void opt_erase_instr(struct IrBlock *bb, struct IrInstr *in); /* vregs are never reused */
+void opt_insert_instr(struct IrBlock *bb, u32 idx, struct IrInstr *in);
+void opt_replace_operand(struct IrInstr *in, u8 which, IrOperand val);
+void opt_copy_line(struct IrInstr *in,
+                   const struct IrInstr *model); /* substitutions inherit line */
+
+/* ---- edge splicing (opt.c) ---- */
+
+/* Split the edges in `preds` -> succ through one fresh empty block; returns it. */
+struct IrBlock *opt_insert_empty_block(struct IrModule *mod, struct IrFunction *f, Vec *preds,
+                                       struct IrBlock *succ, const char *prefix);
+/* Single-predecessor form of opt_insert_empty_block (the preheader shape). */
+struct IrBlock *opt_insert_preheader(struct IrModule *mod, struct IrFunction *f,
+                                     struct IrBlock *pred, struct IrBlock *succ,
+                                     const char *prefix);
+
+/* ---- value analysis (opt.c) ---- */
+
+/* Fill ctx->def_vreg/ctx->use_count for f (fresh arena arrays, module-sized). */
+void opt_make_value_analysis(OptimizerContext *ctx, struct IrFunction *f);
 
 #endif

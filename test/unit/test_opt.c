@@ -1,11 +1,15 @@
 #include "harness.h"
 #include "testdriver.h"
 
+#include "opt.h"
 #include "optpasses/opt_internal.h"
 
 #include "ir.h"
 #include "ir_interp.h"
 #include "util/arena.h"
+
+#include <stdint.h>
+#include <string.h>
 
 /* Exercised one invariant per TEST on hand-built, then corrupted, modules. */
 
@@ -834,5 +838,230 @@ TEST(opt, for_loop_preheader_is_entry)
     EXPECT_TRUE(l->preheader == (IrBlock *) vec_get(f->blocks, 0));
     EXPECT_TRUE(opt_loops_verify_shapes(loops));
     EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+/* ---- optimize() shell, mode tables, shared magic ---- */
+
+static OptimizerContext make_ctx(IrModule *m, Arena *a)
+{
+    OptimizerContext ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.mod = m;
+    ctx.arena = a;
+    ctx.opts = opt_config_for(OPT_LEVEL_0);
+    return ctx;
+}
+
+TEST(opt, optimize_preserves_with_empty_tables)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 6; i = i + 1) s = s + i;\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    i64 before = ir_interp_run(m);
+    optimize(m, OPT_LEVEL_0, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), before);
+
+    optimize(m, OPT_LEVEL_2, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), before);
+    arena_free(a);
+}
+
+TEST(opt, optimize_tolerates_null_module)
+{
+    Arena *a = arena_new();
+    optimize(NULL, OPT_LEVEL_2, a);
+    arena_free(a);
+}
+
+TEST(opt, cfg_cache_reused_and_rebuilt_per_function)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int a(void) { return 1; }\n"
+                                  "int b(void) { return 2; }\n"
+                                  "int main(void) { return a() + b(); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    OptimizerContext ctx = make_ctx(m, a);
+    IrFunction *f0 = (IrFunction *) vec_get(m->funcs, 0);
+    IrFunction *f1 = (IrFunction *) vec_get(m->funcs, 1);
+    CfgInfo *c0 = opt_get_cfg(&ctx, f0);
+    EXPECT_TRUE(c0->func == f0);
+    EXPECT_TRUE(opt_get_cfg(&ctx, f0) == c0); /* same function, same epoch: cached */
+    CfgInfo *c1 = opt_get_cfg(&ctx, f1);
+    EXPECT_TRUE(c1 != c0);
+    EXPECT_TRUE(c1->func == f1);
+    arena_free(a);
+}
+
+TEST(opt, cfg_epoch_invalidation_rebuilds_cache)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    if (1) return 1; else return 2;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    OptimizerContext ctx = make_ctx(m, a);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *c0 = opt_get_cfg(&ctx, f);
+    ctx.cfg_epoch++;
+    CfgInfo *c1 = opt_get_cfg(&ctx, f);
+    EXPECT_TRUE(c1 != c0);
+    EXPECT_TRUE(c0->func == f);
+    EXPECT_TRUE(c1->func == f);
+    EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+TEST(opt, rpo_order_matches_cfg)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_if_else(a);
+    OptimizerContext ctx = make_ctx(m, a);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_get_cfg(&ctx, f);
+    Vec *order = opt_rpo_order(&ctx, f);
+    EXPECT_TRUE(vec_size(order) == cfg->nreach);
+    for (u32 k = 0; k < cfg->nreach; k++)
+    {
+        EXPECT_TRUE(vec_get(order, k) == cfg->rpo[k]);
+    }
+    arena_free(a);
+}
+
+TEST(opt, value_analysis_defs_and_uses)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_if_else(a);
+    OptimizerContext ctx = make_ctx(m, a);
+    IrFunction *f = opt_main_fn(m);
+    opt_make_value_analysis(&ctx, f);
+
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrInstr *binc = (IrInstr *) vec_get(entry->instrs, 0); /* icmp_slt -> cond */
+    u32 cond = binc->result;
+    EXPECT_TRUE(ctx.def_vreg[cond] == binc);
+    EXPECT_EQ(ctx.use_count[cond], 1); /* the brcond consumes it */
+
+    IrBlock *merge = (IrBlock *) vec_get(f->blocks, 3);
+    IrInstr *phi = (IrInstr *) vec_get(merge->instrs, 0);
+    u32 val = phi->result;
+    EXPECT_TRUE(ctx.def_vreg[val] == phi);
+    EXPECT_EQ(ctx.use_count[val], 1); /* the ret consumes it */
+    arena_free(a);
+}
+
+/* Whether the current terminator of `bb` leaves for `target`. */
+static bool succ_contains_bb(IrBlock *bb, IrBlock *target)
+{
+    if (vec_size(bb->instrs) == 0)
+    {
+        return false;
+    }
+    IrInstr *last = (IrInstr *) vec_last(bb->instrs);
+    switch (last->opcode)
+    {
+        case OP_BR:
+            return strcmp(last->extra.br.target_label, target->label) == 0;
+        case OP_BRCOND:
+            return strcmp(last->extra.brcond.true_label, target->label) == 0 ||
+                   strcmp(last->extra.brcond.false_label, target->label) == 0;
+        default:
+            return false;
+    }
+}
+
+TEST(opt, insert_empty_block_splits_ifelse_merge)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_if_else(a);
+    EXPECT_EQ(ir_interp_run(m), 10);
+    IrFunction *f = opt_main_fn(m);
+    IrBlock *then_bb = (IrBlock *) vec_get(f->blocks, 1);
+    IrBlock *else_bb = (IrBlock *) vec_get(f->blocks, 2);
+    IrBlock *merge = (IrBlock *) vec_get(f->blocks, 3);
+
+    Vec *preds = vec_new(a);
+    vec_push(preds, then_bb);
+    vec_push(preds, else_bb);
+    IrBlock *spliced = opt_insert_empty_block(m, f, preds, merge, "merged");
+    EXPECT_NOTNULL(spliced);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 10);
+
+    /* both original edges now land on the splice; merge's phi has one entry */
+    EXPECT_TRUE(succ_contains_bb(then_bb, spliced));
+    EXPECT_TRUE(succ_contains_bb(else_bb, spliced));
+    IrInstr *phi = (IrInstr *) vec_get(merge->instrs, 0);
+    EXPECT_EQ(phi->extra.phi.nentries, 1);
+    EXPECT_STR_EQ(phi->extra.phi.entries[0].label, spliced->label);
+    arena_free(a);
+}
+
+TEST(opt, insert_preheader_single_edge)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 4; i = i + 1) s = s + i;\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    IrFunction *f = opt_main_fn(m);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrBlock *header = block_with_prefix(f, "for_header");
+    EXPECT_EQ(ir_interp_run(m), 6);
+    IrBlock *pre = opt_insert_preheader(m, f, entry, header, "ph");
+    EXPECT_NOTNULL(pre);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 6);
+    EXPECT_TRUE(succ_contains_bb(entry, pre));
+    EXPECT_TRUE(succ_contains_bb(pre, header));
+    arena_free(a);
+}
+
+TEST(opt, insert_preheader_through_brcond)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_if_else(a);
+    EXPECT_EQ(ir_interp_run(m), 10);
+    IrFunction *f = opt_main_fn(m);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrBlock *then_bb = (IrBlock *) vec_get(f->blocks, 1);
+
+    IrBlock *pre = opt_insert_preheader(m, f, entry, then_bb, "pre");
+    EXPECT_NOTNULL(pre);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 10);
+    EXPECT_TRUE(succ_contains_bb(entry, pre));
+    EXPECT_TRUE(succ_contains_bb(pre, then_bb));
+    arena_free(a);
+}
+
+TEST(opt, erase_and_reinsert_instr)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_if_else(a);
+    IrFunction *f = opt_main_fn(m);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrInstr *brcond = (IrInstr *) vec_last(entry->instrs);
+    EXPECT_TRUE(opt_instr_index(entry, brcond) != UINT32_MAX);
+
+    opt_erase_instr(entry, brcond);
+    EXPECT_TRUE(opt_instr_index(entry, brcond) == UINT32_MAX);
+    EXPECT_FALSE(opt_verify(m)); /* the entry block lost its terminator */
+
+    opt_insert_instr(entry, (u32) vec_size(entry->instrs), brcond);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 10);
     arena_free(a);
 }

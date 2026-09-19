@@ -43,10 +43,14 @@ typedef struct
     bool pedantic; /* shares spelling with ParserConfig.pedantic, set in tandem */
 } SemanticConfig;
 
-typedef struct
+/* The -O levels; each expands inside the optimizer to its pass set (-O0 = none). */
+typedef enum
 {
-    int level; /* -O / -Ofast...; populated in a later phase */
-} OptConfig;
+    OPT_LEVEL_0 = 0,
+    OPT_LEVEL_1,
+    OPT_LEVEL_2,
+    OPT_LEVEL_3,
+} OptLevel;
 
 /* IR / codegen fragments are empty placeholders for now (future -O, -march, -g);
    passing them now avoids signature churn later. */
@@ -83,7 +87,7 @@ typedef struct
     ParserConfig parser;
     SemanticConfig semantic;
     IRConfig ir;
-    OptConfig opt; /* empty until the opt phase */
+    OptLevel opt; /* the -O level the optimizer runs at */
     CodegenConfig codegen;
 } CompilerConfig;
 

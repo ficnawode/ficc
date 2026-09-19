@@ -129,10 +129,10 @@ endef
 selftest: $(FICC_BIN) $(SELF_DIR)/.staged
 	@echo "== selftest stage 1: compile with $(notdir $(FICC_BIN)) =="
 	$(call self-compile-loop,$(abspath $(FICC_BIN)),$(abspath $(SELF_OBJ1)))
-	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ1)/*.o $(SELF_OBJ1)/util/*.o $(wildcard $(SELF_OBJ1)/optpasses/*.o) -o $(FICC1_BIN)
+	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ1)/*.o $(SELF_OBJ1)/util/*.o $(SELF_OBJ1)/optpasses/*.o -o $(FICC1_BIN)
 	@echo "== selftest stage 2: rebuild with ficc1 =="
 	$(call self-compile-loop,$(abspath $(FICC1_BIN)),$(abspath $(SELF_OBJ2)))
-	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ2)/*.o $(SELF_OBJ2)/util/*.o $(wildcard $(SELF_OBJ2)/optpasses/*.o) -o $(FICC2_BIN)
+	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ2)/*.o $(SELF_OBJ2)/util/*.o $(SELF_OBJ2)/optpasses/*.o -o $(FICC2_BIN)
 	@if diff -r --brief $(SELF_OBJ1) $(SELF_OBJ2); then \
 		echo "selftest: OK — stage1 and stage2 object trees are byte-identical"; \
 	else \

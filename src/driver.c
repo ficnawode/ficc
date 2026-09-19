@@ -5,11 +5,15 @@
 #include "ir_builder.h"
 #include "ir_interp.h"
 #include "lexer.h"
+#include "opt.h"
 #include "parser.h"
 #include "pp.h"
 #include "pp_emit.h"
 #include "semantic.h"
 #include "util/arena.h"
+#ifdef OPT_VERIFY
+#include "optpasses/opt_internal.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -178,6 +182,15 @@ static int run_pipeline(const CompilerConfig *cfg, const char *input, Arena *are
         fprintf(stderr, "IR build failed\n");
         return 1;
     }
+    /* Run the passes the -O level enables (none at -O0). */
+    optimize(mod, cfg->opt, arena);
+#ifdef OPT_VERIFY
+    if (!opt_verify(mod))
+    {
+        fprintf(stderr, "IR verification failed\n");
+        return 1;
+    }
+#endif
     if (cfg->dump_ir)
     {
         ir_dump(mod);

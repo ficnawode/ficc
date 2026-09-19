@@ -387,3 +387,75 @@ TEST(cli, help_listing_smoke)
     cli_help(cfg);
     arena_free(a);
 }
+
+TEST(cli, opt_level_defaults_to_zero)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_EQ(cfg->opt, OPT_LEVEL_0);
+    arena_free(a);
+}
+
+TEST(cli, opt_levels_explicit)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-O0", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_EQ(cfg->opt, OPT_LEVEL_0);
+    arena_free(a);
+
+    Arena *a2 = arena_new();
+    char *argv2[] = {"ficc", "-O1", "a.c"};
+    CompilerConfig *cfg2 = cli_parse(ARRAY_LEN(argv2), argv2, a2);
+    EXPECT_NOTNULL(cfg2);
+    EXPECT_EQ(cfg2->opt, OPT_LEVEL_1);
+    arena_free(a2);
+
+    Arena *a3 = arena_new();
+    char *argv3[] = {"ficc", "-O2", "a.c"};
+    CompilerConfig *cfg3 = cli_parse(ARRAY_LEN(argv3), argv3, a3);
+    EXPECT_NOTNULL(cfg3);
+    EXPECT_EQ(cfg3->opt, OPT_LEVEL_2);
+    arena_free(a3);
+
+    Arena *a4 = arena_new();
+    char *argv4[] = {"ficc", "-O3", "a.c"};
+    CompilerConfig *cfg4 = cli_parse(ARRAY_LEN(argv4), argv4, a4);
+    EXPECT_NOTNULL(cfg4);
+    EXPECT_EQ(cfg4->opt, OPT_LEVEL_3);
+    arena_free(a4);
+
+    /* bare -O is shorthand for -O2 */
+    Arena *a5 = arena_new();
+    char *argv5[] = {"ficc", "-O", "a.c"};
+    CompilerConfig *cfg5 = cli_parse(ARRAY_LEN(argv5), argv5, a5);
+    EXPECT_NOTNULL(cfg5);
+    EXPECT_EQ(cfg5->opt, OPT_LEVEL_2);
+    arena_free(a5);
+}
+
+TEST(cli, opt_level_last_wins)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-O2", "-O0", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_EQ(cfg->opt, OPT_LEVEL_0);
+    arena_free(a);
+}
+
+TEST(cli, unknown_opt_level_rejected)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-O4", "a.c"};
+    EXPECT_NULL(cli_parse(ARRAY_LEN(argv), argv, a));
+    arena_free(a);
+
+    Arena *a2 = arena_new();
+    char *argv2[] = {"ficc", "-Ofast", "a.c"};
+    EXPECT_NULL(cli_parse(ARRAY_LEN(argv2), argv2, a2));
+    arena_free(a2);
+}

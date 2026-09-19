@@ -141,6 +141,34 @@ static bool set_ir_dump(CompilerConfig *cfg, const char *value)
     return true;
 }
 
+static bool set_opt0(CompilerConfig *cfg, const char *value)
+{
+    (void) value;
+    cfg->opt = OPT_LEVEL_0;
+    return true;
+}
+
+static bool set_opt1(CompilerConfig *cfg, const char *value)
+{
+    (void) value;
+    cfg->opt = OPT_LEVEL_1;
+    return true;
+}
+
+static bool set_opt2(CompilerConfig *cfg, const char *value)
+{
+    (void) value;
+    cfg->opt = OPT_LEVEL_2;
+    return true;
+}
+
+static bool set_opt3(CompilerConfig *cfg, const char *value)
+{
+    (void) value;
+    cfg->opt = OPT_LEVEL_3;
+    return true;
+}
+
 static bool set_keep_comments(CompilerConfig *cfg, const char *value)
 {
     (void) value;
@@ -194,6 +222,11 @@ static const CLIOption option_table[] = {
     {"-E", ARG_NONE, 0, set_emit_pp, "print the preprocessed source to stdout"},
     {"-c", ARG_NONE, 0, set_emit_obj, "compile to an object file"},
     {"-g", ARG_NONE, 0, set_debug, "emit DWARF debug info and call-frame info"},
+    {"-O0", ARG_NONE, 0, set_opt0, "no optimization"},
+    {"-O1", ARG_NONE, 0, set_opt1, "common subexpression and loop optimizations"},
+    {"-O2", ARG_NONE, 0, set_opt2, "more aggressive optimizations"},
+    {"-O3", ARG_NONE, 0, set_opt3, "everything in -O2 and more"},
+    {"-O", ARG_NONE, 0, set_opt2, "shorthand for -O2"},
     {"-run", ARG_NONE, 0, set_run_interp, "execute the program in the interpreter"},
     {"-nostdinc", ARG_NONE, 0, set_nostdinc, "do not search the builtin include directory"},
     {"-tokens", ARG_NONE, 0, set_dump_tokens, "dump the token stream"},

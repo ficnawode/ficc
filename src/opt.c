@@ -1,0 +1,504 @@
+#include "opt.h"
+#include "optpasses/opt_internal.h"
+
+#include "util/assert.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* Optimizer shell: per-level pass selections, the registry, and shared magic. */
+
+void opt_error(const char *fmt, ...)
+{
+    printf("[opt] error: ");
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    printf("\n");
+}
+
+/* -O0 runs no passes; the optimizer only canonicalizes when asked to. */
+static const OptPassId level1_passes[] = {
+    OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY,  OPT_PASS_CAST,      OPT_PASS_CPROP, OPT_PASS_PHI_SIMP,
+    OPT_PASS_DCE,        OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER, OPT_PASS_GVN,   OPT_PASS_LICM,
+};
+static const OptPassId level2_passes[] = {
+    OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY, OPT_PASS_CAST,      OPT_PASS_CPROP,
+    OPT_PASS_PHI_SIMP,   OPT_PASS_DCE,      OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER,
+    OPT_PASS_GVN,        OPT_PASS_LICM,     OPT_PASS_MEM_FWD,
+};
+static const OptPassId level3_passes[] = {
+    OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY,  OPT_PASS_CAST,      OPT_PASS_CPROP, OPT_PASS_PHI_SIMP,
+    OPT_PASS_DCE,        OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER, OPT_PASS_GVN,   OPT_PASS_LICM,
+    OPT_PASS_MEM_FWD,    OPT_PASS_REASSOC,   OPT_PASS_STRENGTH,
+};
+
+#define PASS_COUNT(list) (sizeof(list) / sizeof((list)[0]))
+
+static const OptConfig level0_cfg = {.passlist = {NULL, 0}, .max_iterations = 100};
+static const OptConfig level1_cfg = {.passlist = {level1_passes, PASS_COUNT(level1_passes)},
+                                     .max_iterations = 100};
+static const OptConfig level2_cfg = {.passlist = {level2_passes, PASS_COUNT(level2_passes)},
+                                     .max_iterations = 100};
+static const OptConfig level3_cfg = {.passlist = {level3_passes, PASS_COUNT(level3_passes)},
+                                     .max_iterations = 100};
+
+const OptConfig *opt_config_for(OptLevel level)
+{
+    switch (level)
+    {
+        case OPT_LEVEL_0:
+            return &level0_cfg;
+        case OPT_LEVEL_1:
+            return &level1_cfg;
+        case OPT_LEVEL_2:
+            return &level2_cfg;
+        case OPT_LEVEL_3:
+            return &level3_cfg;
+        default:
+            return &level0_cfg;
+    }
+}
+
+/* The pass registry; each pass file fills its row's fn (NULL = reserved). */
+static const OptPass opt_passes[] = {
+    {OPT_PASS_FOLD_CONST, "fold_const", NULL},
+    {OPT_PASS_IDENTITY, "identity", NULL},
+    {OPT_PASS_CAST, "cast", NULL},
+    {OPT_PASS_CPROP, "cprop", NULL},
+    {OPT_PASS_PHI_SIMP, "phi_simp", NULL},
+    {OPT_PASS_DCE, "dce", NULL},
+    {OPT_PASS_CFG_CLEAN, "cfg_clean", NULL},
+    {OPT_PASS_PREHEADER, "preheader", NULL},
+    {OPT_PASS_GVN, "gvn", NULL},
+    {OPT_PASS_LICM, "licm", NULL},
+    {OPT_PASS_MEM_FWD, "mem_fwd", NULL},
+    {OPT_PASS_REASSOC, "reassoc", NULL},
+    {OPT_PASS_STRENGTH, "strength", NULL},
+    {0},
+};
+
+static const OptPass *pass_lookup(OptPassId id)
+{
+    for (const OptPass *p = opt_passes; p->name; p++)
+    {
+        if (p->id == id)
+        {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+/* Run the config's passes to fixpoint, bounded by its iteration budget. */
+static void run_pipeline(OptimizerContext *ctx)
+{
+    const OptConfig *cfg = ctx->opts;
+    u32 iterations = 0;
+    for (;;)
+    {
+        ctx->changed = false;
+        for (u32 i = 0; i < cfg->passlist.count; i++)
+        {
+            OptPassId id = cfg->passlist.passes[i];
+            const OptPass *pass = pass_lookup(id);
+            if (!pass)
+            {
+                opt_error("unknown pass id %d", (int) id);
+                exit(1);
+            }
+            if (!pass->fn)
+            {
+                continue; /* reserved pass, not implemented yet */
+            }
+            if (pass->fn(ctx))
+            {
+                ctx->changed = true;
+                ctx->cfg_epoch++;
+            }
+#ifdef OPT_VERIFY
+            if (!opt_verify(ctx->mod))
+            {
+                opt_error("pass '%s' left the IR malformed", pass->name);
+                exit(1);
+            }
+#endif
+        }
+        if (!ctx->changed)
+        {
+            return;
+        }
+        if (++iterations >= cfg->max_iterations)
+        {
+            opt_error("pass pipeline failed to converge");
+            exit(1);
+        }
+    }
+}
+
+static void ensure_caches(OptimizerContext *ctx, IrFunction *f)
+{
+    if (ctx->cfg && ctx->cache_f == f && ctx->cache_epoch == ctx->cfg_epoch)
+    {
+        return;
+    }
+    ctx->cfg = opt_cfg_build(f, ctx->arena);
+    ctx->doms = opt_doms_build(ctx->cfg, ctx->arena);
+    ctx->loops = opt_loops_find(f, ctx->cfg, ctx->doms, ctx->arena);
+    ctx->cache_f = f;
+    ctx->cache_epoch = ctx->cfg_epoch;
+}
+
+CfgInfo *opt_get_cfg(OptimizerContext *ctx, IrFunction *f)
+{
+    ensure_caches(ctx, f);
+    return ctx->cfg;
+}
+
+Dominators *opt_get_doms(OptimizerContext *ctx, IrFunction *f)
+{
+    ensure_caches(ctx, f);
+    return ctx->doms;
+}
+
+LoopInfo *opt_get_loops(OptimizerContext *ctx, IrFunction *f)
+{
+    ensure_caches(ctx, f);
+    return ctx->loops;
+}
+
+Vec *opt_rpo_order(OptimizerContext *ctx, IrFunction *f)
+{
+    CfgInfo *cfg = opt_get_cfg(ctx, f);
+    Vec *order = vec_new(ctx->arena);
+    for (u32 k = 0; k < cfg->nreach; k++)
+    {
+        vec_push(order, cfg->rpo[k]);
+    }
+    return order;
+}
+
+/* ---- instruction algebra ---- */
+
+u32 opt_instr_index(IrBlock *bb, IrInstr *in)
+{
+    size_t n = vec_size(bb->instrs);
+    for (size_t i = 0; i < n; i++)
+    {
+        if (vec_get(bb->instrs, i) == in)
+        {
+            return (u32) i;
+        }
+    }
+    return UINT32_MAX;
+}
+
+void opt_erase_instr(IrBlock *bb, IrInstr *in)
+{
+    u32 idx = opt_instr_index(bb, in);
+    ASSERT(idx != UINT32_MAX && "opt_erase_instr: instruction is not in its block");
+    size_t n = vec_size(bb->instrs);
+    for (size_t j = idx; j + 1 < n; j++)
+    {
+        vec_set(bb->instrs, j, vec_get(bb->instrs, j + 1));
+    }
+    vec_pop(bb->instrs);
+}
+
+void opt_insert_instr(IrBlock *bb, u32 idx, IrInstr *in)
+{
+    vec_insert(bb->instrs, idx, in);
+}
+
+void opt_replace_operand(IrInstr *in, u8 which, IrOperand val)
+{
+    ASSERT(which < in->nops && "opt_replace_operand: index out of range");
+    in->ops[which] = val;
+}
+
+void opt_copy_line(IrInstr *in, const IrInstr *model)
+{
+    in->line = model->line;
+}
+
+/* ---- edge splicing ---- */
+
+static void retarget_labels(IrInstr *last, const char *old_label, const char *new_label)
+{
+    switch (last->opcode)
+    {
+        case OP_BR:
+            if (strcmp(last->extra.br.target_label, old_label) == 0)
+            {
+                last->extra.br.target_label = new_label;
+            }
+            break;
+        case OP_BRCOND:
+            if (strcmp(last->extra.brcond.true_label, old_label) == 0)
+            {
+                last->extra.brcond.true_label = new_label;
+            }
+            if (strcmp(last->extra.brcond.false_label, old_label) == 0)
+            {
+                last->extra.brcond.false_label = new_label;
+            }
+            break;
+        case OP_SWITCH:
+            for (u32 c = 0; c < last->extra.sw.ncases; c++)
+            {
+                if (strcmp(last->extra.sw.cases[c].label, old_label) == 0)
+                {
+                    last->extra.sw.cases[c].label = new_label;
+                }
+            }
+            if (last->extra.sw.default_label &&
+                strcmp(last->extra.sw.default_label, old_label) == 0)
+            {
+                last->extra.sw.default_label = new_label;
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+static void retarget_terminator(IrBlock *from, const char *old_label, const char *new_label)
+{
+    if (vec_size(from->instrs) == 0)
+    {
+        return;
+    }
+    retarget_labels((IrInstr *) vec_last(from->instrs), old_label, new_label);
+}
+
+static void preds_remove(Vec *preds, IrBlock *gone)
+{
+    size_t write = 0;
+    size_t n = vec_size(preds);
+    for (size_t read = 0; read < n; read++)
+    {
+        if (vec_get(preds, read) != gone)
+        {
+            vec_set(preds, write, vec_get(preds, read));
+            write++;
+        }
+    }
+    while (vec_size(preds) > write)
+    {
+        vec_pop(preds);
+    }
+}
+
+static void preds_push_unique(Vec *preds, IrBlock *bb)
+{
+    size_t n = vec_size(preds);
+    for (size_t i = 0; i < n; i++)
+    {
+        if (vec_get(preds, i) == bb)
+        {
+            return;
+        }
+    }
+    vec_push(preds, bb);
+}
+
+static IrBlock *new_block(IrFunction *f, const char *prefix)
+{
+    size_t idx = vec_size(f->blocks);
+    int n = snprintf(NULL, 0, "%s_%zu", prefix, idx);
+    char *buf = arena_alloc(f->arena, (size_t) n + 1, sizeof(char));
+    snprintf(buf, (size_t) n + 1, "%s_%zu", prefix, idx);
+    return ir_func_add_block(f, buf);
+}
+
+static u32 alloc_merge_vreg(IrModule *mod, IrInstr *phi)
+{
+    return ir_alloc_vreg(mod, mod->widths[phi->result], mod->signedness[phi->result],
+                         mod->floatness[phi->result]);
+}
+
+static bool pred_list_has_label(Vec *preds, const char *label)
+{
+    size_t n = vec_size(preds);
+    for (size_t i = 0; i < n; i++)
+    {
+        if (strcmp(((IrBlock *) vec_get(preds, i))->label, label) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static IrOperand phi_value_for_pred(IrInstr *phi, IrBlock *pred)
+{
+    for (u32 e = 0; e < phi->extra.phi.nentries; e++)
+    {
+        if (strcmp(phi->extra.phi.entries[e].label, pred->label) == 0)
+        {
+            return phi->extra.phi.entries[e].val;
+        }
+    }
+    ASSERT(false && "insert_empty_block: pred has no matching phi entry");
+    return ir_operand_imm(0);
+}
+
+/* Collapse the spliced preds' entries in `phi` into one entry for the new block. */
+static void phi_retag_entries(IrInstr *phi, Vec *preds, IrBlock *bb, IrOperand merged)
+{
+    u32 nkept = 0;
+    for (u32 e = 0; e < phi->extra.phi.nentries; e++)
+    {
+        if (!pred_list_has_label(preds, phi->extra.phi.entries[e].label))
+        {
+            nkept++;
+        }
+    }
+    IrPhiEntry *entries = arena_alloc(bb->arena, (nkept + 1) * sizeof(IrPhiEntry), sizeof(void *));
+    u32 k = 0;
+    for (u32 e = 0; e < phi->extra.phi.nentries; e++)
+    {
+        if (pred_list_has_label(preds, phi->extra.phi.entries[e].label))
+        {
+            continue;
+        }
+        entries[k++] = phi->extra.phi.entries[e];
+    }
+    entries[k].val = merged;
+    entries[k].label = bb->label;
+    phi->extra.phi.entries = entries;
+    phi->extra.phi.nentries = nkept + 1;
+    phi->extra.phi.nfilled = nkept + 1;
+}
+
+IrBlock *opt_insert_empty_block(IrModule *mod, IrFunction *f, Vec *preds, IrBlock *succ,
+                                const char *prefix)
+{
+    ASSERT(succ != (IrBlock *) vec_get(f->blocks, 0) &&
+           "insert_empty_block: cannot split an edge into the entry block");
+    size_t npreds = vec_size(preds);
+    ASSERT(npreds > 0 && "insert_empty_block: no predecessors to splice");
+
+    IrBlock *bb = new_block(f, prefix);
+
+    size_t ninstr = vec_size(succ->instrs);
+    for (size_t i = 0; i < ninstr; i++)
+    {
+        IrInstr *in = (IrInstr *) vec_get(succ->instrs, i);
+        if (in->opcode != OP_PHI)
+        {
+            break;
+        }
+        IrInstr *mp = ir_emit_phi_at_start(bb, alloc_merge_vreg(mod, in), (u32) npreds);
+        for (size_t p = 0; p < npreds; p++)
+        {
+            IrBlock *pred = (IrBlock *) vec_get(preds, p);
+            ir_phi_add_entry(mp, phi_value_for_pred(in, pred), pred);
+        }
+        phi_retag_entries(in, preds, bb, ir_operand_vreg(mp->result));
+    }
+    ir_emit_br(bb, succ->label);
+
+    for (size_t p = 0; p < npreds; p++)
+    {
+        IrBlock *pred = (IrBlock *) vec_get(preds, p);
+        retarget_terminator(pred, succ->label, bb->label);
+        preds_remove(succ->preds, pred);
+        preds_push_unique(bb->preds, pred);
+    }
+    preds_push_unique(succ->preds, bb);
+    return bb;
+}
+
+IrBlock *opt_insert_preheader(IrModule *mod, IrFunction *f, IrBlock *pred, IrBlock *succ,
+                              const char *prefix)
+{
+    Vec *preds = vec_new(f->arena);
+    vec_push(preds, pred);
+    return opt_insert_empty_block(mod, f, preds, succ, prefix);
+}
+
+/* ---- value analysis ---- */
+
+static void count_use_operand(IrModule *mod, u32 *uses, IrOperand op)
+{
+    if (op.is_imm || op.is_global || op.is_func)
+    {
+        return;
+    }
+    if (op.u.vreg < mod->width_count)
+    {
+        uses[op.u.vreg]++;
+    }
+}
+
+void opt_make_value_analysis(OptimizerContext *ctx, IrFunction *f)
+{
+    IrModule *mod = ctx->mod;
+    u32 nvregs = mod->width_count;
+    IrInstr **defs = arena_alloc(ctx->arena, nvregs * sizeof(IrInstr *), sizeof(void *));
+    u32 *uses = arena_alloc(ctx->arena, nvregs * sizeof(u32), sizeof(u32));
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        defs[v] = NULL;
+        uses[v] = 0;
+    }
+
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(bb->instrs);
+        for (size_t j = 0; j < ninstr; j++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, j);
+            if (in->result != NO_VREG)
+            {
+                defs[in->result] = in;
+            }
+            for (u8 o = 0; o < in->nops; o++)
+            {
+                count_use_operand(mod, uses, in->ops[o]);
+            }
+            if (in->opcode == OP_PHI)
+            {
+                for (u32 e = 0; e < in->extra.phi.nentries; e++)
+                {
+                    count_use_operand(mod, uses, in->extra.phi.entries[e].val);
+                }
+            }
+            else if (in->opcode == OP_CALL)
+            {
+                for (u32 arg = 0; arg < in->extra.call.nargs; arg++)
+                {
+                    count_use_operand(mod, uses, in->extra.call.args[arg]);
+                }
+                if (in->extra.call.is_indirect)
+                {
+                    count_use_operand(mod, uses, in->extra.call.callee);
+                }
+            }
+        }
+    }
+    ctx->def_vreg = defs;
+    ctx->use_count = uses;
+}
+
+void optimize(IrModule *mod, OptLevel level, Arena *arena)
+{
+    if (mod == NULL || level == OPT_LEVEL_0)
+    {
+        return; /* -O0 runs no passes; nothing to build or run */
+    }
+
+    OptimizerContext ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.mod = mod;
+    ctx.arena = arena;
+    ctx.opts = opt_config_for(level);
+
+    run_pipeline(&ctx);
+}

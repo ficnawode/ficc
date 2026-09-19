@@ -1,6 +1,11 @@
 #ifndef FICC_OPT_H
 #define FICC_OPT_H
 
-/* Public opt surface; passes live under optpasses/ with verify/can/opt names. */
+#include "cli.h"
+#include "ir.h"
+#include "util/arena.h"
+
+/* Sole public entry point: run the passes the level enables (none at -O0). */
+void optimize(IrModule *mod, OptLevel level, Arena *arena);
 
 #endif
