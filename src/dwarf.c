@@ -30,9 +30,18 @@ enum LineExtOp
 
 enum DwarfTag
 {
+    DW_TAG_array_type = 0x01,
+    DW_TAG_enumeration_type = 0x04,
     DW_TAG_formal_parameter = 0x05,
+    DW_TAG_member = 0x0d,
+    DW_TAG_pointer_type = 0x0f,
     DW_TAG_compile_unit = 0x11,
+    DW_TAG_structure_type = 0x13,
+    DW_TAG_subroutine_type = 0x15,
+    DW_TAG_union_type = 0x17,
+    DW_TAG_subrange_type = 0x21,
     DW_TAG_base_type = 0x24,
+    DW_TAG_const_type = 0x26,
     DW_TAG_subprogram = 0x2e,
     DW_TAG_variable = 0x34,
 };
@@ -42,12 +51,16 @@ enum DwarfAttr
     DW_AT_location = 0x02,
     DW_AT_name = 0x03,
     DW_AT_byte_size = 0x0b,
+    DW_AT_bit_size = 0x0d,
+    DW_AT_data_member_location = 0x38,
+    DW_AT_bit_offset = 0x0c,
     DW_AT_stmt_list = 0x10,
     DW_AT_low_pc = 0x11,
     DW_AT_high_pc = 0x12,
     DW_AT_language = 0x13,
     DW_AT_comp_dir = 0x1b,
     DW_AT_producer = 0x25,
+    DW_AT_count = 0x37,
     DW_AT_encoding = 0x3e,
     DW_AT_external = 0x3f,
     DW_AT_frame_base = 0x40,
@@ -63,6 +76,7 @@ enum DwarfForm
     DW_FORM_string = 0x08,
     DW_FORM_flag = 0x0c,
     DW_FORM_ref4 = 0x13,
+    DW_FORM_udata = 0x0f,
     DW_FORM_exprloc = 0x18,
 };
 
@@ -93,6 +107,19 @@ enum
     ABBREV_VARIABLE = 4,
     ABBREV_BASE_TYPE = 5,
     ABBREV_VARIABLE_NO_LOC = 6, /* externs declare no DW_AT_location */
+    ABBREV_POINTER_TYPE = 7,
+    ABBREV_CONST_TYPE = 8,
+    ABBREV_ARRAY_TYPE = 9,
+    ABBREV_SUBRANGE_TYPE = 10,
+    ABBREV_STRUCT_TYPE = 11,
+    ABBREV_UNION_TYPE = 12,
+    ABBREV_STRUCT_INCOMPLETE = 13,
+    ABBREV_UNION_INCOMPLETE = 14,
+    ABBREV_MEMBER = 15,
+    ABBREV_MEMBER_BITFIELD = 16,
+    ABBREV_ENUM_TYPE = 17,
+    ABBREV_SUBROUTINE_TYPE = 18,
+    ABBREV_SUBPROG_PARAM = 19,
 };
 
 enum
@@ -230,7 +257,8 @@ static void line_func(ByteBuf *b, Vec *relocs, CodegenFunc *cf)
         }
         else
         {
-            addr = target; /* same-line run: extend the current row */
+            /* Decoder registers only move via emitted opcodes. */
+            line_advance_pc(b, &addr, target);
         }
     }
 
@@ -271,10 +299,17 @@ static void line_header(ByteBuf *b, const char *compile_unit)
 
 typedef struct
 {
+    size_t slot; /* byte position of a u32 ref4 field to backpatch */
+    Type *type;
+} PendingRef;
+
+typedef struct
+{
     ByteBuf *b;          /* .debug_info being built */
     Vec *relocs;         /* .rela.debug_info */
     U64Map *type_to_die; /* Type* -> DIE byte offset (0: not yet emitted) */
-    u64 void_die;        /* cached fallback DIE for types beyond this phase */
+    u64 void_die;        /* cached fallback DIE for `void` references */
+    Vec *pending;        /* Vec<PendingRef*>: type refs patched before the CU ends */
 } InfoCtx;
 
 static void info_reloc(InfoCtx *c, u32 sym, i64 addend)
@@ -340,15 +375,190 @@ static u64 void_base_type(InfoCtx *c)
     return c->void_die;
 }
 
-/* Fundamental scalar -> its base-type DIE; everything else -> void fallback. */
+/* ---- compound type DIEs: pointer/const/array/record/enum/func ---- */
+
+static u64 type_die(InfoCtx *c, Type *t);
+
+/* Claim the CU offset up front so self-referential records terminate. */
+static u32 type_die_reserve(InfoCtx *c, Type *t)
+{
+    u32 off = (u32) bytebuf_len(c->b);
+    u64map_set(c->type_to_die, (u64) (uintptr_t) t, (void *) (uintptr_t) off);
+    return off;
+}
+
+static u32 type_die_lookup(InfoCtx *c, Type *t)
+{
+    return (u32) (uintptr_t) u64map_get(c->type_to_die, (u64) (uintptr_t) t);
+}
+
+/* Backpatch slot with t's offset; unresolved types defer so no DIE nests. */
+static void type_poke(InfoCtx *c, size_t slot, Type *t)
+{
+    u32 off = type_die_lookup(c, t);
+    if (off)
+    {
+        bytebuf_poke_u32(c->b, slot, off);
+        return;
+    }
+    PendingRef *p = arena_alloc(c->b->arena, sizeof(PendingRef), sizeof(void *));
+    p->slot = slot;
+    p->type = t;
+    vec_push(c->pending, p);
+}
+
+/* Emit a u32 ref4 placeholder for `t`; resolves via type_poke. */
+static size_t type_ref_emit(InfoCtx *c, Type *t)
+{
+    size_t slot = bytebuf_len(c->b);
+    bytebuf_append_u32(c->b, 0);
+    type_poke(c, slot, t);
+    return slot;
+}
+
+static u64 pointer_die(InfoCtx *c, Type *t)
+{
+    u32 off = type_die_lookup(c, t);
+    if (off)
+    {
+        return off;
+    }
+    /* Pointee DIE first; member cycles resolve through the pending list. */
+    u64 pointee = type_die(c, t->ptr.pointee);
+    off = (u32) bytebuf_len(c->b);
+    u64map_set(c->type_to_die, (u64) (uintptr_t) t, (void *) (uintptr_t) off);
+    dwarf_uleb128(c->b, ABBREV_POINTER_TYPE);
+    bytebuf_append_u32(c->b, (u32) pointee);
+    return off;
+}
+
+static u64 const_die(InfoCtx *c, Type *t)
+{
+    u32 off = type_die_lookup(c, t);
+    if (off)
+    {
+        return off;
+    }
+    u64 base = type_die(c, type_unqual(t));
+    off = (u32) bytebuf_len(c->b);
+    u64map_set(c->type_to_die, (u64) (uintptr_t) t, (void *) (uintptr_t) off);
+    dwarf_uleb128(c->b, ABBREV_CONST_TYPE);
+    bytebuf_append_u32(c->b, (u32) base);
+    return off;
+}
+
+static u64 array_die(InfoCtx *c, Type *t)
+{
+    u32 off = type_die_lookup(c, t);
+    if (off)
+    {
+        return off;
+    }
+    u64 elem = type_die(c, t->arr.elem);
+    u64 index = type_die(c, type_ulong()); /* subrange index type (size_t) */
+    off = type_die_reserve(c, t);
+    dwarf_uleb128(c->b, ABBREV_ARRAY_TYPE);
+    bytebuf_append_u32(c->b, (u32) elem);
+    dwarf_uleb128(c->b, ABBREV_SUBRANGE_TYPE);
+    bytebuf_append_u32(c->b, (u32) index);
+    dwarf_uleb128(c->b, t->arr.length);
+    bytebuf_append(c->b, 0); /* end of array_type's children */
+    return off;
+}
+
+static u64 enum_die(InfoCtx *c, Type *t)
+{
+    u32 off = type_die_lookup(c, t);
+    if (off)
+    {
+        return off;
+    }
+    off = type_die_reserve(c, t);
+    dwarf_uleb128(c->b, ABBREV_ENUM_TYPE);
+    info_string(c, t->enumm.tag ? t->enumm.tag : "");
+    /* Constants are folded away, so there are no enumerator children. */
+    dwarf_uleb128(c->b, t->size);
+    return off;
+}
+
+static u64 record_die(InfoCtx *c, Type *t)
+{
+    u32 off = type_die_lookup(c, t);
+    if (off)
+    {
+        return off;
+    }
+    off = type_die_reserve(c, t);
+    bool is_struct = t->kind == TYPE_STRUCT;
+    if (!t->record.complete)
+    {
+        /* Forward-declared `struct S;`: name only, no byte_size, no members. */
+        dwarf_uleb128(c->b, is_struct ? ABBREV_STRUCT_INCOMPLETE : ABBREV_UNION_INCOMPLETE);
+        info_string(c, t->record.tag ? t->record.tag : "");
+        return off;
+    }
+    dwarf_uleb128(c->b, is_struct ? ABBREV_STRUCT_TYPE : ABBREV_UNION_TYPE);
+    info_string(c, t->record.tag ? t->record.tag : "");
+    dwarf_uleb128(c->b, t->size);
+
+    Vec *fields = t->record.fields;
+    size_t nfields = vec_size(fields);
+    for (size_t i = 0; i < nfields; i++)
+    {
+        RecordField *f = (RecordField *) vec_get(fields, i);
+        dwarf_uleb128(c->b, f->bit_width >= 0 ? ABBREV_MEMBER_BITFIELD : ABBREV_MEMBER);
+        info_string(c, f->name);
+        type_ref_emit(c, f->type);
+        dwarf_uleb128(c->b, f->offset);
+        if (f->bit_width >= 0)
+        {
+            /* Bit offset counts from the storage unit's MSb (little-endian). */
+            i64 unit_bits = (i64) f->type->size * 8;
+            dwarf_uleb128(c->b, (u64) f->bit_width);
+            dwarf_uleb128(c->b, (u64) (unit_bits - f->bit_offset - f->bit_width));
+        }
+    }
+    bytebuf_append(c->b, 0); /* end of the record's children */
+    return off;
+}
+
+static u64 func_die(InfoCtx *c, Type *t)
+{
+    u32 off = type_die_lookup(c, t);
+    if (off)
+    {
+        return off;
+    }
+    /* Reserve first: `int (*f)(int (*f)(int))` self-references recurse. */
+    off = type_die_reserve(c, t);
+    dwarf_uleb128(c->b, ABBREV_SUBROUTINE_TYPE);
+    type_ref_emit(c, t->func.ret);
+    size_t nparams = vec_size(t->func.params);
+    for (size_t i = 0; i < nparams; i++)
+    {
+        dwarf_uleb128(c->b, ABBREV_SUBPROG_PARAM);
+        type_ref_emit(c, (Type *) vec_get(t->func.params, i));
+    }
+    bytebuf_append(c->b, 0); /* end of subroutine_type's children */
+    return off;
+}
+
+/* Fundamental scalar -> its base-type DIE; compound types get their own DIEs. */
 static u64 type_die(InfoCtx *c, Type *t)
 {
-    t = type_unqual(t);
     if (!t)
     {
         return void_base_type(c);
     }
-    u32 off = (u32) (uintptr_t) u64map_get(c->type_to_die, (u64) (uintptr_t) t);
+    if (t->kind == TYPE_ARRAY)
+    {
+        return array_die(c, t);
+    }
+    if (t->qualifiers & Q_CONST)
+    {
+        return const_die(c, t);
+    }
+    u32 off = type_die_lookup(c, t);
     if (off)
     {
         return off;
@@ -430,6 +640,15 @@ static u64 type_die(InfoCtx *c, Type *t)
             size = (u8) (t->size);
             encoding = DW_ATE_float;
             break;
+        case TYPE_PTR:
+            return pointer_die(c, t);
+        case TYPE_STRUCT:
+        case TYPE_UNION:
+            return record_die(c, t);
+        case TYPE_ENUM:
+            return enum_die(c, t);
+        case TYPE_FUNC:
+            return func_die(c, t);
         default:
             return void_base_type(c);
     }
@@ -467,6 +686,7 @@ static void subprogram_emit(InfoCtx *c, CodegenFunc *cf)
     bytebuf_append_u32(c->b, (u32) bytebuf_len(cf->bytes)); /* high_pc = size */
     bytebuf_append(c->b, 1);                                /* frame_base exprloc length */
     bytebuf_append(c->b, DW_OP_call_frame_cfa);
+    type_ref_emit(c, cf->func->ret_type);
 
     size_t nparams = vec_size(cf->func->params);
     for (size_t i = 0; i < nparams; i++)
@@ -474,7 +694,7 @@ static void subprogram_emit(InfoCtx *c, CodegenFunc *cf)
         IrParam *p = (IrParam *) vec_get(cf->func->params, i);
         dwarf_uleb128(c->b, ABBREV_FORMAL_PARAM);
         info_string(c, p->name);
-        bytebuf_append_u32(c->b, (u32) type_die(c, p->type));
+        type_ref_emit(c, p->type);
         /* Slots sit below %rbp; the CFA is 16 bytes above it (push rbp + ret). */
         info_fbreg_loc(c, -(i64) cf->slot_off[p->vreg] - 16);
     }
@@ -500,7 +720,7 @@ static void global_emit(InfoCtx *c, IrGlobal *g, u64 offset)
     dwarf_uleb128(c->b, has_loc ? ABBREV_VARIABLE : ABBREV_VARIABLE_NO_LOC);
     info_string(c, g->name);
     bytebuf_append(c->b, (u8) (g->linkage == IR_LINK_LOCAL ? 0 : 1));
-    bytebuf_append_u32(c->b, (u32) type_die(c, g->type));
+    type_ref_emit(c, g->type);
     if (has_loc)
     {
         info_addr_loc(c, global_section_sym(g), (i64) offset);
@@ -542,6 +762,8 @@ static void abbrev_emit(ByteBuf *b)
     dwarf_uleb128(b, DW_FORM_data4);
     dwarf_uleb128(b, DW_AT_frame_base);
     dwarf_uleb128(b, DW_FORM_exprloc);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
     bytebuf_append(b, 0);
     bytebuf_append(b, 0);
 
@@ -595,6 +817,132 @@ static void abbrev_emit(ByteBuf *b)
     bytebuf_append(b, 0);
     bytebuf_append(b, 0);
 
+    /* ---- rich type abbreviations ---- */
+
+    dwarf_uleb128(b, ABBREV_POINTER_TYPE);
+    dwarf_uleb128(b, DW_TAG_pointer_type);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_CONST_TYPE);
+    dwarf_uleb128(b, DW_TAG_const_type);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_ARRAY_TYPE);
+    dwarf_uleb128(b, DW_TAG_array_type);
+    dwarf_uleb128(b, DW_CHILDREN_YES);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_SUBRANGE_TYPE);
+    dwarf_uleb128(b, DW_TAG_subrange_type);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    dwarf_uleb128(b, DW_AT_count);
+    dwarf_uleb128(b, DW_FORM_udata);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_STRUCT_TYPE);
+    dwarf_uleb128(b, DW_TAG_structure_type);
+    dwarf_uleb128(b, DW_CHILDREN_YES);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    dwarf_uleb128(b, DW_AT_byte_size);
+    dwarf_uleb128(b, DW_FORM_udata);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_UNION_TYPE);
+    dwarf_uleb128(b, DW_TAG_union_type);
+    dwarf_uleb128(b, DW_CHILDREN_YES);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    dwarf_uleb128(b, DW_AT_byte_size);
+    dwarf_uleb128(b, DW_FORM_udata);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_STRUCT_INCOMPLETE);
+    dwarf_uleb128(b, DW_TAG_structure_type);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_UNION_INCOMPLETE);
+    dwarf_uleb128(b, DW_TAG_union_type);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_MEMBER);
+    dwarf_uleb128(b, DW_TAG_member);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    dwarf_uleb128(b, DW_AT_data_member_location);
+    dwarf_uleb128(b, DW_FORM_udata);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_MEMBER_BITFIELD);
+    dwarf_uleb128(b, DW_TAG_member);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    dwarf_uleb128(b, DW_AT_data_member_location);
+    dwarf_uleb128(b, DW_FORM_udata);
+    dwarf_uleb128(b, DW_AT_bit_size);
+    dwarf_uleb128(b, DW_FORM_udata);
+    dwarf_uleb128(b, DW_AT_bit_offset);
+    dwarf_uleb128(b, DW_FORM_udata);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_ENUM_TYPE);
+    dwarf_uleb128(b, DW_TAG_enumeration_type);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    dwarf_uleb128(b, DW_AT_byte_size);
+    dwarf_uleb128(b, DW_FORM_udata);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_SUBROUTINE_TYPE);
+    dwarf_uleb128(b, DW_TAG_subroutine_type);
+    dwarf_uleb128(b, DW_CHILDREN_YES);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_SUBPROG_PARAM);
+    dwarf_uleb128(b, DW_TAG_formal_parameter);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
     bytebuf_append(b, 0); /* end of the abbrev table */
 }
 
@@ -630,6 +978,7 @@ void dwarf_build(CodegenModule *cm, const char *compile_unit, const char *comp_d
         .relocs = out->rela_info,
         .type_to_die = u64map_new(arena),
         .void_die = 0,
+        .pending = vec_new(arena),
     };
 
     size_t cu_length_off = bytebuf_len(c.b);
@@ -671,6 +1020,13 @@ void dwarf_build(CodegenModule *cm, const char *compile_unit, const char *comp_d
         {
             global_emit(&c, (IrGlobal *) vec_get(cm->globals, i), global_off[i]);
         }
+    }
+
+    /* Flush deferred type DIEs; a record resolved here queues its own members. */
+    for (size_t i = 0; i < vec_size(c.pending); i++)
+    {
+        PendingRef *p = (PendingRef *) vec_get(c.pending, i);
+        bytebuf_poke_u32(c.b, p->slot, (u32) type_die(&c, p->type));
     }
 
     bytebuf_append(c.b, 0); /* null DIE: terminates the compile_unit children */

@@ -119,7 +119,7 @@ TEST(debug_line, gdb_break_next_backtrace)
 
     const char *base = strrchr(src, '/') + 1;
     char breakpoint[64];
-    snprintf(breakpoint, sizeof(breakpoint), "break %s:8", base);
+    snprintf(breakpoint, sizeof(breakpoint), "break %s:7", base);
 
     char cmd[4096];
     snprintf(cmd, sizeof(cmd), "%s -g -c %s -o %s >/dev/null 2>&1", FICC_BIN, src, obj);
@@ -127,7 +127,8 @@ TEST(debug_line, gdb_break_next_backtrace)
     snprintf(cmd, sizeof(cmd), "gcc -no-pie -g %s -o %s >/dev/null 2>&1", obj, bin);
     EXPECT_EQ(tc_run_shell(cmd), 0);
 
-    /* Break at the add3 return statement; bt must show add3 over main. */
+    /* Break at the add3 first statement; one next homes to the return
+       statement, and bt must show add3's frame over main's. */
     snprintf(cmd, sizeof(cmd),
              "gdb -batch -ex 'set debuginfod enabled off' -ex 'set pagination off' "
              "-ex '%s' -ex run -ex next -ex bt -ex quit %s "
