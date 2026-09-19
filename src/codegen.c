@@ -9,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+static u64 align_up(u64 n, u64 a)
+{
+    return (n + a - 1) / a * a;
+}
+
 /* A rel32 field patched later; `target` is a function name (calls) or block label (jcc/jmp). */
 typedef struct
 {
@@ -3506,6 +3511,8 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     cf->frame.off_mov = fr.off_mov;
     cf->frame.off_sub = fr.off_sub;
     cf->is_static = f->is_static;
+    cf->func = f;
+    cf->slot_off = fr.slot_off;
 }
 
 static size_t emit_all_funcs(CodegenModule *cm, IrModule *ir, Arena *arena, bool debug)
@@ -3575,4 +3582,43 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Are
     assign_func_offsets(cm, nfuncs);
     resolve_direct_calls(cm, nfuncs, arena);
     return cm;
+}
+
+static u64 append_global(ByteBuf *buf, IrGlobal *g)
+{
+    u64 off = align_up(bytebuf_len(buf), g->align);
+    while ((u64) bytebuf_len(buf) < off)
+    {
+        bytebuf_append(buf, 0);
+    }
+    if (g->init_data)
+    {
+        bytebuf_append_bytes(buf, g->init_data, g->init_len);
+    }
+    return off;
+}
+
+u64 *codegen_global_offsets(CodegenModule *cm, ByteBuf *rodata, ByteBuf *data, Arena *arena)
+{
+    size_t nglobals = cm->globals ? vec_size(cm->globals) : 0;
+    u64 *global_off = arena_alloc(arena, (nglobals ? nglobals : 1) * sizeof(u64), sizeof(u64));
+    u64 bss_size = 0;
+    for (size_t i = 0; i < nglobals; i++)
+    {
+        IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
+        switch (g->section)
+        {
+            case IR_SECTION_RODATA:
+                global_off[i] = append_global(rodata, g);
+                break;
+            case IR_SECTION_DATA:
+                global_off[i] = append_global(data, g);
+                break;
+            case IR_SECTION_BSS:
+                global_off[i] = align_up(bss_size, g->align);
+                bss_size = global_off[i] + type_sizeof(g->type);
+                break;
+        }
+    }
+    return global_off;
 }

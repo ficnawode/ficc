@@ -100,7 +100,8 @@ TEST(dwarf_leb, build_line_unit_shape)
     EXPECT_EQ((size_t) unit_len, bytebuf_len(&out.debug_line) - 4);
     EXPECT_TRUE(bytebuf_len(&out.debug_info) > 0);
     EXPECT_TRUE(bytebuf_len(&out.debug_abbrev) > 0);
-    EXPECT_EQ(vec_size(out.rela_info), 1); /* CU low_pc */
+    /* CU low_pc + one subprogram low_pc per function. */
+    EXPECT_EQ(vec_size(out.rela_info), 3);
 
     arena_free(a);
 }

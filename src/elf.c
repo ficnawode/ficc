@@ -371,50 +371,18 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
 
     size_t nglobals = cm->globals ? vec_size(cm->globals) : 0;
 
-    u64 *global_off = arena_alloc(arena, (nglobals ? nglobals : 1) * sizeof(u64), sizeof(u64));
     ByteBuf text, rodata, data;
     bytebuf_init(&text, arena);
     bytebuf_init(&rodata, arena);
     bytebuf_init(&data, arena);
+    u64 *global_off = codegen_global_offsets(cm, &rodata, &data, arena);
     u64 bss_size = 0;
     for (size_t i = 0; i < nglobals; i++)
     {
         IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
-        switch (g->section)
+        if (g->section == IR_SECTION_BSS)
         {
-            case IR_SECTION_RODATA:
-            {
-                u64 off = align_up(bytebuf_len(&rodata), g->align);
-                while ((u64) bytebuf_len(&rodata) < off)
-                {
-                    bytebuf_append(&rodata, 0);
-                }
-                global_off[i] = off;
-                if (g->init_data)
-                {
-                    bytebuf_append_bytes(&rodata, g->init_data, g->init_len);
-                }
-                break;
-            }
-            case IR_SECTION_DATA:
-            {
-                u64 off = align_up(bytebuf_len(&data), g->align);
-                while ((u64) bytebuf_len(&data) < off)
-                {
-                    bytebuf_append(&data, 0);
-                }
-                global_off[i] = off;
-                if (g->init_data)
-                {
-                    bytebuf_append_bytes(&data, g->init_data, g->init_len);
-                }
-                break;
-            }
-            case IR_SECTION_BSS:
-                bss_size = align_up(bss_size, g->align);
-                global_off[i] = bss_size;
-                bss_size += type_sizeof(g->type);
-                break;
+            bss_size = global_off[i] + type_sizeof(g->type);
         }
     }
 
@@ -812,12 +780,12 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
         for (size_t i = 0; i < vec_size(dwarf->rela_info); i++)
         {
             DwarfReloc *rel = (DwarfReloc *) vec_get(dwarf->rela_info, i);
-            rela_emit(&out, rel->offset, TEXT_SECTION_SYM, R_X86_64_64, rel->addend);
+            rela_emit(&out, rel->offset, rel->sym, R_X86_64_64, rel->addend);
         }
         for (size_t i = 0; i < vec_size(dwarf->rela_line); i++)
         {
             DwarfReloc *rel = (DwarfReloc *) vec_get(dwarf->rela_line, i);
-            rela_emit(&out, rel->offset, TEXT_SECTION_SYM, R_X86_64_64, rel->addend);
+            rela_emit(&out, rel->offset, rel->sym, R_X86_64_64, rel->addend);
         }
     }
     while ((size_t) bytebuf_len(&out) < off_shdr)

@@ -7,12 +7,21 @@
 #include "util/types.h"
 #include "util/vec.h"
 
-/* R_X86_64_64 reloc against the .text section symbol. */
+/* R_X86_64_64 reloc for a .debug_* address slot; sym is text/rodata/data/bss. */
 typedef struct
 {
     u64 offset;
     i64 addend;
+    u32 sym;
 } DwarfReloc;
+
+enum
+{
+    DWARF_SYM_TEXT = 1,
+    DWARF_SYM_RODATA = 2,
+    DWARF_SYM_DATA = 3,
+    DWARF_SYM_BSS = 4,
+};
 
 /* Debug-section content plus the relocation lists elf_write consumes. */
 typedef struct

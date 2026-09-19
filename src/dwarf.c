@@ -1,5 +1,6 @@
 #include "dwarf.h"
 #include "util/assert.h"
+#include "util/hashmap.h"
 
 #include <string.h>
 
@@ -29,26 +30,69 @@ enum LineExtOp
 
 enum DwarfTag
 {
+    DW_TAG_formal_parameter = 0x05,
     DW_TAG_compile_unit = 0x11,
+    DW_TAG_base_type = 0x24,
+    DW_TAG_subprogram = 0x2e,
+    DW_TAG_variable = 0x34,
 };
 
 enum DwarfAttr
 {
+    DW_AT_location = 0x02,
     DW_AT_name = 0x03,
+    DW_AT_byte_size = 0x0b,
     DW_AT_stmt_list = 0x10,
     DW_AT_low_pc = 0x11,
     DW_AT_high_pc = 0x12,
     DW_AT_language = 0x13,
     DW_AT_comp_dir = 0x1b,
     DW_AT_producer = 0x25,
+    DW_AT_encoding = 0x3e,
+    DW_AT_external = 0x3f,
+    DW_AT_frame_base = 0x40,
+    DW_AT_type = 0x49,
 };
 
 enum DwarfForm
 {
     DW_FORM_addr = 0x01,
+    DW_FORM_data1 = 0x0b,
     DW_FORM_data2 = 0x05,
     DW_FORM_data4 = 0x06,
     DW_FORM_string = 0x08,
+    DW_FORM_flag = 0x0c,
+    DW_FORM_ref4 = 0x13,
+    DW_FORM_exprloc = 0x18,
+};
+
+enum DwarfOp
+{
+    DW_OP_addr = 0x03,
+    DW_OP_fbreg = 0x91,
+    DW_OP_call_frame_cfa = 0x9c,
+};
+
+enum DwarfAtE
+{
+    DW_ATE_address = 0x01,
+    DW_ATE_boolean = 0x02,
+    DW_ATE_float = 0x04,
+    DW_ATE_signed = 0x05,
+    DW_ATE_signed_char = 0x06,
+    DW_ATE_unsigned = 0x07,
+    DW_ATE_unsigned_char = 0x08,
+};
+
+/* Abbrev codes: the fixed table emitted into .debug_abbrev in this order. */
+enum
+{
+    ABBREV_CU = 1,
+    ABBREV_SUBPROGRAM = 2,
+    ABBREV_FORMAL_PARAM = 3,
+    ABBREV_VARIABLE = 4,
+    ABBREV_BASE_TYPE = 5,
+    ABBREV_VARIABLE_NO_LOC = 6, /* externs declare no DW_AT_location */
 };
 
 enum
@@ -167,6 +211,7 @@ static void line_func(ByteBuf *b, Vec *relocs, CodegenFunc *cf)
     DwarfReloc *rel = arena_alloc(b->arena, sizeof(DwarfReloc), sizeof(void *));
     rel->offset = (u64) slot;
     rel->addend = (i64) cf->offset;
+    rel->sym = DWARF_SYM_TEXT;
     vec_push(relocs, rel);
 
     u64 addr = cf->offset;
@@ -222,11 +267,249 @@ static void line_header(ByteBuf *b, const char *compile_unit)
     bytebuf_append(b, 0); /* end of file_names */
 }
 
-/* ---- .debug_info: a single DWARF4 compile-unit DIE ---- */
+/* ---- .debug_info: one DWARF4 compile-unit tree ---- */
+
+typedef struct
+{
+    ByteBuf *b;          /* .debug_info being built */
+    Vec *relocs;         /* .rela.debug_info */
+    U64Map *type_to_die; /* Type* -> DIE byte offset (0: not yet emitted) */
+    u64 void_die;        /* cached fallback DIE for types beyond this phase */
+} InfoCtx;
+
+static void info_reloc(InfoCtx *c, u32 sym, i64 addend)
+{
+    size_t slot = bytebuf_len(c->b);
+    bytebuf_append_u64(c->b, 0);
+    DwarfReloc *rel = arena_alloc(c->b->arena, sizeof(DwarfReloc), sizeof(void *));
+    rel->offset = (u64) slot;
+    rel->addend = addend;
+    rel->sym = sym;
+    vec_push(c->relocs, rel);
+}
+
+static void info_string(InfoCtx *c, const char *s)
+{
+    size_t n = strlen(s);
+    bytebuf_append_bytes(c->b, (const u8 *) s, n);
+    bytebuf_append(c->b, 0);
+}
+
+/* exprloc = DW_OP_fbreg(disp): a fixed slot below the call-frame CFA. */
+static void info_fbreg_loc(InfoCtx *c, i64 disp)
+{
+    ByteBuf tmp;
+    bytebuf_init(&tmp, c->b->arena);
+    dwarf_sleb128(&tmp, disp);
+    bytebuf_append(c->b, (u8) (1u + (u32) bytebuf_len(&tmp)));
+    bytebuf_append(c->b, DW_OP_fbreg);
+    bytebuf_append_bytes(c->b, bytebuf_data(&tmp), bytebuf_len(&tmp));
+}
+
+/* exprloc = DW_OP_addr: an R_X86_64_64 slot resolved to sym + addend. */
+static void info_addr_loc(InfoCtx *c, u32 sym, i64 addend)
+{
+    bytebuf_append(c->b, (u8) (1u + DW_ADDRESS_SIZE));
+    bytebuf_append(c->b, DW_OP_addr);
+    size_t slot = bytebuf_len(c->b);
+    bytebuf_append_u64(c->b, 0);
+    DwarfReloc *rel = arena_alloc(c->b->arena, sizeof(DwarfReloc), sizeof(void *));
+    rel->offset = (u64) slot;
+    rel->addend = addend;
+    rel->sym = sym;
+    vec_push(c->relocs, rel);
+}
+
+static u64 dump_base_type(InfoCtx *c, const char *name, u8 byte_size, u8 encoding)
+{
+    u64 die = bytebuf_len(c->b);
+    dwarf_uleb128(c->b, ABBREV_BASE_TYPE);
+    info_string(c, name);
+    bytebuf_append(c->b, byte_size);
+    bytebuf_append(c->b, encoding);
+    return die;
+}
+
+/* Fallback void DIE for types this phase does not describe. */
+static u64 void_base_type(InfoCtx *c)
+{
+    if (c->void_die == 0)
+    {
+        c->void_die = dump_base_type(c, "void", 0, DW_ATE_address);
+    }
+    return c->void_die;
+}
+
+/* Fundamental scalar -> its base-type DIE; everything else -> void fallback. */
+static u64 type_die(InfoCtx *c, Type *t)
+{
+    t = type_unqual(t);
+    if (!t)
+    {
+        return void_base_type(c);
+    }
+    u32 off = (u32) (uintptr_t) u64map_get(c->type_to_die, (u64) (uintptr_t) t);
+    if (off)
+    {
+        return off;
+    }
+    const char *name;
+    u8 size;
+    u8 encoding;
+    switch (t->kind)
+    {
+        case TYPE_VOID:
+            return void_base_type(c);
+        case TYPE_BOOL:
+            name = "_Bool";
+            size = (u8) (t->size);
+            encoding = DW_ATE_boolean;
+            break;
+        case TYPE_CHAR:
+            name = "char";
+            size = (u8) (t->size);
+            encoding = DW_ATE_signed_char;
+            break;
+        case TYPE_SHORT:
+            name = "short";
+            size = (u8) (t->size);
+            encoding = DW_ATE_signed;
+            break;
+        case TYPE_INT:
+            name = "int";
+            size = (u8) (t->size);
+            encoding = DW_ATE_signed;
+            break;
+        case TYPE_LONG:
+            name = "long";
+            size = (u8) (t->size);
+            encoding = DW_ATE_signed;
+            break;
+        case TYPE_LLONG:
+            name = "long long";
+            size = (u8) (t->size);
+            encoding = DW_ATE_signed;
+            break;
+        case TYPE_UCHAR:
+            name = "unsigned char";
+            size = (u8) (t->size);
+            encoding = DW_ATE_unsigned_char;
+            break;
+        case TYPE_USHORT:
+            name = "unsigned short";
+            size = (u8) (t->size);
+            encoding = DW_ATE_unsigned;
+            break;
+        case TYPE_UINT:
+            name = "unsigned int";
+            size = (u8) (t->size);
+            encoding = DW_ATE_unsigned;
+            break;
+        case TYPE_ULONG:
+            name = "unsigned long";
+            size = (u8) (t->size);
+            encoding = DW_ATE_unsigned;
+            break;
+        case TYPE_ULLONG:
+            name = "unsigned long long";
+            size = (u8) (t->size);
+            encoding = DW_ATE_unsigned;
+            break;
+        case TYPE_FLOAT:
+            name = "float";
+            size = (u8) (t->size);
+            encoding = DW_ATE_float;
+            break;
+        case TYPE_DOUBLE:
+            name = "double";
+            size = (u8) (t->size);
+            encoding = DW_ATE_float;
+            break;
+        case TYPE_LONG_DOUBLE:
+            name = "long double";
+            size = (u8) (t->size);
+            encoding = DW_ATE_float;
+            break;
+        default:
+            return void_base_type(c);
+    }
+    off = (u32) dump_base_type(c, name, size, encoding);
+    u64map_set(c->type_to_die, (u64) (uintptr_t) t, (void *) (uintptr_t) off);
+    return off;
+}
+
+/* Pre-emit referenced base types so ref4 offsets point at complete sibling DIEs. */
+static void preemit_types(InfoCtx *c, CodegenModule *cm)
+{
+    size_t nfuncs = vec_size(cm->funcs);
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
+        size_t nparams = vec_size(cf->func->params);
+        for (size_t j = 0; j < nparams; j++)
+        {
+            type_die(c, ((IrParam *) vec_get(cf->func->params, j))->type);
+        }
+    }
+    size_t nglobals = cm->globals ? vec_size(cm->globals) : 0;
+    for (size_t i = 0; i < nglobals; i++)
+    {
+        type_die(c, ((IrGlobal *) vec_get(cm->globals, i))->type);
+    }
+}
+
+static void subprogram_emit(InfoCtx *c, CodegenFunc *cf)
+{
+    dwarf_uleb128(c->b, ABBREV_SUBPROGRAM);
+    bytebuf_append(c->b, (u8) (cf->is_static ? 0 : 1));
+    info_string(c, cf->name);
+    info_reloc(c, DWARF_SYM_TEXT, (i64) cf->offset);
+    bytebuf_append_u32(c->b, (u32) bytebuf_len(cf->bytes)); /* high_pc = size */
+    bytebuf_append(c->b, 1);                                /* frame_base exprloc length */
+    bytebuf_append(c->b, DW_OP_call_frame_cfa);
+
+    size_t nparams = vec_size(cf->func->params);
+    for (size_t i = 0; i < nparams; i++)
+    {
+        IrParam *p = (IrParam *) vec_get(cf->func->params, i);
+        dwarf_uleb128(c->b, ABBREV_FORMAL_PARAM);
+        info_string(c, p->name);
+        bytebuf_append_u32(c->b, (u32) type_die(c, p->type));
+        /* Slots sit below %rbp; the CFA is 16 bytes above it (push rbp + ret). */
+        info_fbreg_loc(c, -(i64) cf->slot_off[p->vreg] - 16);
+    }
+    bytebuf_append(c->b, 0); /* end of this subprogram's children */
+}
+
+static u32 global_section_sym(IrGlobal *g)
+{
+    switch (g->section)
+    {
+        case IR_SECTION_RODATA:
+            return DWARF_SYM_RODATA;
+        case IR_SECTION_DATA:
+            return DWARF_SYM_DATA;
+        default:
+            return DWARF_SYM_BSS;
+    }
+}
+
+static void global_emit(InfoCtx *c, IrGlobal *g, u64 offset)
+{
+    bool has_loc = g->linkage != IR_LINK_EXTERN;
+    dwarf_uleb128(c->b, has_loc ? ABBREV_VARIABLE : ABBREV_VARIABLE_NO_LOC);
+    info_string(c, g->name);
+    bytebuf_append(c->b, (u8) (g->linkage == IR_LINK_LOCAL ? 0 : 1));
+    bytebuf_append_u32(c->b, (u32) type_die(c, g->type));
+    if (has_loc)
+    {
+        info_addr_loc(c, global_section_sym(g), (i64) offset);
+    }
+}
 
 static void abbrev_emit(ByteBuf *b)
 {
-    dwarf_uleb128(b, 1); /* abbrev code */
+    dwarf_uleb128(b, ABBREV_CU);
     dwarf_uleb128(b, DW_TAG_compile_unit);
     dwarf_uleb128(b, DW_CHILDREN_YES);
     dwarf_uleb128(b, DW_AT_producer);
@@ -243,51 +526,76 @@ static void abbrev_emit(ByteBuf *b)
     dwarf_uleb128(b, DW_FORM_data4);
     dwarf_uleb128(b, DW_AT_stmt_list);
     dwarf_uleb128(b, DW_FORM_data4);
-    bytebuf_append(b, 0); /* end of attributes */
     bytebuf_append(b, 0);
-    bytebuf_append(b, 0); /* end of abbrev table */
-}
-
-static void info_cu(ByteBuf *b, Vec *relocs, const char *compile_unit, const char *comp_dir,
-                    CodegenModule *cm)
-{
-    bytebuf_append_u32(b, 0); /* unit length: patched in dwarf_build */
-    bytebuf_append_u16(b, DW_INFO_VERSION);
-    bytebuf_append_u32(b, 0); /* abbrev offset */
-    bytebuf_append(b, DW_ADDRESS_SIZE);
-
-    dwarf_uleb128(b, 1); /* abbrev code: compile_unit */
-    size_t n = strlen("ficc");
-    bytebuf_append_bytes(b, (const u8 *) "ficc", n);
-    bytebuf_append(b, 0);
-    bytebuf_append_u16(b, DW_LANG_C11);
-    n = strlen(compile_unit);
-    bytebuf_append_bytes(b, (const u8 *) compile_unit, n);
-    bytebuf_append(b, 0);
-    n = strlen(comp_dir);
-    bytebuf_append_bytes(b, (const u8 *) comp_dir, n);
     bytebuf_append(b, 0);
 
-    size_t text_size = 0;
-    size_t nfuncs = vec_size(cm->funcs);
-    for (size_t i = 0; i < nfuncs; i++)
-    {
-        text_size += bytebuf_len(((CodegenFunc *) vec_get(cm->funcs, i))->bytes);
-    }
+    dwarf_uleb128(b, ABBREV_SUBPROGRAM);
+    dwarf_uleb128(b, DW_TAG_subprogram);
+    dwarf_uleb128(b, DW_CHILDREN_YES);
+    dwarf_uleb128(b, DW_AT_external);
+    dwarf_uleb128(b, DW_FORM_flag);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    dwarf_uleb128(b, DW_AT_low_pc);
+    dwarf_uleb128(b, DW_FORM_addr);
+    dwarf_uleb128(b, DW_AT_high_pc);
+    dwarf_uleb128(b, DW_FORM_data4);
+    dwarf_uleb128(b, DW_AT_frame_base);
+    dwarf_uleb128(b, DW_FORM_exprloc);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
 
-    /* low_pc = .text start (reloc vs .text); high_pc = length (DWARF4 size). */
-    size_t slot = bytebuf_len(b);
-    bytebuf_append_u64(b, 0);
-    DwarfReloc *lo = arena_alloc(b->arena, sizeof(DwarfReloc), sizeof(void *));
-    lo->offset = (u64) slot;
-    lo->addend = 0;
-    vec_push(relocs, lo);
+    dwarf_uleb128(b, ABBREV_FORMAL_PARAM);
+    dwarf_uleb128(b, DW_TAG_formal_parameter);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    dwarf_uleb128(b, DW_AT_location);
+    dwarf_uleb128(b, DW_FORM_exprloc);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
 
-    bytebuf_append_u32(b, (u32) text_size);
+    dwarf_uleb128(b, ABBREV_VARIABLE);
+    dwarf_uleb128(b, DW_TAG_variable);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    dwarf_uleb128(b, DW_AT_external);
+    dwarf_uleb128(b, DW_FORM_flag);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    dwarf_uleb128(b, DW_AT_location);
+    dwarf_uleb128(b, DW_FORM_exprloc);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
 
-    bytebuf_append_u32(b, 0); /* stmt_list: the single .debug_line unit */
+    dwarf_uleb128(b, ABBREV_VARIABLE_NO_LOC);
+    dwarf_uleb128(b, DW_TAG_variable);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    dwarf_uleb128(b, DW_AT_external);
+    dwarf_uleb128(b, DW_FORM_flag);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
 
-    bytebuf_append(b, 0); /* null DIE: terminates the compile_unit children */
+    dwarf_uleb128(b, ABBREV_BASE_TYPE);
+    dwarf_uleb128(b, DW_TAG_base_type);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    dwarf_uleb128(b, DW_AT_byte_size);
+    dwarf_uleb128(b, DW_FORM_data1);
+    dwarf_uleb128(b, DW_AT_encoding);
+    dwarf_uleb128(b, DW_FORM_data1);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    bytebuf_append(b, 0); /* end of the abbrev table */
 }
 
 void dwarf_build(CodegenModule *cm, const char *compile_unit, const char *comp_dir,
@@ -317,8 +625,54 @@ void dwarf_build(CodegenModule *cm, const char *compile_unit, const char *comp_d
 
     abbrev_emit(&out->debug_abbrev);
 
-    ByteBuf *ib = &out->debug_info;
-    size_t cu_length_off = bytebuf_len(ib);
-    info_cu(ib, out->rela_info, compile_unit, comp_dir, cm);
-    bytebuf_poke_u32(ib, cu_length_off, (u32) (bytebuf_len(ib) - cu_length_off - sizeof(u32)));
+    InfoCtx c = {
+        .b = &out->debug_info,
+        .relocs = out->rela_info,
+        .type_to_die = u64map_new(arena),
+        .void_die = 0,
+    };
+
+    size_t cu_length_off = bytebuf_len(c.b);
+    bytebuf_append_u32(c.b, 0); /* unit length: patched below */
+    bytebuf_append_u16(c.b, DW_INFO_VERSION);
+    bytebuf_append_u32(c.b, 0); /* abbrev offset: the table starts at 0 */
+    bytebuf_append(c.b, DW_ADDRESS_SIZE);
+
+    dwarf_uleb128(c.b, ABBREV_CU);
+    info_string(&c, "ficc");
+    bytebuf_append_u16(c.b, DW_LANG_C11);
+    info_string(&c, compile_unit);
+    info_string(&c, comp_dir);
+    info_reloc(&c, DWARF_SYM_TEXT, 0); /* low_pc = .text start */
+
+    size_t text_size = 0;
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        text_size += bytebuf_len(((CodegenFunc *) vec_get(cm->funcs, i))->bytes);
+    }
+    bytebuf_append_u32(c.b, (u32) text_size); /* high_pc of the whole unit */
+    bytebuf_append_u32(c.b, 0);               /* stmt_list: the one .debug_line unit */
+
+    preemit_types(&c, cm);
+
+    for (size_t i = 0; i < nfuncs; i++)
+    {
+        subprogram_emit(&c, (CodegenFunc *) vec_get(cm->funcs, i));
+    }
+
+    size_t nglobals = cm->globals ? vec_size(cm->globals) : 0;
+    if (nglobals)
+    {
+        ByteBuf scratch_ro, scratch_data;
+        bytebuf_init(&scratch_ro, arena);
+        bytebuf_init(&scratch_data, arena);
+        u64 *global_off = codegen_global_offsets(cm, &scratch_ro, &scratch_data, arena);
+        for (size_t i = 0; i < nglobals; i++)
+        {
+            global_emit(&c, (IrGlobal *) vec_get(cm->globals, i), global_off[i]);
+        }
+    }
+
+    bytebuf_append(c.b, 0); /* null DIE: terminates the compile_unit children */
+    bytebuf_poke_u32(c.b, cu_length_off, (u32) (bytebuf_len(c.b) - cu_length_off - sizeof(u32)));
 }

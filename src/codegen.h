@@ -57,6 +57,8 @@ struct CodegenFunc
     Vec *lines;          /* Vec<LineEntry*>, NULL without -g */
     FuncFrame frame;     /* prologue layout for .eh_frame CFI */
     bool is_static;      /* emit as STB_LOCAL in the object file */
+    IrFunction *func;    /* owning IR function: param names/types for .debug_info */
+    u32 *slot_off;       /* per-vreg frame offsets below %rbp; param locations (dwarf.c) */
 };
 
 /* IrModule-level codegen records */
@@ -70,5 +72,8 @@ struct CodegenModule
 
 /* Convert IR to machine code bytes. */
 CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Arena *arena);
+
+/* Per-global .rodata/.data/.bss offsets; shared by elf.c and dwarf.c layout. */
+u64 *codegen_global_offsets(CodegenModule *cm, ByteBuf *rodata, ByteBuf *data, Arena *arena);
 
 #endif
