@@ -65,14 +65,14 @@ const OptConfig *opt_config_for(OptLevel level)
 
 /* The pass registry; each pass file fills its row's fn (NULL = reserved). */
 static const OptPass opt_passes[] = {
-    {OPT_PASS_FOLD_CONST, "fold_const", NULL},
-    {OPT_PASS_IDENTITY, "identity", NULL},
-    {OPT_PASS_CAST, "cast", NULL},
-    {OPT_PASS_CPROP, "cprop", NULL},
-    {OPT_PASS_PHI_SIMP, "phi_simp", NULL},
-    {OPT_PASS_DCE, "dce", NULL},
-    {OPT_PASS_CFG_CLEAN, "cfg_clean", NULL},
-    {OPT_PASS_PREHEADER, "preheader", NULL},
+    {OPT_PASS_FOLD_CONST, "fold_const", opt_pass_fold_const},
+    {OPT_PASS_IDENTITY, "identity", opt_pass_identity},
+    {OPT_PASS_CAST, "cast", opt_pass_cast},
+    {OPT_PASS_CPROP, "cprop", opt_pass_cprop},
+    {OPT_PASS_PHI_SIMP, "phi_simp", opt_pass_phi_simp},
+    {OPT_PASS_DCE, "dce", opt_pass_dce},
+    {OPT_PASS_CFG_CLEAN, "cfg_clean", opt_pass_cfg_clean},
+    {OPT_PASS_PREHEADER, "preheader", opt_pass_preheader},
     {OPT_PASS_GVN, "gvn", NULL},
     {OPT_PASS_LICM, "licm", NULL},
     {OPT_PASS_MEM_FWD, "mem_fwd", NULL},
@@ -265,7 +265,7 @@ static void retarget_labels(IrInstr *last, const char *old_label, const char *ne
     }
 }
 
-static void retarget_terminator(IrBlock *from, const char *old_label, const char *new_label)
+void opt_retarget_terminator(IrBlock *from, const char *old_label, const char *new_label)
 {
     if (vec_size(from->instrs) == 0)
     {
@@ -405,7 +405,7 @@ IrBlock *opt_insert_empty_block(IrModule *mod, IrFunction *f, Vec *preds, IrBloc
     for (size_t p = 0; p < npreds; p++)
     {
         IrBlock *pred = (IrBlock *) vec_get(preds, p);
-        retarget_terminator(pred, succ->label, bb->label);
+        opt_retarget_terminator(pred, succ->label, bb->label);
         preds_remove(succ->preds, pred);
         preds_push_unique(bb->preds, pred);
     }
@@ -419,6 +419,53 @@ IrBlock *opt_insert_preheader(IrModule *mod, IrFunction *f, IrBlock *pred, IrBlo
     Vec *preds = vec_new(f->arena);
     vec_push(preds, pred);
     return opt_insert_empty_block(mod, f, preds, succ, prefix);
+}
+
+/* Drop `from`'s phi entries so a block's phis stay exactly its pred set. */
+static void phi_drop_pred(IrBlock *bb, const char *label)
+{
+    size_t ninstr = vec_size(bb->instrs);
+    for (size_t i = 0; i < ninstr; i++)
+    {
+        IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
+        if (in->opcode != OP_PHI)
+        {
+            break;
+        }
+        u32 nentries = in->extra.phi.nentries;
+        u32 nkept = 0;
+        for (u32 e = 0; e < nentries; e++)
+        {
+            if (strcmp(in->extra.phi.entries[e].label, label) != 0)
+            {
+                nkept++;
+            }
+        }
+        if (nkept == nentries)
+        {
+            continue;
+        }
+        IrPhiEntry *entries =
+            arena_alloc(bb->arena, (nkept + 1) * sizeof(IrPhiEntry), sizeof(void *));
+        u32 k = 0;
+        for (u32 e = 0; e < nentries; e++)
+        {
+            if (strcmp(in->extra.phi.entries[e].label, label) == 0)
+            {
+                continue;
+            }
+            entries[k++] = in->extra.phi.entries[e];
+        }
+        in->extra.phi.entries = entries;
+        in->extra.phi.nentries = nkept;
+        in->extra.phi.nfilled = nkept;
+    }
+}
+
+void opt_drop_edge(IrBlock *from, IrBlock *to)
+{
+    preds_remove(to->preds, from);
+    phi_drop_pred(to, from->label);
 }
 
 /* ---- value analysis ---- */
@@ -485,6 +532,72 @@ void opt_make_value_analysis(OptimizerContext *ctx, IrFunction *f)
     }
     ctx->def_vreg = defs;
     ctx->use_count = uses;
+}
+
+static void rewrite_slot(IrOperand *slot, u32 vreg, IrOperand val, bool *changed)
+{
+    if (slot->is_imm || slot->is_global || slot->is_func)
+    {
+        return;
+    }
+    if (slot->u.vreg == vreg)
+    {
+        *slot = val;
+        *changed = true;
+    }
+}
+
+bool opt_replace_def(OptimizerContext *ctx, IrFunction *f, IrInstr *def, IrOperand val)
+{
+    (void) ctx;
+    u32 vreg = def->result;
+    if (vreg == NO_VREG)
+    {
+        return false;
+    }
+    bool changed = false;
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(bb->instrs);
+        for (size_t j = 0; j < ninstr; j++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, j);
+            for (u8 o = 0; o < in->nops; o++)
+            {
+                rewrite_slot(&in->ops[o], vreg, val, &changed);
+            }
+            if (in->opcode == OP_PHI)
+            {
+                for (u32 e = 0; e < in->extra.phi.nentries; e++)
+                {
+                    rewrite_slot(&in->extra.phi.entries[e].val, vreg, val, &changed);
+                }
+            }
+            else if (in->opcode == OP_CALL)
+            {
+                for (u32 arg = 0; arg < in->extra.call.nargs; arg++)
+                {
+                    rewrite_slot(&in->extra.call.args[arg], vreg, val, &changed);
+                }
+                if (in->extra.call.is_indirect)
+                {
+                    rewrite_slot(&in->extra.call.callee, vreg, val, &changed);
+                }
+            }
+        }
+    }
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+        if (opt_instr_index(bb, def) != UINT32_MAX)
+        {
+            opt_erase_instr(bb, def);
+            break;
+        }
+    }
+    return true;
 }
 
 void optimize(IrModule *mod, OptLevel level, Arena *arena)

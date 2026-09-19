@@ -1065,3 +1065,486 @@ TEST(opt, erase_and_reinsert_instr)
     EXPECT_EQ(ir_interp_run(m), 10);
     arena_free(a);
 }
+
+/* ---- canonicalize passes ---- */
+
+static u32 count_opcode(IrModule *m, IrOpcode op)
+{
+    u32 n = 0;
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+        size_t nblocks = vec_size(f->blocks);
+        for (size_t b = 0; b < nblocks; b++)
+        {
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+            size_t ninstr = vec_size(bb->instrs);
+            for (size_t j = 0; j < ninstr; j++)
+            {
+                if (((IrInstr *) vec_get(bb->instrs, j))->opcode == op)
+                {
+                    n++;
+                }
+            }
+        }
+    }
+    return n;
+}
+
+static u32 count_all_instrs(IrModule *m)
+{
+    u32 n = 0;
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+        size_t nblocks = vec_size(f->blocks);
+        for (size_t b = 0; b < nblocks; b++)
+        {
+            n += (u32) vec_size(((IrBlock *) vec_get(f->blocks, b))->instrs);
+        }
+    }
+    return n;
+}
+
+static u32 count_add_mul_or_sub(IrModule *m)
+{
+    return count_opcode(m, OP_ADD) + count_opcode(m, OP_MUL) + count_opcode(m, OP_OR) +
+           count_opcode(m, OP_SUB);
+}
+
+static i64 fp_bits(double d)
+{
+    i64 bits = 0;
+    memcpy(&bits, &d, sizeof(d));
+    return bits;
+}
+
+static IrFunction *add_int_param(IrModule *m, const char *name, u8 width, bool is_signed)
+{
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    u32 p = ir_alloc_vreg(m, width, is_signed, false);
+    IrParam *param = arena_alloc(m->arena, sizeof(IrParam), sizeof(void *));
+    param->name = name;
+    param->type = type_int();
+    param->vreg = p;
+    vec_push(f->params, param);
+    ir_func_add_block(f, "entry");
+    return f;
+}
+
+TEST(opt, fold_both_immediate_binops)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 v0 = ir_alloc_vreg(m, 8, true, false);
+    u32 v1 = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ADD, v0, ir_operand_imm(3), ir_operand_imm(4));
+    ir_emit_binop(entry, OP_MUL, v1, ir_operand_vreg(v0), ir_operand_imm(6));
+    ir_emit_ret(entry, ir_operand_vreg(v1));
+    EXPECT_EQ(ir_interp_run(m), 42);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_ADD), 0);
+    EXPECT_EQ(count_opcode(m, OP_MUL), 0);
+    EXPECT_EQ(ir_interp_run(m), 42);
+    arena_free(a);
+}
+
+TEST(opt, fold_normalizes_at_result_width)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 v0 = ir_alloc_vreg(m, 1, true, false); /* signed i8: 120+8 wraps to -128 */
+    ir_emit_binop(entry, OP_ADD, v0, ir_operand_imm(120), ir_operand_imm(8));
+    ir_emit_ret(entry, ir_operand_vreg(v0));
+    EXPECT_EQ(ir_interp_run(m), -128);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_ADD), 0);
+    EXPECT_EQ(ir_interp_run(m), -128);
+    arena_free(a);
+}
+
+TEST(opt, fold_unsigned_masks_to_width)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 v0 = ir_alloc_vreg(m, 1, false, false); /* u8: 250+10 wraps to 4 */
+    ir_emit_binop(entry, OP_ADD, v0, ir_operand_imm(250), ir_operand_imm(10));
+    ir_emit_ret(entry, ir_operand_vreg(v0));
+    EXPECT_EQ(ir_interp_run(m), 4);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 4);
+    arena_free(a);
+}
+
+/* Zero divisors and out-of-range shift counts are UB; the fold leaves them. */
+TEST(opt, fold_keeps_ub_shapes)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 v0 = ir_alloc_vreg(m, 8, true, false);
+    u32 v1 = ir_alloc_vreg(m, 8, true, false);
+    u32 v2 = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_SDIV, v0, ir_operand_imm(4), ir_operand_imm(0));
+    ir_emit_binop(entry, OP_SHL, v1, ir_operand_imm(1), ir_operand_imm(65));
+    ir_emit_binop(entry, OP_ADD, v2, ir_operand_vreg(v0), ir_operand_vreg(v1));
+    ir_emit_ret(entry, ir_operand_vreg(v2));
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_SDIV), 1);
+    EXPECT_EQ(count_opcode(m, OP_SHL), 1);
+    arena_free(a);
+}
+
+TEST(opt, fold_fp_arithmetic)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 v0 = ir_alloc_fp_vreg(m, 8);
+    u32 v1 = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_FADD, v0, ir_operand_imm(fp_bits(2.0)), ir_operand_imm(fp_bits(3.0)));
+    ir_emit_unary(entry, OP_FTOI, v1, ir_operand_vreg(v0));
+    ir_emit_ret(entry, ir_operand_vreg(v1));
+    EXPECT_EQ(ir_interp_run(m), 5);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_FADD), 0);
+    EXPECT_EQ(ir_interp_run(m), 5);
+    arena_free(a);
+}
+
+TEST(opt, fold_icmp_feeds_constant_branch)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    if (1 < 2) return 7;\n"
+                                  "    return 9;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 7);
+    EXPECT_TRUE(count_opcode(m, OP_ICMP_SLT) >= 1);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_ICMP_SLT), 0);
+    EXPECT_EQ(count_opcode(m, OP_BRCOND), 0);
+    EXPECT_EQ(ir_interp_run(m), 7);
+    arena_free(a);
+}
+
+TEST(opt, identity_neutral_elements)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = add_int_param(m, "x", 4, true);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrParam *p = (IrParam *) vec_get(f->params, 0);
+    u32 a0 = ir_alloc_vreg(m, 4, true, false);
+    u32 a1 = ir_alloc_vreg(m, 4, true, false);
+    u32 a2 = ir_alloc_vreg(m, 4, true, false);
+    u32 a3 = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(entry, OP_ADD, a0, ir_operand_vreg(p->vreg), ir_operand_imm(0));
+    ir_emit_binop(entry, OP_MUL, a1, ir_operand_vreg(a0), ir_operand_imm(1));
+    ir_emit_binop(entry, OP_OR, a2, ir_operand_vreg(a1), ir_operand_imm(0));
+    ir_emit_binop(entry, OP_SUB, a3, ir_operand_vreg(a2), ir_operand_vreg(a2));
+    ir_emit_ret(entry, ir_operand_vreg(a3));
+    EXPECT_EQ(ir_interp_run(m), 0);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_add_mul_or_sub(m), 0);
+    EXPECT_EQ(count_all_instrs(m), 1); /* just the ret */
+    EXPECT_EQ(ir_interp_run(m), 0);
+    arena_free(a);
+}
+
+TEST(opt, identity_mul_by_zero)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = add_int_param(m, "x", 4, true);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrParam *p = (IrParam *) vec_get(f->params, 0);
+    u32 v0 = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(entry, OP_MUL, v0, ir_operand_vreg(p->vreg), ir_operand_imm(0));
+    ir_emit_ret(entry, ir_operand_vreg(v0));
+    EXPECT_EQ(ir_interp_run(m), 0);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_MUL), 0);
+    EXPECT_EQ(ir_interp_run(m), 0);
+    arena_free(a);
+}
+
+/* x + 0.0 and x * 1.0 are not FP identities (-0.0/NaN); they must survive. */
+TEST(opt, identity_skips_fp)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    u32 fp = ir_alloc_fp_vreg(m, 4);
+    IrParam *param = arena_alloc(m->arena, sizeof(IrParam), sizeof(void *));
+    param->name = "x";
+    param->type = type_float();
+    param->vreg = fp;
+    vec_push(f->params, param);
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 v0 = ir_alloc_fp_vreg(m, 4);
+    u32 v1 = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_FADD, v0, ir_operand_vreg(fp), ir_operand_imm(fp_bits(0.0)));
+    ir_emit_unary(entry, OP_FTOI, v1, ir_operand_vreg(v0));
+    ir_emit_ret(entry, ir_operand_vreg(v1));
+    i64 before = ir_interp_run(m);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_FADD), 1);
+    EXPECT_EQ(ir_interp_run(m), before);
+    arena_free(a);
+}
+
+TEST(opt, cast_same_width_removed)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = add_int_param(m, "x", 4, true);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrParam *p = (IrParam *) vec_get(f->params, 0);
+    u32 v0 = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_unary(entry, OP_ZEXT, v0, ir_operand_vreg(p->vreg));
+    ir_emit_ret(entry, ir_operand_vreg(v0));
+    i64 before = ir_interp_run(m);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_ZEXT), 0);
+    EXPECT_EQ(ir_interp_run(m), before);
+    arena_free(a);
+}
+
+TEST(opt, cast_trunc_imm_normalizes)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 v0 = ir_alloc_vreg(m, 1, true, false);
+    ir_emit_unary(entry, OP_TRUNC, v0, ir_operand_imm(300));
+    ir_emit_ret(entry, ir_operand_vreg(v0));
+    EXPECT_EQ(ir_interp_run(m), 44);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_TRUNC), 0);
+    EXPECT_EQ(ir_interp_run(m), 44);
+    arena_free(a);
+}
+
+TEST(opt, cast_widening_kept)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = add_int_param(m, "x", 1, true);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrParam *p = (IrParam *) vec_get(f->params, 0);
+    u32 v0 = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_unary(entry, OP_SEXT, v0, ir_operand_vreg(p->vreg));
+    ir_emit_ret(entry, ir_operand_vreg(v0));
+    i64 before = ir_interp_run(m);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_SEXT), 1);
+    EXPECT_EQ(ir_interp_run(m), before);
+    arena_free(a);
+}
+
+TEST(opt, cprop_double_neg)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = add_int_param(m, "x", 4, true);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrParam *p = (IrParam *) vec_get(f->params, 0);
+    u32 n1 = ir_alloc_vreg(m, 4, true, false);
+    u32 n2 = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_unary(entry, OP_NEG, n1, ir_operand_vreg(p->vreg));
+    ir_emit_unary(entry, OP_NEG, n2, ir_operand_vreg(n1));
+    ir_emit_ret(entry, ir_operand_vreg(n2));
+    i64 before = ir_interp_run(m);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_NEG), 0);
+    EXPECT_EQ(ir_interp_run(m), before);
+    arena_free(a);
+}
+
+static IrModule *build_equal_phi(Arena *a, i64 entry_val, i64 latch_val)
+{
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    u32 x = ir_alloc_vreg(m, 8, true, false);
+    IrParam *param = arena_alloc(m->arena, sizeof(IrParam), sizeof(void *));
+    param->name = "x";
+    param->type = type_int();
+    param->vreg = x;
+    vec_push(f->params, param);
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    IrBlock *left = ir_func_add_block(f, "left");
+    IrBlock *right = ir_func_add_block(f, "right");
+    IrBlock *exit_bb = ir_func_add_block(f, "exit");
+    u32 cond = ir_alloc_vreg(m, 8, true, false);
+    u32 p = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ICMP_SLT, cond, ir_operand_vreg(x), ir_operand_imm(1));
+    ir_emit_brcond(entry, ir_operand_vreg(cond), left->label, right->label);
+    vec_push(left->preds, entry);
+    vec_push(right->preds, entry);
+    ir_emit_br(left, exit_bb->label);
+    vec_push(exit_bb->preds, left);
+    ir_emit_br(right, exit_bb->label);
+    vec_push(exit_bb->preds, right);
+    IrInstr *phi = ir_emit_phi_at_start(exit_bb, p, 2);
+    ir_phi_add_entry(phi, ir_operand_imm(entry_val), left);
+    ir_phi_add_entry(phi, ir_operand_imm(latch_val), right);
+    ir_emit_ret(exit_bb, ir_operand_vreg(p));
+    return m;
+}
+
+TEST(opt, phi_simp_equal_entries_collapse)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_equal_phi(a, 10, 10);
+    EXPECT_EQ(ir_interp_run(m), 10);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_PHI), 0);
+    EXPECT_EQ(ir_interp_run(m), 10);
+    arena_free(a);
+}
+
+/* A natural loop whose latch keeps the value (self entry) collapses to the preheader's. */
+TEST(opt, phi_simp_self_latch_invariant)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    IrBlock *head = ir_func_add_block(f, "head");
+    IrBlock *latch = ir_func_add_block(f, "latch");
+    IrBlock *exit_bb = ir_func_add_block(f, "exit");
+    u32 p = ir_alloc_vreg(m, 8, true, false);
+    u32 cond = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_br(entry, head->label);
+    vec_push(head->preds, entry);
+    IrInstr *phi = ir_emit_phi_at_start(head, p, 2);
+    ir_phi_add_entry(phi, ir_operand_imm(5), entry);
+    ir_phi_add_entry(phi, ir_operand_vreg(p), latch);
+    ir_emit_binop(head, OP_ICMP_SLT, cond, ir_operand_imm(1), ir_operand_imm(0));
+    ir_emit_brcond(head, ir_operand_vreg(cond), latch->label, exit_bb->label);
+    vec_push(latch->preds, head);
+    vec_push(exit_bb->preds, head);
+    ir_emit_br(latch, head->label);
+    vec_push(head->preds, latch);
+    ir_emit_ret(exit_bb, ir_operand_vreg(p));
+    EXPECT_EQ(ir_interp_run(m), 5);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_PHI), 0);
+    EXPECT_EQ(ir_interp_run(m), 5);
+    arena_free(a);
+}
+
+TEST(opt, phi_simp_distinct_values_kept)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_equal_phi(a, 10, 20);
+    EXPECT_EQ(ir_interp_run(m), 10);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_PHI), 1);
+    EXPECT_EQ(ir_interp_run(m), 10);
+    arena_free(a);
+}
+
+TEST(opt, dce_removes_unused_arithmetic)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = add_int_param(m, "x", 4, true);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrParam *p = (IrParam *) vec_get(f->params, 0);
+    u32 a0 = ir_alloc_vreg(m, 4, true, false);
+    u32 a1 = ir_alloc_vreg(m, 4, true, false);
+    u32 c = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(entry, OP_ADD, a0, ir_operand_vreg(p->vreg), ir_operand_imm(1));
+    ir_emit_binop(entry, OP_MUL, a1, ir_operand_vreg(a0), ir_operand_imm(2));
+    ir_emit_binop(entry, OP_ADD, c, ir_operand_vreg(p->vreg), ir_operand_imm(3));
+    ir_emit_ret(entry, ir_operand_vreg(c));
+    i64 before = ir_interp_run(m);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_ADD), 1); /* a0 (via a1) and a1 are gone */
+    EXPECT_EQ(count_opcode(m, OP_MUL), 0);
+    EXPECT_EQ(ir_interp_run(m), before);
+    arena_free(a);
+}
+
+TEST(opt, dce_removes_unused_alloca)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 sp = ir_alloc_vreg(m, 8, false, false);
+    ir_emit_alloca(entry, sp, 8);
+    ir_emit_ret(entry, ir_operand_imm(0));
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_ALLOCA), 0);
+    EXPECT_EQ(ir_interp_run(m), 0);
+    arena_free(a);
+}
+
+TEST(opt, cfg_clean_prunes_dead_blocks)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    return 42;\n"
+                                  "    return 7;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 42);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    IrFunction *f = opt_main_fn(m);
+    EXPECT_EQ(vec_size(f->blocks), 1);
+    EXPECT_EQ(ir_interp_run(m), 42);
+    arena_free(a);
+}
+
+TEST(opt, preheader_canonical_shape_after_optimize)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 6; i = i + 1) s = s + i;\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 15);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 15);
+    arena_free(a);
+}

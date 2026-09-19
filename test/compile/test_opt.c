@@ -92,3 +92,103 @@ TEST(opt, level2_if_returns)
 {
     opt_run_level(expr_src, "-O2", 42);
 }
+
+/* The canonicalize passes fold, copy-eliminate, and prune at every level. */
+
+static const char *fold_src = "double f(void) { return 2.0 + 3.0; }\n"
+                              "int main(void) { return (int) f(); }\n";
+
+TEST(opt, level1_fp_fold)
+{
+    opt_run_level(fold_src, "-O1", 5);
+}
+
+TEST(opt, level2_fp_fold)
+{
+    opt_run_level(fold_src, "-O2", 5);
+}
+
+TEST(opt, level3_fp_fold)
+{
+    opt_run_level(fold_src, "-O3", 5);
+}
+
+static const char *cast_src = "int main(void) {\n"
+                              "    char c = (char) 200;\n"
+                              "    return c;\n"
+                              "}\n";
+
+TEST(opt, level1_cast_preserves_sign)
+{
+    opt_run_level(cast_src, "-O1", 200); /* -56 as an 8-bit process status */
+}
+
+TEST(opt, level2_cast_preserves_sign)
+{
+    opt_run_level(cast_src, "-O2", 200);
+}
+
+static const char *dead_src = "int main(void) {\n"
+                              "    return 42;\n"
+                              "    return 7;\n"
+                              "}\n";
+
+TEST(opt, level1_dead_code_pruned)
+{
+    opt_run_level(dead_src, "-O1", 42);
+}
+
+TEST(opt, level2_dead_code_pruned)
+{
+    opt_run_level(dead_src, "-O2", 42);
+}
+
+static const char *branch_src = "int main(void) {\n"
+                                "    if (2 < 3) return 30;\n"
+                                "    return 99;\n"
+                                "}\n";
+
+TEST(opt, level1_constant_branch)
+{
+    opt_run_level(branch_src, "-O1", 30);
+}
+
+TEST(opt, level2_constant_branch)
+{
+    opt_run_level(branch_src, "-O2", 30);
+}
+
+static const char *do_while_src = "int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    int i = 0;\n"
+                                  "    do { s = s + i; i = i + 1; } while (i < 5);\n"
+                                  "    return s;\n"
+                                  "}\n";
+
+TEST(opt, level2_do_while)
+{
+    opt_run_level(do_while_src, "-O2", 10);
+}
+
+static const char *volatile_src = "volatile int g;\n"
+                                  "int main(void) {\n"
+                                  "    for (int i = 0; i < 5; i = i + 1) g = g + 1;\n"
+                                  "    return g;\n"
+                                  "}\n";
+
+TEST(opt, level2_volatile_loop)
+{
+    opt_run_level(volatile_src, "-O2", 5);
+}
+
+static const char *long_double_src = "long double g;\n"
+                                     "int main(void) {\n"
+                                     "    g = 1.5L;\n"
+                                     "    if (g > 0) return (int) g;\n"
+                                     "    return -1;\n"
+                                     "}\n";
+
+TEST(opt, level2_long_double)
+{
+    opt_run_level(long_double_src, "-O2", 1);
+}

@@ -152,10 +152,47 @@ struct IrBlock *opt_insert_empty_block(struct IrModule *mod, struct IrFunction *
 struct IrBlock *opt_insert_preheader(struct IrModule *mod, struct IrFunction *f,
                                      struct IrBlock *pred, struct IrBlock *succ,
                                      const char *prefix);
+/* Retarget `from`'s terminator edges naming `old_label` to `new_label`. */
+void opt_retarget_terminator(struct IrBlock *from, const char *old_label, const char *new_label);
+/* Remove the from->to edge: drop `from` from to->preds and from to's phis. */
+void opt_drop_edge(struct IrBlock *from, struct IrBlock *to);
 
 /* ---- value analysis (opt.c) ---- */
 
 /* Fill ctx->def_vreg/ctx->use_count for f (fresh arena arrays, module-sized). */
 void opt_make_value_analysis(OptimizerContext *ctx, struct IrFunction *f);
+
+/* ---- def replacement (opt.c) ---- */
+
+/* Rewrite every use of def->result to `val`, then erase the def. */
+bool opt_replace_def(OptimizerContext *ctx, struct IrFunction *f, struct IrInstr *def,
+                     IrOperand val);
+
+/* ---- scalar value semantics (opt_value.c) ---- */
+
+bool opt_operand_eq(IrOperand a, IrOperand b);
+
+/* Mask/sign-extend `raw` to a value's width class, as the interpreter does. */
+i64 opt_normalize(i64 raw, u8 width_bytes, bool is_signed);
+
+/* Fold an all-imm integer op to normalized bits; false on UB (zero div, bad shift). */
+bool opt_fold_int(const struct IrModule *mod, const struct IrInstr *in, i64 *out);
+
+/* Fold an all-imm FP op re-rounded at the result width; false for width 16. */
+bool opt_fold_fp(const struct IrModule *mod, const struct IrInstr *in, i64 *out);
+
+/* Fold an all-imm FP compare to its 0/1 integer result. */
+bool opt_fold_fcmp(const struct IrModule *mod, const struct IrInstr *in, i64 *out);
+
+/* ---- canonicalize passes (one file each) ---- */
+
+bool opt_pass_fold_const(OptimizerContext *ctx);
+bool opt_pass_identity(OptimizerContext *ctx);
+bool opt_pass_cast(OptimizerContext *ctx);
+bool opt_pass_cprop(OptimizerContext *ctx);
+bool opt_pass_phi_simp(OptimizerContext *ctx);
+bool opt_pass_dce(OptimizerContext *ctx);
+bool opt_pass_cfg_clean(OptimizerContext *ctx);
+bool opt_pass_preheader(OptimizerContext *ctx);
 
 #endif
