@@ -141,7 +141,7 @@ TEST(parser, prototype_shape)
     EXPECT_STR_EQ(fd->sig.name, "add");
     EXPECT_TRUE(fd->sig.ret_type == type_int());
     EXPECT_EQ(vec_size(fd->sig.params), 2);
-    EXPECT_EQ(fd->sig.storage, SC_NONE);
+    EXPECT_EQ(fd->sig.spec.storage, SC_NONE);
     EXPECT_FALSE(fd->sig.is_variadic);
 
     arena_free(a);
@@ -170,7 +170,7 @@ TEST(parser, prototype_storage_class)
 
     ASTProgram *prog = ast_as(ASTProgram, ast);
     ASTFuncDecl *fd = ast_as(ASTFuncDecl, (ASTNode *) vec_get(prog->decls, 0));
-    EXPECT_EQ(fd->sig.storage, SC_STATIC);
+    EXPECT_EQ(fd->sig.spec.storage, SC_STATIC);
 
     arena_free(a);
 }

@@ -5,13 +5,7 @@
 #include "ir.h"
 #include "util/bytebuf.h"
 #include "util/types.h"
-
-/* Patch record for a global-data reference; elf.c reads these to emit R_X86_64_32 relocations. */
-typedef struct
-{
-    size_t offset;    /* byte offset of the immediate within the function's bytebuf */
-    u32 global_index; /* index into IrModule globals */
-} GlobalPatch;
+#include "x86_emit.h"
 
 /* Call to a declaration-only extern: rel32 field stays 0; elf.c emits an SHN_UNDEF symbol +
  * R_X86_64_PLT32 relocation. */
@@ -20,14 +14,6 @@ typedef struct
     const char *name;
     size_t text_offset; /* absolute byte offset of the rel32 field within .text */
 } ExternCall;
-
-/* Taking a function's address (`&f`/designator): `mov $f, imm32sx` with an R_X86_64_32S relocation.
- */
-typedef struct
-{
-    const char *name;
-    size_t offset; /* byte offset of the immediate within the function's bytebuf */
-} FuncAddrPatch;
 
 /* Line boundary: `line` starts at byte `offset`; only recorded with -g. */
 typedef struct
