@@ -1824,3 +1824,77 @@ TEST(opt, mem_fwd_redundant_load)
     EXPECT_EQ(ir_interp_run(m), 40);
     arena_free(a);
 }
+
+/* The body of a `for (k = n; k-- > 1;)` loop reads the decremented value. */
+TEST(opt, for_postdec_condition_visits_decremented_values)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static unsigned char data[8];\n"
+                                  "int main(void) {\n"
+                                  "    int n = 8;\n"
+                                  "    int k;\n"
+                                  "    for (k = n; k-- > 1;)\n"
+                                  "        data[k] = 1;\n"
+                                  "    int ok = 1;\n"
+                                  "    for (int i = 0; i < 8; i = i + 1)\n"
+                                  "        if (i >= 1 && i <= 7 && data[i] != 1)\n"
+                                  "            ok = 0;\n"
+                                  "    return ok ? 0 : 1;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 0);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 0);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 0);
+    arena_free(a);
+}
+
+/* The sext of an immediate must survive optimization (folding it would
+   narrow the value at its uses). */
+TEST(opt, sext_imm_kept_across_optimize)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int emit(long long addend)\n"
+                                  "{\n"
+                                  "    return addend == -4 ? 0 : 1;\n"
+                                  "}\n"
+                                  "int main(void) { return emit(-4); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_2, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_opcode(m, OP_SEXT) >= 1);
+    arena_free(a);
+}
+
+/* A latch stub feeding a header phi must stay a single-successor block. */
+TEST(opt, cfg_clean_keeps_latch_for_header_phi_copy)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static unsigned char data[8];\n"
+                                  "int main(void) {\n"
+                                  "    int end = 8;\n"
+                                  "    int k;\n"
+                                  "    for (k = 0; k < end; k = k + 1)\n"
+                                  "        if (k == 4)\n"
+                                  "            break;\n"
+                                  "        else\n"
+                                  "            data[k] = 1;\n"
+                                  "    int ok = 1;\n"
+                                  "    for (int i = 0; i < 8; i = i + 1)\n"
+                                  "        if (i <= 3 && data[i] != 1)\n"
+                                  "            ok = 0;\n"
+                                  "    return ok ? 0 : 1;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 0);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 0);
+    arena_free(a);
+}

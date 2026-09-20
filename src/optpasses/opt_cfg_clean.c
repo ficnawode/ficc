@@ -240,6 +240,50 @@ static bool vec_contains_ptr(Vec *v, void *item)
     return false;
 }
 
+/* True when one of `bb`'s phis takes a value from `label`. */
+static bool phis_reference_label(IrBlock *bb, const char *label)
+{
+    size_t ninstr = vec_size(bb->instrs);
+    for (size_t i = 0; i < ninstr; i++)
+    {
+        IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
+        if (in->opcode != OP_PHI)
+        {
+            break;
+        }
+        for (u32 e = 0; e < in->extra.phi.nentries; e++)
+        {
+            if (strcmp(in->extra.phi.entries[e].label, label) == 0)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* True when `bb`'s terminator can reach more than one block. */
+static bool block_has_split_exit(IrFunction *f, IrBlock *bb)
+{
+    if (vec_size(bb->instrs) == 0)
+    {
+        return false;
+    }
+    IrInstr *last = (IrInstr *) vec_last(bb->instrs);
+    if (last->opcode != OP_BRCOND && last->opcode != OP_SWITCH)
+    {
+        return false; /* br / ret: a single, unambiguous successor */
+    }
+    if (last->opcode == OP_BRCOND)
+    {
+        const char *a = last->extra.brcond.true_label;
+        const char *b = last->extra.brcond.false_label;
+        return strcmp(a, b) != 0 && opt_block_by_label(f, a) != NULL &&
+               opt_block_by_label(f, b) != NULL;
+    }
+    return last->extra.sw.ncases > 0 || last->extra.sw.default_label != NULL;
+}
+
 static size_t vec_index_ptr(Vec *v, void *item)
 {
     size_t n = vec_size(v);
@@ -272,6 +316,12 @@ static bool merge_jump_stubs(OptimizerContext *ctx, IrFunction *f)
             IrBlock *pred = (IrBlock *) vec_get(bb->preds, 0);
             IrBlock *target = opt_block_by_label(f, br->extra.br.target_label);
             if (pred == bb || !target || target == bb || vec_contains_ptr(target->preds, pred))
+            {
+                continue;
+            }
+            /* Skip: the phi copy's successor would become a block that also
+               branches elsewhere, so the copy would run for the wrong target. */
+            if (phis_reference_label(target, bb->label) && block_has_split_exit(f, pred))
             {
                 continue;
             }

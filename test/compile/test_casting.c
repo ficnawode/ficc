@@ -476,3 +476,16 @@ TEST(casting, negative_void_value_in_unary)
                       "    return !((void)5);\n"
                       "}\n");
 }
+
+/* A negative immediate keeps its sign when widened to a wider parameter. */
+TEST(casting, negative_imm_sextended_into_wide_param)
+{
+    EXPECT_INTERP_AND_ELF("unsigned long long as_ull(long long v)\n"
+                          "{\n"
+                          "    return (unsigned long long)v;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return as_ull(-4) == 0xfffffffffffffffcULL ? 0 : 1;\n"
+                          "}\n",
+                          0);
+}

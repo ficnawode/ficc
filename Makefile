@@ -94,6 +94,9 @@ compile-commands:
 # no longer overwrites stage 1. Bootstrap correctness = stage1 and stage2 OBJECT trees
 # are byte-identical (stricter, and independent of the external linker).
 #
+# Both stages compile at -O1 so the bootstrap also exercises the optimizer; a
+# self-host miscompile changes the generated code between stage 1 and stage 2.
+#
 # We still cd into the staging dir so __FILE__-derived strings match across stages, and
 # still force -no-pie on the final links because ficc objects carry R_X86_64_32S data
 # relocations; both vanish when an internal linker replaces the external ld step.
@@ -120,7 +123,7 @@ $(SELF_DIR)/.staged: $(SELF_FILES) | dirs
 define self-compile-loop
 	@rm -rf $(2) && mkdir -p $(2)/util $(2)/optpasses
 	@cd $(SELF_SRC) && for c in *.c util/*.c $$(ls optpasses/*.c 2>/dev/null); do \
-		SOURCE_DATE_EPOCH=0 $(1) -I. -c "-DFICC_BUILTIN_INCLUDE=\"$(abspath include)\"" \
+		SOURCE_DATE_EPOCH=0 $(1) -O1 -I. -c "-DFICC_BUILTIN_INCLUDE=\"$(abspath include)\"" \
 			"$$c" -o "$(2)/$${c%.c}.o" \
 		|| { echo "selftest: stage $(2) failed to compile $$c"; exit 1; }; \
 	done

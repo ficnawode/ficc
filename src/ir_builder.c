@@ -3056,20 +3056,28 @@ static void patch_body_pred(LoopBlocks *lb, IrBlock *cond_block)
     }
 }
 
-static void finish_loop(FuncBuilder *ctx, ASTNode *cond_node, LoopBlocks *lb, IrBlock **out_cond)
+/* Emit `cond` into the loop header, branching to body/exit; returns the block
+   the condition lowered into (its result block for short-circuits). */
+static IrBlock *emit_loop_condition(FuncBuilder *ctx, ASTNode *cond, LoopBlocks *lb)
 {
     IrBlock *h = lb->header;
-    if (cond_node)
+    if (cond)
     {
-        ExprResult c = build_expr(ctx, cond_node, h);
+        ExprResult c = build_expr(ctx, cond, h);
         h = c.block;
-        IrOperand cval = boolify(ctx, h, c.value, node_type(cond_node));
+        IrOperand cval = boolify(ctx, h, c.value, node_type(cond));
         ir_emit_brcond(h, cval, lb->body->label, lb->exit->label);
     }
     else
     {
         ir_emit_br(h, lb->body->label);
     }
+    return h;
+}
+
+static void finish_loop(FuncBuilder *ctx, ASTNode *cond_node, LoopBlocks *lb, IrBlock **out_cond)
+{
+    IrBlock *h = emit_loop_condition(ctx, cond_node, lb);
     if (out_cond)
     {
         *out_cond = h;
@@ -3097,19 +3105,7 @@ static IrBlock *build_while_stmt(FuncBuilder *ctx, ASTWhileStmt *ws, IrBlock *bb
 
     jump(bb, lb.header);
 
-    /* Run the condition in the header first; the body sees its post-cond value. */
-    IrBlock *h = lb.header;
-    if (ws->cond)
-    {
-        ExprResult c = build_expr(ctx, ws->cond, h);
-        h = c.block;
-        IrOperand cval = boolify(ctx, h, c.value, node_type(ws->cond));
-        ir_emit_brcond(h, cval, lb.body->label, lb.exit->label);
-    }
-    else
-    {
-        ir_emit_br(h, lb.body->label);
-    }
+    IrBlock *h = emit_loop_condition(ctx, ws->cond, &lb);
     /* The body's only predecessor is the condition's result block, not the header. */
     declare_pred(lb.body, h);
     declare_pred(lb.exit, h);
@@ -3158,7 +3154,12 @@ static IrBlock *build_for_stmt(FuncBuilder *ctx, ASTForStmt *fs, IrBlock *bb)
     LoopBlocks lb = {header_bb, body_bb, latch_bb, exit_bb};
 
     jump(bb, lb.header);
-    declare_pred(lb.body, lb.header);
+
+    /* Lower the condition first so the body sees its post-inc/dec value. */
+    IrBlock *h = emit_loop_condition(ctx, fs->cond, &lb);
+    declare_pred(lb.body, h);
+    declare_pred(lb.exit, h);
+
     backedge(build_loop_body(ctx, fs->body, &lb), &lb);
 
     /* Seal the latch before the post-expression so post reads see sealed
@@ -3175,11 +3176,8 @@ static IrBlock *build_for_stmt(FuncBuilder *ctx, ASTForStmt *fs, IrBlock *bb)
         jump(lb.latch, lb.header);
     }
 
-    IrBlock *h = NULL;
-    finish_loop(ctx, fs->cond, &lb, &h);
-    /* Same non-predecessor fixup as do-while for short-circuited conditions. */
-    patch_body_pred(&lb, h);
-
+    seal_block(ctx, h);
+    seal_block(ctx, lb.exit);
     return lb.exit;
 }
 

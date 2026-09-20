@@ -31,16 +31,14 @@ bool opt_pass_cast(OptimizerContext *ctx)
                 bool rewrite = false;
                 if (src.is_imm)
                 {
+                    /* Only trunc of an imm folds; an imm has no width, so
+                       widening casts stay. */
                     if (op == OP_TRUNC)
                     {
                         result = ir_operand_imm(opt_normalize(src.u.imm, mod->widths[in->result],
                                                               mod->signedness[in->result]));
+                        rewrite = true;
                     }
-                    else
-                    {
-                        result = src;
-                    }
-                    rewrite = true;
                 }
                 else if (!src.is_global && !src.is_func && src.u.vreg < mod->width_count &&
                          !mod->floatness[src.u.vreg] &&

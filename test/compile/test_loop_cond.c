@@ -19,6 +19,23 @@ TEST(loop_cond, while_post_decrement_cond)
                           0);
 }
 
+TEST(loop_cond, for_post_decrement_cond)
+{
+    EXPECT_INTERP_AND_ELF("static unsigned char data[8];\n"
+                          "int main(void) {\n"
+                          "    int n = 8;\n"
+                          "    int k;\n"
+                          "    for (k = n; k-- > 1;)\n"
+                          "        data[k] = 1;\n"
+                          "    int ok = 1;\n"
+                          "    for (int i = 0; i < 8; i = i + 1)\n"
+                          "        if (i >= 1 && i <= 7 && data[i] != 1)\n"
+                          "            ok = 0;\n"
+                          "    return ok ? 0 : 1;\n"
+                          "}\n",
+                          0);
+}
+
 TEST(loop_cond, do_while_pre_decrement_cond)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -69,6 +86,27 @@ TEST(loop_cond, side_effect_in_cond_then_body_break)
                           "        if (count == 6) break;\n"
                           "    }\n"
                           "    return n == 4 && count == 6 ? 0 : 1;\n"
+                          "}\n",
+                          0);
+}
+
+/* After a break, the loop counter keeps its value at loop entry. */
+TEST(loop_cond, break_keeps_loop_var_from_latched_value)
+{
+    EXPECT_INTERP_AND_ELF("static unsigned char data[8];\n"
+                          "int main(void) {\n"
+                          "    int end = 8;\n"
+                          "    int k;\n"
+                          "    for (k = 0; k < end; k = k + 1)\n"
+                          "        if (k == 4)\n"
+                          "            break;\n"
+                          "        else\n"
+                          "            data[k] = 1;\n"
+                          "    int ok = 1;\n"
+                          "    for (int i = 0; i < 8; i = i + 1)\n"
+                          "        if (i <= 3 && data[i] != 1)\n"
+                          "            ok = 0;\n"
+                          "    return ok ? 0 : 1;\n"
                           "}\n",
                           0);
 }
