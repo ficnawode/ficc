@@ -56,8 +56,16 @@ Dominators *opt_doms_build(CfgInfo *cfg, Arena *arena)
     doms->idom[ENTRY_BLOCK] = ENTRY_BLOCK;
 
     bool changed = true;
+    int guard = 0;
     while (changed)
     {
+        /* Stop loudly rather than hang the compiler on a wild CFG. */
+        if (++guard > (int) n * 16 + 2048)
+        {
+            opt_error("dominator fixpoint failed to converge in '%s' (%zu blocks)", cfg->func->name,
+                      n);
+            abort();
+        }
         changed = false;
         for (u32 k = cfg->nreach - 1; k > 0; k--)
         {

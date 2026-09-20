@@ -47,6 +47,7 @@ typedef struct Specs
     StorageClass storage;
     u32 alignas;
     ASTNode *tag_def;
+    bool is_inline; /* the `inline` function specifier was seen (C11 §6.7.4) */
 } Specs;
 
 static Token *peek_token(Parser *p)
@@ -778,10 +779,10 @@ static Type *apply_quals(Type *t, u8 quals)
 static Specs parse_decl_specifiers(Parser *p)
 {
     Specs s = {0};
-    /* Function specifiers (§6.7.4): `inline` is accepted and ignored — ficc has
-       no inlining pass, so it is a no-op hint like `register`. */
+    /* Function specifiers (§6.7.4): `inline` drives the tier-1 inliner. */
     while (peek_token(p)->kind == TOK_KW_INLINE)
     {
+        s.is_inline = true;
         next_token(p);
     }
     u8 lead_quals = 0;
@@ -1418,6 +1419,7 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
         return NULL;
     }
     StorageClass storage = s.storage == SC_STATIC ? SC_STATIC : SC_NONE;
+    FuncSpecs fs = {.storage = storage, .is_inline = s.is_inline};
     if (!check_not_enumerator(p, d.name))
     {
         return NULL;
@@ -1444,7 +1446,7 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
     {
         next_token(p);
         pop_scope(p);
-        return ast_func_decl(d.type, d.name, params, storage, variadic, start, p->arena);
+        return ast_func_decl(d.type, d.name, params, fs, variadic, start, p->arena);
     }
 
     for (size_t i = 0; i < vec_size(params); i++)
@@ -1463,7 +1465,7 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
         return NULL;
     }
     pop_scope(p);
-    return ast_func_def(d.type, d.name, params, body, storage, variadic, start, p->arena);
+    return ast_func_def(d.type, d.name, params, body, fs, variadic, start, p->arena);
 }
 
 static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start)
@@ -1475,6 +1477,7 @@ static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start
         return NULL;
     }
     StorageClass storage = s.storage == SC_STATIC ? SC_STATIC : SC_NONE;
+    FuncSpecs fs = {.storage = storage, .is_inline = s.is_inline};
     if (!check_not_enumerator(p, d.name))
     {
         return NULL;
@@ -1508,7 +1511,7 @@ static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start
         {
             return NULL;
         }
-        return ast_func_decl(d.type->func.ret, d.name, params, storage,
+        return ast_func_decl(d.type->func.ret, d.name, params, fs,
                              d.type->func.is_variadic || d.func_variadic, start, p->arena);
     }
 
@@ -1528,7 +1531,7 @@ static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start
         return NULL;
     }
     pop_scope(p);
-    return ast_func_def(d.type->func.ret, d.name, params, body, storage,
+    return ast_func_def(d.type->func.ret, d.name, params, body, fs,
                         d.type->func.is_variadic || d.func_variadic, start, p->arena);
 }
 

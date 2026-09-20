@@ -9,8 +9,8 @@ TEST(ast, func_def_constructor)
     Arena *a = arena_new();
     Vec *params = vec_new(a);
     ASTNode *body = ast_compound_stmt(vec_new(a), (Loc) {"t", 1, 1}, a);
-    ASTNode *node =
-        ast_func_def(type_int(), "foo", params, body, SC_NONE, false, (Loc) {"t", 1, 1}, a);
+    ASTNode *node = ast_func_def(type_int(), "foo", params, body, (FuncSpecs) {.is_inline = true},
+                                 false, (Loc) {"t", 1, 1}, a);
 
     EXPECT_NOTNULL(node);
     EXPECT_EQ(node->kind, AST_FUNC_DEF);
@@ -19,6 +19,7 @@ TEST(ast, func_def_constructor)
     EXPECT_TRUE(fn->sig.ret_type == type_int());
     EXPECT_STR_EQ(fn->sig.name, "foo");
     EXPECT_TRUE(fn->body == body);
+    EXPECT_EQ(fn->sig.spec.is_inline, true);
 
     arena_free(a);
 }
@@ -27,7 +28,8 @@ TEST(ast, func_decl_constructor)
 {
     Arena *a = arena_new();
     Vec *params = vec_new(a);
-    ASTNode *node = ast_func_decl(type_int(), "foo", params, SC_NONE, true, (Loc) {"t", 1, 1}, a);
+    ASTNode *node = ast_func_decl(type_int(), "foo", params, (FuncSpecs) {.is_inline = true}, true,
+                                  (Loc) {"t", 1, 1}, a);
 
     EXPECT_NOTNULL(node);
     EXPECT_EQ(node->kind, AST_FUNC_DECL);
@@ -106,7 +108,7 @@ TEST(ast, dump_does_not_crash)
     Vec *stmts = vec_new(a);
     ASTNode *body = ast_compound_stmt(stmts, (Loc) {"t", 1, 1}, a);
     ASTNode *fn =
-        ast_func_def(type_int(), "bar", params, body, SC_NONE, false, (Loc) {"t", 1, 1}, a);
+        ast_func_def(type_int(), "bar", params, body, (FuncSpecs) {0}, false, (Loc) {"t", 1, 1}, a);
     ast_dump(fn);
     arena_free(a);
 }

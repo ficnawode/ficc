@@ -118,16 +118,23 @@ struct ASTNode
 
 #define ast_as(T, node) ((T *) (node))
 
+/* Function declaration specifiers (C11 §6.7.4); one field per new specifier. */
+typedef struct
+{
+    StorageClass storage;
+    bool is_inline;
+} FuncSpecs;
+
 /* Signature shared by a function definition (`{...}`) and a prototype (`;`). */
 typedef struct FuncSig FuncSig;
 struct FuncSig
 {
     Type *ret_type;
     const char *name;
-    Vec *params;          /* Vec<ASTNode*> (parameter declarations; empty for void) */
-    StorageClass storage; /* SC_STATIC = internal linkage */
-    bool is_variadic;     /* trailing unnamed args (C11 §6.7.6.3p8) */
-    Type *func_type;      /* interned function type (filled by semantic; NULL at parse time) */
+    Vec *params;      /* Vec<ASTNode*> (parameter declarations; empty for void) */
+    FuncSpecs spec;   /* storage class + function specifiers */
+    bool is_variadic; /* trailing unnamed args (C11 §6.7.6.3p8) */
+    Type *func_type;  /* interned function type (filled by semantic; NULL at parse time) */
 };
 
 typedef struct ASTFuncDef ASTFuncDef;
@@ -558,9 +565,9 @@ struct ASTCompoundLiteral
     struct InitPlan *plan; /* flattening plan (filled by semantic) */
 };
 
-ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body,
-                      StorageClass storage, bool is_variadic, Loc loc, Arena *arena);
-ASTNode *ast_func_decl(Type *ret_type, const char *name, Vec *params, StorageClass storage,
+ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body, FuncSpecs spec,
+                      bool is_variadic, Loc loc, Arena *arena);
+ASTNode *ast_func_decl(Type *ret_type, const char *name, Vec *params, FuncSpecs spec,
                        bool is_variadic, Loc loc, Arena *arena);
 ASTNode *ast_compound_stmt(Vec *stmts, Loc loc, Arena *arena);
 ASTNode *ast_return_stmt(ASTNode *expr, Loc loc, Arena *arena);

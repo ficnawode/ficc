@@ -1898,3 +1898,292 @@ TEST(opt, cfg_clean_keeps_latch_for_header_phi_copy)
     EXPECT_EQ(ir_interp_run(m), 0);
     arena_free(a);
 }
+
+/* ---- inline pass (F1: tier 1 user-directed + tier 2 size filter) ---- */
+
+static u32 count_calls_to(IrModule *m, const char *fname)
+{
+    u32 n = 0;
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+        size_t nb = vec_size(f->blocks);
+        for (size_t b = 0; b < nb; b++)
+        {
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+            size_t nin = vec_size(bb->instrs);
+            for (size_t j = 0; j < nin; j++)
+            {
+                IrInstr *in = (IrInstr *) vec_get(bb->instrs, j);
+                if (in->opcode == OP_CALL && !in->extra.call.is_indirect &&
+                    strcmp(in->extra.call.name, fname) == 0)
+                {
+                    n++;
+                }
+            }
+        }
+    }
+    return n;
+}
+
+static u32 count_opcode_in_fn(IrModule *m, const char *fname, IrOpcode op)
+{
+    u32 n = 0;
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+        if (fname && strcmp(f->name, fname) != 0)
+        {
+            continue;
+        }
+        size_t nb = vec_size(f->blocks);
+        for (size_t b = 0; b < nb; b++)
+        {
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+            size_t nin = vec_size(bb->instrs);
+            for (size_t j = 0; j < nin; j++)
+            {
+                if (((IrInstr *) vec_get(bb->instrs, j))->opcode == op)
+                {
+                    n++;
+                }
+            }
+        }
+    }
+    return n;
+}
+
+static IrFunction *fn_by_name(IrModule *m, const char *name)
+{
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+        if (strcmp(f->name, name) == 0)
+        {
+            return f;
+        }
+    }
+    return NULL;
+}
+
+/* Tier 1: a `static inline` leaf disappears entirely at -O1. */
+TEST(opt, inline_tier1_removes_call)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static inline int sq(int x) { return x * x; }\n"
+                                  "int main(void) { return sq(6); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_TRUE(count_calls_to(m, "sq") >= 1);
+    EXPECT_EQ(ir_interp_run(m), 36);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "sq") == 0);
+    EXPECT_EQ(ir_interp_run(m), 36);
+    arena_free(a);
+}
+
+/* A `static inline` keeps its addressable copy (C11 §6.7.4). */
+TEST(opt, inline_static_copy_kept)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static inline int add(int x) { return x + 1; }\n"
+                                  "int main(void) { return add(41); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    IrFunction *add = fn_by_name(m, "add");
+    EXPECT_NOTNULL(add);
+    EXPECT_TRUE(vec_size(add->blocks) > 0);
+    EXPECT_EQ(ir_interp_run(m), 42);
+    arena_free(a);
+}
+
+/* Direct or transitive recursion is never expanded: a self-call stays a call. */
+TEST(opt, inline_recursion_not_expanded)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static inline int down(int n)\n"
+                                  "{\n"
+                                  "    return n <= 0 ? n : down(n - 1) + 1;\n"
+                                  "}\n"
+                                  "int main(void) { return down(5); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 5);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "down") >= 1); /* the recursion remains */
+    EXPECT_EQ(ir_interp_run(m), 5);
+    arena_free(a);
+}
+
+/* Mutual recursion f <-> g is equally inert under the chain guard. */
+TEST(opt, inline_transitive_recursion_blocked)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static inline int g(int n);\n"
+                                  "static inline int f(int n)\n"
+                                  "{\n"
+                                  "    return n <= 0 ? 1 : g(n - 1);\n"
+                                  "}\n"
+                                  "static inline int g(int n)\n"
+                                  "{\n"
+                                  "    return f(n - 1);\n"
+                                  "}\n"
+                                  "int main(void) { return f(3); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 1);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "f") + count_calls_to(m, "g") >= 1);
+    EXPECT_EQ(ir_interp_run(m), 1);
+    arena_free(a);
+}
+
+/* Tier 2: a non-inline helper that is too cheap to stay a call inlines too. */
+TEST(opt, inline_tier2_small_callee)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int twice(int x) { return x + x; }\n"
+                                  "int main(void) { return twice(21); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_TRUE(count_calls_to(m, "twice") >= 1);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "twice") == 0);
+    EXPECT_EQ(ir_interp_run(m), 42);
+    arena_free(a);
+}
+
+/* Tier 2 size filter: a body above the cap stays a call. */
+TEST(opt, inline_tier2_big_callee_kept)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int many(int k)\n"
+                                  "{\n"
+                                  "    int s = 0;\n"
+                                  "    s = s + k; s = s + k; s = s + k; s = s + k; s = s + k;\n"
+                                  "    s = s + k; s = s + k; s = s + k; s = s + k; s = s + k;\n"
+                                  "    s = s + k; s = s + k; s = s + k; s = s + k; s = s + k;\n"
+                                  "    s = s + k; s = s + k; s = s + k; s = s + k; s = s + k;\n"
+                                  "    s = s + k; s = s + k;\n"
+                                  "    return s;\n"
+                                  "}\n"
+                                  "int main(void) { return many(1) == 22 ? 0 : 1; }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "many") >= 1); /* over the size cap */
+    EXPECT_EQ(ir_interp_run(m), 0);
+    arena_free(a);
+}
+
+/* A multi-exit inline body merges its returns into the call result phi. */
+TEST(opt, inline_multi_ret_phi)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static inline int cls(int v)\n"
+                                  "{\n"
+                                  "    if (v < 0) return -1;\n"
+                                  "    if (v == 0) return 0;\n"
+                                  "    return 1;\n"
+                                  "}\n"
+                                  "int main(void) { return cls(-3) + cls(0) + cls(4) + 2; }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 2);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "cls") == 0);
+    EXPECT_EQ(ir_interp_run(m), 2);
+    arena_free(a);
+}
+
+/* A void inline with a loop-local alloca and a pointer param. */
+TEST(opt, inline_void_alloca)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static inline void bump(int *p, int n)\n"
+                                  "{\n"
+                                  "    for (int k = 0; k < n; k = k + 1) *p = *p + 1;\n"
+                                  "}\n"
+                                  "int main(void) { int v = 0; bump(&v, 3); return v; }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 3);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "bump") == 0);
+    EXPECT_EQ(ir_interp_run(m), 3);
+    arena_free(a);
+}
+
+/* A direct call to a non-inline leaf nested inside another inline callee is
+   itself inlined (the clone's call sites fall under a fresh chain). */
+TEST(opt, inline_nested_chain)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static inline int seven(void) { return 7; }\n"
+                                  "static inline int bump7(int x) { return x + seven(); }\n"
+                                  "int main(void) { return bump7(10); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "bump7") == 0);
+    EXPECT_TRUE(count_calls_to(m, "seven") == 0);
+    EXPECT_EQ(ir_interp_run(m), 17);
+    arena_free(a);
+}
+
+/* Taking a function's address routes the call through an operand: that call
+   is indirect and stays, even if the target is `inline`. */
+TEST(opt, inline_indirect_stays)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static inline int sel(int v) { return v * 2; }\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    int (*fp)(int) = &sel;\n"
+                                  "    return fp(21) == 42 ? 0 : 1;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "sel") == 0);               /* no direct calls remain */
+    EXPECT_TRUE(count_opcode_in_fn(m, "main", OP_CALL) >= 1); /* the fp() */
+    EXPECT_EQ(ir_interp_run(m), 0);
+    arena_free(a);
+}
+
+/* An sret (record-return) inline writes through the caller's slot pointer. */
+TEST(opt, inline_sret_record)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("typedef struct { int a; int b; } Pair;\n"
+                                  "static inline Pair mk(int a, int b)\n"
+                                  "{\n"
+                                  "    Pair p;\n"
+                                  "    p.a = a;\n"
+                                  "    p.b = b;\n"
+                                  "    return p;\n"
+                                  "}\n"
+                                  "int main(void) { Pair q = mk(20, 22); return q.a + q.b; }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 42);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "mk") == 0);
+    EXPECT_EQ(ir_interp_run(m), 42);
+    arena_free(a);
+}

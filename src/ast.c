@@ -25,28 +25,28 @@ static void *ast_new_node(size_t size, ASTKind kind, Loc loc, Arena *arena)
     return base;
 }
 
-ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body,
-                      StorageClass storage, bool is_variadic, Loc loc, Arena *arena)
+ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body, FuncSpecs spec,
+                      bool is_variadic, Loc loc, Arena *arena)
 {
     ASTFuncDef *n = ast_new_node(sizeof(ASTFuncDef), AST_FUNC_DEF, loc, arena);
     n->sig.ret_type = ret_type;
     n->sig.name = name;
     n->sig.params = params;
+    n->sig.spec = spec;
     n->body = body;
-    n->sig.storage = storage;
     n->sig.is_variadic = is_variadic;
     n->sig.func_type = NULL;
     return &n->base;
 }
 
-ASTNode *ast_func_decl(Type *ret_type, const char *name, Vec *params, StorageClass storage,
+ASTNode *ast_func_decl(Type *ret_type, const char *name, Vec *params, FuncSpecs spec,
                        bool is_variadic, Loc loc, Arena *arena)
 {
     ASTFuncDecl *n = ast_new_node(sizeof(ASTFuncDecl), AST_FUNC_DECL, loc, arena);
     n->sig.ret_type = ret_type;
     n->sig.name = name;
     n->sig.params = params;
-    n->sig.storage = storage;
+    n->sig.spec = spec;
     n->sig.is_variadic = is_variadic;
     n->sig.func_type = NULL;
     return &n->base;

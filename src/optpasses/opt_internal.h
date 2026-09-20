@@ -5,6 +5,7 @@
 #include "cli.h"
 #include "ir.h"
 #include "util/arena.h"
+#include "util/hashmap.h"
 #include "util/types.h"
 #include "util/vec.h"
 #include <stdbool.h>
@@ -77,6 +78,7 @@ typedef enum
     OPT_PASS_DCE,
     OPT_PASS_CFG_CLEAN,
     OPT_PASS_PREHEADER,
+    OPT_PASS_INLINE,
     OPT_PASS_GVN,
     OPT_PASS_LICM,
     OPT_PASS_MEM_FWD,
@@ -122,8 +124,11 @@ struct OptimizerContext
     CfgInfo *cfg;
     Dominators *doms;
     LoopInfo *loops;
-    struct IrInstr **def_vreg; /* producing instruction per vreg */
-    u32 *use_count;            /* operand-reference count per vreg */
+    struct IrInstr **def_vreg;          /* producing instruction per vreg */
+    u32 *use_count;                     /* operand-reference count per vreg */
+    u64 inline_sites;                   /* monotonic inline-site counter (unique clone labels) */
+    struct HashMap *inline_lineage;     /* IrBlock* -> Vec<IrFunction*>: a clone's ancestry */
+    struct HashMap *inline_caller_used; /* IrFunction* -> u32: clones a caller absorbed overall */
 };
 
 /* Cached per-function analysis, rebuilt when the function or cfg_epoch changes. */
@@ -197,6 +202,7 @@ bool opt_pass_preheader(OptimizerContext *ctx);
 
 /* ---- optimize passes (one file each) ---- */
 
+bool opt_pass_inline(OptimizerContext *ctx);
 bool opt_pass_gvn(OptimizerContext *ctx);
 bool opt_pass_licm(OptimizerContext *ctx);
 bool opt_pass_mem_fwd(OptimizerContext *ctx);

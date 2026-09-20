@@ -3848,7 +3848,8 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
     ASTFuncDef *func_ast = (ASTFuncDef *) ast;
 
     IrFunction *func = ir_module_add_func(mod, func_ast->sig.name, func_ast->sig.ret_type);
-    func->is_static = func_ast->sig.storage == SC_STATIC;
+    func->is_static = func_ast->sig.spec.storage == SC_STATIC;
+    func->is_inline = func_ast->sig.spec.is_inline;
     func->cur_line = func_ast->base.loc.line;
     IrBlock *entry = ir_func_add_block(func, "entry");
 

@@ -2779,11 +2779,11 @@ static bool merge_function_decl(ASTNode *decl, ASTNode *prev, SemanticCtx *ctx)
 {
     FuncSig *fn = func_sig_of(decl);
     FuncSig *pfn = func_sig_of(prev);
-    if ((pfn->storage == SC_STATIC) != (fn->storage == SC_STATIC))
+    if ((pfn->spec.storage == SC_STATIC) != (fn->spec.storage == SC_STATIC))
     {
         return sem_error(ctx, decl->loc, "%s declaration of '%s' follows %s declaration",
-                         fn->storage == SC_STATIC ? "static" : "non-static", fn->name,
-                         pfn->storage == SC_STATIC ? "static" : "non-static");
+                         fn->spec.storage == SC_STATIC ? "static" : "non-static", fn->name,
+                         pfn->spec.storage == SC_STATIC ? "static" : "non-static");
     }
     if (func_node_defined(prev) && func_node_defined(decl))
     {

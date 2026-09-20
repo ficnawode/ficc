@@ -267,3 +267,78 @@ TEST(opt, level2_mem_fwd_redundant_load)
 {
     opt_run_level(redundant_load_src, "-O2", 40);
 }
+
+/* ---- inline suite (F1): tier 1 user-directed, size filter, negatives ---- */
+
+static const char *inline_leaf_src = "static inline int sq(int x) { return x * x; }\n"
+                                     "int main(void) { return sq(7) == 49 ? 0 : 1; }\n";
+
+TEST(opt, level0_inline_off)
+{
+    opt_run_level(inline_leaf_src, "-O0", 0);
+}
+
+TEST(opt, level1_inline_static_leaf)
+{
+    opt_run_level(inline_leaf_src, "-O1", 0);
+}
+
+TEST(opt, level2_inline_static_leaf)
+{
+    opt_run_level(inline_leaf_src, "-O2", 0);
+}
+
+static const char *inline_chain_src = "static inline int seven(void) { return 7; }\n"
+                                      "static inline int plus(int x) { return x + seven(); }\n"
+                                      "int main(void) { return plus(10) == 17 ? 0 : 1; }\n";
+
+TEST(opt, level1_inline_transitive_leaf)
+{
+    opt_run_level(inline_chain_src, "-O1", 0);
+}
+
+/* Taking &f routes the call through a pointer: the indirect site must not be
+   inlined away, and the addressable copy must survive. */
+static const char *inline_address_taken_src = "static inline int dbl(int v) { return v * 2; }\n"
+                                              "int main(void)\n"
+                                              "{\n"
+                                              "    int (*fp)(int) = &dbl;\n"
+                                              "    return fp(21) == 42 ? 0 : 1;\n"
+                                              "}\n";
+
+TEST(opt, level1_inline_address_taken_negative)
+{
+    opt_run_level(inline_address_taken_src, "-O1", 0);
+}
+
+/* Recursion is never expanded: the self-call stays a real call. */
+static const char *inline_recursion_src = "static inline int down(int n)\n"
+                                          "{\n"
+                                          "    return n <= 0 ? n : down(n - 1) + 1;\n"
+                                          "}\n"
+                                          "int main(void) { return down(200) == 200 ? 0 : 1; }\n";
+
+TEST(opt, level1_inline_recursion_negative)
+{
+    opt_run_level(inline_recursion_src, "-O1", 0);
+}
+
+/* A call inside a loop amortizes its overhead, so a mid-size callee that the
+   tier-2 threshold would reject still holds under the loop discount. */
+static const char *inline_loop_leaf_src = "int sq(int x) { return x * x; }\n"
+                                          "int main(void)\n"
+                                          "{\n"
+                                          "    int s = 0;\n"
+                                          "    for (int i = 0; i < 8; i = i + 1) s = s + sq(i);\n"
+                                          "    return s == 140 ? 0 : 1;\n"
+                                          "}\n";
+
+TEST(opt, level1_inline_loop_discount)
+{
+    opt_run_level(inline_loop_leaf_src, "-O1", 0);
+}
+
+TEST(opt, level2_inline_loop_discount)
+{
+    opt_run_level(inline_loop_leaf_src, "-O2", 0);
+}

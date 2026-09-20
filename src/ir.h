@@ -207,6 +207,7 @@ struct IrFunction
     u32 cur_line;     /* source line for the next emitted instruction (0 until a stmt/expr) */
     bool is_static;   /* internal linkage (stays local in the object file) */
     bool is_variadic; /* trailing unnamed args beyond the named params (C11 §6.7.6.3p8) */
+    bool is_inline;   /* the definition carried the `inline` specifier (C11 §6.7.4) */
 };
 
 /* init_data == NULL && init_len == 0 → .bss */

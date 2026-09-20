@@ -22,18 +22,20 @@ void opt_error(const char *fmt, ...)
 
 /* -O0 runs no passes; the optimizer only canonicalizes when asked to. */
 static const OptPassId level1_passes[] = {
-    OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY,  OPT_PASS_CAST,      OPT_PASS_CPROP, OPT_PASS_PHI_SIMP,
-    OPT_PASS_DCE,        OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER, OPT_PASS_GVN,   OPT_PASS_LICM,
+    OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY, OPT_PASS_CAST,      OPT_PASS_CPROP,
+    OPT_PASS_PHI_SIMP,   OPT_PASS_DCE,      OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER,
+    OPT_PASS_INLINE,     OPT_PASS_GVN,      OPT_PASS_LICM,
 };
 static const OptPassId level2_passes[] = {
     OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY, OPT_PASS_CAST,      OPT_PASS_CPROP,
     OPT_PASS_PHI_SIMP,   OPT_PASS_DCE,      OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER,
-    OPT_PASS_GVN,        OPT_PASS_LICM,     OPT_PASS_MEM_FWD,
+    OPT_PASS_INLINE,     OPT_PASS_GVN,      OPT_PASS_LICM,      OPT_PASS_MEM_FWD,
 };
 static const OptPassId level3_passes[] = {
-    OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY,  OPT_PASS_CAST,      OPT_PASS_CPROP, OPT_PASS_PHI_SIMP,
-    OPT_PASS_DCE,        OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER, OPT_PASS_GVN,   OPT_PASS_LICM,
-    OPT_PASS_MEM_FWD,    OPT_PASS_REASSOC,   OPT_PASS_STRENGTH,
+    OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY, OPT_PASS_CAST,      OPT_PASS_CPROP,
+    OPT_PASS_PHI_SIMP,   OPT_PASS_DCE,      OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER,
+    OPT_PASS_INLINE,     OPT_PASS_GVN,      OPT_PASS_LICM,      OPT_PASS_MEM_FWD,
+    OPT_PASS_REASSOC,    OPT_PASS_STRENGTH,
 };
 
 #define PASS_COUNT(list) (sizeof(list) / sizeof((list)[0]))
@@ -73,6 +75,7 @@ static const OptPass opt_passes[] = {
     {OPT_PASS_DCE, "dce", opt_pass_dce},
     {OPT_PASS_CFG_CLEAN, "cfg_clean", opt_pass_cfg_clean},
     {OPT_PASS_PREHEADER, "preheader", opt_pass_preheader},
+    {OPT_PASS_INLINE, "inline", opt_pass_inline},
     {OPT_PASS_GVN, "gvn", opt_pass_gvn},
     {OPT_PASS_LICM, "licm", opt_pass_licm},
     {OPT_PASS_MEM_FWD, "mem_fwd", opt_pass_mem_fwd},
