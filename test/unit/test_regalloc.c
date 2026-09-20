@@ -1,0 +1,282 @@
+#include "harness.h"
+#include "ir.h"
+#include "liveinterval.h"
+#include "regalloc.h"
+#include "target.h"
+#include "type.h"
+#include "util/arena.h"
+#include "util/vec.h"
+#include "x86_emit.h"
+
+static const LiveInterval *find_iv(const LiveIntervals *set, u32 vreg)
+{
+    for (u32 i = 0; i < set->n; i++)
+    {
+        if (set->ivs[i].vreg == vreg)
+        {
+            return &set->ivs[i];
+        }
+    }
+    return NULL;
+}
+
+static u32 emit_leaf(IrModule *m, IrBlock *b, i64 value)
+{
+    u32 v = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(b, OP_ADD, v, ir_operand_imm(value), ir_operand_imm(1));
+    return v;
+}
+
+static bool is_callee_saved(u8 reg)
+{
+    return reg == R_EBX || reg == R_R12 || reg == R_R13 || reg == R_R14 || reg == R_R15;
+}
+
+static bool is_reserved(u8 reg)
+{
+    return reg == R_EAX || reg == R_ECX || reg == R_EDX || reg == R_ESI || reg == R_EDI ||
+           reg == R_ESP || reg == R_EBP;
+}
+
+static IrModule *build_chain(Arena *a, u32 *x, u32 *y, u32 *z)
+{
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    *x = ir_alloc_vreg(m, 8, true, false);
+    *y = ir_alloc_vreg(m, 8, true, false);
+    *z = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ADD, *x, ir_operand_imm(1), ir_operand_imm(2));
+    ir_emit_binop(entry, OP_ADD, *y, ir_operand_vreg(*x), ir_operand_imm(3));
+    ir_emit_binop(entry, OP_ADD, *z, ir_operand_vreg(*y), ir_operand_imm(4));
+    ir_emit_ret(entry, ir_operand_vreg(*z));
+    return m;
+}
+
+/* A value defined before a call and read after it spans the clobber. */
+static IrModule *build_crossing_call(Arena *a, u32 *live, u32 *call_result)
+{
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    *live = ir_alloc_vreg(m, 8, true, false);
+    *call_result = ir_alloc_vreg(m, 8, true, false);
+    u32 sum = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ADD, *live, ir_operand_imm(1), ir_operand_imm(2));
+    ir_emit_call(entry, *call_result, "foo", 0, NULL);
+    ir_emit_binop(entry, OP_ADD, sum, ir_operand_vreg(*live), ir_operand_vreg(*call_result));
+    ir_emit_ret(entry, ir_operand_vreg(sum));
+    return m;
+}
+
+static IrModule *build_pressure(Arena *a)
+{
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 leaf[12];
+    for (u32 i = 0; i < 12; i++)
+    {
+        leaf[i] = emit_leaf(m, entry, (i64) i + 1);
+    }
+    u32 acc = leaf[0];
+    for (u32 i = 1; i < 12; i++)
+    {
+        u32 next = ir_alloc_vreg(m, 8, true, false);
+        ir_emit_binop(entry, OP_ADD, next, ir_operand_vreg(acc), ir_operand_vreg(leaf[i]));
+        acc = next;
+    }
+    ir_emit_ret(entry, ir_operand_vreg(acc));
+    return m;
+}
+
+static u32 count_spilled(const RegAllocation *alloc, const LiveIntervals *set)
+{
+    u32 spilled = 0;
+    for (u32 i = 0; i < set->n; i++)
+    {
+        if (alloc->phys_map[set->ivs[i].vreg] < 0)
+        {
+            spilled++;
+        }
+    }
+    return spilled;
+}
+
+TEST(regalloc, overlapping_intervals_never_share_a_register)
+{
+    Arena *a = arena_new();
+    u32 x, y, z;
+    IrModule *m = build_chain(a, &x, &y, &z);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    for (u32 i = 0; i < set.n; i++)
+    {
+        for (u32 j = i + 1; j < set.n; j++)
+        {
+            const LiveInterval *u = &set.ivs[i];
+            const LiveInterval *v = &set.ivs[j];
+            bool overlap = u->start <= v->end && v->start <= u->end;
+            int ru = alloc->phys_map[u->vreg];
+            int rv = alloc->phys_map[v->vreg];
+            if (overlap && ru >= 0 && rv >= 0)
+            {
+                EXPECT_TRUE(ru != rv);
+            }
+        }
+    }
+    arena_free(a);
+}
+
+TEST(regalloc, assigns_lowest_free_and_reuses_disjoint_registers)
+{
+    Arena *a = arena_new();
+    u32 x, y, z;
+    IrModule *m = build_chain(a, &x, &y, &z);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    EXPECT_EQ(alloc->phys_map[x], R_EBX);
+    EXPECT_EQ(alloc->phys_map[z], R_EBX);
+    EXPECT_TRUE(alloc->phys_map[y] >= 0);
+    EXPECT_TRUE(alloc->phys_map[y] != R_EBX);
+    EXPECT_EQ(alloc->frame_size, 0);
+    EXPECT_EQ(alloc->saved_mask & 1u, 1u);
+    arena_free(a);
+}
+
+TEST(regalloc, loc_of_reports_registers_and_slots)
+{
+    Arena *a = arena_new();
+    u32 x, y, z;
+    IrModule *m = build_chain(a, &x, &y, &z);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    RegLoc lx = loc_of(alloc, ir_operand_vreg(x));
+    EXPECT_EQ(lx.kind, LOC_REG);
+    EXPECT_EQ(lx.reg, R_EBX);
+    RegLoc li = loc_of(alloc, ir_operand_imm(7));
+    EXPECT_EQ(li.kind, LOC_IMM);
+    arena_free(a);
+}
+
+TEST(regalloc, x87_values_are_always_spilled)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    u32 ld = ir_alloc_fp_vreg(m, 16);
+    IrParam *p = arena_alloc(a, sizeof(IrParam), _Alignof(IrParam));
+    p->name = "ld";
+    p->type = type_long_double();
+    p->vreg = ld;
+    vec_push(f->params, p);
+    ir_func_add_block(f, "entry");
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    EXPECT_NOTNULL(find_iv(&set, ld));
+    EXPECT_EQ(find_iv(&set, ld)->cls, RC_X87);
+    EXPECT_EQ(alloc->phys_map[ld], -1);
+    EXPECT_TRUE(alloc->slot_map[ld] > 0);
+    EXPECT_TRUE(alloc->frame_size >= 16);
+    arena_free(a);
+}
+
+TEST(regalloc, call_crossing_gpr_uses_a_callee_saved_register)
+{
+    Arena *a = arena_new();
+    u32 live, call_result;
+    IrModule *m = build_crossing_call(a, &live, &call_result);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    int reg = alloc->phys_map[live];
+    EXPECT_TRUE(reg >= 0);
+    EXPECT_TRUE(is_callee_saved((u8) reg));
+    EXPECT_TRUE((alloc->saved_mask & 1u) == 1u);
+    arena_free(a);
+}
+
+TEST(regalloc, call_crossing_xmm_spills)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 d = ir_alloc_fp_vreg(m, 8);
+    u32 e = ir_alloc_fp_vreg(m, 8);
+    u32 r = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_FADD, d, ir_operand_imm(0), ir_operand_imm(0));
+    ir_emit_call(entry, r, "foo", 0, NULL);
+    ir_emit_binop(entry, OP_FADD, e, ir_operand_vreg(d), ir_operand_imm(0));
+    ir_emit_ret(entry, ir_operand_imm(0));
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    EXPECT_EQ(find_iv(&set, d)->cls, RC_XMM);
+    EXPECT_EQ(alloc->phys_map[d], -1);
+    EXPECT_TRUE(alloc->slot_map[d] > 0);
+    arena_free(a);
+}
+
+TEST(regalloc, pressure_beyond_the_bank_spills)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_pressure(a);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    EXPECT_TRUE(count_spilled(alloc, &set) >= 3);
+    arena_free(a);
+}
+
+TEST(regalloc, reserved_registers_are_never_allocated)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 s = ir_alloc_vreg(m, 8, true, false);
+    u32 q = ir_alloc_vreg(m, 8, true, false);
+    u32 t = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_SHL, s, ir_operand_imm(1), ir_operand_imm(2));
+    ir_emit_binop(entry, OP_SDIV, q, ir_operand_imm(100), ir_operand_vreg(s));
+    ir_emit_binop(entry, OP_ADD, t, ir_operand_vreg(q), ir_operand_vreg(s));
+    ir_emit_ret(entry, ir_operand_vreg(t));
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    for (u32 i = 0; i < set.n; i++)
+    {
+        int reg = alloc->phys_map[set.ivs[i].vreg];
+        if (reg >= 0)
+        {
+            EXPECT_FALSE(is_reserved((u8) reg));
+        }
+    }
+    arena_free(a);
+}
+
+TEST(regalloc, allocation_is_deterministic)
+{
+    Arena *a1 = arena_new();
+    Arena *a2 = arena_new();
+    IrModule *m1 = build_pressure(a1);
+    IrModule *m2 = build_pressure(a2);
+    IrFunction *f1 = (IrFunction *) vec_get(m1->funcs, 0);
+    IrFunction *f2 = (IrFunction *) vec_get(m2->funcs, 0);
+    LiveIntervals s1 = liveinterval_compute(f1, m1, a1);
+    LiveIntervals s2 = liveinterval_compute(f2, m2, a2);
+    RegAllocation *r1 = regalloc_linear(f1, &s1, x86_64_target(), a1);
+    RegAllocation *r2 = regalloc_linear(f2, &s2, x86_64_target(), a2);
+    EXPECT_EQ(r1->frame_size, r2->frame_size);
+    EXPECT_EQ(r1->saved_mask, r2->saved_mask);
+    EXPECT_EQ(r1->nvregs, r2->nvregs);
+    for (u32 v = 0; v < r1->nvregs; v++)
+    {
+        EXPECT_EQ(r1->phys_map[v], r2->phys_map[v]);
+        EXPECT_EQ(r1->slot_map[v], r2->slot_map[v]);
+    }
+    arena_free(a1);
+    arena_free(a2);
+}

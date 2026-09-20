@@ -14,14 +14,18 @@ typedef struct
     int *phys_map;   /* vreg → physical register id, -1 when spilled */
     u32 *slot_map;   /* vreg → offset below %rbp (spilled values and RC_X87) */
     Vec *call_sites; /* Vec<u32*> — instruction positions of every OP_CALL */
-    u8 saved_mask;   /* callee-saved registers the prologue must push */
+    u8 saved_mask;   /* bit i set when target->gpr.callee_saved[i] is used */
     u32 frame_size;  /* packed spill bytes below %rbp */
 } RegAllocation;
 
 /* All-spilled allocation: every vreg rides its own packed spill slot, matching
-   the legacy stack machine's frame exactly.  The register-assigning pass (D)
-   leaves this interface unchanged. */
+   the legacy stack machine's frame exactly. */
 RegAllocation *regalloc_all_spilled(IrFunction *f, const LiveIntervals *set, Arena *arena);
+
+/* Linear scan over the target's GPR/XMM banks; reserved and caller-saved
+   registers constrain the choice, RC_X87 always spills.  Deterministic. */
+RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const TargetDesc *target,
+                               Arena *arena);
 
 typedef struct CodegenCtx CodegenCtx;
 

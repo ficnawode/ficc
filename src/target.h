@@ -23,6 +23,8 @@ typedef struct
     u8 ncallee_saved;
     u8 align;         /* spill-slot alignment for a value of this class */
     bool memory_only; /* values never live in a register (RC_X87) */
+    u8 fixed[16];     /* reserved from allocation: implicit operands and scratch */
+    u8 nfixed;
 } RegBank;
 
 /* The x87 return carrier: element 0 of the physical x87 stack. */
