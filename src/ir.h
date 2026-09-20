@@ -313,6 +313,7 @@ IrOperand ir_operand_imm(i64 val);
 IrOperand ir_operand_vreg(u32 vreg);
 IrOperand ir_operand_global(u32 global_index);
 IrOperand ir_operand_func(const char *func_name);
+bool ir_operand_is_vreg(IrOperand op);
 
 /* dump */
 void ir_dump(IrModule *m);

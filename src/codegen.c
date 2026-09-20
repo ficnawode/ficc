@@ -1,14 +1,14 @@
 #include "codegen.h"
+#include "liveinterval.h"
+#include "regalloc.h"
 #include "target.h"
 #include "util/assert.h"
-#include "util/bitset.h"
 #include "util/bytebuf.h"
 #include "util/hashmap.h"
 #include "util/types.h"
 #include "x86_emit.h"
 #include <stdarg.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
 static u64 align_up(u64 n, u64 a)
@@ -219,11 +219,6 @@ static X86Operand lowered_operand(CodegenCtx *ctx, IrOperand op, u8 reg)
         return xop_imm(op.u.imm);
     }
     return xop_vreg(ctx, op.u.vreg);
-}
-
-static bool operand_is_vreg(IrOperand op)
-{
-    return !op.is_imm && !op.is_global && !op.is_func;
 }
 
 /* Integer-immediate load width: 4 bytes if it fits a sign-extended imm32, else full 64-bit. */
@@ -689,7 +684,7 @@ static u32 classify_call_args(CodegenCtx *ctx, IrInstr *in, CallArg *args, u32 *
         CallArg *a = &args[i];
         a->op = arg;
         a->width = operand_width(ctx, arg);
-        a->is_fp = operand_is_vreg(arg) && ir_vreg_float(ctx->mod, arg.u.vreg);
+        a->is_fp = ir_operand_is_vreg(arg) && ir_vreg_float(ctx->mod, arg.u.vreg);
         if (a->is_fp && a->width == W_LD)
         {
             stack_off = ALIGN_UP(stack_off, STACK_ALIGN);
@@ -1239,7 +1234,7 @@ static void emit_load_2pow63(ByteBuf *buf, bool is_f32)
 /* A width-16 operand is always a vreg slot (immediates carry no 16-byte form). */
 static X86Mem x87_slot(CodegenCtx *ctx, IrOperand op)
 {
-    ASSERT(operand_is_vreg(op));
+    ASSERT(ir_operand_is_vreg(op));
     return vreg_slot_mem(ctx, op.u.vreg);
 }
 
@@ -1759,470 +1754,13 @@ static void lower_instr(IrInstr *in, CodegenCtx *ctx)
     fn(in, ctx);
 }
 
-static void scan_vreg(u32 *max, u32 vreg)
+static FrameInfo frame_plan(IrFunction *f, IrModule *mod, Arena *arena)
 {
-    if (vreg != NO_VREG && vreg > *max)
-    {
-        *max = vreg;
-    }
-}
-
-static void scan_operand(u32 *max, IrOperand op)
-{
-    if (!operand_is_vreg(op))
-    {
-        return;
-    }
-    scan_vreg(max, op.u.vreg);
-}
-
-static void scan_instr_vregs(u32 *max, IrInstr *in)
-{
-    scan_vreg(max, in->result);
-    for (u8 oi = 0; oi < in->nops; oi++)
-    {
-        scan_operand(max, in->ops[oi]);
-    }
-    if (in->opcode == OP_CALL)
-    {
-        if (in->extra.call.is_indirect)
-        {
-            scan_operand(max, in->extra.call.callee);
-        }
-        for (u32 a = 0; a < in->extra.call.nargs; a++)
-        {
-            scan_operand(max, in->extra.call.args[a]);
-        }
-    }
-}
-
-/* Live intervals for stack-slot reuse. */
-typedef struct
-{
-    u32 start;
-    u32 end;
-    u32 vreg;
-    u8 is16;
-} SlotRange;
-
-static u8 slot_width_of(IrModule *m, u32 vreg)
-{
-    return (m->widths && vreg < m->width_count && m->widths[vreg] == 16) ? 16 : 8;
-}
-
-static void record_use(Bitset *seen_defs, Bitset *uses, Bitset *use_before_def, IrOperand op)
-{
-    if (operand_is_vreg(op))
-    {
-        u32 v = op.u.vreg;
-        bitset_set(uses, v);
-        if (!bitset_test(seen_defs, v))
-        {
-            bitset_set(use_before_def, v);
-        }
-    }
-}
-
-static int slot_range_cmp(const void *a, const void *b)
-{
-    const SlotRange *ra = (const SlotRange *) a;
-    const SlotRange *rb = (const SlotRange *) b;
-    if (ra->start != rb->start)
-    {
-        return ra->start < rb->start ? -1 : 1;
-    }
-    if (ra->end != rb->end)
-    {
-        return ra->end < rb->end ? -1 : 1;
-    }
-    return ra->vreg < rb->vreg ? -1 : (ra->vreg > rb->vreg ? 1 : 0);
-}
-
-static u32 scan_max_vreg(IrFunction *f)
-{
-    u32 max_vreg = 0;
-    size_t nblocks = vec_size(f->blocks);
-    for (size_t bi = 0; bi < nblocks; bi++)
-    {
-        IrBlock *blk = (IrBlock *) vec_get(f->blocks, bi);
-        size_t ninstr = vec_size(blk->instrs);
-        for (size_t ii = 0; ii < ninstr; ii++)
-        {
-            scan_instr_vregs(&max_vreg, (IrInstr *) vec_get(blk->instrs, ii));
-        }
-    }
-    size_t nparams = vec_size(f->params);
-    for (size_t i = 0; i < nparams; i++)
-    {
-        scan_vreg(&max_vreg, ((IrParam *) vec_get(f->params, i))->vreg);
-    }
-    return max_vreg;
-}
-
-/* Per-block def/use sets plus the PHI bookkeeping that feeds the live intervals. */
-typedef struct
-{
-    size_t nblocks;
-    u32 nvregs;
-    Bitset **defs;           /* per-block bitsets */
-    Bitset **uses;           /* per-block bitsets */
-    Bitset **use_before_def; /* per-block bitsets */
-    Bitset *has_phi;         /* vregs written by a phi anywhere in the function */
-    u32 *phi_pred_min;       /* lowest predecessor index among a phi's blocks; UINT32_MAX: none */
-    u32 *phi_pred_max;       /* highest predecessor index among a phi's blocks */
-} BlockSets;
-
-static void scan_call_uses(Bitset *seen, Bitset *uses, Bitset *ubd, IrInstr *in)
-{
-    if (in->extra.call.is_indirect)
-    {
-        record_use(seen, uses, ubd, in->extra.call.callee);
-    }
-    for (u32 a = 0; a < in->extra.call.nargs; a++)
-    {
-        record_use(seen, uses, ubd, in->extra.call.args[a]);
-    }
-}
-
-/* A PHI's copies at the predecessors' ends define its result and read its operands there. */
-static void record_phi_edges(const BlockIndex *bi, BlockSets *s, IrInstr *in)
-{
-    for (u32 e = 0; e < in->extra.phi.nentries; e++)
-    {
-        IrBlock *pred = block_by_label(bi, in->extra.phi.entries[e].label);
-        if (!pred)
-        {
-            continue;
-        }
-        size_t pj = block_index_of(bi, pred);
-        if (pj < s->phi_pred_min[in->result])
-        {
-            s->phi_pred_min[in->result] = (u32) pj;
-        }
-        if (pj > s->phi_pred_max[in->result])
-        {
-            s->phi_pred_max[in->result] = (u32) pj;
-        }
-        bitset_set(s->has_phi, in->result);
-        bitset_set(s->defs[pj], in->result);
-        IrOperand op = in->extra.phi.entries[e].val;
-        if (operand_is_vreg(op))
-        {
-            bitset_set(s->uses[pj], op.u.vreg);
-            bitset_set(s->use_before_def[pj], op.u.vreg);
-        }
-    }
-}
-
-static void scan_block_sets(const BlockIndex *bi, BlockSets *s, IrBlock *blk, size_t b,
-                            Arena *arena)
-{
-    Bitset *seen_defs = bitset_new(arena, s->nvregs);
-    size_t ninstr = vec_size(blk->instrs);
-    for (size_t ii = 0; ii < ninstr; ii++)
-    {
-        IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
-        if (in->result != NO_VREG && in->opcode != OP_PHI)
-        {
-            bitset_set(seen_defs, in->result);
-            bitset_set(s->defs[b], in->result);
-        }
-        for (u8 oi = 0; oi < in->nops; oi++)
-        {
-            record_use(seen_defs, s->uses[b], s->use_before_def[b], in->ops[oi]);
-        }
-        if (in->opcode == OP_CALL)
-        {
-            scan_call_uses(seen_defs, s->uses[b], s->use_before_def[b], in);
-        }
-        else if (in->opcode == OP_PHI && in->result != NO_VREG)
-        {
-            record_phi_edges(bi, s, in);
-        }
-    }
-}
-
-static BlockSets build_block_sets(IrFunction *f, const BlockIndex *bi, u32 nvregs, Arena *arena)
-{
-    size_t nblocks = bi->nblocks;
-    BlockSets s = {0};
-    s.nblocks = nblocks;
-    s.nvregs = nvregs;
-    s.defs = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
-    s.uses = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
-    s.use_before_def = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
-    s.has_phi = bitset_new(arena, nvregs);
-    s.phi_pred_min = arena_alloc(arena, nvregs * sizeof(u32), sizeof(u32));
-    s.phi_pred_max = arena_alloc(arena, nvregs * sizeof(u32), sizeof(u32));
-    for (size_t b = 0; b < nblocks; b++)
-    {
-        s.defs[b] = bitset_new(arena, nvregs);
-        s.uses[b] = bitset_new(arena, nvregs);
-        s.use_before_def[b] = bitset_new(arena, nvregs);
-    }
-    for (u32 v = 0; v < nvregs; v++)
-    {
-        s.phi_pred_min[v] = UINT32_MAX;
-        s.phi_pred_max[v] = 0;
-    }
-
-    size_t nparams = vec_size(f->params);
-    for (size_t i = 0; i < nparams; i++)
-    {
-        u32 pv = ((IrParam *) vec_get(f->params, i))->vreg;
-        if (pv != NO_VREG && nblocks > 0)
-        {
-            bitset_set(s.defs[0], pv);
-        }
-    }
-
-    for (size_t b = 0; b < nblocks; b++)
-    {
-        scan_block_sets(bi, &s, (IrBlock *) vec_get(f->blocks, b), b, arena);
-    }
-    return s;
-}
-
-static void propagate_live_in(IrFunction *f, const BlockIndex *bi, size_t b, Bitset **lvin,
-                              Bitset **lvout, size_t nwords)
-{
-    IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
-    size_t npred = vec_size(blk->preds);
-    u64 *lin_w = bitset_words(lvin[b]);
-    for (size_t p = 0; p < npred; p++)
-    {
-        IrBlock *pred = (IrBlock *) vec_get(blk->preds, p);
-        u64 *lout_w = bitset_words(lvout[block_index_of(bi, pred)]);
-        for (size_t wi = 0; wi < nwords; wi++)
-        {
-            lout_w[wi] |= lin_w[wi];
-        }
-    }
-}
-
-/* lvin[b] = (lvout[b] & ~defs) | use_before_def; returns true if it grew. */
-static bool update_block_liveness(const BlockSets *s, size_t b, Bitset **lvin, Bitset **lvout,
-                                  size_t nwords)
-{
-    bool changed = false;
-    u64 *lout_w = bitset_words(lvout[b]);
-    u64 *def_w = bitset_words(s->defs[b]);
-    u64 *ubd_w = bitset_words(s->use_before_def[b]);
-    u64 *lin_w = bitset_words(lvin[b]);
-    for (size_t wi = 0; wi < nwords; wi++)
-    {
-        u64 nb = (lout_w[wi] & ~def_w[wi]) | ubd_w[wi];
-        if (nb & ~lin_w[wi])
-        {
-            changed = true;
-        }
-        lin_w[wi] |= nb;
-    }
-    return changed;
-}
-
-/* Dataflow fixpoint over the block CFG. Word-at-a-time; a per-bit sweep is prohibitively slow. */
-static void solve_liveness(IrFunction *f, const BlockIndex *bi, const BlockSets *s, Arena *arena,
-                           Bitset ***p_lvin, Bitset ***p_lvout)
-{
-    size_t nblocks = bi->nblocks;
-    Bitset **lvin = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
-    Bitset **lvout = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
-    for (size_t b = 0; b < nblocks; b++)
-    {
-        lvin[b] = bitset_new(arena, s->nvregs);
-        lvout[b] = bitset_new(arena, s->nvregs);
-    }
-    size_t nwords = bitset_nwords(lvin[0]);
-    for (;;)
-    {
-        bool changed = false;
-        for (size_t b = 0; b < nblocks; b++)
-        {
-            propagate_live_in(f, bi, b, lvin, lvout, nwords);
-        }
-        for (size_t b = 0; b < nblocks; b++)
-        {
-            changed |= update_block_liveness(s, b, lvin, lvout, nwords);
-        }
-        if (!changed)
-        {
-            break;
-        }
-    }
-    *p_lvin = lvin;
-    *p_lvout = lvout;
-}
-
-/* Per-vreg live interval over block indices; start == UINT32_MAX means never live. */
-typedef struct
-{
-    u32 *start;
-    u32 *end;
-} LiveIntervals;
-
-/* Index of the lowest set bit (0..63); `v` must be nonzero (portable, self-hostable). */
-static unsigned lowest_set_bit(u64 v)
-{
-    unsigned k = 0;
-    while ((v & 1ULL) == 0)
-    {
-        v >>= 1;
-        ++k;
-    }
-    return k;
-}
-
-static void extend_intervals(LiveIntervals *lv, u32 nvregs, size_t b, u64 bits, u32 vbase)
-{
-    while (bits)
-    {
-        u32 k = lowest_set_bit(bits);
-        bits &= bits - 1;
-        u32 v = vbase + k;
-        if (v >= nvregs)
-        {
-            continue;
-        }
-        if (b < lv->start[v])
-        {
-            lv->start[v] = (u32) b;
-        }
-        if (b > lv->end[v])
-        {
-            lv->end[v] = (u32) b;
-        }
-    }
-}
-
-static LiveIntervals compute_intervals(const BlockSets *s, Bitset **lvin, Bitset **lvout,
-                                       Arena *arena)
-{
-    size_t nblocks = s->nblocks;
-    u32 nvregs = s->nvregs;
-    LiveIntervals lv = {0};
-    lv.start = arena_alloc(arena, nvregs * sizeof(u32), sizeof(u32));
-    lv.end = arena_alloc(arena, nvregs * sizeof(u32), sizeof(u32));
-    for (u32 v = 0; v < nvregs; v++)
-    {
-        lv.start[v] = UINT32_MAX;
-        lv.end[v] = 0;
-    }
-    size_t nwords = bitset_nwords(lvin[0]);
-    for (size_t b = 0; b < nblocks; b++)
-    {
-        u64 *def_w = bitset_words(s->defs[b]);
-        u64 *use_w = bitset_words(s->uses[b]);
-        u64 *lin_w = bitset_words(lvin[b]);
-        u64 *lout_w = bitset_words(lvout[b]);
-        for (size_t wi = 0; wi < nwords; wi++)
-        {
-            u64 bits = def_w[wi] | use_w[wi] | lin_w[wi] | lout_w[wi];
-            extend_intervals(&lv, nvregs, b, bits, (u32) wi * 64);
-        }
-    }
-    /* A PHI result spans all its predecessors (the copies there read and write it). */
-    for (u32 v = 0; v < nvregs; v++)
-    {
-        if (bitset_test(s->has_phi, v))
-        {
-            if (s->phi_pred_min[v] < lv.start[v])
-            {
-                lv.start[v] = s->phi_pred_min[v];
-            }
-            if (s->phi_pred_max[v] > lv.end[v])
-            {
-                lv.end[v] = s->phi_pred_max[v];
-            }
-        }
-    }
-    return lv;
-}
-
-/* First-fit packing of one slot class (w8 or w16); returns the number of slots used. */
-static u32 pack_slot_class(SlotRange *ranges, size_t nranges, bool is16, u32 base, u32 stride,
-                           u32 *slot_off, Arena *arena)
-{
-    u32 *expire = arena_alloc(arena, nranges * sizeof(u32), sizeof(u32));
-    u32 nslots = 0;
-    for (size_t r = 0; r < nranges; r++)
-    {
-        SlotRange *ra = &ranges[r];
-        if (ra->is16 != is16)
-        {
-            continue;
-        }
-        u32 slot = 0;
-        bool reused = false;
-        for (u32 i = 0; i < nslots; i++)
-        {
-            if (expire[i] < ra->start)
-            {
-                slot = i;
-                reused = true;
-                break;
-            }
-        }
-        if (!reused)
-        {
-            slot = nslots++;
-        }
-        expire[slot] = ra->end;
-        slot_off[ra->vreg] = base + (slot + 1) * stride;
-    }
-    return nslots;
-}
-
-/* w8 slots tile [0,total8); w16 boxes sit above, never overlapping. Returns frame bytes. */
-static u32 pack_slots(SlotRange *ranges, size_t nranges, u32 *slot_off, Arena *arena)
-{
-    u32 nslots8 = pack_slot_class(ranges, nranges, false, 0, 8, slot_off, arena);
-    u32 total8 = nslots8 * 8;
-    u32 base16 = ALIGN_UP(total8, W_LD); /* w16 region sits above the w8 region */
-    u32 nslots16 = pack_slot_class(ranges, nranges, true, base16, 16, slot_off, arena);
-    if (nslots16 > 0)
-    {
-        return base16 + nslots16 * 16;
-    }
-    return total8;
-}
-
-static FrameInfo frame_plan(IrFunction *f, IrModule *mod, Arena *arena, const BlockIndex *bi)
-{
-    u32 max_vreg = scan_max_vreg(f);
-    u32 nvregs = max_vreg + 1;
-
-    BlockSets bs = build_block_sets(f, bi, nvregs, arena);
-
-    Bitset **lvin;
-    Bitset **lvout;
-    solve_liveness(f, bi, &bs, arena, &lvin, &lvout);
-    LiveIntervals lv = compute_intervals(&bs, lvin, lvout, arena);
-
-    SlotRange *ranges = arena_alloc(arena, nvregs * sizeof(SlotRange), sizeof(SlotRange));
-    size_t nranges = 0;
-    for (u32 v = 0; v < nvregs; v++)
-    {
-        if (lv.start[v] != UINT32_MAX)
-        {
-            ranges[nranges].vreg = v;
-            ranges[nranges].start = lv.start[v];
-            ranges[nranges].end = lv.end[v];
-            ranges[nranges].is16 = slot_width_of(mod, v) == 16;
-            nranges++;
-        }
-    }
-    qsort(ranges, nranges, sizeof(SlotRange), slot_range_cmp);
-
-    u32 *slot_off = arena_alloc(arena, nvregs * sizeof(u32), sizeof(u32));
-    for (u32 v = 0; v < nvregs; v++)
-    {
-        slot_off[v] = 8; /* never-live vregs get an unused slot */
-    }
-    u32 total = pack_slots(ranges, nranges, slot_off, arena);
-
+    LiveIntervals ivs = liveinterval_compute(f, mod, arena);
+    RegAllocation *alloc = regalloc_all_spilled(f, &ivs, arena);
+    u32 total = alloc->frame_size;
     FrameInfo fr = {0};
-    fr.slot_off = slot_off;
+    fr.slot_off = alloc->slot_map;
     if (f->is_variadic)
     {
         /* The va_list register save area sits below the vreg slots; the prologue spills into it. */
@@ -2472,7 +2010,7 @@ static void emit_func_mc(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *a
     Vec *lines = debug ? vec_new(arena) : NULL;
 
     BlockIndex *blocks = index_blocks(f, arena);
-    FrameInfo fr = frame_plan(f, mod, arena, blocks);
+    FrameInfo fr = frame_plan(f, mod, arena);
     emit_prologue(buf, f, mod, &fr);
 
     size_t nblocks = vec_size(f->blocks);

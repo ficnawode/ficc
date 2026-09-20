@@ -353,6 +353,11 @@ IrOperand ir_operand_func(const char *func_name)
     return o;
 }
 
+bool ir_operand_is_vreg(IrOperand op)
+{
+    return !op.is_imm && !op.is_global && !op.is_func;
+}
+
 static void dump_operand(IrOperand op)
 {
     if (op.is_global)
