@@ -190,3 +190,66 @@ TEST(ir_interp, fp_conversions_itof_ftoi_fconv)
     EXPECT_EQ(ir_interp_run(m), 16777216);
     arena_free(a);
 }
+
+/* A recursive function whose post-call merge block carries a phi: the nested
+   run_block for a callee must not clobber the caller's block-walk state. Old
+   interp walked with shared ctx->next_pred, so the caller's merge block was
+   entered with the *callee's* last block as its predecessor. */
+TEST(ir_interp, recursion_through_phi_merge)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+
+    /* int fib(int n) { return (n < 2) ? n : fib(n-1) + fib(n-2); } */
+    IrFunction *fib = ir_module_add_func(m, "fib", type_int());
+    IrBlock *entry = ir_func_add_block(fib, "entry");
+    IrBlock *then_bb = ir_func_add_block(fib, "then");
+    IrBlock *else_bb = ir_func_add_block(fib, "else");
+    IrBlock *merge = ir_func_add_block(fib, "merge");
+    u32 n_vreg = ir_alloc_vreg(m, 4, true, false);
+    IrParam *pn = arena_alloc(a, sizeof(IrParam), sizeof(void *));
+    pn->name = "n";
+    pn->type = type_int();
+    pn->vreg = n_vreg;
+    vec_push(fib->params, pn);
+
+    u32 cond = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(entry, OP_ICMP_SLT, cond, ir_operand_vreg(n_vreg), ir_operand_imm(2));
+    ir_emit_brcond(entry, ir_operand_vreg(cond), then_bb->label, else_bb->label);
+    vec_push(then_bb->preds, entry);
+    vec_push(else_bb->preds, entry);
+
+    ir_emit_br(then_bb, merge->label);
+    vec_push(merge->preds, then_bb);
+
+    u32 nm1 = ir_alloc_vreg(m, 4, true, false);
+    u32 r1 = ir_alloc_vreg(m, 4, true, false);
+    u32 nm2 = ir_alloc_vreg(m, 4, true, false);
+    u32 r2 = ir_alloc_vreg(m, 4, true, false);
+    u32 sum = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(else_bb, OP_SUB, nm1, ir_operand_vreg(n_vreg), ir_operand_imm(1));
+    IrOperand args1[1] = {ir_operand_vreg(nm1)};
+    ir_emit_call(else_bb, r1, "fib", 1, args1);
+    ir_emit_binop(else_bb, OP_SUB, nm2, ir_operand_vreg(n_vreg), ir_operand_imm(2));
+    IrOperand args2[1] = {ir_operand_vreg(nm2)};
+    ir_emit_call(else_bb, r2, "fib", 1, args2);
+    ir_emit_binop(else_bb, OP_ADD, sum, ir_operand_vreg(r1), ir_operand_vreg(r2));
+    ir_emit_br(else_bb, merge->label);
+    vec_push(merge->preds, else_bb);
+
+    u32 phi_result = ir_alloc_vreg(m, 4, true, false);
+    IrInstr *phi = ir_emit_phi_at_start(merge, phi_result, 2);
+    ir_phi_add_entry(phi, ir_operand_vreg(n_vreg), then_bb);
+    ir_phi_add_entry(phi, ir_operand_vreg(sum), else_bb);
+    ir_emit_ret(merge, ir_operand_vreg(phi_result));
+
+    IrFunction *main_fn = ir_module_add_func(m, "main", type_int());
+    IrBlock *main_bb = ir_func_add_block(main_fn, "entry");
+    u32 fib10 = ir_alloc_vreg(m, 4, true, false);
+    IrOperand margs[1] = {ir_operand_imm(10)};
+    ir_emit_call(main_bb, fib10, "fib", 1, margs);
+    ir_emit_ret(main_bb, ir_operand_vreg(fib10));
+
+    EXPECT_EQ(ir_interp_run(m), 55);
+    arena_free(a);
+}

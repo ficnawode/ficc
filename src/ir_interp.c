@@ -599,13 +599,23 @@ static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
 
     build_block_map(ctx, callee);
     IrBlock *entry = (IrBlock *) vec_get(callee->blocks, 0);
-    i64 ret = run_block(ctx, callee_frame->regs, entry, NULL);
-    vec_pop(ctx->stack);
 
-    /* Callee's run_block sets returned/jumped; reset for the caller's loop. */
-    ctx->returned = false;
-    ctx->jumped = false;
+    /* The callee's run_block reuses and overwrites the caller's block-walk
+       scratch (next_bb/next_pred/jumped/returned). Save it so the caller
+       resumes its own walk after the call returns. */
+    IrBlock *saved_next_bb = ctx->next_bb;
+    IrBlock *saved_next_pred = ctx->next_pred;
+    bool saved_jumped = ctx->jumped;
+    bool saved_returned = ctx->returned;
+
+    i64 ret = run_block(ctx, callee_frame->regs, entry, NULL);
+
+    ctx->next_bb = saved_next_bb;
+    ctx->next_pred = saved_next_pred;
+    ctx->jumped = saved_jumped;
+    ctx->returned = saved_returned;
     ctx->block_map = saved_block_map;
+    vec_pop(ctx->stack);
     if (in->result != NO_VREG)
     {
         if (ctx->mod->widths[in->result] == 16)

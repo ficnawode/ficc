@@ -192,3 +192,78 @@ TEST(opt, level2_long_double)
 {
     opt_run_level(long_double_src, "-O2", 1);
 }
+
+/* The optimize passes (GVN/LICM/mem_fwd) must preserve the oracle at every level. */
+
+static const char *gvn_src = "int f(int x, int y) {\n"
+                             "    int a = x + y;\n"
+                             "    int b = x + y;\n"
+                             "    return a * b;\n"
+                             "}\n"
+                             "int main(void) { return f(6, 1); }\n";
+
+TEST(opt, level1_gvn_merges)
+{
+    opt_run_level(gvn_src, "-O1", 49);
+}
+
+TEST(opt, level2_gvn_merges)
+{
+    opt_run_level(gvn_src, "-O2", 49);
+}
+
+TEST(opt, level3_gvn_merges)
+{
+    opt_run_level(gvn_src, "-O3", 49);
+}
+
+static const char *licm_src = "int f(int k) {\n"
+                              "    int s = 0;\n"
+                              "    for (int i = 0; i < 100; i = i + 1) s = s + k * 3;\n"
+                              "    return s;\n"
+                              "}\n"
+                              "int main(void) { return f(5) == 1500; }\n";
+
+TEST(opt, level1_licm_hoists)
+{
+    opt_run_level(licm_src, "-O1", 1);
+}
+
+TEST(opt, level2_licm_hoists)
+{
+    opt_run_level(licm_src, "-O2", 1);
+}
+
+static const char *mem_fwd_src = "int g;\n"
+                                 "int main(void) { g = 40; return g; }\n";
+
+TEST(opt, level2_mem_fwd_store_to_load)
+{
+    opt_run_level(mem_fwd_src, "-O2", 40);
+}
+
+TEST(opt, level3_mem_fwd_store_to_load)
+{
+    opt_run_level(mem_fwd_src, "-O3", 40);
+}
+
+static const char *vol_barrier_src = "volatile int g;\n"
+                                     "int main(void) { g = 40; return g; }\n";
+
+TEST(opt, level2_mem_fwd_volatile_barrier)
+{
+    opt_run_level(vol_barrier_src, "-O2", 40);
+}
+
+static const char *redundant_load_src = "int g;\n"
+                                        "int main(void) {\n"
+                                        "    g = 20;\n"
+                                        "    int a = g;\n"
+                                        "    int b = g;\n"
+                                        "    return a + b;\n"
+                                        "}\n";
+
+TEST(opt, level2_mem_fwd_redundant_load)
+{
+    opt_run_level(redundant_load_src, "-O2", 40);
+}

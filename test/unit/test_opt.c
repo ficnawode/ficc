@@ -1548,3 +1548,279 @@ TEST(opt, preheader_canonical_shape_after_optimize)
     EXPECT_EQ(ir_interp_run(m), 15);
     arena_free(a);
 }
+
+/* ---- optimize passes (GVN, LICM, mem_fwd) ---- */
+
+static IrModule *build_add_add(Arena *a)
+{
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    u32 x = ir_alloc_vreg(m, 4, true, false);
+    u32 y = ir_alloc_vreg(m, 4, true, false);
+    IrParam *px = arena_alloc(m->arena, sizeof(IrParam), sizeof(void *));
+    px->name = "x";
+    px->type = type_int();
+    px->vreg = x;
+    IrParam *py = arena_alloc(m->arena, sizeof(IrParam), sizeof(void *));
+    py->name = "y";
+    py->type = type_int();
+    py->vreg = y;
+    vec_push(f->params, px);
+    vec_push(f->params, py);
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 v0 = ir_alloc_vreg(m, 4, true, false);
+    u32 v1 = ir_alloc_vreg(m, 4, true, false);
+    u32 v2 = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(entry, OP_ADD, v0, ir_operand_vreg(x), ir_operand_vreg(y));
+    ir_emit_binop(entry, OP_ADD, v1, ir_operand_vreg(x), ir_operand_vreg(y));
+    ir_emit_binop(entry, OP_ADD, v2, ir_operand_vreg(v0), ir_operand_vreg(v1));
+    ir_emit_ret(entry, ir_operand_vreg(v2));
+    return m;
+}
+
+TEST(opt, gvn_merges_equal_defs)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_add_add(a);
+    EXPECT_EQ(count_opcode(m, OP_ADD), 3);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_ADD), 2); /* the second a+b folds into the first */
+    arena_free(a);
+}
+
+TEST(opt, gvn_commutative_merge)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    u32 x = ir_alloc_vreg(m, 4, true, false);
+    u32 y = ir_alloc_vreg(m, 4, true, false);
+    IrParam *px = arena_alloc(m->arena, sizeof(IrParam), sizeof(void *));
+    px->name = "x";
+    px->type = type_int();
+    px->vreg = x;
+    IrParam *py = arena_alloc(m->arena, sizeof(IrParam), sizeof(void *));
+    py->name = "y";
+    py->type = type_int();
+    py->vreg = y;
+    vec_push(f->params, px);
+    vec_push(f->params, py);
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 v0 = ir_alloc_vreg(m, 4, true, false);
+    u32 v1 = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(entry, OP_ADD, v0, ir_operand_vreg(x), ir_operand_vreg(y));
+    ir_emit_binop(entry, OP_ADD, v1, ir_operand_vreg(y), ir_operand_vreg(x));
+    ir_emit_ret(entry, ir_operand_vreg(v1));
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_ADD), 1);
+    arena_free(a);
+}
+
+/* Equal expressions in non-dominating siblings are never merged. */
+TEST(opt, gvn_skips_sibling_defs)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    u32 x = ir_alloc_vreg(m, 8, true, false);
+    u32 y = ir_alloc_vreg(m, 8, true, false);
+    IrParam *px = arena_alloc(m->arena, sizeof(IrParam), sizeof(void *));
+    px->name = "x";
+    px->type = type_int();
+    px->vreg = x;
+    IrParam *py = arena_alloc(m->arena, sizeof(IrParam), sizeof(void *));
+    py->name = "y";
+    py->type = type_int();
+    py->vreg = y;
+    vec_push(f->params, px);
+    vec_push(f->params, py);
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    IrBlock *then_bb = ir_func_add_block(f, "then");
+    IrBlock *else_bb = ir_func_add_block(f, "else");
+    u32 c = ir_alloc_vreg(m, 8, false, false);
+    u32 v0 = ir_alloc_vreg(m, 8, true, false);
+    u32 v1 = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ICMP_SLT, c, ir_operand_vreg(x), ir_operand_vreg(y));
+    ir_emit_brcond(entry, ir_operand_vreg(c), then_bb->label, else_bb->label);
+    vec_push(then_bb->preds, entry);
+    vec_push(else_bb->preds, entry);
+    ir_emit_binop(then_bb, OP_ADD, v0, ir_operand_vreg(x), ir_operand_vreg(y));
+    ir_emit_ret(then_bb, ir_operand_vreg(v0));
+    ir_emit_binop(else_bb, OP_ADD, v1, ir_operand_vreg(x), ir_operand_vreg(y));
+    ir_emit_ret(else_bb, ir_operand_vreg(v1));
+    EXPECT_EQ(ir_interp_run(m), 0);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    if (count_opcode(m, OP_ADD) != 2)
+    {
+        fprintf(stderr, "add count: %u\n", count_opcode(m, OP_ADD));
+        test_fail();
+    }
+    EXPECT_EQ(ir_interp_run(m), 0);
+    arena_free(a);
+}
+
+/* The block that owns the sole surviving MUL is the loop's preheader. */
+static IrBlock *block_of_instr(IrFunction *f, IrInstr *in)
+{
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+        if (opt_instr_index(bb, in) != UINT32_MAX)
+        {
+            return bb;
+        }
+    }
+    return NULL;
+}
+
+TEST(opt, licm_hoists_invariant_mul)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int helper(int k) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 100; i = i + 1) s = s + k * 3;\n"
+                                  "    return s;\n"
+                                  "}\n"
+                                  "int main(void) { return helper(5) == 1500; }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 1);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0); /* helper */
+    EXPECT_EQ(count_opcode(m, OP_MUL), 1);
+    IrInstr *mul = NULL;
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(bb->instrs);
+        for (size_t j = 0; j < ninstr; j++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, j);
+            if (in->opcode == OP_MUL)
+            {
+                mul = in;
+            }
+        }
+    }
+    EXPECT_TRUE(mul != NULL);
+    /* the invariant k*3 lands in blocks[0] (the preheader) */
+    EXPECT_TRUE(block_of_instr(f, mul) == (IrBlock *) vec_get(f->blocks, 0));
+    EXPECT_EQ(ir_interp_run(m), 1);
+    arena_free(a);
+}
+
+TEST(opt, licm_keeps_loop_carried_defs)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int helper(int k) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 100; i = i + 1) s = s + k;\n"
+                                  "    return s;\n"
+                                  "}\n"
+                                  "int main(void) { return helper(5) == 500; }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 1);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    /* the add uses `s` via a header phi, so it must stay in the loop */
+    size_t nadd = 0;
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+        size_t nblocks = vec_size(f->blocks);
+        for (size_t b = 0; b < nblocks; b++)
+        {
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+            size_t ninstr = vec_size(bb->instrs);
+            for (size_t j = 0; j < ninstr; j++)
+            {
+                IrInstr *in = (IrInstr *) vec_get(bb->instrs, j);
+                if (in->opcode == OP_ADD)
+                {
+                    nadd++;
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(nadd >= 1);
+    EXPECT_EQ(ir_interp_run(m), 1);
+    arena_free(a);
+}
+
+/* Store-then-load of the same global forwards the value; the load dies. */
+TEST(opt, mem_fwd_forwards_store_to_load)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int g;\n"
+                                  "int main(void) { g = 40; return g; }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 40);
+    optimize(m, OPT_LEVEL_2, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_LOAD), 0);
+    EXPECT_EQ(count_opcode(m, OP_STORE), 1);
+    EXPECT_EQ(ir_interp_run(m), 40);
+    arena_free(a);
+}
+
+/* A volatile store is a barrier: the following load must survive. */
+TEST(opt, mem_fwd_volatile_barrier)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("volatile int g;\n"
+                                  "int main(void) { g = 40; return g; }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 40);
+    optimize(m, OPT_LEVEL_2, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_LOAD), 1);
+    EXPECT_EQ(ir_interp_run(m), 40);
+    arena_free(a);
+}
+
+/* A call between store and load is a barrier: the load must survive. */
+TEST(opt, mem_fwd_call_barrier)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int g;\n"
+                                  "int f(void) { return 1; }\n"
+                                  "int main(void) {\n"
+                                  "    g = 40;\n"
+                                  "    (void) f();\n"
+                                  "    return g;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 40);
+    optimize(m, OPT_LEVEL_2, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_LOAD), 1);
+    EXPECT_EQ(ir_interp_run(m), 40);
+    arena_free(a);
+}
+
+/* Two identical loads of one global collapse to one (redundant-load elim). */
+TEST(opt, mem_fwd_redundant_load)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int g = 20;\n"
+                                  "int main(void) { int a = g; int b = g; return a + b; }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 40);
+    optimize(m, OPT_LEVEL_2, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_LOAD), 1);
+    EXPECT_EQ(ir_interp_run(m), 40);
+    arena_free(a);
+}

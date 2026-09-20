@@ -195,4 +195,10 @@ bool opt_pass_dce(OptimizerContext *ctx);
 bool opt_pass_cfg_clean(OptimizerContext *ctx);
 bool opt_pass_preheader(OptimizerContext *ctx);
 
+/* ---- optimize passes (one file each) ---- */
+
+bool opt_pass_gvn(OptimizerContext *ctx);
+bool opt_pass_licm(OptimizerContext *ctx);
+bool opt_pass_mem_fwd(OptimizerContext *ctx);
+
 #endif
