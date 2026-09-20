@@ -90,7 +90,7 @@ void dwarf_check_from_buffers(DwarfCheck *out, Arena *arena, const u8 *info, siz
                               const u8 *eh, size_t eh_len, const u8 *text, size_t text_len,
                               Vec *rela_info, Vec *rela_line, Vec *rela_eh);
 
-/* ---- .debug_line ---- */
+/* .debug_line */
 
 typedef struct
 {
@@ -115,7 +115,7 @@ typedef struct
 /* Decode the single-CU line program; NULL (with out->err) on malformed input. */
 DwarfCheckLines *dwarf_check_lines(DwarfCheck *out, Arena *arena);
 
-/* ---- .debug_info / .debug_abbrev ---- */
+/* .debug_info / .debug_abbrev */
 
 enum DWAttrKind
 {
@@ -160,7 +160,7 @@ typedef struct
 /* Walk the first CU's DIE tree and resolve every ref4; NULL on malformed input. */
 DwarfCheckInfo *dwarf_check_info(DwarfCheck *out, Arena *arena);
 
-/* ---- .eh_frame ---- */
+/* .eh_frame */
 
 typedef struct
 {
@@ -182,7 +182,7 @@ typedef struct
 /* Parse .eh_frame (CIE + one FDE per function); NULL on wrong shape. */
 DwarfCheckEh *dwarf_check_eh(DwarfCheck *out, Arena *arena);
 
-/* ---- helpers shared by the tests ---- */
+/* helpers shared by the tests */
 
 /* Decode a signed LEB128; returns bytes consumed (0 when truncated). */
 size_t dwarf_check_sleb128(const u8 *buf, size_t len, i64 *out);

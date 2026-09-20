@@ -1928,7 +1928,7 @@ TEST(pp, pedantic_warns_on_gnu_pragma)
     arena_free(a);
 }
 
-/* ---- Phase 17x: hostile-input hardening corpus (in-process, D17.14) ----
+/* Phase 17x: hostile-input hardening corpus (in-process, D17.14)
    Every row below is a corner that a naive preprocessor gets wrong: the
    rescan/disable-during boundary, empty-argument placemarkers, paste
    validity, intmax arithmetic in `#if`, and the diagnostic pragmas. */

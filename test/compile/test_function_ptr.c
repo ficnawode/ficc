@@ -1,7 +1,7 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* --- Phase 16b: function-pointer types + parenthesized declarators --- */
+/* Phase 16b: function-pointer types + parenthesized declarators */
 
 TEST(function_ptr, assign_compare_designator)
 {
@@ -161,7 +161,7 @@ TEST(function_ptr, negative_assign_constability)
                       "    return 0;\n"
                       "}\n");
 }
-/* --- Phase 16c: indirect call lowering --- */
+/* Phase 16c: indirect call lowering */
 
 TEST(function_ptr, indirect_call_through_variable)
 {

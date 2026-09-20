@@ -58,8 +58,6 @@ struct LvalueResult
     bool failed;
 };
 
-/* Shared arithmetic-lowering inputs; plain binaries and compound assignment
-   differ only in converting the result back to the LHS type. */
 typedef struct
 {
     BinOpKind op;
@@ -113,7 +111,7 @@ typedef struct FuncBuilder FuncBuilder;
 struct FuncBuilder
 {
     IrModule *mod;
-    IrFunction *f;        /* the function being lowered */
+    IrFunction *f;
     U64Map *block_locals; /* (u64)IrBlock* -> BlockLocals* */
     Vec *loop_stack;      /* Vec<LoopContext*> */
     Vec *switch_stack;    /* Vec<SwitchCtx*> */
@@ -124,7 +122,7 @@ struct FuncBuilder
     Vec *spilled;         /* Vec<ASTVarDecl*>: block-scope autos whose address is taken */
     U64Map *spill_slots;  /* (u64)ASTVarDecl* -> IrOperand* (function-entry slot addr) */
     u32 sret_vreg;        /* hidden sret pointer vreg for record-returning funcs */
-    bool failed;          /* an error was reported while building this function */
+    bool failed;
 };
 
 static IrOperand read_var_at_merge(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb);
@@ -415,10 +413,8 @@ static void declare_pred(IrBlock *bb, IrBlock *pred)
     vec_push(bb->preds, pred);
 }
 
-/* --- scalar address-of spill machinery ---
-   An address-taken block-scope auto becomes memory-resident: a function-entry
-   OP_ALLOCA slot (keyed in spill_slots) that every read/write loads/stores,
-   bypassing the SSA stack — loads see current memory, so no PHIs are needed. */
+/* Address-taken autos become memory-resident: slot loads/stores see current
+   memory, so the SSA stack is bypassed and no PHIs are needed. */
 
 static bool is_spillable_var(ASTVarDecl *decl)
 {
@@ -608,7 +604,6 @@ static ExprResult expr_void(IrBlock *bb)
     return expr_result(ir_operand_imm(0), bb);
 }
 
-/* Load the value at an address and wrap it as an expression. */
 static ExprResult load_value(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *type)
 {
     u32 dst = alloc_vreg_from_type(ctx, type);
@@ -779,7 +774,6 @@ static ExprResult build_ternary_expr(FuncBuilder *ctx, ASTTernaryExpr *te, IrBlo
     return expr_result(ir_operand_vreg(dst), merge_bb);
 }
 
-/* Element address of a subscript: index promoted to long, GEP'd by size. */
 static ExprResult build_subscript_addr(FuncBuilder *ctx, ASTSubscriptExpr *se, IrBlock *bb)
 {
     ExprResult base = build_expr(ctx, se->array, bb);
@@ -810,8 +804,6 @@ static LvalueResult mem_lvalue(IrOperand addr, Type *type, IrBlock *bb)
     return lv;
 }
 
-/* Lower a write target into an lvalue slot. The address is computed exactly
-   once; operators never re-evaluate it. */
 static LvalueResult build_lvalue_slot(FuncBuilder *ctx, ASTNode *target, IrBlock *bb)
 {
     switch (target->kind)
@@ -1009,8 +1001,6 @@ static ExprResult build_assign_expr(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlock
     return expr_result(val, bb);
 }
 
-/* `++`/`--`: load old, step (pointers GEP by pointee size, arithmetic
-   promotes/adjusts/rewraps), store; postfix yields old, prefix new. */
 static ExprResult build_incdec_expr(FuncBuilder *ctx, ASTIncDecExpr *ie, IrBlock *bb)
 {
     LvalueResult lv = build_lvalue_slot(ctx, ie->operand, bb);
@@ -1133,7 +1123,6 @@ static void promote_binop_operands(FuncBuilder *ctx, BinOpKind op, IrBlock *bb, 
     *rt = type_promote(*rt);
 }
 
-/* Select the IR opcode for a promoted binary op. */
 static IrOpcode arith_opcode(BinOpKind op, Type *lt)
 {
     if (type_is_fp(lt))
@@ -1322,8 +1311,6 @@ static ExprResult build_arith_binop_expr(FuncBuilder *ctx, ASTBinaryExpr *be, Ir
     return expr_result(ar.value, ar.block);
 }
 
-/* Compound assignment (§6.5.16.2): load once, run the plain op's lowering,
-   rewrap to the LHS type, store, and yield the new value. */
 static ExprResult build_compound_assign(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlock *bb)
 {
     LvalueResult lv = build_lvalue_slot(ctx, be->left, bb);
@@ -1441,7 +1428,6 @@ static ExprResult build_cast_expr(FuncBuilder *ctx, ASTCastExpr *ce, IrBlock *bb
     return expr_result(promote_to(ctx, bb, src.value, src_type, target), bb);
 }
 
-/* `__builtin_va_arg`: read the raw slot, then promote_to narrows it. */
 static ExprResult build_va_arg_expr(FuncBuilder *ctx, ASTVaArgExpr *va, IrBlock *bb)
 {
     ExprResult ap = build_expr(ctx, va->ap, bb);
@@ -1555,7 +1541,6 @@ static IrBlock *lower_call_arg(FuncBuilder *ctx, ASTNode *arg, Type *param_type,
     return bb;
 }
 
-/* Param type for arg `i`: the declared param, a promoted variadic tail arg, or the arg type. */
 static Type *call_param_type(Type *callee_type, size_t i, Type *arg_type)
 {
     size_t n_declared = vec_size(callee_type->func.params);
@@ -1573,8 +1558,6 @@ static Type *call_param_type(Type *callee_type, size_t i, Type *arg_type)
 
 static ExprResult build_call_expr(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *bb)
 {
-    /* Resolve the callee: a named function (direct) or a runtime value
-       (indirect). */
     Type *callee_type;
     IrOperand indirect_callee = ir_operand_imm(0);
     bool indirect = ce->callee_expr != NULL;
@@ -1698,7 +1681,6 @@ static ExprResult build_addr_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *b
         case AST_MEMBER_ACCESS:
             return build_member_lvalue(ctx, ast_as(ASTMemberAccess, operand), bb);
         case AST_COMPOUND_LITERAL:
-            /* The slot address without the load — the point of `&`. */
             return compound_literal_slot(ctx, ast_as(ASTCompoundLiteral, operand), bb);
         case AST_IDENT:
         {
@@ -1742,8 +1724,6 @@ static ExprResult build_subscript_expr(FuncBuilder *ctx, ASTSubscriptExpr *se, I
     return load_value(ctx, bb, addr.value, elem);
 }
 
-/* sizeof/alignof are compile-time constants resolved by semantic (§6.5.3.4);
-   the expression value is that constant. */
 static ExprResult build_size_const(ASTNode *node, IrBlock *bb)
 {
     switch (node->kind)
@@ -1774,7 +1754,6 @@ static u32 block_static_index(FuncBuilder *ctx, ASTVarDecl *var)
     return idx ? *idx : NO_VREG;
 }
 
-/* The global index of a file-scope name or a block-scope static. */
 static u32 var_global_index(FuncBuilder *ctx, ASTVarDecl *decl)
 {
     if (decl->is_block_scope)
@@ -2311,9 +2290,9 @@ static char *anon_name(Arena *arena, const char *prefix, u32 idx)
    neither. The serializer turns this into a relocation. */
 typedef enum
 {
-    RELOC_TARGET_NONE,   /* not an address constant */
-    RELOC_TARGET_OBJECT, /* `index` selects a global object */
-    RELOC_TARGET_FUNC,   /* `func` names a function */
+    RELOC_TARGET_NONE,
+    RELOC_TARGET_OBJECT,
+    RELOC_TARGET_FUNC,
 } RelocTargetKind;
 
 typedef struct
@@ -2456,8 +2435,6 @@ static u32 clamped_string_len(ASTStringLiteral *sl, Type *array_type)
     return need;
 }
 
-/* Encode a plan into init bytes: zero-filled base, folded scalars, string
-   fills, and address relocs. */
 static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrMap *global_map,
                                 U64Map *static_map, Arena *arena)
 {
@@ -2543,8 +2520,6 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
     return true;
 }
 
-/* Fill `g` from a variable declaration. Returns false (error reported) when an
-   initializer leaf cannot be serialized. */
 static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *global_map,
                         U64Map *static_map, Arena *arena)
 {
@@ -2662,7 +2637,6 @@ static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *aren
     return idx;
 }
 
-/* An anonymous `.rodata` blob addressed like a string literal. */
 static u32 ir_add_rodata_blob(IrModule *mod, Arena *arena, const void *bytes, u32 len, u32 align)
 {
     u32 idx = (u32) vec_size(mod->globals);
@@ -2697,8 +2671,6 @@ static u32 ir_add_zero_blob(IrModule *mod, Arena *arena, u32 size)
     return idx;
 }
 
-/* Apply an InitPlan at `base`: zero-fill the object, then each write as a
-   scalar OP_STORE or char-array OP_MEMCPY, GEP'd by the write's offset. */
 static IrBlock *emit_init_plan(FuncBuilder *ctx, IrBlock *bb, IrOperand base, InitPlan *plan)
 {
     if (plan->total_size > 0)
@@ -2760,7 +2732,6 @@ static ExprResult build_string_literal_expr(FuncBuilder *ctx, ASTStringLiteral *
     return expr_result(ir_operand_global(idx), bb);
 }
 
-/* Member address: both `.` and `->` GEP the object pointer by field_offset. */
 static ExprResult build_member_lvalue(FuncBuilder *ctx, ASTMemberAccess *ma, IrBlock *bb)
 {
     ExprResult obj = build_expr(ctx, ma->object, bb);
@@ -2795,7 +2766,6 @@ static ExprResult build_binary_expr(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlock
 {
     if (strip_assign_op(be->op) != be->op)
     {
-        /* Not its own plain form: a compound assignment. */
         return build_compound_assign(ctx, be, bb);
     }
     switch (be->op)
@@ -2834,7 +2804,7 @@ static ExprResult build_expr(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
                 memcpy(blob, &fl->value.ld, 10); /* 10 valid bytes, padding zero */
                 u32 idx = ir_add_rodata_blob(ctx->mod, ctx->mod->arena, blob, 16, 16);
                 u32 vreg = alloc_vreg_from_type(ctx, type_long_double());
-                ir_emit_load(bb, vreg, ir_operand_global(idx), false); /* .rodata constant */
+                ir_emit_load(bb, vreg, ir_operand_global(idx), false);
                 return expr_result(ir_operand_vreg(vreg), bb);
             }
             return expr_result(ir_operand_imm((i64) fl->value.bits), bb);
@@ -3916,7 +3886,6 @@ static void register_func_type(ASTNode *decl, StrMap *func_types)
     }
 }
 
-/* Emit one global per declarator; false when any fails to serialize. */
 static bool emit_file_globals(ASTNode *decl, IrModule *mod, Arena *arena, StrMap *global_map)
 {
     if (decl->kind == AST_VAR_DECL)
@@ -3940,7 +3909,6 @@ static bool emit_file_globals(ASTNode *decl, IrModule *mod, Arena *arena, StrMap
     return true;
 }
 
-/* The declaration kinds that produce no function IR. */
 static bool is_toplevel_declaration(ASTNode *decl)
 {
     switch (decl->kind)

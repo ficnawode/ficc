@@ -6,8 +6,6 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Scalar value semantics, matching ir_interp: ints wrap per class, FP re-rounds. */
-
 bool opt_operand_eq(IrOperand a, IrOperand b)
 {
     if (a.is_imm || b.is_imm)

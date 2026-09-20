@@ -189,7 +189,7 @@ bool type_is_complete(Type *t)
     if (type_is_array(t))
     {
         /* §6.7.6.2p4: a length-0 array is the `[]` "as unspecified" sentinel
-           until an initializer completes it (D12.7) — incomplete. An array of
+           until an initializer completes it — incomplete. An array of
            incomplete elements is likewise incomplete. */
         if (t->arr.length == 0)
         {
@@ -256,7 +256,7 @@ Type *type_promote(Type *t)
     {
         return t;
     }
-    /* Enums are int-sized (D7); promote them to int proper. */
+    /* Enums are int-sized; promote them to int. */
     if (t->kind == TYPE_ENUM || type_rank(t) < type_rank(type_int()))
     {
         return type_int();
@@ -498,11 +498,11 @@ bool type_is_variadic(Type *t)
     return t && t->kind == TYPE_FUNC && t->func.is_variadic;
 }
 
-/* The builtin `va_list` (D15.2): glibc's x86-64 tag, a 24-byte struct used as
+/* The builtin `va_list`: glibc's x86-64 tag, a 24-byte struct used as
    an array of 1 (decays to a pointer on use, so passing it to a fixed
    `va_list` libc parameter is a plain pointer — vsnprintf interop). The record
-   is anonymous and minted fresh on type_reset (the tagless record pattern from
-   Phase 12), then cached as the array-of-1 interned type. */
+   is anonymous and minted fresh on type_reset (the tagless record pattern),
+   then cached as the array-of-1 interned type. */
 static Type *the_va_list;
 
 Type *type_va_list(void)
@@ -972,8 +972,7 @@ Type *type_decay(Type *t)
         /* Function-to-pointer conversion (C11 §6.3.2.1p4): a function
            designator used in any other context than the operand of `&`,
            `sizeof`, `_Alignof`, or unary `*` converts to a pointer to the
-           function (D16.1 — pointer-to-function is TYPE_PTR whose pointee is
-           the interned TYPE_FUNC). */
+           function. */
         return type_ptr(t);
     }
     return t;

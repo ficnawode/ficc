@@ -63,7 +63,7 @@ bool opt_loops_verify_shapes(LoopInfo *loops);
 u32 opt_block_index(struct IrFunction *f, struct IrBlock *bb);
 struct IrBlock *opt_block_by_label(struct IrFunction *f, const char *label);
 
-/* ---- optimizer context and shared magic (opt.c) ---- */
+/* Optimizer context and shared magic (opt.c). */
 
 typedef struct OptimizerContext OptimizerContext;
 
@@ -139,7 +139,7 @@ LoopInfo *opt_get_loops(OptimizerContext *ctx, struct IrFunction *f);
 /* Blocks of f reachable from the entry, dominator-first reverse postorder. */
 Vec *opt_rpo_order(OptimizerContext *ctx, struct IrFunction *f);
 
-/* ---- instruction algebra (opt.c) ---- */
+/* Instruction algebra (opt.c). */
 
 u32 opt_instr_index(struct IrBlock *bb, struct IrInstr *in);
 void opt_erase_instr(struct IrBlock *bb, struct IrInstr *in); /* vregs are never reused */
@@ -148,7 +148,7 @@ void opt_replace_operand(struct IrInstr *in, u8 which, IrOperand val);
 void opt_copy_line(struct IrInstr *in,
                    const struct IrInstr *model); /* substitutions inherit line */
 
-/* ---- edge splicing (opt.c) ---- */
+/* Edge splicing (opt.c). */
 
 /* Split the edges in `preds` -> succ through one fresh empty block; returns it. */
 struct IrBlock *opt_insert_empty_block(struct IrModule *mod, struct IrFunction *f, Vec *preds,
@@ -162,18 +162,18 @@ void opt_retarget_terminator(struct IrBlock *from, const char *old_label, const 
 /* Remove the from->to edge: drop `from` from to->preds and from to's phis. */
 void opt_drop_edge(struct IrBlock *from, struct IrBlock *to);
 
-/* ---- value analysis (opt.c) ---- */
+/* Value analysis (opt.c). */
 
 /* Fill ctx->def_vreg/ctx->use_count for f (fresh arena arrays, module-sized). */
 void opt_make_value_analysis(OptimizerContext *ctx, struct IrFunction *f);
 
-/* ---- def replacement (opt.c) ---- */
+/* Def replacement (opt.c). */
 
 /* Rewrite every use of def->result to `val`, then erase the def. */
 bool opt_replace_def(OptimizerContext *ctx, struct IrFunction *f, struct IrInstr *def,
                      IrOperand val);
 
-/* ---- scalar value semantics (opt_value.c) ---- */
+/* Scalar value semantics (opt_value.c). */
 
 bool opt_operand_eq(IrOperand a, IrOperand b);
 
@@ -189,7 +189,7 @@ bool opt_fold_fp(const struct IrModule *mod, const struct IrInstr *in, i64 *out)
 /* Fold an all-imm FP compare to its 0/1 integer result. */
 bool opt_fold_fcmp(const struct IrModule *mod, const struct IrInstr *in, i64 *out);
 
-/* ---- canonicalize passes (one file each) ---- */
+/* Canonicalize passes (one file each). */
 
 bool opt_pass_fold_const(OptimizerContext *ctx);
 bool opt_pass_identity(OptimizerContext *ctx);
@@ -200,7 +200,7 @@ bool opt_pass_dce(OptimizerContext *ctx);
 bool opt_pass_cfg_clean(OptimizerContext *ctx);
 bool opt_pass_preheader(OptimizerContext *ctx);
 
-/* ---- optimize passes (one file each) ---- */
+/* Optimize passes (one file each). */
 
 bool opt_pass_inline(OptimizerContext *ctx);
 bool opt_pass_gvn(OptimizerContext *ctx);

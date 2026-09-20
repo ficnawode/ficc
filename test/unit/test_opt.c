@@ -71,7 +71,7 @@ TEST(opt, builder_fixtures_verify)
     arena_free(a);
 }
 
-/* --- invariant 1: SSA (single def; every operand has one; params def'd at entry) --- */
+/* invariant 1: SSA (single def; every operand has one; params def'd at entry) */
 
 TEST(opt, double_def_rejected)
 {
@@ -138,7 +138,7 @@ TEST(opt, param_redefined_rejected)
     arena_free(a);
 }
 
-/* --- invariant 2: block shape --- */
+/* invariant 2: block shape */
 
 TEST(opt, missing_terminator_rejected)
 {
@@ -191,7 +191,7 @@ TEST(opt, phi_not_at_start_rejected)
     arena_free(a);
 }
 
-/* --- invariant 3: CFG coherence --- */
+/* invariant 3: CFG coherence */
 
 TEST(opt, brcond_unknown_target_rejected)
 {
@@ -254,7 +254,7 @@ TEST(opt, succ_not_recorded_pred_rejected)
     arena_free(a);
 }
 
-/* --- invariant 4: labels unique per function --- */
+/* invariant 4: labels unique per function */
 
 TEST(opt, duplicate_label_rejected)
 {
@@ -266,7 +266,7 @@ TEST(opt, duplicate_label_rejected)
     arena_free(a);
 }
 
-/* --- invariant 5: operands --- */
+/* invariant 5: operands */
 
 TEST(opt, arity_mismatch_rejected)
 {
@@ -347,7 +347,7 @@ TEST(opt, wide_phi_nonzero_immediate_rejected)
     arena_free(a);
 }
 
-/* --- invariant 6: module value tables --- */
+/* invariant 6: module value tables */
 
 TEST(opt, width_count_mismatch_rejected)
 {
@@ -380,7 +380,7 @@ TEST(opt, width_zero_result_rejected)
     arena_free(a);
 }
 
-/* --- invariant 7: volatile as a memory-op barrier --- */
+/* invariant 7: volatile as a memory-op barrier */
 
 /* OP_LOAD/OP_STORE counts from an inspected module, split by the volatile flag. */
 typedef struct
@@ -472,7 +472,7 @@ TEST(opt, plain_global_ops_unflagged)
     arena_free(a);
 }
 
-/* ---- CFG base, dominators, natural loops, canonical shape ---- */
+/* CFG base, dominators, natural loops, canonical shape */
 
 static IrFunction *opt_main_fn(IrModule *m)
 {
@@ -841,7 +841,7 @@ TEST(opt, for_loop_preheader_is_entry)
     arena_free(a);
 }
 
-/* ---- optimize() shell, mode tables, shared magic ---- */
+/* optimize() shell, mode tables, shared magic */
 
 static OptimizerContext make_ctx(IrModule *m, Arena *a)
 {
@@ -1066,7 +1066,7 @@ TEST(opt, erase_and_reinsert_instr)
     arena_free(a);
 }
 
-/* ---- canonicalize passes ---- */
+/* canonicalize passes */
 
 static u32 count_opcode(IrModule *m, IrOpcode op)
 {
@@ -1549,7 +1549,7 @@ TEST(opt, preheader_canonical_shape_after_optimize)
     arena_free(a);
 }
 
-/* ---- optimize passes (GVN, LICM, mem_fwd) ---- */
+/* optimize passes (GVN, LICM, mem_fwd) */
 
 static IrModule *build_add_add(Arena *a)
 {
@@ -1899,7 +1899,7 @@ TEST(opt, cfg_clean_keeps_latch_for_header_phi_copy)
     arena_free(a);
 }
 
-/* ---- inline pass (F1: tier 1 user-directed + tier 2 size filter) ---- */
+/* inline pass (F1: tier 1 user-directed + tier 2 size filter) */
 
 static u32 count_calls_to(IrModule *m, const char *fname)
 {

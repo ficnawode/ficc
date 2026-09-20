@@ -1,7 +1,7 @@
 #include "cfi.h"
 #include "util/assert.h"
 
-/* ---- .eh_frame emission (DWARF4 §6.4.2, the two-address frame table) ---- */
+/* .eh_frame emission (DWARF4 §6.4.2, the two-address frame table). */
 
 enum
 {

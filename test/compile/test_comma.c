@@ -179,7 +179,7 @@ TEST(comma, left_side_effects_before_right)
                           42);
 }
 
-/* --- negatives (all must fail to build) --- */
+/* negatives (all must fail to build) */
 
 TEST(comma, negative_not_an_lvalue)
 {

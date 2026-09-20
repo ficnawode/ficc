@@ -313,7 +313,7 @@ TEST(declarators, pointer_param_and_return_types)
                           42);
 }
 
-/* --- negatives (all must fail to build) --- */
+/* negatives (all must fail to build) */
 
 TEST(declarators, negative_char_with_long)
 {

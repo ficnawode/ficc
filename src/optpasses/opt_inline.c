@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Clones a callee into each direct call site (D21/F1), ahead of GVN/LICM. */
+/* Clones a callee into each direct call site, ahead of GVN/LICM. */
 
 #define INLINE_T2_MAX_INSTRS 20 /* tier-2 body cap, in non-phi instructions */
 #define INLINE_T2_LOOP_FACTOR 4 /* a call in a loop amortizes its own overhead */
@@ -198,8 +198,6 @@ static bool site_eligible(InlinePass *ip, IrFunction *caller, Vec *lin, IrFuncti
     }
     return callee_eligible(callee, in_loop);
 }
-
-/* ---- clone machinery ---- */
 
 typedef struct
 {

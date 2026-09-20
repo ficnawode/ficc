@@ -115,7 +115,7 @@ char *pp_prepare(const char *file, const char *src, Arena *arena);
 Vec *pp_lex(const char *file, const char *src, Arena *arena);
 
 /* True if joining the spellings a then b would re-lex as a single
-   (possibly longer) punctuator — the -E token-separation test (D17.13). */
+   (possibly longer) punctuator — the -E token-separation test. */
 bool pp_concat_is_punct(const char *a, size_t alen, const char *b, size_t blen);
 
 const char *pp_kind_name(PpKind kind);

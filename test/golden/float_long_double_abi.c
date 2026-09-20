@@ -73,7 +73,7 @@ long double res;
 
 int main(void)
 {
-    /* --- args/returns --- */
+    /* args/returns */
     if (mul(1.5L, 2.5L) != 4.75L)
     {
         return 1;
@@ -109,7 +109,7 @@ int main(void)
         return 8;
     }
 
-    /* --- variadic (overflow-only reads) --- */
+    /* variadic (overflow-only reads) */
     if (vsum(3, 1.0L, 2.0L, 3.0L) != 6.0L)
     {
         return 9;
@@ -131,7 +131,7 @@ int main(void)
         return 13;
     }
 
-    /* --- a width-16 global fed by the %st0 return path --- */
+    /* a width-16 global fed by the %st0 return path */
     res = mul(3.0L, 4.0L);
     if (*(unsigned long long *) &res != 0xD000000000000000ULL)
     {

@@ -430,7 +430,7 @@ TEST(globals, elf_shadow_in_loop)
     EXPECT_EQ(tc_run_elf(shadow_in_loop_src), 0);
 }
 
-/* --- Phase 12c: file-scope & block-static initializer lists + relocs --- */
+/* Phase 12c: file-scope & block-static initializer lists + relocs */
 
 TEST(globals, file_scope_array_list)
 {

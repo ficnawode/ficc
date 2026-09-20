@@ -2,8 +2,6 @@
 
 #include "ir.h"
 
-/* Integer-only 0/1 identities; FP keeps its -0.0 and NaN cracks untouched. */
-
 static bool is_imm_zero(IrOperand op)
 {
     return op.is_imm && op.u.imm == 0;

@@ -322,7 +322,7 @@ TEST(incdec, postfix_old_value_chain)
                           42);
 }
 
-/* --- negatives (all must fail to build) --- */
+/* negatives (all must fail to build) */
 
 TEST(incdec, negative_const_scalar)
 {
@@ -379,7 +379,7 @@ TEST(incdec, negative_increment_of_binary)
     EXPECT_BUILD_FAIL("int main(void) { int a = 1; int b = 2; return (a + b)++; }\n");
 }
 
-/* --- Phase 13c: compound assignment (§6.5.16.2) --- */
+/* Phase 13c: compound assignment (§6.5.16.2) */
 
 TEST(incdec, compound_all_ten_ops)
 {
@@ -574,7 +574,7 @@ TEST(incdec, compound_rvalue_result)
                           42);
 }
 
-/* --- compound-assignment negatives --- */
+/* compound-assignment negatives */
 
 TEST(incdec, negative_compound_const)
 {

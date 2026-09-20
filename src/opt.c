@@ -8,8 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Optimizer shell: per-level pass selections, the registry, and shared magic. */
-
 void opt_error(const char *fmt, ...)
 {
     printf("[opt] error: ");
@@ -184,8 +182,6 @@ Vec *opt_rpo_order(OptimizerContext *ctx, IrFunction *f)
     return order;
 }
 
-/* ---- instruction algebra ---- */
-
 u32 opt_instr_index(IrBlock *bb, IrInstr *in)
 {
     size_t n = vec_size(bb->instrs);
@@ -226,8 +222,6 @@ void opt_copy_line(IrInstr *in, const IrInstr *model)
 {
     in->line = model->line;
 }
-
-/* ---- edge splicing ---- */
 
 static void retarget_labels(IrInstr *last, const char *old_label, const char *new_label)
 {
@@ -470,8 +464,6 @@ void opt_drop_edge(IrBlock *from, IrBlock *to)
     preds_remove(to->preds, from);
     phi_drop_pred(to, from->label);
 }
-
-/* ---- value analysis ---- */
 
 static void count_use_operand(IrModule *mod, u32 *uses, IrOperand op)
 {

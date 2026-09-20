@@ -5,8 +5,6 @@
 #include "util/types.h"
 #include "util/vec.h"
 
-/* ---- per-stage config fragments (each embedded in that stage's ctx) ---- */
-
 typedef struct
 {
     bool keep_comments; /* -C: print comment trivia (implies emit_pp) */
@@ -62,8 +60,6 @@ typedef struct
 {
     bool debug; /* -g: emit DWARF debug info + .eh_frame CFI in the object */
 } CodegenConfig;
-
-/* ---- top-level config: the product of the arg parse ---- */
 
 typedef struct
 {

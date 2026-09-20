@@ -124,7 +124,6 @@ static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
 #define VA_NGP 6
 #define VA_NXMM 8
 
-/* va_list field offsets. */
 #define VA_FIELD_GP_OFFSET 0
 #define VA_FIELD_FP_OFFSET 4
 #define VA_FIELD_OVF 8
@@ -563,7 +562,7 @@ static void lower_binary(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, w, xop_reg(R_EAX), lowered_operand(ctx, in->ops[0], R_EAX));
     if (in->opcode == OP_AND && w == 4 && rhs.kind == XOP_IMM && rhs.u.imm == 0xFF)
     {
-        emit_movzbl_al_eax(ctx->buf); /* andl $0xFF, %eax → movzbl %al, %eax */
+        emit_movzbl_al_eax(ctx->buf);
     }
     else if (in->opcode == OP_XOR && rhs.kind == XOP_IMM && rhs.u.imm == 0)
     {
@@ -656,7 +655,6 @@ static void lower_icmp(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, rw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
-/* System V AMD64 argument registers. */
 static const u8 abi_arg_regs[6] = {R_EDI, R_ESI, R_EDX, R_ECX, R_R8, R_R9};
 
 /* Where a call argument travels: GP/SSE register, or a caller-stack spill slot. */
@@ -678,7 +676,6 @@ typedef struct
     u32 reg_or_off; /* GP/SSE register index, or byte offset below %rsp for stack args */
 } CallArg;
 
-/* Classify each argument (independent GP/SSE counters); returns stack bytes and %al count. */
 static u32 classify_call_args(CodegenCtx *ctx, IrInstr *in, CallArg *args, u32 *fp_count)
 {
     u32 nargs = in->extra.call.nargs;

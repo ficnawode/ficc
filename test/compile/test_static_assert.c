@@ -3,7 +3,7 @@
 
 #include "util/arena.h"
 
-/* --- Phase 14b: _Static_assert — compile-time constant-expression check. --- */
+/* Phase 14b: _Static_assert — compile-time constant-expression check. */
 
 TEST(static_assert, file_scope_pass)
 {

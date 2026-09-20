@@ -2,8 +2,6 @@
 
 #include "ir.h"
 
-/* Collapse phis whose values all agree; self entries make the value invariant. */
-
 bool opt_pass_phi_simp(OptimizerContext *ctx)
 {
     bool changed = false;

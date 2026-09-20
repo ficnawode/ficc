@@ -30,7 +30,6 @@ struct SwitchSem
     bool has_default;
 };
 
-/* How a declaration's initializer was handled by the planner. */
 typedef enum
 {
     PLAN_HANDLED, /* aggregate / string / address-constant initializer was planned */
@@ -50,7 +49,6 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd);
 static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type);
 static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx);
 
-/* Report a diagnostic, mark the context failed, and return false  */
 static bool sem_error(SemanticCtx *ctx, Loc loc, const char *fmt, ...)
 {
     fprintf(stderr, "%s:%u:%u: [semantic] error: ", loc.file, loc.line, loc.col);
@@ -105,7 +103,6 @@ static void pop_scope(SemanticCtx *ctx)
     vec_pop(ctx->scopes);
 }
 
-/* Walk the scope stack innermost-first. */
 static ASTVarDecl *scope_lookup(SemanticCtx *ctx, const char *name)
 {
     size_t n = vec_size(ctx->scopes);
@@ -120,7 +117,6 @@ static ASTVarDecl *scope_lookup(SemanticCtx *ctx, const char *name)
     return NULL;
 }
 
-/* Look up only the innermost scope (for same-scope redeclaration checks). */
 static ASTVarDecl *scope_top_lookup(SemanticCtx *ctx, const char *name)
 {
     return strmap_get(current_scope(ctx), name);
@@ -165,13 +161,11 @@ static bool check_identifier_expr(ASTIdent *ident, SemanticCtx *ctx)
     return sem_error(ctx, ident->base.loc, "undeclared identifier '%s'", ident->name);
 }
 
-/* One bool per BinOpKind: comparison operators (==, !=, <, >, <=, >=). */
 static const bool is_comparison_op_table[BIN_GE + 1] = {
     [BIN_EQ] = true, [BIN_NE] = true, [BIN_LT] = true,
     [BIN_GT] = true, [BIN_LE] = true, [BIN_GE] = true,
 };
 
-/* One bool per BinOpKind: compound-assignment operators (+=, -=, ... , ^=). */
 static const bool is_compound_assign_table[BIN_XOR_ASSIGN + 1] = {
     [BIN_ADD_ASSIGN] = true, [BIN_SUB_ASSIGN] = true, [BIN_MUL_ASSIGN] = true,
     [BIN_DIV_ASSIGN] = true, [BIN_REM_ASSIGN] = true, [BIN_SHL_ASSIGN] = true,
@@ -901,7 +895,6 @@ static bool check_member_access(ASTMemberAccess *ma, SemanticCtx *ctx)
     return true;
 }
 
-/* resolve a whole-sized expression node: `ok ? node->expr_type : NULL`. */
 static Type *expr_done(bool ok, ASTNode *node)
 {
     return ok ? node->expr_type : NULL;
@@ -1271,7 +1264,7 @@ static bool check_expression_statement(ASTExprStmt *expr_stmt, SemanticCtx *ctx)
     return check_expr(expr_stmt->expr, ctx);
 }
 
-/* ---- initializer-list planner (C11 §6.7.9) ----
+/* Initializer-list planner (C11 §6.7.9):
    Flattens a brace-enclosed initializer tree into offset-targeted writes on
    the object being initialized. A cursor of aggregate frames walks the
    subobjects in initialization order; brace elision falls out of the descent:
@@ -1340,7 +1333,6 @@ static bool plan_frame_child(const PlanFrame *fr, Type **cty, u32 *coff, bool *i
     return true;
 }
 
-/* Walk the fields of `agg` looking for `name`; returns its index on success. */
 static bool record_field_index(Type *agg, const char *name, u32 *out)
 {
     agg = type_unqual(agg);
@@ -1554,7 +1546,7 @@ static PlanResult plan_char_string_clause(SemanticCtx *ctx, InitPlan *plan, Type
 {
     if (e->design || e->value->kind != AST_STRING_LITERAL)
     {
-        return PLAN_NONE; /* not this special form; fall through */
+        return PLAN_NONE;
     }
     ASTStringLiteral *sl = ast_as(ASTStringLiteral, e->value);
     u64 need = sl->length + 1;
@@ -2044,7 +2036,6 @@ static bool check_for_statement(ASTForStmt *for_stmt, SemanticCtx *ctx, Type *re
     return ok;
 }
 
-/* Fold a unary integer-constant operation; false when the op doesn't fold. */
 static bool fold_unary_constant(UnaryOpKind op, i64 v, i64 *out)
 {
     switch (op)
@@ -2753,7 +2744,6 @@ static bool register_globals(ASTProgram *prog, SemanticCtx *ctx)
     return true;
 }
 
-/* Check file-scope `_Static_assert`s before anything else. */
 static bool check_file_scope_asserts(ASTProgram *prog, SemanticCtx *ctx)
 {
     size_t ndecls = vec_size(prog->decls);
@@ -2851,7 +2841,6 @@ static bool register_functions(ASTProgram *prog, SemanticCtx *ctx)
     return true;
 }
 
-/* Check every function body; each gets its own scope, labels, and loop depth. */
 static bool check_function_bodies(ASTProgram *prog, SemanticCtx *ctx)
 {
     size_t ndecls = vec_size(prog->decls);

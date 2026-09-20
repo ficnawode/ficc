@@ -147,7 +147,7 @@ TEST(semantic, param_body_redeclaration_error)
                       "}");
 }
 
-/* --- Phase 11: cast legality --- */
+/* Phase 11: cast legality */
 
 TEST(semantic, cast_ok)
 {
@@ -282,7 +282,7 @@ TEST(semantic, void_ptr_param_wrong_deep_pointer_rejected)
                       "}\n");
 }
 
-/* --- Phase 12a: typedef --- */
+/* Phase 12a: typedef */
 
 TEST(semantic, typedef_void_pointer)
 {
@@ -781,7 +781,7 @@ TEST(semantic, va_arg_first_arg_not_va_list)
                       "}\n");
 }
 
-/* --- Phase 16a: function prototypes / forward declarations --- */
+/* Phase 16a: function prototypes / forward declarations */
 
 TEST(semantic, prototype_then_definition)
 {
@@ -946,7 +946,7 @@ TEST(semantic, prototype_collides_with_global_var)
                       "}");
 }
 
-/* --- Phase 16b: function designators / function-pointer semantics --- */
+/* Phase 16b: function designators / function-pointer semantics */
 
 TEST(semantic, function_designator_in_expression)
 {

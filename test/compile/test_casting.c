@@ -433,7 +433,7 @@ TEST(casting, double_pointer_cast)
                           42);
 }
 
-/* --- negative: casts that must not compile --- */
+/* negative: casts that must not compile */
 
 TEST(casting, negative_cast_to_struct)
 {

@@ -268,7 +268,7 @@ TEST(opt, level2_mem_fwd_redundant_load)
     opt_run_level(redundant_load_src, "-O2", 40);
 }
 
-/* ---- inline suite (F1): tier 1 user-directed, size filter, negatives ---- */
+/* inline suite (F1): tier 1 user-directed, size filter, negatives */
 
 static const char *inline_leaf_src = "static inline int sq(int x) { return x * x; }\n"
                                      "int main(void) { return sq(7) == 49 ? 0 : 1; }\n";

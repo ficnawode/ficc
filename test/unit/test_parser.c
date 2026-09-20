@@ -780,7 +780,7 @@ TEST(parser, array_declarator)
     arena_free(a);
 }
 
-/* --- Phase 11: cast parsing, disambiguation, and constant folding --- */
+/* Phase 11: cast parsing, disambiguation, and constant folding */
 
 TEST(parser, cast_node)
 {
@@ -963,7 +963,7 @@ TEST(parser, cast_folds_unsigned_in_case_label)
     arena_free(a);
 }
 
-/* --- Phase 12a: typedef --- */
+/* Phase 12a: typedef */
 
 TEST(parser, typedef_toplevel_decl_shape)
 {
@@ -1603,7 +1603,7 @@ TEST(parser, builtin_va_arg_pointer_type)
     arena_free(a);
 }
 
-/* --- Phase 16b: function-pointer declarator shapes --- */
+/* Phase 16b: function-pointer declarator shapes */
 
 TEST(parser, fn_ptr_declarator)
 {

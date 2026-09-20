@@ -14,7 +14,7 @@ long double res;
 
 int main(void)
 {
-    /* --- arithmetic, bit-exact against the host x87 --- */
+    /* arithmetic, bit-exact against the host x87 */
     long double s = 0.0L;
     s = 0.1L + 0.2L;
     if (*(unsigned long long *) &s != 0x999999999999999aULL)
@@ -61,7 +61,7 @@ int main(void)
         return 8; /* the chain lands a hair above 1.0 */
     }
 
-    /* --- compares incl. NaN --- */
+    /* compares incl. NaN */
     if (!(a < b) || !(a <= 2.0L) || !(b > a) || !(b >= 2.5L))
     {
         return 9;
@@ -77,7 +77,7 @@ int main(void)
         return 11;
     }
 
-    /* --- boolify / conditions / unary / mutators --- */
+    /* boolify / conditions / unary / mutators */
     long double nz = -0.0L;
     if (nz)
     {
@@ -119,7 +119,7 @@ int main(void)
         return 21;
     }
 
-    /* --- converts: i/d/f ↔ ld --- */
+    /* converts: i/d/f ↔ ld */
     if ((long double) 3 != 3.0L)
     {
         return 22;
@@ -146,7 +146,7 @@ int main(void)
         return 27;
     }
 
-    /* --- the u64 ≥ 2^63 add-back dance and the truncation brands --- */
+    /* the u64 ≥ 2^63 add-back dance and the truncation brands */
     long double big = (long double) 0xFFFFFFFFFFFFFFFFULL;
     if (*(unsigned long long *) &big != 0xFFFFFFFFFFFFFFFFULL)
     {
@@ -182,7 +182,7 @@ int main(void)
         return 35;
     }
 
-    /* --- subnormal literal (smallest positive extended) --- */
+    /* subnormal literal (smallest positive extended) */
     long double sub = 0x1p-16445L;
     if (*(unsigned long long *) &sub != 0x0000000000000001ULL || sub == 0.0L)
     {

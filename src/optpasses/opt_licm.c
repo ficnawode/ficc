@@ -5,8 +5,6 @@
 
 #include <stdint.h>
 
-/* Hoist loop-invariant pure defs to each loop's preheader. */
-
 static u64 ptr_hash(const void *key)
 {
     return (u64) (uintptr_t) key;

@@ -117,7 +117,7 @@ TEST(char_lit, string_escapes_share_decoder)
                           42);
 }
 
-/* --- negatives (all must fail to build) --- */
+/* negatives (all must fail to build) */
 
 TEST(char_lit, negative_empty)
 {

@@ -141,7 +141,7 @@ bool type_is_record(Type *t);
 bool type_is_struct(Type *t);
 bool type_is_union(Type *t);
 bool type_is_enum(Type *t);
-bool type_is_complete(Type *t); /* records + arrays (len-0 = `[]` unspecified, D12.7) */
+bool type_is_complete(Type *t); /* records + arrays (len-0 = `[]` unspecified) */
 bool type_is_const(Type *t);
 bool type_is_volatile(Type *t);
 
@@ -153,7 +153,7 @@ Type *type_record(TypeKind kind, const char *tag);
 Type *type_record_anon(TypeKind kind);
 void type_record_complete(Type *t, Vec *fields);
 
-/* The builtin `va_list` (D15.2): glibc's x86-64 shape, a 24-byte struct
+/* The builtin `va_list`: glibc's x86-64 shape, a 24-byte struct
    `{u32 gp_offset; u32 fp_offset; void *overflow_arg_area; void
    *reg_save_area;}` used as an array of 1 so it decays to a pointer on use.
    Interned singleton; reconstructed per compilation unit by type_reset. */
@@ -209,7 +209,7 @@ int type_rank(Type *t);
 /* C11 §6.3.1.3: convert a value into a target integer type's range. Narrower
    targets wrap modulo 2^width; the result is masked to the width and
    sign-extended if the target is signed (the implementation-defined wrap for
-   out-of-range signed targets, matching design.md §8). Used by constant
+   out-of-range signed targets). Used by constant
    folding of casts and switch case conversion; runtime casts lower to
    TRUNC/ZEXT/SEXT in the IR builder instead. */
 i64 type_reduce_int(Type *target, i64 value);

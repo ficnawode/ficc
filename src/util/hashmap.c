@@ -210,7 +210,6 @@ bool hashmap_contains(const HashMap *m, const void *key)
     return hashmap_get(m, key) != NULL;
 }
 
-/* ---- StrMap ---- */
 StrMap *strmap_new(Arena *arena)
 {
     return hashmap_new_with_cap(arena, HASHMAP_INIT_CAP, hashmap_str_hash, hashmap_str_eq);
@@ -226,7 +225,6 @@ void *strmap_get(const StrMap *m, const char *key)
     return hashmap_get(m, key);
 }
 
-/* ---- U64Map ---- */
 U64Map *u64map_new(Arena *arena)
 {
     return hashmap_new_with_cap(arena, HASHMAP_INIT_CAP, hash_u64, eq_u64);
@@ -242,7 +240,6 @@ void *u64map_get(const U64Map *m, u64 key)
     return hashmap_get(m, (const void *) (uintptr_t) key);
 }
 
-/* ---- HashSet ---- */
 HashSet *hashset_new(Arena *arena, u64 (*hash)(const void *key),
                      bool (*eq)(const void *a, const void *b))
 {

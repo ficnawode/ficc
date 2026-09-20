@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ---- ELF64 format definitions ---- */
+/* ELF64 format definitions. */
 typedef uint8_t Elf64_Byte;
 typedef uint16_t Elf64_Half;
 typedef uint32_t Elf64_Word;
@@ -103,7 +103,7 @@ struct Elf64_Rela
     Elf64_Sxword r_addend;
 };
 
-/* ---- string table builder ---- */
+/* String table builder. */
 /* A string table is a byte buffer whose first byte is NUL and whose only
    appends are strings followed by NUL. strtab_add returns the offset. */
 static void strtab_init(ByteBuf *st, Arena *arena)
@@ -149,7 +149,7 @@ typedef enum
 /* e_shnum without the -g-only sections (byte-identical non-debug path). */
 #define SEC_BASE_COUNT (SEC_RELA_RODATA + 1)
 
-/* Symbol indices are fixed for determinism (D12):
+/* Symbol indices are fixed for determinism:
    0 = null, 1-4 = section symbols (text/rodata/data/bss),
    5+i = global i (definition order), then function symbols. */
 #define FIRST_GLOBAL_SYM 5
@@ -463,7 +463,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
     }
 
     /* Declaration-only extern functions referenced by calls *or* whose address
-       is taken (Phase 16): one SHN_UNDEF STB_GLOBAL symbol per unique name,
+       is taken: one SHN_UNDEF STB_GLOBAL symbol per unique name,
        placed after the defined-function symbols; elf's symbol index for extern
        e is FIRST_GLOBAL_SYM + nglobals + nfuncs + e. */
     size_t nextern = cm->extern_calls ? vec_size(cm->extern_calls) : 0;
@@ -488,7 +488,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
             sym_emit(&symtab, name_off, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), SHN_UNDEF, 0, 0);
         }
     }
-    /* Function-address loads (`&f`/designator, D16.1) of *extern* functions
+    /* Function-address loads (`&f`/designator) of *extern* functions
        also need an undefined symbol, even if never called. */
     for (size_t fi = 0; fi < nfuncs; fi++)
     {
@@ -519,7 +519,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
             }
         }
     }
-    /* File-scope function-pointer initializers (D16.1): a data-side
+    /* File-scope function-pointer initializers: a data-side
        R_X86_64_64 relocation against an *extern* function also needs an
        undefined symbol. */
     for (size_t i = 0; i < nglobals; i++)
@@ -591,7 +591,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
         rela_emit(&rela_text, ec->text_offset, sym_idx, R_X86_64_PLT32, -4);
     }
 
-    /* Function-address loads (`&f`/designator, D16.1): R_X86_64_32S against
+    /* Function-address loads (`&f`/designator): R_X86_64_32S against
        the function's own symbol (defined or SHN_UNDEF extern). */
     for (size_t fi = 0; fi < nfuncs; fi++)
     {
@@ -624,7 +624,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
             u32 sym_idx;
             if (gr->is_func)
             {
-                /* A function-address initializer (D16.1): R_X86_64_64 against
+                /* A function-address initializer: R_X86_64_64 against
                    the function's symbol. */
                 sym_idx = func_sym_index(cm, gr->func_name, extern_syms, &layout);
             }

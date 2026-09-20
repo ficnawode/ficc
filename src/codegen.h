@@ -56,7 +56,6 @@ struct CodegenModule
     Vec *extern_calls; /* Vec<ExternCall*> — calls to declaration-only externs */
 };
 
-/* Convert IR to machine code bytes. */
 CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Arena *arena);
 
 /* Per-global .rodata/.data/.bss offsets; shared by elf.c and dwarf.c layout. */

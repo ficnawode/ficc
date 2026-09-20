@@ -132,7 +132,7 @@ static size_t fail_pos(DwarfCheck *out, const char *msg)
     return (size_t) -1;
 }
 
-/* ---- little-endian word reads (the only endianness elf.c emits) ---- */
+/* little-endian word reads (the only endianness elf.c emits) */
 
 static u16 rd16(const u8 *p)
 {
@@ -149,7 +149,7 @@ static u64 rd64(const u8 *p)
     return (u64) rd32(p) | (u64) rd32(p + 4) << 32;
 }
 
-/* ---- LEB128 readers ---- */
+/* LEB128 readers */
 
 static bool read_uleb(const u8 *p, size_t len, size_t *pos, u64 *out)
 {
@@ -243,7 +243,7 @@ static bool reloc_covers(Vec *relas, u64 slot, u32 lo, u32 hi)
     return false;
 }
 
-/* ---- ELF object loading ---- */
+/* ELF object loading */
 
 typedef struct
 {
@@ -430,7 +430,7 @@ void dwarf_check_from_buffers(DwarfCheck *out, Arena *arena, const u8 *info, siz
     out->rela_eh = rela_eh;
 }
 
-/* ---- .debug_line ---- */
+/* .debug_line */
 
 /* Program registers plus the header fields the decoder advances. */
 typedef struct
@@ -742,7 +742,7 @@ bool dwarf_check_line_relocs_covered(DwarfCheck *out, const DwarfCheckLines *lin
     return true;
 }
 
-/* ---- .debug_info: abbrev table + DIE tree ---- */
+/* .debug_info: abbrev table + DIE tree */
 
 typedef struct
 {
@@ -1124,7 +1124,7 @@ bool dwarf_check_info_relocs_covered(DwarfCheck *out, const DwarfCheckInfo *info
     return true;
 }
 
-/* ---- helpers the tests share ---- */
+/* helpers the tests share */
 
 size_t dwarf_check_sleb128(const u8 *buf, size_t len, i64 *out)
 {
@@ -1195,7 +1195,7 @@ DwarfCheckDie *dwarf_check_die_named(const DwarfCheckInfo *info, const char *nam
     return NULL;
 }
 
-/* ---- .eh_frame ---- */
+/* .eh_frame */
 
 /* Skip a 'z' augmentation: uleb length followed by that many bytes. */
 static bool skip_aug_data(DwarfCheck *out, const u8 *p, size_t end, size_t *pos)

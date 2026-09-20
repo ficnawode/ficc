@@ -2,8 +2,6 @@
 
 #include "ir.h"
 
-/* Loop canonical shape as a canon rule (at most one latch, one outside pred). */
-
 bool opt_pass_preheader(OptimizerContext *ctx)
 {
     bool changed = false;

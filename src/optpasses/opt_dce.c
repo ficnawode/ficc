@@ -2,8 +2,6 @@
 
 #include "ir.h"
 
-/* SSA use-count DCE to fixpoint; memory, calls, and terminators stay put. */
-
 static bool is_pure(IrInstr *in)
 {
     switch (in->opcode)

@@ -3,7 +3,7 @@
 
 #include "util/arena.h"
 
-/* --- Phase 14a: _Alignof — alignment queries folded to size_t constants. --- */
+/* Phase 14a: _Alignof — alignment queries folded to size_t constants. */
 
 TEST(alignof, type_forms)
 {

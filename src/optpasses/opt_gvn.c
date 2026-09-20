@@ -6,8 +6,6 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Dominator-scoped value numbering over pure integer/pointer ops. */
-
 typedef enum
 {
     VN_NONE = 0,

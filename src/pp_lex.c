@@ -222,7 +222,7 @@ static u32 pp_punct_match(const char *p, PpPunct *out)
 /* Joining a then b reads as one punctuator when the concatenation itself is
    one, or when max-munch would chew part of `a` across the seam (`a` a strict
    prefix of a punctuator whose remainder `b` starts with, e.g. `<` `<<`). This
-   is the -E token-separation test (D17.13). */
+   is the -E token-separation test. */
 bool pp_concat_is_punct(const char *a, size_t alen, const char *b, size_t blen)
 {
     if (alen + blen > 4)

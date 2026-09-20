@@ -3,7 +3,7 @@
 
 #include "util/arena.h"
 
-/* --- Phase 14c: _Bool — 1-byte unsigned integer that normalizes to 0/1. --- */
+/* Phase 14c: _Bool — 1-byte unsigned integer that normalizes to 0/1. */
 
 TEST(bool, declare_and_normalize)
 {

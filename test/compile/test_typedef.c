@@ -223,7 +223,7 @@ TEST(typedef, for_init_declaration)
                           42);
 }
 
-/* --- negatives (all must fail to build) --- */
+/* negatives (all must fail to build) */
 
 TEST(typedef, negative_same_scope_var_clash)
 {

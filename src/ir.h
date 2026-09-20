@@ -264,7 +264,7 @@ struct IrModule
     u32 next_vreg; /* module-wide vreg allocator */
 };
 
-/* ---- builder ----
+/* Builder interface.
    Every builder allocates from the module's arena, reached through the
    module/function/block context. ir_module_new is the sole entry point. */
 IrModule *ir_module_new(Arena *arena);

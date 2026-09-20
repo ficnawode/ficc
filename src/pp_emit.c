@@ -20,7 +20,7 @@ static bool pp_emit_kind_word(PpKind kind)
 }
 
 /* True when printing prev then cur without a separator would re-lex to a
-   different token sequence than the two printed tokens (D17.13). */
+   different token sequence than the two printed tokens. */
 static bool pp_emit_needs_space(const PpToken *prev, const PpToken *cur)
 {
     if (pp_emit_kind_word(prev->kind) && pp_emit_kind_word(cur->kind))

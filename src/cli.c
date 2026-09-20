@@ -248,8 +248,6 @@ static const CLIOption option_table[] = {
 #define USAGE_INDENT 7
 #define USAGE_WRAP 78
 
-/* Prints one bracketed token, wrapping to the hanging indent when it would
-   overflow the usage line. Returns the new column. */
 static int usage_print_token(int col, const char *token)
 {
     if (col > USAGE_INDENT && col + 1 + (int) strlen(token) > USAGE_WRAP)

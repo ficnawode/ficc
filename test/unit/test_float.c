@@ -626,7 +626,7 @@ TEST(float, float_subscript_rejected)
     EXPECT_BUILD_FAIL("int main(void) { int a[3]; return a[1.5]; }");
 }
 
-/* ---- SysV FP ABI and file-scope FP globals ---- */
+/* SysV FP ABI and file-scope FP globals */
 
 TEST(float, fp_args_mixed_and_overflow_both_backends)
 {
@@ -842,7 +842,7 @@ TEST(float, file_scope_fp_nonconstant_rejected)
                       "int main(void) { return 0; }\n");
 }
 
-/* ---- long double: type, literals, constants, value model (storage-only) ---- */
+/* long double: type, literals, constants, value model (storage-only) */
 
 TEST(float, long_double_sizeof_alignof_folded)
 {
@@ -971,7 +971,7 @@ TEST(float, long_double_cast_matrix_builds)
                          "int main(void) { return 0; }\n");
 }
 
-/* ---- 19f: x87 arithmetic / compares / converts (both backends) ---- */
+/* 19f: x87 arithmetic / compares / converts (both backends) */
 
 TEST(float, long_double_arith_both_backends)
 {

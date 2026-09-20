@@ -5,8 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* --- Interpreter diagnostics --- */
-
 static void interp_error(const char *fmt, ...)
 {
     fprintf(stderr, "[interp] error: ");
@@ -16,8 +14,6 @@ static void interp_error(const char *fmt, ...)
     va_end(args);
     fprintf(stderr, "\n");
 }
-
-/* --- Interpreter context --- */
 
 typedef struct InterpGlobal InterpGlobal;
 struct InterpGlobal
@@ -37,14 +33,12 @@ struct InterpCtx
     /* Per-function block lookup (rebuilt on every run_func / eval_call) */
     StrMap *block_map; /* label -> IrBlock* */
 
-    /* Per-block execution state */
     IrBlock *next_bb;   /* next block to execute (set by branch ops) */
     IrBlock *next_pred; /* the block that jumps to next_bb */
     bool jumped;
     bool returned;
     bool error; /* set on a runtime trap (e.g. null dereference) */
 
-    /* Alloca and global state */
     u8 *alloca_base;
     u64 alloca_top;
     u64 alloca_limit;
@@ -59,7 +53,6 @@ struct InterpCtx
     u32 nfuncs;
 };
 
-/* --- SysV x86-64 varargs ABI --- (6 GP slots + 8 xmm slots at a 16-byte stride) */
 #define VA_GP_ARGS 6
 #define VA_GP_BYTES (VA_GP_ARGS * 8) /* 48 */
 #define VA_XMM_ARGS 8
@@ -93,8 +86,6 @@ static void copy_cell(InterpCtx *ctx, i64 *dst_regs, u32 dst_vreg, i64 *src_regs
     memcpy(&dst_regs[ctx->nregs + dst_vreg], &src_regs[ctx->nregs + src_vreg], 8);
 }
 
-/* --- Function pseudo-addresses --- */
-
 #define FUNC_ADDR_BASE 0x400000000ULL
 
 static size_t func_index_by_name(IrModule *mod, const char *name)
@@ -121,8 +112,6 @@ static i64 func_addr_by_name(IrModule *mod, const char *name)
     size_t fi = func_index_by_name(mod, name);
     return fi < vec_size(mod->funcs) ? func_addr(fi) : 0;
 }
-
-/* --- Frame management --- */
 
 static i64 operand_val(InterpCtx *ctx, IrOperand o, i64 *regs)
 {
@@ -192,8 +181,6 @@ static u8 *interp_alloc(InterpCtx *ctx, u64 size)
     return p;
 }
 
-/* --- Width-aware masking --- */
-
 static i64 trunc_result(i64 val, u8 width_bytes)
 {
     switch (width_bytes)
@@ -232,14 +219,9 @@ static void apply_vreg_width(InterpCtx *ctx, i64 *regs, u32 vreg)
     regs[vreg] = is_signed ? sext_result(regs[vreg], w) : trunc_result(regs[vreg], w);
 }
 
-/* --- Eval dispatch --- */
-
 typedef i64 (*EvalFn)(IrInstr *in, InterpCtx *ctx, i64 *regs);
 
-/* Forward declaration for the mutual recursion with eval_call. */
 static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *start_pred);
-
-/* --- Eval functions --- */
 
 static i64 eval_binary(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
@@ -393,7 +375,6 @@ static i64 eval_icmp(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* Resolve a function pseudo-address back to its IrFunction; NULL if unknown. */
 static IrFunction *find_func_by_addr(InterpCtx *ctx, i64 addr)
 {
     for (u32 i = 0; i < ctx->nfuncs; i++)
@@ -1147,8 +1128,6 @@ static i64 eval_memcpy(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* --- PHI evaluation --- */
-
 static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
 {
     size_t ninstr = vec_size(bb->instrs);
@@ -1182,8 +1161,6 @@ static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
         ASSERT(found && "phi entry names a real predecessor block");
     }
 }
-
-/* --- Dispatch table --- */
 
 #define EVAL_ENTRIES(X)                                                                            \
     X(OP_ADD, eval_binary)                                                                         \
@@ -1251,8 +1228,6 @@ static const EvalFn eval_fns[] = {
 #undef EVAL_INIT
 };
 
-/* --- Block execution --- */
-
 static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *start_pred)
 {
     IrBlock *bb = start_bb;
@@ -1312,8 +1287,6 @@ static i64 run_block(InterpCtx *ctx, i64 *regs, IrBlock *start_bb, IrBlock *star
     return 0;
 }
 
-/* --- Function execution --- */
-
 static i64 run_func(IrFunction *func, InterpCtx *ctx)
 {
     Frame *frame = frame_new(ctx->frame_arena, ctx->nregs);
@@ -1326,8 +1299,6 @@ static i64 run_func(IrFunction *func, InterpCtx *ctx)
     vec_pop(ctx->stack);
     return result;
 }
-
-/* --- Public entry point --- */
 
 #define ALLOCA_SIZE (1ULL << 20)
 

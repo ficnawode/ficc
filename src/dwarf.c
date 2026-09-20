@@ -4,7 +4,7 @@
 
 #include <string.h>
 
-/* ---- .debug_line (DWARF2 §6.2) ---- */
+/* .debug_line (DWARF2 §6.2). */
 
 enum LineStdOp
 {
@@ -295,7 +295,7 @@ static void line_header(ByteBuf *b, const char *compile_unit)
     bytebuf_append(b, 0); /* end of file_names */
 }
 
-/* ---- .debug_info: one DWARF4 compile-unit tree ---- */
+/* .debug_info: one DWARF4 compile-unit tree. */
 
 typedef struct
 {
@@ -375,7 +375,7 @@ static u64 void_base_type(InfoCtx *c)
     return c->void_die;
 }
 
-/* ---- compound type DIEs: pointer/const/array/record/enum/func ---- */
+/* Compound type DIEs: pointer/const/array/record/enum/func. */
 
 static u64 type_die(InfoCtx *c, Type *t);
 
@@ -817,7 +817,7 @@ static void abbrev_emit(ByteBuf *b)
     bytebuf_append(b, 0);
     bytebuf_append(b, 0);
 
-    /* ---- rich type abbreviations ---- */
+    /* Rich type abbreviations. */
 
     dwarf_uleb128(b, ABBREV_POINTER_TYPE);
     dwarf_uleb128(b, DW_TAG_pointer_type);

@@ -4,8 +4,6 @@
 
 #include <string.h>
 
-/* Both-immediate ops fold; UB divisors and shift counts are left in place. */
-
 static bool is_int_binop(IrOpcode op)
 {
     switch (op)

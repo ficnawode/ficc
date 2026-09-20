@@ -3,7 +3,7 @@
 
 /* Phase 12b: block-scope initializer lists. */
 
-/* --- 1-D arrays --- */
+/* 1-D arrays */
 
 TEST(init, one_d_simple)
 {
@@ -32,7 +32,7 @@ TEST(init, one_d_trailing_comma)
                           60);
 }
 
-/* --- Scalar unwrap --- */
+/* Scalar unwrap */
 
 TEST(init, scalar_unwrap)
 {
@@ -43,7 +43,7 @@ TEST(init, scalar_unwrap)
                           42);
 }
 
-/* --- Structs --- */
+/* Structs */
 
 TEST(init, struct_simple)
 {
@@ -66,7 +66,7 @@ TEST(init, struct_nested)
                           6);
 }
 
-/* --- 2-D arrays --- */
+/* 2-D arrays */
 
 TEST(init, two_d_full)
 {
@@ -95,7 +95,7 @@ TEST(init, two_d_flattened)
                           10);
 }
 
-/* --- Brace elision --- */
+/* Brace elision */
 
 TEST(init, brace_elision_struct)
 {
@@ -117,7 +117,7 @@ TEST(init, brace_elision_nested_struct_array)
                           10);
 }
 
-/* --- Designated initializers --- */
+/* Designated initializers */
 
 TEST(init, designator_index)
 {
@@ -148,7 +148,7 @@ TEST(init, designator_chained)
                           50);
 }
 
-/* --- Char-array from string --- */
+/* Char-array from string */
 
 TEST(init, char_array_from_string)
 {
@@ -159,7 +159,7 @@ TEST(init, char_array_from_string)
                           'h' + 'i');
 }
 
-/* --- Empty init zero-fills --- */
+/* Empty init zero-fills */
 
 TEST(init, array_zero_fill)
 {
@@ -170,7 +170,7 @@ TEST(init, array_zero_fill)
                           0);
 }
 
-/* --- negatives (all must fail to build) --- */
+/* negatives (all must fail to build) */
 
 TEST(init, negative_overlong_array)
 {
@@ -337,7 +337,7 @@ TEST(init, negative_list_not_expression)
                       "}\n");
 }
 
-/* --- Phase 12 coverage completes: C11 §6.7.9 boundary rows --- */
+/* Phase 12 coverage completes: C11 §6.7.9 boundary rows */
 
 TEST(init, char_array_exact_fit_keeps_nul)
 {

@@ -103,7 +103,7 @@ TEST(type, va_list_shape)
     EXPECT_TRUE(type_decay(vl)->kind == TYPE_PTR);
     EXPECT_TRUE(type_deref(type_decay(vl)) == e);
 }
-/* --- Phase 16b (D16.1): pointer-to-function composition --- */
+/* Phase 16b (D16.1): pointer-to-function composition */
 
 TEST(type, fn_ptr_is_ptr_of_interned_func)
 {

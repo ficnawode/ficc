@@ -2,8 +2,6 @@
 
 #include "ir.h"
 
-/* Copy elimination: a def provably equal to an operand becomes that operand. */
-
 bool opt_pass_cprop(OptimizerContext *ctx)
 {
     bool changed = false;

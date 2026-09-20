@@ -170,7 +170,7 @@ void ir_call_set_variadic(IrInstr *call, bool is_variadic)
     call->extra.call.is_variadic = is_variadic;
 }
 
-/* Mark a call as *indirect* (D16.4): the target is the runtime value of the
+/* Mark a call as *indirect*: the target is the runtime value of the
    `callee` operand (a function pointer), not the named symbol `name` (which is
    then ignored). Append-only — every existing direct call keeps byte-identical
    lowering. */
@@ -195,7 +195,7 @@ IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offs
 
 /* __builtin_va_arg(ap, type): advance the ap to the next argument and fetch
    its full 8-byte slot into the width-8 result vreg; the builder converts to
-   the requested type afterwards (D15.6/D15.7). */
+   the requested type afterwards. */
 IrInstr *ir_emit_va_arg(IrBlock *bb, u32 dst, IrOperand ap)
 {
     IrInstr *ins = instr_new(bb, OP_VA_ARG, dst, 1);

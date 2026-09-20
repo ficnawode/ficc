@@ -639,7 +639,7 @@ static Type *parse_integer_specifiers(Parser *p)
         }
         if (n_double && n_long)
         {
-            return type_long_double(); /* the x87 80-bit type */
+            return type_long_double();
         }
         return n_float ? type_float() : type_double();
     }
@@ -1429,7 +1429,7 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
         return NULL;
     }
 
-    next_token(p); /* '(' */
+    next_token(p);
     push_scope(p);
     bool variadic = false;
     Vec *params = parse_param_list(p, &variadic);
@@ -1846,8 +1846,8 @@ static ASTNode *parse_label_stmt(Parser *p)
 {
     Token *start = peek_token(p);
     const char *label = start->payload.str;
-    next_token(p); /* label */
-    next_token(p); /* ':' */
+    next_token(p);
+    next_token(p);
     ASTNode *stmt = parse_stmt(p);
     if (!stmt)
     {
@@ -2229,7 +2229,7 @@ static ASTNode *parse_unary(Parser *p)
     Token *t = peek_token(p);
     if (paren_is_typename(p))
     {
-        next_token(p); /* '(' */
+        next_token(p);
         Type *target = parse_paren_type_name(p);
         if (!target)
         {
@@ -2257,7 +2257,7 @@ static ASTNode *parse_unary(Parser *p)
         next_token(p);
         if (paren_is_typename(p))
         {
-            next_token(p); /* '(' */
+            next_token(p);
             Type *ty = parse_paren_type_name(p);
             if (!ty)
             {
@@ -2277,7 +2277,7 @@ static ASTNode *parse_unary(Parser *p)
         next_token(p);
         if (paren_is_typename(p))
         {
-            next_token(p); /* '(' */
+            next_token(p);
             Type *ty = parse_paren_type_name(p);
             if (!ty)
             {
@@ -2454,7 +2454,6 @@ static const BinOpToken *binary_op(TokenKind kind)
     return NULL;
 }
 
-/* Precedence climbing over the left-associative binary table. */
 static ASTNode *parse_binary(Parser *p, u8 min_prec)
 {
     ASTNode *left = parse_unary(p);

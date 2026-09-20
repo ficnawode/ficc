@@ -8,7 +8,7 @@
 
 #include <unistd.h>
 
-/* --- positive: reading const lvalues --- */
+/* positive: reading const lvalues */
 
 TEST(const, const_local_read)
 {
@@ -166,7 +166,7 @@ TEST(const, const_param_qualifiers_ignored_not_prototypes)
               42);
 }
 
-/* --- positive: .rodata placement (no SHF_WRITE) --- */
+/* positive: .rodata placement (no SHF_WRITE) */
 
 TEST(const, const_global_in_rodata)
 {
@@ -229,7 +229,7 @@ TEST(const, const_global_elf_rodata_no_write_flag)
     unlink("/tmp/ficc_p9_rd.o");
 }
 
-/* --- negative: writes through const lvalues --- */
+/* negative: writes through const lvalues */
 
 TEST(const, negative_assign_const_var)
 {
@@ -313,7 +313,7 @@ TEST(const, negative_write_const_local_param)
                       "}\n");
 }
 
-/* --- negative: discarding qualifiers (C11 §6.5.16.1) --- */
+/* negative: discarding qualifiers (C11 §6.5.16.1) */
 
 TEST(const, negative_discard_in_initializer)
 {
@@ -402,7 +402,7 @@ TEST(const, negative_consistency_ok_same_qualifiers)
                          "}\n");
 }
 
-/* --- Part 9b: scalar address-of (`&x`) --- */
+/* Part 9b: scalar address-of (`&x`) */
 
 TEST(const, addr_of_scalar_write_through)
 {
@@ -564,7 +564,7 @@ TEST(const, addr_of_spills_to_alloca)
     arena_free(arena);
 }
 
-/* --- narrow integer memory semantics (signedness-aware extension) --- */
+/* narrow integer memory semantics (signedness-aware extension) */
 
 TEST(const, narrow_unsigned_char_load_no_sext)
 {

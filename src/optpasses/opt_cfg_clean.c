@@ -4,8 +4,6 @@
 
 #include <string.h>
 
-/* CFG canon: prune unreachable blocks, fold imm brconds, merge jump stubs. */
-
 static void succs_of(IrFunction *f, IrBlock *bb, Vec *out)
 {
     if (vec_size(bb->instrs) == 0)

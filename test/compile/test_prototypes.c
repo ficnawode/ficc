@@ -1,7 +1,7 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* --- Phase 16a: function prototypes / forward declarations --- */
+/* Phase 16a: function prototypes / forward declarations */
 
 TEST(prototypes, prototype_then_definition)
 {

@@ -182,7 +182,6 @@ static int run_pipeline(const CompilerConfig *cfg, const char *input, Arena *are
         fprintf(stderr, "IR build failed\n");
         return 1;
     }
-    /* Run the passes the -O level enables (none at -O0). */
     optimize(mod, cfg->opt, arena);
 #ifdef OPT_VERIFY
     if (!opt_verify(mod))

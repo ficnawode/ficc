@@ -99,7 +99,6 @@ static TokList *list_concat(Arena *arena, TokList *x, TokList *y)
     return head;
 }
 
-/* Appends t to the growing list and returns the advanced tail pointer. */
 static TokList **pp_list_append(Pp *pp, TokList **tail, PpToken *t)
 {
     *tail = list_cons(pp->arena, t, NULL);
@@ -296,7 +295,6 @@ void pp_note(Loc loc, const char *fmt, ...)
     va_end(args);
 }
 
-/* Returns an arena NUL-terminated copy of the token's spelling. */
 static const char *pp_token_text(Pp *pp, const PpToken *tok)
 {
     char *buf = arena_alloc(pp->arena, tok->len + 1, 1);
@@ -429,7 +427,6 @@ static size_t pp_param_list_end(const PpIncludeFrame *frame, size_t open, size_t
     return end;
 }
 
-/* Advances past `...` and reports an error if anything follows it. */
 static bool pp_require_variadic_last(Pp *pp, const PpIncludeFrame *frame, size_t *i, size_t close,
                                      Loc params_loc)
 {
@@ -786,7 +783,6 @@ static void pp_push_cond(Pp *pp, bool parent_active, bool taken)
     vec_push(pp->conds, frame);
 }
 
-/* Reads the trailing macro name of `#ifdef`/`#ifndef`. */
 static PpToken *pp_cond_macro(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
                               const char *directive, Loc directive_loc)
 {
@@ -1739,7 +1735,7 @@ static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end
 {
     size_t i = pp_skip_trivia(frame, begin, end);
     Loc directive_loc = ((PpToken *) vec_get(frame->tokens, i))->loc;
-    i++; /* the # */
+    i++;
 
     size_t name_index = pp_skip_trivia(frame, i, end);
     if (name_index >= end)
@@ -1801,7 +1797,6 @@ struct MacroArgs
     TokList *after;
 };
 
-/* Collects invocation arguments starting at lparen, honoring nesting. */
 static bool pp_collect_args(Pp *pp, PpToken *name, Macro *macro, TokList *lparen, MacroArgs *out)
 {
     Vec *args = vec_new(pp->arena);

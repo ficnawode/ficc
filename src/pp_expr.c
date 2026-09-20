@@ -43,7 +43,6 @@ static Loc expr_loc(ExprParser *ep)
     return t ? t->loc : ep->last_loc;
 }
 
-/* Consumes punct when it is next; returns whether it was. */
 static bool expr_expect(ExprParser *ep, PpPunct punct)
 {
     if (expr_punct(ep, punct))

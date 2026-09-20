@@ -420,7 +420,7 @@ TEST(ir_builder, multiple_string_literals)
     arena_free(a);
 }
 
-/* --- Phase 11: cast lowering shape --- */
+/* Phase 11: cast lowering shape */
 
 TEST(ir_builder, cast_narrowing_emits_trunc)
 {

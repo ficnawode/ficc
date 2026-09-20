@@ -2,8 +2,6 @@
 
 #include "ir.h"
 
-/* Equal-width int/pointer casts vanish; trunc of an imm snaps to its class. */
-
 bool opt_pass_cast(OptimizerContext *ctx)
 {
     IrModule *mod = ctx->mod;

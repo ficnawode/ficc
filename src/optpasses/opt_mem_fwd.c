@@ -4,9 +4,6 @@
 
 #include <stddef.h>
 
-/* Redundant-load elimination and load-after-store forwarding within a block,
-   on exact pointer identity, never across volatile or barrier-flagged ops. */
-
 typedef enum
 {
     FWD_STORE,
