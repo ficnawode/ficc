@@ -176,15 +176,13 @@ void emit_mov(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
 }
 
 const ArithSpec arith_specs[] = {
-    [OP_ADD] = {0x03, 0x83, 0x81, 0, false}, [OP_SUB] = {0x2B, 0x83, 0x81, 5, false},
-    [OP_MUL] = {0xAF, 0x6B, 0x69, 0, true},  [OP_AND] = {0x23, 0x83, 0x81, 4, false},
-    [OP_OR] = {0x0B, 0x83, 0x81, 1, false},  [OP_XOR] = {0x33, 0x83, 0x81, 6, false},
-    [OP_FADD] = {0x58, 0, 0, 0, true},       [OP_FSUB] = {0x5C, 0, 0, 0, true},
-    [OP_FMUL] = {0x59, 0, 0, 0, true},       [OP_FDIV] = {0x5E, 0, 0, 0, true},
+    [OP_ADD] = {0x03, 0x83, 0x81, 0, false, false}, [OP_SUB] = {0x2B, 0x83, 0x81, 5, false, false},
+    [OP_MUL] = {0xAF, 0x6B, 0x69, 0, true, true},   [OP_AND] = {0x23, 0x83, 0x81, 4, false, false},
+    [OP_OR] = {0x0B, 0x83, 0x81, 1, false, false},  [OP_XOR] = {0x33, 0x83, 0x81, 6, false, false},
+    [OP_FADD] = {0x58, 0, 0, 0, true, false},       [OP_FSUB] = {0x5C, 0, 0, 0, true, false},
+    [OP_FMUL] = {0x59, 0, 0, 0, true, false},       [OP_FDIV] = {0x5E, 0, 0, 0, true, false},
 };
-
-/* cmp: same shape as the arithmetic ops, /7. Not an IR opcode itself. */
-const ArithSpec cmp_spec = {0x3B, 0x83, 0x81, 7, false};
+const ArithSpec cmp_spec = {0x3B, 0x83, 0x81, 7, false, false};
 
 const u8 unary_digit[OP_NOT + 1] = {[OP_NEG] = 3, [OP_NOT] = 2};
 const u8 shift_digit[64] = {[OP_SHL] = 4, [OP_LSHR] = 5, [OP_ASHR] = 7};
@@ -225,17 +223,18 @@ static void emit_binop_byte(ByteBuf *buf, const ArithSpec *s, u8 dst_reg, X86Ope
 static void emit_binop_imm(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_reg, i64 v)
 {
     emit_os16(buf, width);
-    bytebuf_append(buf, rex(width == 8, false, false, dst_reg >= 8));
+    u8 reg_field = s->imm_dst ? dst_reg : s->digit;
+    bytebuf_append(buf, rex(width == 8, reg_field >= 8, false, dst_reg >= 8));
     if (fits_i8(v))
     {
         bytebuf_append(buf, s->imm8);
-        bytebuf_append(buf, modrm(3, s->digit, dst_reg));
+        bytebuf_append(buf, modrm(3, reg_field, dst_reg));
         bytebuf_append_i8(buf, (i8) v);
     }
     else
     {
         bytebuf_append(buf, s->imm32);
-        bytebuf_append(buf, modrm(3, s->digit, dst_reg));
+        bytebuf_append(buf, modrm(3, reg_field, dst_reg));
         bytebuf_append_i32(buf, (i32) v);
     }
 }
@@ -686,4 +685,14 @@ void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src)
     bytebuf_append(buf, rex_mem(true, dst_reg >= 8, src));
     bytebuf_append(buf, X86_LEA);
     emit_mem_operand(buf, dst_reg, src);
+}
+
+/* push r64 (50+rd); the default operand size is already 64-bit, REX.B alone extends. */
+void emit_push_reg(ByteBuf *buf, u8 reg)
+{
+    if (reg >= 8)
+    {
+        bytebuf_append(buf, X86_REX_B);
+    }
+    bytebuf_append(buf, (u8) (X86_PUSH_R_BASE + (reg & 7)));
 }

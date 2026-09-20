@@ -62,6 +62,7 @@ typedef enum
     X86_TWO_BYTE_ESC = 0x0F,
     X86_UD2 = 0x0B,
     X86_OPERAND_SIZE = 0x66,
+    X86_REX_B = 0x41,
     X86_REX_W = 0x48,
     X86_REP = 0xF3,
 
@@ -81,6 +82,7 @@ typedef enum
     X86_SSE_MOVD = 0x6E,   /* movd/movq xmm, r/m (66 prefix, REX.W for 64) */
     X86_BIT_BASE = 0xBA,   /* 0F BA /digit ib: bt/bts/btr on r/m64 */
 
+    X86_PUSH_R_BASE = 0x50,
     X86_PUSH_RBP = 0x55,
     X86_LEAVE = 0xC9,
     X86_RET = 0xC3,
@@ -242,11 +244,12 @@ static inline X86Mem x86_mem_rcx(i32 disp)
 /* x86 encoding recipe for a binary arithmetic/logic operation. */
 typedef struct
 {
-    u8 mem;      /* reg op= r/m opcode */
-    u8 imm8;     /* reg op= imm8 opcode (0x83, or 0x6B for imul) */
-    u8 imm32;    /* reg op= imm32 opcode (0x81, or 0x69 for imul) */
-    u8 digit;    /* /digit for all forms */
-    bool mem_0f; /* true if the mem opcode needs a 0x0F prefix */
+    u8 mem;       /* reg op= r/m opcode */
+    u8 imm8;      /* reg op= imm8 opcode (0x83, or 0x6B for imul) */
+    u8 imm32;     /* reg op= imm32 opcode (0x81, or 0x69 for imul) */
+    u8 digit;     /* /digit for all forms */
+    bool mem_0f;  /* true if the mem opcode needs a 0x0F prefix */
+    bool imm_dst; /* imm form encodes the destination in the reg field (imul) */
 } ArithSpec;
 
 extern const ArithSpec arith_specs[];
@@ -333,6 +336,7 @@ void emit_sse_xor(ByteBuf *buf, u8 mand, u8 dst_xmm, u8 src_xmm);
 void emit_movzx(ByteBuf *buf, u8 src_width, u8 dst_width, u8 dst_reg, X86Operand src);
 void emit_movsx(ByteBuf *buf, u8 src_width, u8 dst_width, u8 dst_reg, X86Operand src);
 void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src);
+void emit_push_reg(ByteBuf *buf, u8 reg);
 
 void emit_global_addr_to(ByteBuf *buf, u8 reg, u32 global_idx, Vec *patches, Arena *arena);
 void emit_global_addr(ByteBuf *buf, u32 global_idx, Vec *patches, Arena *arena);

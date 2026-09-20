@@ -7,6 +7,7 @@
 #include "util/hashmap.h"
 #include "util/types.h"
 #include "x86_emit.h"
+#include "x86_lower.h"
 #include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
@@ -2128,7 +2129,15 @@ CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Are
     cm->globals = ir->globals;
     cm->extern_calls = vec_new(arena);
 
-    size_t nfuncs = emit_all_funcs(cm, ir, arena, debug);
+    size_t nfuncs;
+    if (cfg && cfg->backend == CG_LINEAR)
+    {
+        nfuncs = x86_lower_module(cm, ir, debug, arena);
+    }
+    else
+    {
+        nfuncs = emit_all_funcs(cm, ir, arena, debug);
+    }
     assign_func_offsets(cm, nfuncs);
     resolve_direct_calls(cm, nfuncs, arena);
     return cm;

@@ -140,7 +140,7 @@ static void tc_temp_cleanup(char *paths[], size_t n)
     }
 }
 
-int tc_run_elf(const char *src)
+static int tc_run_elf_cfg(const char *src, CodegenBackend backend)
 {
     Arena *arena = arena_new();
     IrModule *mod = tc_build_module(src, arena);
@@ -152,7 +152,8 @@ int tc_run_elf(const char *src)
         return -1;
     }
 
-    CodegenModule *cm = codegen_ir_to_machine(mod, NULL, arena);
+    CodegenConfig ccfg = {.debug = false, .backend = backend};
+    CodegenModule *cm = codegen_ir_to_machine(mod, &ccfg, arena);
     if (!cm)
     {
         fprintf(stderr, "  [testdriver] codegen failed for: %s\n", src);
@@ -174,6 +175,18 @@ int tc_run_elf(const char *src)
     tc_temp_cleanup(paths, 2);
     arena_free(arena);
     return rc;
+}
+
+static CodegenBackend tc_backend = CG_STACK;
+
+void tc_set_codegen_backend(CodegenBackend backend)
+{
+    tc_backend = backend;
+}
+
+int tc_run_elf(const char *src)
+{
+    return tc_run_elf_cfg(src, tc_backend);
 }
 
 int tc_run_elf_with_extra_tu(const char *src, const char *extra_src)
