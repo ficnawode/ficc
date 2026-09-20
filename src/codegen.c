@@ -1,4 +1,5 @@
 #include "codegen.h"
+#include "target.h"
 #include "util/assert.h"
 #include "util/bitset.h"
 #include "util/bytebuf.h"
@@ -116,13 +117,14 @@ static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
 
 #define ALIGN_UP(v, align) (((v) + ((align) - 1)) & ~((align) - 1))
 
-/* SysV va_list register save area: 6 × 8-byte GP slots, then 8 × 16-byte xmm slots. */
+/* SysV va_list register save area: ngp × 8-byte GP slots, then nfp × 16-byte
+   xmm slots; the slot counts come from the target (B). */
 #define VA_GP_STRIDE 8
-#define VA_GP_BYTES 48
-#define VA_SAVE_BYTES 176
+#define VA_NGP x86_64_target()->ngp
+#define VA_NXMM x86_64_target()->nfp
+#define VA_GP_BYTES (VA_NGP * VA_GP_STRIDE)
+#define VA_SAVE_BYTES (VA_GP_BYTES + VA_NXMM * VA_XMM_STRIDE)
 #define VA_XMM_STRIDE 16
-#define VA_NGP 6
-#define VA_NXMM 8
 
 #define VA_FIELD_GP_OFFSET 0
 #define VA_FIELD_FP_OFFSET 4
@@ -655,7 +657,7 @@ static void lower_icmp(IrInstr *in, CodegenCtx *ctx)
     emit_mov(ctx->buf, rw, xop_vreg(ctx, in->result), xop_reg(R_EAX));
 }
 
-static const u8 abi_arg_regs[6] = {R_EDI, R_ESI, R_EDX, R_ECX, R_R8, R_R9};
+/* The GP argument register sequence is the target's (x86_64_target().gp_args). */
 
 /* Where a call argument travels: GP/SSE register, or a caller-stack spill slot. */
 typedef enum
@@ -757,7 +759,8 @@ static void emit_call_reg_args(CodegenCtx *ctx, CallArg *args, u32 nargs)
         else if (a->cls == ARG_GP)
         {
             emit_mov(ctx->buf, a->width, xop_reg(R_EAX), lowered_operand(ctx, a->op, R_EAX));
-            emit_mov(ctx->buf, a->width, xop_reg(abi_arg_regs[a->reg_or_off]), xop_reg(R_EAX));
+            emit_mov(ctx->buf, a->width, xop_reg(x86_64_target()->gp_args[a->reg_or_off]),
+                     xop_reg(R_EAX));
         }
     }
 }
@@ -2266,7 +2269,7 @@ static void emit_param_shuffle(ByteBuf *buf, IrFunction *f, IrModule *mod, const
         {
             if (gp_used < VA_NGP)
             {
-                emit_mov(buf, w, dst, xop_reg(abi_arg_regs[gp_used]));
+                emit_mov(buf, w, dst, xop_reg(x86_64_target()->gp_args[gp_used]));
                 gp_used++;
             }
             else
@@ -2297,7 +2300,7 @@ static void emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, FrameInfo 
         {
             emit_mov(buf, W_QWORD,
                      xop_mem(x86_mem_rbp(-(i32) fr->save_area_off + (i32) i * VA_GP_STRIDE)),
-                     xop_reg(abi_arg_regs[i]));
+                     xop_reg(x86_64_target()->gp_args[i]));
         }
         for (size_t i = 0; i < VA_NXMM; i++)
         {
