@@ -16,9 +16,12 @@ TEST(target, x86_64_reg_bank_shape)
     EXPECT_EQ(t->gpr.callee_saved[1], R_EBP);
     EXPECT_EQ(t->gpr.callee_saved[5], R_R15);
     EXPECT_EQ(t->xmm.cls, RC_XMM);
-    EXPECT_EQ(t->xmm.num_regs, 8);
+    EXPECT_EQ(t->xmm.num_regs, 16);
     EXPECT_EQ(t->xmm.names[0], R_XMM0);
     EXPECT_EQ(t->xmm.names[7], 7);
+    EXPECT_EQ(t->xmm.names[8], 8);
+    EXPECT_EQ(t->xmm.names[15], 15);
+    EXPECT_EQ(t->xmm.nfixed, 8); /* xmm0-7 are the ABI argument lanes, never allocated */
     EXPECT_EQ(t->x87.cls, RC_X87);
     EXPECT_TRUE(t->x87.memory_only);
 }

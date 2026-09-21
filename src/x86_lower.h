@@ -33,6 +33,7 @@ struct X86LowerCtx
     Vec *switch_tables;
     size_t *block_offsets;
     StrMap *label_to_index;
+    int fpu_depth; /* x87 stack depth; every lowering leaves it at 0 */
 };
 
 u8 x86_lower_vreg_width(X86LowerCtx *ctx, u32 vreg);

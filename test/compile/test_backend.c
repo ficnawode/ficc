@@ -534,3 +534,158 @@ TEST(backend, gcc_interop_printf)
                        "int main(void) { printf(\"%d\\n\", 42); return 0; }\n",
                        "/* libc provides printf; this TU only anchors the link. */\n", 0);
 }
+
+TEST(backend, fp_double_arithmetic)
+{
+    backend_run("double muladd(double a, double b) { return a * b + 1.5; }\n"
+                "double sum(double a, double b, double c, double d, double e, double f, double g,\n"
+                "           double h, double i, double j) {\n"
+                "    return a + b + c + d + e + f + g + h + i + j; }\n"
+                "int main(void) { double r = muladd(2.0, 3.0);\n"
+                "                double s = sum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);\n"
+                "                return (int) (r + s); }\n",
+                62);
+}
+
+TEST(backend, fp_float_arithmetic)
+{
+    backend_run("float fadd(float a, float b) { return a + b; }\n"
+                "int main(void) { float x = fadd(1.5f, 2.25f); return (int) (x * 4.0f); }\n",
+                15);
+}
+
+TEST(backend, fp_compares_including_nan)
+{
+    backend_run("int main(void) { double a = 1.5, b = 2.5;\n"
+                "  if (!(a < b)) return 1; if (a > b) return 2; if (!(a != b)) return 3;\n"
+                "  double z = 0.0; double nan = z / z;\n"
+                "  if (nan == nan) return 4; if (!(nan != 1.0)) return 5;\n"
+                "  if (nan < 1.0 || nan >= 1.0) return 6;\n"
+                "  return 42; }\n",
+                42);
+}
+
+TEST(backend, fp_casts_and_u64_threshold)
+{
+    backend_run(
+        "int main(void) { double d = 3.75; int i = (int) d; float f = (float) d;\n"
+        "  double e = (double) i;\n"
+        "  if (i != 3 || f != 3.75f || e != 3.0) return 1;\n"
+        "  if ((long long) (-4.5) != -4) return 2;\n"
+        "  if ((unsigned) 4.25 != 4) return 3;\n"
+        "  if ((unsigned long long) 9223372036854775808.0 != 0x8000000000000000ULL) return 4;\n"
+        "  double big = (double) 0xFFFFFFFFFFFFFFFFULL;\n"
+        "  if (big < 1.8e19) return 5;\n"
+        "  return 42; }\n",
+        42);
+}
+
+TEST(backend, fp_global_load_store)
+{
+    backend_run("double g = 1.5;\n"
+                "int main(void) { double x = g; x = x * 2.0; g = x;\n"
+                "                if (g != 3.0) return 1; return 42; }\n",
+                42);
+}
+
+TEST(backend, fp_long_double_arithmetic)
+{
+    backend_run("long double lmul(long double a, long double b) { return a * b + 1.0L; }\n"
+                "int main(void) {\n"
+                "  long double s = 0.1L + 0.2L;\n"
+                "  if (*(unsigned long long *) &s != 0x999999999999999aULL) return 1;\n"
+                "  if (lmul(1.5L, 2.5L) != 4.75L) return 2;\n"
+                "  long double a = 1.5L, b = 2.5L;\n"
+                "  if (!(a < b) || !(b > a) || a == b) return 3;\n"
+                "  if ((long double) 3 != 3.0L) return 4;\n"
+                "  if ((int) 4.25L != 4 || (long long) -4.5L != -4) return 5;\n"
+                "  return 42; }\n",
+                42);
+}
+
+TEST(backend, fp_long_double_u64_roundtrip)
+{
+    backend_run("int main(void) {\n"
+                "  long double big = (long double) 0xFFFFFFFFFFFFFFFFULL;\n"
+                "  if (*(unsigned long long *) &big != 0xFFFFFFFFFFFFFFFFULL) return 1;\n"
+                "  if ((unsigned long long) big != 0xFFFFFFFFFFFFFFFFULL) return 2;\n"
+                "  return 42; }\n",
+                42);
+}
+
+TEST(backend, fp_long_double_phi)
+{
+    backend_run("long double res;\n"
+                "int main(void) { long double a = 1.5L, b = 2.5L; int c = 1;\n"
+                "  res = c ? a : b;\n"
+                "  if (*(unsigned long long *) &res != 0xC000000000000000ULL) return 1;\n"
+                "  return 42; }\n",
+                42);
+}
+
+TEST(backend, fp_variadic_double)
+{
+    backend_run("double vsum(int n, ...) {\n"
+                "    __builtin_va_list ap; __builtin_va_start(ap, n);\n"
+                "    double s = 0.0;\n"
+                "    for (int i = 0; i < n; i = i + 1) { s = s + __builtin_va_arg(ap, double); }\n"
+                "    __builtin_va_end(ap); return s; }\n"
+                "int main(void) { return (int) vsum(3, 1.5, 2.25, 38.25); }\n",
+                42);
+}
+
+TEST(backend, fp_variadic_long_double)
+{
+    backend_run(
+        "long double vsum(int n, ...) {\n"
+        "    __builtin_va_list ap; __builtin_va_start(ap, n);\n"
+        "    long double s = 0.0L;\n"
+        "    for (int i = 0; i < n; i = i + 1) { s = s + __builtin_va_arg(ap, long double); }\n"
+        "    __builtin_va_end(ap); return s; }\n"
+        "int main(void) { return (int) vsum(3, 1.0L, 2.0L, 39.0L); }\n",
+        42);
+}
+
+TEST(backend, fp_in_process_oracle)
+{
+    backend_run_inproc("double f(double x) { return x * 2.0 + 0.5; }\n"
+                       "int main(void) { double r = f(2.5); return (int) (r + 37.0); }\n",
+                       42);
+}
+
+TEST(backend, fp_long_double_in_process_oracle)
+{
+    backend_run_inproc("long double f(long double x) { return x + 39.5L; }\n"
+                       "int main(void) { return (int) f(2.5L); }\n",
+                       42);
+}
+
+TEST(backend, gcc_interop_long_double)
+{
+    backend_run_gcc_tu("long double gcc_mul(long double a, long double b);\n"
+                       "int main(void) { return (int) gcc_mul(2.5L, 4.0L); }\n",
+                       "long double gcc_mul(long double a, long double b) { return a * b; }\n", 10);
+}
+
+TEST(backend, gcc_interop_variadic_long_double)
+{
+    backend_run_gcc_tu(
+        "int gcc_ldsum(int n, ...);\n"
+        "int main(void) { return gcc_ldsum(2, 40.0L, 2.0L); }\n",
+        "#include <stdarg.h>\n"
+        "int gcc_ldsum(int n, ...) {\n"
+        "    va_list ap; va_start(ap, n);\n"
+        "    long double s = 0.0L;\n"
+        "    for (int i = 0; i < n; i = i + 1) { s = s + va_arg(ap, long double); }\n"
+        "    va_end(ap); return (int) s; }\n",
+        42);
+}
+
+TEST(backend, gcc_interop_double_return)
+{
+    backend_run_gcc_tu("double gcc_hypot(double a, double b);\n"
+                       "int main(void) { return (int) gcc_hypot(3.0, 4.0); }\n",
+                       "double gcc_hypot(double a, double b) { return a * a + b * b >= 25.0 ? 5.0 "
+                       ": 0.0; }\n",
+                       5);
+}

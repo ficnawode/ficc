@@ -8,6 +8,7 @@
 #include "util/types.h"
 #include "x86_emit.h"
 #include "x86_lower.h"
+#include "x87.h"
 #include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
@@ -142,34 +143,6 @@ static void codegen_error(CodegenCtx *ctx, const char *fmt, ...)
 #define F32_BITS_2POW63 0x5F000000
 #define F64_BITS_2POW63 0x43E0000000000000
 
-/* x87 two-byte memory forms: primary byte then modrm with reg = /digit. */
-#define X87_FLDT 0xDB       /* /5: fldt m80 */
-#define X87_FSTPT 0xDB      /* /7: fstpt m80 (DB /7 — DD /7 is fnstsw m16) */
-#define X87_FLDS 0xD9       /* /0: flds m32 */
-#define X87_FSTPS 0xD9      /* /2: fstps m32 */
-#define X87_FLDL 0xDD       /* /0: fldl m64 */
-#define X87_FSTPL 0xDD      /* /2: fstpl m64 */
-#define X87_FILD_M32 0xDB   /* /0: fild m32int */
-#define X87_FILD_M64 0xDF   /* /5: fild m64int */
-#define X87_FISTTP_M32 0xDB /* /1: fisttp m32int */
-#define X87_FISTTP_M64 0xDD /* /1: fisttp m64int */
-#define X87_DIG_5 5
-#define X87_DIG_7 7
-#define X87_DIG_0 0
-#define X87_DIG_1 1
-#define X87_DIG_2 2
-
-/* x87 register-form opcodes (two bytes: primary then sub-opcode). */
-#define X87_FLDZ 0xD9EE
-#define X87_FCHS 0xD9E0
-#define X87_FADDP 0xDEC1
-#define X87_FSUBP 0xDEE9
-#define X87_FSUBRP 0xDEE1
-#define X87_FMULP 0xDEC9
-#define X87_FDIVP 0xDEF9
-#define X87_FUCOMIP 0xDFE9
-#define X87_FSTP_ST0 0xDDD8
-
 /* 80-bit pattern of 2^63: significand 0x8000000000000000 @ exponent 0x403E. */
 #define LD_EXPONENT_2POW63 0x403E
 #define LD_SIGNIFICAND_2POW63 0x8000000000000000ULL
@@ -270,124 +243,96 @@ static void x87_set_depth(CodegenCtx *ctx, int depth)
     ctx->fpu_depth = depth;
 }
 
-/* Two-byte memory form: primary byte, then modrm with reg = the /digit. */
-static void emit_x87_mem(CodegenCtx *ctx, u8 primary, u8 digit, X86Mem m)
-{
-    bytebuf_append(ctx->buf, primary);
-    emit_mem_operand(ctx->buf, digit, m);
-}
-
-/* Register form: primary byte followed by a fixed sub-opcode byte. */
-static void emit_x87_reg(CodegenCtx *ctx, u8 primary, u8 opbyte)
-{
-    bytebuf_append(ctx->buf, primary);
-    bytebuf_append(ctx->buf, opbyte);
-}
-
 static void emit_fldt(CodegenCtx *ctx, X86Mem m)
 {
-    emit_x87_mem(ctx, X87_FLDT, X87_DIG_5, m);
+    x87_emit_fldt(ctx->buf, m);
     x87_push(ctx);
 }
 static void emit_fstpt(CodegenCtx *ctx, X86Mem m)
 {
-    emit_x87_mem(ctx, X87_FSTPT, X87_DIG_7, m);
+    x87_emit_fstpt(ctx->buf, m);
     x87_pop(ctx);
 }
 /* A callee left this value on %st0; the depth counter never saw the push. */
 static void emit_fstpt_return(CodegenCtx *ctx, X86Mem m)
 {
-    emit_x87_mem(ctx, X87_FSTPT, X87_DIG_7, m);
+    x87_emit_fstpt(ctx->buf, m);
 }
 static void emit_flds(CodegenCtx *ctx, X86Mem m)
 {
-    emit_x87_mem(ctx, X87_FLDS, X87_DIG_0, m);
+    x87_emit_flds(ctx->buf, m);
     x87_push(ctx);
 }
 static void emit_fstps(CodegenCtx *ctx, X86Mem m)
 {
-    emit_x87_mem(ctx, X87_FSTPS, X87_DIG_2, m);
+    x87_emit_fstps(ctx->buf, m);
     x87_pop(ctx);
 }
 static void emit_fldl(CodegenCtx *ctx, X86Mem m)
 {
-    emit_x87_mem(ctx, X87_FLDL, X87_DIG_0, m);
+    x87_emit_fldl(ctx->buf, m);
     x87_push(ctx);
 }
 static void emit_fstpl(CodegenCtx *ctx, X86Mem m)
 {
-    emit_x87_mem(ctx, X87_FSTPL, X87_DIG_2, m);
+    x87_emit_fstpl(ctx->buf, m);
     x87_pop(ctx);
 }
 static void emit_fild(CodegenCtx *ctx, u8 size, X86Mem m)
 {
-    if (size == 4)
-    {
-        emit_x87_mem(ctx, X87_FILD_M32, X87_DIG_0, m);
-    }
-    else
-    {
-        emit_x87_mem(ctx, X87_FILD_M64, X87_DIG_5, m);
-    }
+    x87_emit_fild(ctx->buf, size, m);
     x87_push(ctx);
 }
 static void emit_fisttp(CodegenCtx *ctx, u8 size, X86Mem m)
 {
-    if (size == 4)
-    {
-        emit_x87_mem(ctx, X87_FISTTP_M32, X87_DIG_1, m);
-    }
-    else
-    {
-        emit_x87_mem(ctx, X87_FISTTP_M64, X87_DIG_1, m);
-    }
+    x87_emit_fisttp(ctx->buf, size, m);
     x87_pop(ctx);
 }
 static void emit_fldz(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, X87_FLDZ >> 8, X87_FLDZ & 0xFF);
+    x87_emit_fldz(ctx->buf);
     x87_push(ctx);
 }
 static void emit_fchs(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, X87_FCHS >> 8, X87_FCHS & 0xFF);
+    x87_emit_fchs(ctx->buf);
 }
 /* fsubp name matches the x87 semantics used: st(1) ← st(1) − st(0), pop. */
 static void emit_faddp(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, X87_FADDP >> 8, X87_FADDP & 0xFF);
+    x87_emit_faddp(ctx->buf);
     x87_pop(ctx);
 }
 static void emit_fsubp(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, X87_FSUBP >> 8, X87_FSUBP & 0xFF);
+    x87_emit_fsubp(ctx->buf);
     x87_pop(ctx);
 }
 /* fsubrp st(1), st(0): st(1) ← st(0) − st(1), pop — the reverse of fsubp. */
 static void emit_fsubrp(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, X87_FSUBRP >> 8, X87_FSUBRP & 0xFF);
+    x87_emit_fsubrp(ctx->buf);
     x87_pop(ctx);
 }
 static void emit_fmulp(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, X87_FMULP >> 8, X87_FMULP & 0xFF);
+    x87_emit_fmulp(ctx->buf);
     x87_pop(ctx);
 }
 static void emit_fdivp(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, X87_FDIVP >> 8, X87_FDIVP & 0xFF);
+    x87_emit_fdivp(ctx->buf);
     x87_pop(ctx);
 }
 /* fucomip st(0), st(1): unordered compare, sets ZF/CF/PF like ucomis*, pops st(0). */
 static void emit_fucomip(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, X87_FUCOMIP >> 8, X87_FUCOMIP & 0xFF);
+    x87_emit_fucomip(ctx->buf);
     x87_pop(ctx);
 }
 static void emit_fstp_st0(CodegenCtx *ctx)
 {
-    emit_x87_reg(ctx, X87_FSTP_ST0 >> 8, X87_FSTP_ST0 & 0xFF);
+    x87_emit_fstp_st0(ctx->buf);
     x87_pop(ctx);
 }
 

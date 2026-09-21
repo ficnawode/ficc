@@ -10,8 +10,22 @@
 #include "x86_emit.h"
 #include "x86_frame.h"
 #include "x86_sysv.h"
+#include "x87.h"
 #include <stdint.h>
 #include <stdio.h>
+
+#define BIT_63 63
+
+#define F32_SIGN_BIT 0x80000000
+#define F64_SIGN_BIT 0x8000000000000000ULL
+
+/* IEEE bit patterns of 2^63, added back by the u64 int→FP sequence. */
+#define F32_BITS_2POW63 0x5F000000
+#define F64_BITS_2POW63 0x43E0000000000000ULL
+
+/* 0F BA /digit ib: bts = 5, btr = 6. */
+#define X86_XOP_BTS 5
+#define X86_XOP_BTR 6
 
 typedef struct
 {
@@ -61,6 +75,10 @@ static u8 operand_width(X86LowerCtx *ctx, IrOperand op)
     }
     return vreg_width(ctx, op.u.vreg);
 }
+
+static u8 load_int_operand(X86LowerCtx *ctx, IrOperand op, bool *is_signed);
+static u8 fp_imm_load_width(u8 w, i64 imm);
+static void fp_operand_to_xmm(X86LowerCtx *ctx, IrOperand op, u8 w, u8 xmm);
 
 static X86Mem rbp_mem(i32 disp)
 {
@@ -259,6 +277,33 @@ static void lower_trunc(IrInstr *in, X86LowerCtx *ctx)
 static void lower_zext(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 dw = vreg_width(ctx, in->result);
+    RegLoc rl = result_loc(ctx, in);
+    if (rl.cls == RC_XMM)
+    {
+        u8 mf = MF_OF(dw);
+        if (in->ops[0].is_imm)
+        {
+            emit_mov(ctx->buf, fp_imm_load_width(dw, in->ops[0].u.imm), xop_reg(R_EAX),
+                     xop_imm(in->ops[0].u.imm));
+            if (rl.kind == LOC_REG)
+            {
+                emit_movd_to_xmm(ctx->buf, rl.reg, R_EAX, dw != W_DWORD);
+            }
+            else
+            {
+                emit_movd_to_xmm(ctx->buf, R_XMM0, R_EAX, dw != W_DWORD);
+                emit_sse_store(ctx->buf, mf, rbp_mem(rl.disp), R_XMM0);
+            }
+            return;
+        }
+        u8 dst = rl.kind == LOC_REG ? rl.reg : R_XMM0;
+        fp_operand_to_xmm(ctx, in->ops[0], dw, dst);
+        if (rl.kind == LOC_MEM)
+        {
+            emit_sse_store(ctx->buf, mf, rbp_mem(rl.disp), dst);
+        }
+        return;
+    }
     force_to_reg(ctx, in->ops[0], R_EAX);
     if (!in->ops[0].is_imm)
     {
@@ -283,12 +328,318 @@ static void lower_sext(IrInstr *in, X86LowerCtx *ctx)
     store_reg_result(ctx, in, dw, R_EAX);
 }
 
+static bool operand_is_fp_vreg(X86LowerCtx *ctx, IrOperand op)
+{
+    return !op.is_imm && !op.is_global && !op.is_func && ir_vreg_float(ctx->mod, op.u.vreg);
+}
+
+static u8 fp_imm_load_width(u8 w, i64 imm)
+{
+    return w == 4 ? 4 : imm_load_width(imm);
+}
+
+/* Move an FP operand's bits into `xmm`; a bare immediate rides a GP mov + movd/movq. */
+static void fp_operand_to_xmm(X86LowerCtx *ctx, IrOperand op, u8 w, u8 xmm)
+{
+    ByteBuf *b = ctx->buf;
+    if (op.is_imm)
+    {
+        emit_mov(b, fp_imm_load_width(w, op.u.imm), xop_reg(R_EAX), xop_imm(op.u.imm));
+        emit_movd_to_xmm(b, xmm, R_EAX, w != W_DWORD);
+        return;
+    }
+    RegLoc l = loc_of(ctx->alloc, op);
+    if (l.kind == LOC_REG)
+    {
+        if (l.reg != xmm)
+        {
+            emit_sse_op_reg(b, MF_OF(w), X86_SSE_MOV, xmm, l.reg);
+        }
+        return;
+    }
+    emit_sse_load(b, MF_OF(w), xmm, rbp_mem(l.disp));
+}
+
+static void store_fp_result(X86LowerCtx *ctx, IrInstr *in, u8 w, u8 xmm)
+{
+    RegLoc rl = result_loc(ctx, in);
+    if (rl.kind == LOC_REG)
+    {
+        if (rl.reg != xmm)
+        {
+            emit_sse_op_reg(ctx->buf, MF_OF(w), X86_SSE_MOV, rl.reg, xmm);
+        }
+        return;
+    }
+    emit_sse_store(ctx->buf, MF_OF(w), rbp_mem(rl.disp), xmm);
+}
+
+/* u64 ≥ 2^63 to float/double: clear the top bit, convert, add 2^63 back. */
+static void emit_load_2pow63(ByteBuf *buf, bool is_f32)
+{
+    if (is_f32)
+    {
+        emit_mov(buf, W_DWORD, xop_reg(R_ECX), xop_imm(F32_BITS_2POW63));
+        emit_movd_to_xmm(buf, R_XMM1, R_ECX, false);
+    }
+    else
+    {
+        emit_mov(buf, W_QWORD, xop_reg(R_ECX), xop_imm(F64_BITS_2POW63));
+        emit_movd_to_xmm(buf, R_XMM1, R_ECX, true);
+    }
+}
+
+static void emit_bit_imm(ByteBuf *buf, u8 digit, u8 dst_reg, u8 imm)
+{
+    bytebuf_append(buf, X86_REX_W);
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_BIT_BASE);
+    bytebuf_append(buf, modrm(3, digit, dst_reg));
+    bytebuf_append_i8(buf, (i8) imm);
+}
+
+static void emit_itof_u64_xmm(X86LowerCtx *ctx, u8 mf, bool is_f32)
+{
+    ByteBuf *b = ctx->buf;
+    emit_test_reg(b, W_QWORD, R_EAX);
+    size_t js_field = emit_jcc_pending(b, CC_S);
+    emit_cvtsi2fp(b, mf, R_XMM0, R_EAX);
+    size_t jmp_field = emit_jmp_pending(b);
+    size_t big_off = bytebuf_len(b);
+    emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_reg(R_EAX));
+    emit_bit_imm(b, X86_XOP_BTR, R_ECX, BIT_63);
+    emit_cvtsi2fp(b, mf, R_XMM0, R_ECX);
+    emit_load_2pow63(b, is_f32);
+    emit_sse_add(b, mf, R_XMM0, R_XMM1);
+    patch_rel32(b, js_field, big_off);
+    patch_rel32(b, jmp_field, bytebuf_len(b));
+}
+
+/* u64 from float/double: convert, then for ≥ 2^63 subtract 2^63, re-convert, set bit 63. */
+static void emit_ftoi_u64_xmm(X86LowerCtx *ctx, u8 mf, u8 sw)
+{
+    ByteBuf *b = ctx->buf;
+    emit_cvtts2i(b, mf, R_EAX, R_XMM0, true);
+    emit_load_2pow63(b, sw == W_DWORD);
+    emit_sse_ucomis(b, sw, R_XMM0, R_XMM1);
+    size_t done_field = emit_jcc_pending(b, CC_B);
+    emit_sse_sub(b, mf, R_XMM0, R_XMM1);
+    emit_cvtts2i(b, mf, R_EAX, R_XMM0, true);
+    emit_bit_imm(b, X86_XOP_BTS, R_EAX, BIT_63);
+    patch_rel32(b, done_field, bytebuf_len(b));
+}
+
+static void lower_itof(IrInstr *in, X86LowerCtx *ctx)
+{
+    u8 dw = vreg_width(ctx, in->result);
+    if (dw == W_LD)
+    {
+        x87_lower_itof(in, ctx);
+        return;
+    }
+    bool is_signed;
+    u8 sw = load_int_operand(ctx, in->ops[0], &is_signed);
+    u8 mf = MF_OF(dw);
+    if (sw == W_QWORD && !is_signed)
+    {
+        emit_itof_u64_xmm(ctx, mf, dw == W_DWORD);
+    }
+    else
+    {
+        emit_cvtsi2fp(ctx->buf, mf, R_XMM0, R_EAX);
+    }
+    store_fp_result(ctx, in, dw, R_XMM0);
+}
+
+static void lower_ftoi(IrInstr *in, X86LowerCtx *ctx)
+{
+    u8 dw = vreg_width(ctx, in->result);
+    bool is_signed = ir_vreg_signed(ctx->mod, in->result);
+    u8 sw = in->ops[0].is_imm ? 8 : vreg_width(ctx, in->ops[0].u.vreg);
+    if (sw == W_LD)
+    {
+        x87_lower_ftoi(in, ctx);
+        return;
+    }
+    u8 mf = MF_OF(sw);
+    fp_operand_to_xmm(ctx, in->ops[0], sw, R_XMM0);
+    if (dw == W_QWORD && !is_signed)
+    {
+        emit_ftoi_u64_xmm(ctx, mf, sw);
+    }
+    else
+    {
+        emit_cvtts2i(ctx->buf, mf, R_EAX, R_XMM0, dw == W_QWORD || !is_signed);
+    }
+    store_reg_result(ctx, in, dw, R_EAX);
+}
+
+static void lower_fconv(IrInstr *in, X86LowerCtx *ctx)
+{
+    u8 dw = vreg_width(ctx, in->result);
+    u8 sw = in->ops[0].is_imm ? 8 : vreg_width(ctx, in->ops[0].u.vreg);
+    if (dw == W_LD || sw == W_LD)
+    {
+        x87_lower_fconv(in, ctx);
+        return;
+    }
+    u8 mf = MF_OF(sw);
+    fp_operand_to_xmm(ctx, in->ops[0], sw, R_XMM0);
+    emit_sse_cvt(ctx->buf, mf, R_XMM0, R_XMM0);
+    store_fp_result(ctx, in, dw, R_XMM0);
+}
+
+static void lower_fbin(IrInstr *in, X86LowerCtx *ctx)
+{
+    u8 w = vreg_width(ctx, in->result);
+    if (w == W_LD)
+    {
+        x87_lower_fbin(in, ctx);
+        return;
+    }
+    u8 mf = MF_OF(w);
+    const ArithSpec *s = &arith_specs[in->opcode];
+    RegLoc rl = result_loc(ctx, in);
+    u8 dst = rl.kind == LOC_REG ? rl.reg : R_XMM0;
+    fp_operand_to_xmm(ctx, in->ops[0], w, dst);
+
+    IrOperand rhs = in->ops[1];
+    if (rhs.is_imm)
+    {
+        emit_mov(ctx->buf, fp_imm_load_width(w, rhs.u.imm), xop_reg(R_EAX), xop_imm(rhs.u.imm));
+        emit_movd_to_xmm(ctx->buf, R_XMM1, R_EAX, w != W_DWORD);
+        emit_sse_op_reg(ctx->buf, mf, s->mem, dst, R_XMM1);
+    }
+    else
+    {
+        RegLoc sl = loc_of(ctx->alloc, rhs);
+        if (sl.kind == LOC_REG)
+        {
+            emit_sse_op_reg(ctx->buf, mf, s->mem, dst, sl.reg);
+        }
+        else
+        {
+            emit_sse_op_mem(ctx->buf, mf, s->mem, dst, rbp_mem(sl.disp));
+        }
+    }
+    if (rl.kind == LOC_MEM)
+    {
+        emit_sse_store(ctx->buf, mf, rbp_mem(rl.disp), dst);
+    }
+}
+
+static void lower_fneg(IrInstr *in, X86LowerCtx *ctx)
+{
+    u8 w = vreg_width(ctx, in->result);
+    if (w == W_LD)
+    {
+        x87_lower_fneg(in, ctx);
+        return;
+    }
+    RegLoc rl = result_loc(ctx, in);
+    u8 dst = rl.kind == LOC_REG ? rl.reg : R_XMM0;
+    fp_operand_to_xmm(ctx, in->ops[0], w, dst);
+    if (w == W_DWORD)
+    {
+        emit_mov(ctx->buf, W_DWORD, xop_reg(R_ECX), xop_imm(F32_SIGN_BIT));
+        emit_movd_to_xmm(ctx->buf, R_XMM1, R_ECX, false);
+        emit_sse_xor(ctx->buf, 0, dst, R_XMM1);
+    }
+    else
+    {
+        emit_mov(ctx->buf, W_QWORD, xop_reg(R_ECX), xop_imm((i64) F64_SIGN_BIT));
+        emit_movd_to_xmm(ctx->buf, R_XMM1, R_ECX, true);
+        emit_sse_xor(ctx->buf, X86_SSE_66, dst, R_XMM1);
+    }
+    if (rl.kind == LOC_MEM)
+    {
+        emit_sse_store(ctx->buf, MF_OF(w), rbp_mem(rl.disp), dst);
+    }
+}
+
+/* FP compare setcc matrix; join=0 predicates need no PF (unordered) fixup. */
+typedef struct
+{
+    u8 cc;
+    u8 join; /* OP_AND/OP_OR to combine the unordered (PF) flag; 0 = none */
+} FcmpSpec;
+
+static const FcmpSpec fcmp_specs[OP_FCMP_GE + 1] = {
+    [OP_FCMP_EQ] = {CC_E, OP_AND}, [OP_FCMP_NE] = {CC_NE, OP_OR},  [OP_FCMP_LT] = {CC_B, OP_AND},
+    [OP_FCMP_GT] = {CC_A, 0},      [OP_FCMP_LE] = {CC_BE, OP_AND}, [OP_FCMP_GE] = {CC_AE, 0},
+};
+
+static void lower_fcmp(IrInstr *in, X86LowerCtx *ctx)
+{
+    u8 rw = vreg_width(ctx, in->result);
+    u8 sw = in->ops[0].is_imm ? 8 : vreg_width(ctx, in->ops[0].u.vreg);
+    if (sw == W_LD)
+    {
+        x87_lower_fcmp(in, ctx);
+        return;
+    }
+    ByteBuf *b = ctx->buf;
+    u8 mf = MF_OF(sw);
+    fp_operand_to_xmm(ctx, in->ops[0], sw, R_XMM0);
+
+    IrOperand rhs = in->ops[1];
+    if (rhs.is_imm)
+    {
+        emit_mov(b, fp_imm_load_width(sw, rhs.u.imm), xop_reg(R_EAX), xop_imm(rhs.u.imm));
+        emit_movd_to_xmm(b, R_XMM1, R_EAX, sw != W_DWORD);
+    }
+    else
+    {
+        RegLoc sl = loc_of(ctx->alloc, rhs);
+        if (sl.kind == LOC_REG)
+        {
+            if (sl.reg != R_XMM1)
+            {
+                emit_sse_op_reg(b, mf, X86_SSE_MOV, R_XMM1, sl.reg);
+            }
+        }
+        else
+        {
+            emit_sse_load(b, mf, R_XMM1, rbp_mem(sl.disp));
+        }
+    }
+    emit_sse_ucomis(b, sw, R_XMM0, R_XMM1);
+
+    const FcmpSpec *spec = &fcmp_specs[in->opcode];
+    emit_setcc_reg(b, spec->cc, R_EAX);
+    if (spec->join)
+    {
+        u8 pf_cc = spec->join == OP_AND ? CC_NP : CC_P;
+        emit_setcc_reg(b, pf_cc, R_EDX);
+        emit_binop_rhs(b, W_BYTE, &arith_specs[spec->join], R_EAX, xop_reg(R_EDX));
+    }
+    emit_movzbl_al_eax(b);
+    store_reg_result(ctx, in, rw, R_EAX);
+}
+
 static void lower_load(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
-    ASSERT(w != W_LD && "long double loads lower in the x87 module");
     X86Mem addr = pointer_in_rax(ctx, in->ops[0]);
     RegLoc rl = result_loc(ctx, in);
+    if (w == W_LD)
+    {
+        ASSERT(rl.kind == LOC_MEM && "x87 values are memory-only");
+        emit_mov16(ctx->buf, addr, rbp_mem(rl.disp));
+        return;
+    }
+    if (rl.cls == RC_XMM)
+    {
+        u8 mf = MF_OF(w);
+        if (rl.kind == LOC_REG)
+        {
+            emit_sse_load(ctx->buf, mf, rl.reg, addr);
+            return;
+        }
+        emit_sse_load(ctx->buf, mf, R_XMM0, addr);
+        emit_sse_store(ctx->buf, mf, rbp_mem(rl.disp), R_XMM0);
+        return;
+    }
     if (rl.kind == LOC_REG)
     {
         emit_mov(ctx->buf, w, xop_reg(rl.reg), xop_mem(addr));
@@ -301,8 +652,38 @@ static void lower_load(IrInstr *in, X86LowerCtx *ctx)
 static void lower_store(IrInstr *in, X86LowerCtx *ctx)
 {
     u32 w = (u32) in->ops[2].u.imm;
-    ASSERT(w != W_LD && "long double stores lower in the x87 module");
-    force_to_reg(ctx, in->ops[0], R_ECX);
+    IrOperand val = in->ops[0];
+    if (w == W_LD)
+    {
+        if (val.is_imm)
+        {
+            ASSERT(val.u.imm == 0 && "nonzero immediate in a width-16 store");
+            emit_sse_xor(ctx->buf, 0, R_XMM0, R_XMM0);
+            X86Mem addr0 = pointer_in_rax(ctx, in->ops[1]);
+            emit_mov16_store(ctx->buf, addr0);
+            return;
+        }
+        RegLoc sl = loc_of(ctx->alloc, val);
+        ASSERT(sl.kind == LOC_MEM && "x87 values are memory-only");
+        X86Mem addr = pointer_in_rax(ctx, in->ops[1]);
+        emit_mov16(ctx->buf, rbp_mem(sl.disp), addr);
+        return;
+    }
+    if (operand_is_fp_vreg(ctx, val))
+    {
+        u8 mf = MF_OF(w);
+        RegLoc sl = loc_of(ctx->alloc, val);
+        X86Mem addr = pointer_in_rax(ctx, in->ops[1]);
+        if (sl.kind == LOC_REG)
+        {
+            emit_sse_store(ctx->buf, mf, addr, sl.reg);
+            return;
+        }
+        emit_sse_load(ctx->buf, mf, R_XMM0, rbp_mem(sl.disp));
+        emit_sse_store(ctx->buf, mf, addr, R_XMM0);
+        return;
+    }
+    force_to_reg(ctx, val, R_ECX);
     X86Mem addr = pointer_in_rax(ctx, in->ops[1]);
     emit_mov(ctx->buf, (u8) w, xop_mem(addr), xop_reg(R_ECX));
 }
@@ -357,26 +738,23 @@ static void lower_ret(IrInstr *in, X86LowerCtx *ctx)
 {
     if (in->nops > 0)
     {
-        u8 w = operand_width(ctx, in->ops[0]);
+        IrOperand val = in->ops[0];
         if (type_is_fp(ctx->func->ret_type))
         {
-            ASSERT(w != W_LD && "long double returns lower in the x87 module");
-            RegLoc l = loc_of(ctx->alloc, in->ops[0]);
-            if (l.kind == LOC_REG)
+            u8 w = val.is_imm ? (u8) type_sizeof(ctx->func->ret_type) : vreg_width(ctx, val.u.vreg);
+            if (w == W_LD)
             {
-                if (l.reg != R_XMM0)
-                {
-                    emit_sse_op_reg(ctx->buf, MF_OF(w), X86_SSE_MOV, R_XMM0, l.reg);
-                }
+                /* %st0 return: leave the value on the x87 stack, reset the counter. */
+                x87_load_result_to_st0(ctx, in);
             }
             else
             {
-                emit_sse_load(ctx->buf, MF_OF(w), R_XMM0, rbp_mem(l.disp));
+                fp_operand_to_xmm(ctx, val, w, R_XMM0);
             }
         }
         else
         {
-            force_to_reg(ctx, in->ops[0], R_EAX);
+            force_to_reg(ctx, val, R_EAX);
         }
     }
     else
@@ -604,7 +982,21 @@ typedef void (*LowerFn)(IrInstr *, X86LowerCtx *);
     X(OP_VA_START, x86_sysv_lower_va_start)                                                        \
     X(OP_VA_ARG, x86_sysv_lower_va_arg)                                                            \
     X(OP_PHI, lower_noop)                                                                          \
-    X(OP_VA_END, lower_noop)
+    X(OP_VA_END, lower_noop)                                                                       \
+    X(OP_ITOF, lower_itof)                                                                         \
+    X(OP_FTOI, lower_ftoi)                                                                         \
+    X(OP_FCONV, lower_fconv)                                                                       \
+    X(OP_FADD, lower_fbin)                                                                         \
+    X(OP_FSUB, lower_fbin)                                                                         \
+    X(OP_FMUL, lower_fbin)                                                                         \
+    X(OP_FDIV, lower_fbin)                                                                         \
+    X(OP_FNEG, lower_fneg)                                                                         \
+    X(OP_FCMP_EQ, lower_fcmp)                                                                      \
+    X(OP_FCMP_NE, lower_fcmp)                                                                      \
+    X(OP_FCMP_LT, lower_fcmp)                                                                      \
+    X(OP_FCMP_GT, lower_fcmp)                                                                      \
+    X(OP_FCMP_LE, lower_fcmp)                                                                      \
+    X(OP_FCMP_GE, lower_fcmp)
 
 /* Dispatch table indexed by opcode; unlisted opcodes hit the unsupported path. */
 static const LowerFn lower_fns[OP_FCMP_GE + 1] = {
@@ -643,8 +1035,21 @@ static void store_vreg_from_reg(X86LowerCtx *ctx, u32 vreg, u8 width, u8 reg)
 static void emit_phi_copy(X86LowerCtx *ctx, IrOperand src, u32 dst_vreg)
 {
     u8 dw = vreg_width(ctx, dst_vreg);
-    ASSERT(dw != W_LD && "long double phi copies lower in the x87 module");
     RegLoc dl = loc_of(ctx->alloc, ir_operand_vreg(dst_vreg));
+    if (dw == W_LD)
+    {
+        if (src.is_imm)
+        {
+            ASSERT(src.u.imm == 0 && "nonzero immediate in a width-16 phi copy");
+            emit_sse_xor(ctx->buf, 0, R_XMM0, R_XMM0);
+            emit_mov16_store(ctx->buf, rbp_mem(dl.disp));
+            return;
+        }
+        RegLoc sl = loc_of(ctx->alloc, src);
+        ASSERT(sl.kind == LOC_MEM && dl.kind == LOC_MEM && "x87 values are memory-only");
+        emit_mov16(ctx->buf, rbp_mem(sl.disp), rbp_mem(dl.disp));
+        return;
+    }
     if (src.is_global)
     {
         emit_global_addr_to(ctx->buf, R_EAX, src.u.global_index, ctx->global_patches, ctx->arena);
@@ -655,6 +1060,46 @@ static void emit_phi_copy(X86LowerCtx *ctx, IrOperand src, u32 dst_vreg)
     {
         emit_func_addr_to(ctx->buf, R_EAX, src.u.func_name, ctx->func_patches, ctx->arena);
         store_vreg_from_reg(ctx, dst_vreg, dw, R_EAX);
+        return;
+    }
+    if (dl.cls == RC_XMM)
+    {
+        u8 mf = MF_OF(dw);
+        if (src.is_imm)
+        {
+            emit_mov(ctx->buf, fp_imm_load_width(dw, src.u.imm), xop_reg(R_EAX),
+                     xop_imm(src.u.imm));
+            if (dl.kind == LOC_REG)
+            {
+                emit_movd_to_xmm(ctx->buf, dl.reg, R_EAX, dw != W_DWORD);
+            }
+            else
+            {
+                emit_movd_to_xmm(ctx->buf, R_XMM0, R_EAX, dw != W_DWORD);
+                emit_sse_store(ctx->buf, mf, rbp_mem(dl.disp), R_XMM0);
+            }
+            return;
+        }
+        RegLoc sl = loc_of(ctx->alloc, src);
+        if (dl.kind == LOC_REG)
+        {
+            if (sl.kind == LOC_REG)
+            {
+                emit_sse_op_reg(ctx->buf, mf, X86_SSE_MOV, dl.reg, sl.reg);
+            }
+            else
+            {
+                emit_sse_load(ctx->buf, mf, dl.reg, rbp_mem(sl.disp));
+            }
+            return;
+        }
+        if (sl.kind == LOC_REG)
+        {
+            emit_sse_store(ctx->buf, mf, rbp_mem(dl.disp), sl.reg);
+            return;
+        }
+        emit_sse_load(ctx->buf, mf, R_XMM0, rbp_mem(sl.disp));
+        emit_sse_store(ctx->buf, mf, rbp_mem(dl.disp), R_XMM0);
         return;
     }
     if (src.is_imm)

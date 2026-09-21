@@ -1,10 +1,12 @@
 #include "x86_sysv.h"
 #include "abi.h"
 #include "regalloc.h"
+#include "util/assert.h"
 #include "util/bytebuf.h"
 #include "x86_emit.h"
 #include "x86_frame.h"
 #include "x86_lower.h"
+#include "x87.h"
 
 #define STACK_ALIGN 16
 #define SYSV_MAX_GP 6
@@ -180,7 +182,9 @@ static void emit_stack_arg(X86LowerCtx *ctx, IrOperand op, const SysvArgPlan *p)
     }
     if (p->is_x87_stack)
     {
-        emit_ud2(ctx->buf); /* long double arguments land with H */
+        RegLoc l = loc_of(ctx->alloc, op);
+        ASSERT(l.kind == LOC_MEM && "x87 values are memory-only");
+        emit_mov16(ctx->buf, x86_lower_rbp_mem(l.disp), dst);
         return;
     }
     if (type_is_fp(p->type))
@@ -253,7 +257,9 @@ static void store_call_result(X86LowerCtx *ctx, IrInstr *in)
     }
     else if (w == 16)
     {
-        emit_ud2(ctx->buf); /* %st0 returns land with H */
+        RegLoc rl = x86_lower_result_loc(ctx, in);
+        ASSERT(rl.kind == LOC_MEM && "x87 results are memory-only");
+        x87_emit_fstpt(ctx->buf, x86_lower_rbp_mem(rl.disp));
     }
     else
     {

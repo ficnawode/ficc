@@ -257,6 +257,25 @@ TEST(regalloc, reserved_registers_are_never_allocated)
     arena_free(a);
 }
 
+TEST(regalloc, xmm_bank_uses_allocatable_lanes)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 d = ir_alloc_fp_vreg(m, 8);
+    u32 e = ir_alloc_fp_vreg(m, 8);
+    ir_emit_binop(entry, OP_FADD, d, ir_operand_imm(0), ir_operand_imm(0));
+    ir_emit_binop(entry, OP_FADD, e, ir_operand_vreg(d), ir_operand_imm(0));
+    ir_emit_ret(entry, ir_operand_imm(0));
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    /* xmm0-7 are the ABI argument lanes and stay reserved; xmm8-15 allocate. */
+    EXPECT_EQ(alloc->phys_map[d], 8);
+    EXPECT_TRUE(alloc->phys_map[e] >= 8 && alloc->phys_map[e] < 16);
+    arena_free(a);
+}
+
 TEST(regalloc, allocation_is_deterministic)
 {
     Arena *a1 = arena_new();

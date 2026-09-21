@@ -504,10 +504,20 @@ void emit_mov16_store(ByteBuf *buf, X86Mem dst)
     emit_mem_operand(buf, R_XMM0, dst);
 }
 
+/* REX.R/REX.B for an SSE reg, r/m pair; xmm0-7 need none (and stay byte-stable). */
+static void emit_sse_rex(ByteBuf *buf, u8 reg, u8 rm)
+{
+    if (reg >= 8 || rm >= 8)
+    {
+        bytebuf_append(buf, rex(false, reg >= 8, false, rm >= 8));
+    }
+}
+
 /* cvtss2sd/cvtsd2ss; the prefix selects the source precision. */
 void emit_sse_cvt(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
 {
     bytebuf_append(buf, mf);
+    emit_sse_rex(buf, dst_xmm, src_xmm);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_CVTS2S);
     bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
@@ -517,7 +527,7 @@ void emit_sse_cvt(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
 void emit_cvtsi2fp(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_reg)
 {
     bytebuf_append(buf, mf);
-    bytebuf_append(buf, X86_REX_W);
+    bytebuf_append(buf, rex(true, dst_xmm >= 8, false, src_reg >= 8));
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_CVTSI2);
     bytebuf_append(buf, modrm(3, dst_xmm, src_reg));
@@ -526,9 +536,9 @@ void emit_cvtsi2fp(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_reg)
 void emit_cvtts2i(ByteBuf *buf, u8 mf, u8 dst_reg, u8 src_xmm, bool to_64)
 {
     bytebuf_append(buf, mf);
-    if (to_64)
+    if (to_64 || dst_reg >= 8 || src_xmm >= 8)
     {
-        bytebuf_append(buf, X86_REX_W);
+        bytebuf_append(buf, rex(to_64, dst_reg >= 8, false, src_xmm >= 8));
     }
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_CVTT);
@@ -542,6 +552,7 @@ void emit_sse_ucomis(ByteBuf *buf, u8 width, u8 lhs_xmm, u8 rhs_xmm)
     {
         bytebuf_append(buf, X86_SSE_66);
     }
+    emit_sse_rex(buf, lhs_xmm, rhs_xmm);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_UCOMIS);
     bytebuf_append(buf, modrm(3, lhs_xmm, rhs_xmm));
@@ -550,6 +561,7 @@ void emit_sse_ucomis(ByteBuf *buf, u8 width, u8 lhs_xmm, u8 rhs_xmm)
 void emit_sse_add(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
 {
     bytebuf_append(buf, mf);
+    emit_sse_rex(buf, dst_xmm, src_xmm);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_ADD);
     bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
@@ -558,6 +570,7 @@ void emit_sse_add(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
 void emit_sse_sub(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
 {
     bytebuf_append(buf, mf);
+    emit_sse_rex(buf, dst_xmm, src_xmm);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_SUB);
     bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
@@ -567,9 +580,9 @@ void emit_sse_sub(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm)
 void emit_movd_to_xmm(ByteBuf *buf, u8 dst_xmm, u8 src_reg, bool is64)
 {
     bytebuf_append(buf, X86_SSE_66);
-    if (is64)
+    if (is64 || dst_xmm >= 8 || src_reg >= 8)
     {
-        bytebuf_append(buf, X86_REX_W);
+        bytebuf_append(buf, rex(is64, dst_xmm >= 8, false, src_reg >= 8));
     }
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_MOVD);
@@ -588,6 +601,7 @@ void emit_sse_op_mem(ByteBuf *buf, u8 mf, u8 op, u8 dst_xmm, X86Mem mem)
 void emit_sse_op_reg(ByteBuf *buf, u8 mf, u8 op, u8 dst_xmm, u8 src_xmm)
 {
     bytebuf_append(buf, mf);
+    emit_sse_rex(buf, dst_xmm, src_xmm);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, op);
     bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
@@ -601,6 +615,7 @@ void emit_sse_xor(ByteBuf *buf, u8 mand, u8 dst_xmm, u8 src_xmm)
     {
         bytebuf_append(buf, mand);
     }
+    emit_sse_rex(buf, dst_xmm, src_xmm);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_XOR);
     bytebuf_append(buf, modrm(3, dst_xmm, src_xmm));
