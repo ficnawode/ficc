@@ -415,14 +415,6 @@ static void emit_bit_imm(ByteBuf *buf, u8 digit, u8 dst_reg, u8 imm)
     bytebuf_append_i8(buf, (i8) imm);
 }
 
-/* FF /4: jmp r/m64 — indirect jump to the absolute address in a register. */
-static void emit_jmp_reg(ByteBuf *buf, u8 reg)
-{
-    bytebuf_append(buf, X86_REX_W);
-    bytebuf_append(buf, X86_IND_JMP);
-    bytebuf_append(buf, modrm(3, 4, reg));
-}
-
 /* `call *%reg` (FF /2) — indirect call through a function pointer. */
 static void emit_call_reg(ByteBuf *buf, u8 reg)
 {

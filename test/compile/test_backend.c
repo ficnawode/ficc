@@ -11,12 +11,12 @@ static unsigned int backend_seq;
 
 static void backend_path(char *buf, size_t sz, const char *backend, const char *ext)
 {
-    snprintf(buf, sz, "/tmp/ficc_22e_%u_%s.%s", backend_seq++, backend, ext);
+    snprintf(buf, sz, "/tmp/ficc_backend_%u_%s.%s", backend_seq++, backend, ext);
 }
 
 static void backend_write_src(char *out, size_t sz, const char *src)
 {
-    snprintf(out, sz, "/tmp/ficc_22e_%u_src.c", backend_seq++);
+    snprintf(out, sz, "/tmp/ficc_backend_%u_src.c", backend_seq++);
     FILE *f = fopen(out, "w");
     EXPECT_NOTNULL(f);
     if (f)
@@ -188,4 +188,136 @@ TEST(backend, in_process_oracle)
     backend_run_inproc("int main(void) { int a = 6; int b = 7; int c[1]; c[0] = a * b;\n"
                        "                       return c[0]; }\n",
                        42);
+}
+
+TEST(backend, control_flow_if_else_chain)
+{
+    backend_run("int main(void) { int s = 0;\n"
+                "  for (int i = -2; i < 12; i = i + 1) {\n"
+                "    if (i < 0) { s = s + 1; }\n"
+                "    else if (i == 0) { s = s + 10; }\n"
+                "    else if (i < 10) { s = s + 100; }\n"
+                "    else { s = s + 1000; } }\n"
+                "  return s % 251; }\n",
+                151);
+}
+
+TEST(backend, control_flow_while_break_continue)
+{
+    backend_run("int main(void) { int i = 0; int s = 0;\n"
+                "  while (i < 100) {\n"
+                "    i = i + 1;\n"
+                "    if (i % 2 == 0) { continue; }\n"
+                "    if (i > 50) { break; }\n"
+                "    s = s + i; }\n"
+                "  return s % 251; }\n",
+                123);
+}
+
+TEST(backend, control_flow_do_while)
+{
+    backend_run("int main(void) { int i = 0; int s = 0;\n"
+                "  do { s = s + i; i = i + 1; } while (i < 10);\n"
+                "  return s; }\n",
+                45);
+}
+
+TEST(backend, control_flow_nested_loops)
+{
+    backend_run("int main(void) { int s = 0;\n"
+                "  for (int i = 0; i < 6; i = i + 1)\n"
+                "    for (int j = 0; j < 7; j = j + 1)\n"
+                "      s = s + i * j;\n"
+                "  return s; }\n",
+                59);
+}
+
+TEST(backend, control_flow_dense_switch)
+{
+    backend_run("int main(void) { int s = 0;\n"
+                "  for (int i = 0; i < 6; i = i + 1) {\n"
+                "    switch (i) {\n"
+                "      case 0: s = s + 10; break;\n"
+                "      case 1: s = s + 20; break;\n"
+                "      case 2: s = s + 30; break;\n"
+                "      case 3: s = s + 40; break;\n"
+                "      case 4: s = s + 50; break;\n"
+                "      default: s = s + 7; break; } }\n"
+                "  return s % 251; }\n",
+                157);
+}
+
+TEST(backend, control_flow_switch_fallthrough)
+{
+    backend_run("int main(void) { int x = 5; int s = 0;\n"
+                "  switch (x) {\n"
+                "    case 0: s = s + 1;\n"
+                "    case 1: s = s + 2; break;\n"
+                "    case 5: s = s + 10;\n"
+                "    case 6: s = s + 20; break;\n"
+                "    default: s = s + 100; break; }\n"
+                "  return s; }\n",
+                30);
+}
+
+TEST(backend, control_flow_switch_negative)
+{
+    backend_run("int main(void) { int s = 0;\n"
+                "  for (int i = -3; i <= 3; i = i + 1) {\n"
+                "    switch (i) {\n"
+                "      case -3: s = s + 1; break;\n"
+                "      case -1: s = s + 10; break;\n"
+                "      case 0: s = s + 100; break;\n"
+                "      case 2: s = s + 1000; break;\n"
+                "      default: s = s + 10000; break; } }\n"
+                "  return s % 251; }\n",
+                238);
+}
+
+TEST(backend, control_flow_sparse_switch_chain)
+{
+    backend_run("int main(void) { int s = 0;\n"
+                "  for (int i = 0; i < 1000; i = i + 1) {\n"
+                "    switch (i) {\n"
+                "      case 3: s = s + 1; break;\n"
+                "      case 500: s = s + 2; break;\n"
+                "      case 999: s = s + 4; break;\n"
+                "      default: break; } }\n"
+                "  return s; }\n",
+                7);
+}
+
+TEST(backend, control_flow_goto_loop)
+{
+    backend_run("int main(void) { int i = 0; int s = 0;\n"
+                "again:\n"
+                "  if (i >= 10) { goto done; }\n"
+                "  s = s + i * i; i = i + 1;\n"
+                "  goto again;\n"
+                "done:\n"
+                "  return s % 251; }\n",
+                34);
+}
+
+TEST(backend, control_flow_logical_short_circuit)
+{
+    backend_run("int main(void) { int s = 0;\n"
+                "  for (int i = 0; i < 20; i = i + 1) {\n"
+                "    if (i > 2 && i < 15) {\n"
+                "      if (i % 3 == 0 || i % 5 == 0) { s = s + i; } }\n"
+                "    if (!(i & 1)) { s = s + 100; } }\n"
+                "  return s % 251; }\n",
+                41);
+}
+
+TEST(backend, control_flow_in_process_oracle)
+{
+    backend_run_inproc("int main(void) { int s = 0;\n"
+                       "  for (int i = 0; i < 10; i = i + 1) {\n"
+                       "    if (i == 5) { continue; }\n"
+                       "    switch (i % 3) { case 0: s = s + 1; break;\n"
+                       "                     case 1: s = s + 2; break;\n"
+                       "                     default: s = s + 3; break; } }\n"
+                       "  return s; }\n",
+                       16);
 }

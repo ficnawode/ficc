@@ -314,6 +314,7 @@ void emit_ud2(ByteBuf *buf);
 void emit_jcc(ByteBuf *buf, u8 cc, const char *target, Vec *patches, Arena *arena);
 void emit_jmp(ByteBuf *buf, const char *target, Vec *patches, Arena *arena);
 void emit_call(ByteBuf *buf, const char *target, Vec *patches, Arena *arena);
+void emit_jmp_reg(ByteBuf *buf, u8 reg);
 size_t emit_jcc_pending(ByteBuf *buf, u8 cc);
 size_t emit_jmp_pending(ByteBuf *buf);
 void patch_rel32(ByteBuf *buf, size_t field_off, size_t target);
