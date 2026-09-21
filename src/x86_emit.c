@@ -433,6 +433,14 @@ void emit_jmp_reg(ByteBuf *buf, u8 reg)
     bytebuf_append(buf, modrm(3, 4, reg));
 }
 
+/* FF /2: call r/m64 — indirect call through a function pointer. */
+void emit_call_reg(ByteBuf *buf, u8 reg)
+{
+    bytebuf_append(buf, rex(true, false, false, reg >= 8));
+    bytebuf_append(buf, X86_IND_JMP);
+    bytebuf_append(buf, modrm(3, 2, reg));
+}
+
 /* Internal-label branch: emit a placeholder rel32 and return the field offset to poke later. */
 size_t emit_jcc_pending(ByteBuf *buf, u8 cc)
 {

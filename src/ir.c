@@ -161,7 +161,18 @@ IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOpera
     ins->extra.call.is_variadic = false;
     ins->extra.call.is_indirect = false;
     ins->extra.call.callee = ir_operand_imm(0);
+    ins->extra.call.arg_types = NULL;
+    ins->extra.call.ret_type = NULL;
     return ins;
+}
+
+/* One by-value type per argument plus the return type; records stay records. */
+void ir_call_set_types(IrInstr *call, Type **arg_types, Type *ret_type)
+{
+    ASSERT(call->opcode == OP_CALL);
+    ASSERT(arg_types != NULL && "a call carries an argument-type vector");
+    call->extra.call.arg_types = arg_types;
+    call->extra.call.ret_type = ret_type;
 }
 
 void ir_call_set_variadic(IrInstr *call, bool is_variadic)

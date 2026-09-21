@@ -5,6 +5,7 @@
 #include "ir_builder.h"
 #include "ir_interp.h"
 #include "lexer.h"
+#include "type.h"
 
 #include <string.h>
 
@@ -739,5 +740,117 @@ TEST(ir_builder, va_arg_and_end_emit_opcodes)
     }
     EXPECT_TRUE(saw_arg);
     EXPECT_TRUE(saw_end);
+    arena_free(a);
+}
+
+/* Every call boundary carries one type per argument plus the return type. */
+static void expect_call_types(IrModule *m)
+{
+    size_t nfuncs = vec_size(m->funcs);
+    u32 ncalls = 0;
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+        size_t nblocks = vec_size(f->blocks);
+        for (size_t bi = 0; bi < nblocks; bi++)
+        {
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
+            size_t ninstr = vec_size(bb->instrs);
+            for (size_t ii = 0; ii < ninstr; ii++)
+            {
+                IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
+                if (in->opcode != OP_CALL)
+                {
+                    continue;
+                }
+                ncalls++;
+                EXPECT_NOTNULL(in->extra.call.arg_types);
+                EXPECT_NOTNULL(in->extra.call.ret_type);
+                for (u32 a = 0; a < in->extra.call.nargs; a++)
+                {
+                    EXPECT_NOTNULL(in->extra.call.arg_types[a]);
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(ncalls > 0);
+}
+
+TEST(ir_builder, direct_call_carries_arg_and_return_types)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int f(int a, char *p) {\n"
+                                  "    return a;\n"
+                                  "}\n"
+                                  "int main(void) {\n"
+                                  "    return f(1, 0);\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    expect_call_types(m);
+    arena_free(a);
+}
+
+TEST(ir_builder, indirect_and_variadic_calls_carry_types)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int printf(const char *fmt, ...);\n"
+                                  "int main(void) {\n"
+                                  "    int (*fp)(int) = 0;\n"
+                                  "    printf(\"%d\\n\", 1);\n"
+                                  "    return fp ? fp(2) : 0;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    expect_call_types(m);
+    arena_free(a);
+}
+
+TEST(ir_builder, record_arg_call_carries_record_type)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("struct Pair { int a; int b; };\n"
+                                  "struct Pair bump(struct Pair p) {\n"
+                                  "    p.a = p.a + 1;\n"
+                                  "    return p;\n"
+                                  "}\n"
+                                  "int main(void) {\n"
+                                  "    struct Pair x;\n"
+                                  "    x.a = 1;\n"
+                                  "    x.b = 2;\n"
+                                  "    struct Pair y = bump(x);\n"
+                                  "    return y.a;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    bool saw_record_arg = false;
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+        size_t nblocks = vec_size(f->blocks);
+        for (size_t bi = 0; bi < nblocks; bi++)
+        {
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
+            size_t ninstr = vec_size(bb->instrs);
+            for (size_t ii = 0; ii < ninstr; ii++)
+            {
+                IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
+                if (in->opcode != OP_CALL)
+                {
+                    continue;
+                }
+                EXPECT_NOTNULL(in->extra.call.arg_types);
+                for (u32 ai = 0; ai < in->extra.call.nargs; ai++)
+                {
+                    if (type_is_record(in->extra.call.arg_types[ai]))
+                    {
+                        saw_record_arg = true;
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_TRUE(saw_record_arg);
     arena_free(a);
 }

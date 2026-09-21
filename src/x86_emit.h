@@ -241,6 +241,16 @@ static inline X86Mem x86_mem_rcx(i32 disp)
     return m;
 }
 
+static inline X86Mem x86_mem_r11(i32 disp)
+{
+    X86Mem m;
+    m.base = R_R11;
+    m.index = NO_REG;
+    m.scale = 1;
+    m.disp = disp;
+    return m;
+}
+
 /* x86 encoding recipe for a binary arithmetic/logic operation. */
 typedef struct
 {
@@ -314,6 +324,7 @@ void emit_ud2(ByteBuf *buf);
 void emit_jcc(ByteBuf *buf, u8 cc, const char *target, Vec *patches, Arena *arena);
 void emit_jmp(ByteBuf *buf, const char *target, Vec *patches, Arena *arena);
 void emit_call(ByteBuf *buf, const char *target, Vec *patches, Arena *arena);
+void emit_call_reg(ByteBuf *buf, u8 reg);
 void emit_jmp_reg(ByteBuf *buf, u8 reg);
 size_t emit_jcc_pending(ByteBuf *buf, u8 cc);
 size_t emit_jmp_pending(ByteBuf *buf);

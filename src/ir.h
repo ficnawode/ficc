@@ -127,6 +127,8 @@ typedef struct
     bool is_variadic; /* the callee is variadic; the call site zeroes %al */
     bool is_indirect; /* the callee is an operand value, not a named symbol */
     IrOperand callee; /* the indirect-call target, when is_indirect */
+    Type **arg_types; /* one declared/promoted type per arg; records are by value */
+    Type *ret_type;   /* the callee's return type (never NULL for a call) */
 } IrCallPayload;
 
 typedef struct
@@ -195,6 +197,7 @@ struct IrParam
     const char *name;
     Type *type;
     u32 vreg;
+    Type *agg_type; /* the record passed by value, else NULL (scalar/pointer/sret) */
 };
 
 struct IrFunction
@@ -288,6 +291,7 @@ IrInstr *ir_emit_unary(IrBlock *bb, IrOpcode op, u32 dst, IrOperand src);
 IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOperand *args);
 void ir_call_set_variadic(IrInstr *call, bool is_variadic);
 void ir_call_set_indirect(IrInstr *call, IrOperand callee);
+void ir_call_set_types(IrInstr *call, Type **arg_types, Type *ret_type);
 IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offset, i64 fp_offset);
 IrInstr *ir_emit_va_arg(IrBlock *bb, u32 dst, IrOperand ap);
 IrInstr *ir_emit_va_end(IrBlock *bb, IrOperand ap);

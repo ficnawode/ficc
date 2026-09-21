@@ -321,3 +321,216 @@ TEST(backend, control_flow_in_process_oracle)
                        "  return s; }\n",
                        16);
 }
+
+TEST(backend, call_direct_and_live_across)
+{
+    backend_run("int add(int a, int b) { return a + b; }\n"
+                "int main(void) { int x = 10; int y = add(20, 30); return x + y; }\n",
+                60);
+}
+
+TEST(backend, call_nested)
+{
+    backend_run("int add(int a, int b) { return a + b; }\n"
+                "int main(void) { return add(add(1, 2), add(3, 36)); }\n",
+                42);
+}
+
+TEST(backend, call_stack_arguments)
+{
+    backend_run("int sum8(int a, int b, int c, int d, int e, int f, int g, int h) {\n"
+                "    return a + b + c + d + e + f + g + h; }\n"
+                "int main(void) { return sum8(1, 2, 3, 4, 5, 6, 7, 8); }\n",
+                36);
+}
+
+TEST(backend, call_indirect)
+{
+    backend_run("int inc(int x) { return x + 1; }\n"
+                "int apply(int (*fp)(int), int x) { return fp(x); }\n"
+                "int main(void) { return apply(inc, 41); }\n",
+                42);
+}
+
+TEST(backend, call_recursion)
+{
+    backend_run("int fact(int n) { return n < 2 ? 1 : n * fact(n - 1); }\n"
+                "int main(void) { return fact(5) % 251; }\n",
+                120);
+}
+
+TEST(backend, call_variadic_sum)
+{
+    backend_run("int sumv(int n, ...) {\n"
+                "    __builtin_va_list ap;\n"
+                "    __builtin_va_start(ap, n);\n"
+                "    int s = 0;\n"
+                "    for (int i = 0; i < n; i = i + 1) { s = s + __builtin_va_arg(ap, int); }\n"
+                "    __builtin_va_end(ap);\n"
+                "    return s; }\n"
+                "int main(void) { return sumv(5, 1, 2, 3, 4, 32); }\n",
+                42);
+}
+
+TEST(backend, call_in_process_oracle)
+{
+    backend_run_inproc("int add(int a, int b) { return a + b; }\n"
+                       "int main(void) { int x = 20; int y = add(x, 22); return y; }\n",
+                       42);
+}
+
+TEST(backend, struct_arg_and_return)
+{
+    backend_run("struct Pair { int a; int b; };\n"
+                "struct Pair bump(struct Pair p) { p.a = p.a + 1; p.b = p.b + 1; return p; }\n"
+                "int main(void) { struct Pair x; x.a = 10; x.b = 20;\n"
+                "                struct Pair y = bump(x);\n"
+                "                return x.a + x.b + y.a + y.b; }\n",
+                62);
+}
+
+TEST(backend, struct_arg_mixed_with_scalars)
+{
+    backend_run("struct P { int a; int b; };\n"
+                "struct P mk(int a, int b) { struct P p; p.a = a; p.b = b; return p; }\n"
+                "int g(struct P p, int c) { return p.a + p.b + c; }\n"
+                "int main(void) { struct P p = mk(10, 20); return g(p, 12); }\n",
+                42);
+}
+
+TEST(backend, struct_arg_register_lanes)
+{
+    backend_run("struct P { int a; int b; };\n"
+                "int sum(struct P p) { return p.a + p.b; }\n"
+                "int main(void) { struct P p; p.a = 40; p.b = 2; return sum(p); }\n",
+                42);
+}
+
+TEST(backend, struct_arg_memory_class)
+{
+    backend_run("struct Big { char a[24]; };\n"
+                "int f(struct Big b) { return b.a[0] + b.a[23]; }\n"
+                "int main(void) { struct Big b; b.a[0] = 20; b.a[23] = 22; return f(b); }\n",
+                42);
+}
+
+TEST(backend, struct_arg_int_and_sse_lanes)
+{
+    backend_run("struct CD { int tag; double d; };\n"
+                "int f(struct CD v) { return v.tag; }\n"
+                "int main(void) { struct CD v; v.tag = 42; v.d = 99.0; return f(v); }\n",
+                42);
+}
+
+TEST(backend, struct_arg_overflows_to_stack)
+{
+    backend_run("struct P { int a; int b; };\n"
+                "int h(int a, int b, int c, int d, int e, struct P p) {\n"
+                "    return a + b + c + d + e + p.a + p.b; }\n"
+                "int main(void) { struct P p; p.a = 10; p.b = 20;\n"
+                "                return h(1, 2, 3, 4, 2, p); }\n",
+                42);
+}
+
+TEST(backend, struct_arg_and_return_with_scalar)
+{
+    backend_run("struct P { int a; int b; };\n"
+                "struct P addp(struct P x, int k) { x.a = x.a + k; x.b = x.b + k; return x; }\n"
+                "int main(void) { struct P p; p.a = 10; p.b = 20;\n"
+                "                struct P q = addp(p, 6); return q.a + q.b; }\n",
+                42);
+}
+
+/* Caller-side SysV aggregate placement must match gcc, which is the ABI oracle. */
+static void backend_run_gcc_tu(const char *ficc_src, const char *gcc_src, int expected)
+{
+    char fsrc[256], csrc[256], obj[256], gobj[256], bin[256], cmd[4096];
+    backend_write_src(fsrc, sizeof(fsrc), ficc_src);
+    backend_path(csrc, sizeof(csrc), "gcc", "c");
+    backend_path(obj, sizeof(obj), "linear", "o");
+    backend_path(gobj, sizeof(gobj), "gcc", "o");
+    backend_path(bin, sizeof(bin), "mix", "bin");
+
+    FILE *f = fopen(csrc, "w");
+    EXPECT_NOTNULL(f);
+    if (f)
+    {
+        fputs(gcc_src, f);
+        fclose(f);
+    }
+    snprintf(cmd, sizeof(cmd), "%s -backend linear -O0 %s -c -o %s >/dev/null 2>&1", FICC_BIN, fsrc,
+             obj);
+    int rc = tc_run_shell(cmd);
+    EXPECT_EQ(rc, 0);
+    if (rc != 0)
+    {
+        return;
+    }
+    snprintf(cmd, sizeof(cmd), "gcc -c %s -o %s >/dev/null 2>&1", csrc, gobj);
+    EXPECT_EQ(tc_run_shell(cmd), 0);
+    snprintf(cmd, sizeof(cmd), "gcc -no-pie %s %s -o %s >/dev/null 2>&1 && %s", obj, gobj, bin,
+             bin);
+    EXPECT_EQ(tc_run_shell(cmd), expected);
+
+    unlink(fsrc);
+    unlink(csrc);
+    unlink(obj);
+    unlink(gobj);
+    unlink(bin);
+}
+
+TEST(backend, gcc_interop_scalar_args)
+{
+    backend_run_gcc_tu("long gcc_add(long a, long b);\n"
+                       "int main(void) { return (int) gcc_add(40, 2); }\n",
+                       "long gcc_add(long a, long b) { return a + b; }\n", 42);
+}
+
+TEST(backend, gcc_interop_register_aggregate)
+{
+    backend_run_gcc_tu("struct P { long a; long b; };\n"
+                       "long gcc_sum(struct P p);\n"
+                       "int main(void) { struct P p; p.a = 40; p.b = 2;\n"
+                       "                return (int) gcc_sum(p); }\n",
+                       "struct P { long a; long b; };\n"
+                       "long gcc_sum(struct P p) { return p.a + p.b; }\n",
+                       42);
+}
+
+TEST(backend, gcc_interop_memory_aggregate)
+{
+    backend_run_gcc_tu("struct Big { char a[24]; };\n"
+                       "long gcc_big(struct Big b);\n"
+                       "int main(void) { struct Big b; b.a[0] = 20; b.a[23] = 22;\n"
+                       "                return (int) gcc_big(b); }\n",
+                       "struct Big { char a[24]; };\n"
+                       "long gcc_big(struct Big b) { return b.a[0] + b.a[23]; }\n",
+                       42);
+}
+
+TEST(backend, gcc_interop_float_and_double_args)
+{
+    backend_run_gcc_tu("int gcc_fp(double x, float y);\n"
+                       "int main(void) { return gcc_fp(21.0, 2.0f); }\n",
+                       "int gcc_fp(double x, float y) { return (int) (x * 2.0 + y); }\n", 44);
+}
+
+TEST(backend, gcc_interop_variadic_double_args)
+{
+    backend_run_gcc_tu("int gcc_fsum(int n, ...);\n"
+                       "int main(void) { return gcc_fsum(2, 40.0, 2.0); }\n",
+                       "#include <stdarg.h>\n"
+                       "int gcc_fsum(int n, ...) {\n"
+                       "    va_list ap; va_start(ap, n);\n"
+                       "    double s = 0.0;\n"
+                       "    for (int i = 0; i < n; i = i + 1) { s = s + va_arg(ap, double); }\n"
+                       "    va_end(ap); return (int) s; }\n",
+                       42);
+}
+
+TEST(backend, gcc_interop_printf)
+{
+    backend_run_gcc_tu("int printf(const char *fmt, ...);\n"
+                       "int main(void) { printf(\"%d\\n\", 42); return 0; }\n",
+                       "/* libc provides printf; this TU only anchors the link. */\n", 0);
+}

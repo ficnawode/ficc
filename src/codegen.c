@@ -415,14 +415,6 @@ static void emit_bit_imm(ByteBuf *buf, u8 digit, u8 dst_reg, u8 imm)
     bytebuf_append_i8(buf, (i8) imm);
 }
 
-/* `call *%reg` (FF /2) — indirect call through a function pointer. */
-static void emit_call_reg(ByteBuf *buf, u8 reg)
-{
-    bytebuf_append(buf, rex(true, false, false, reg >= 8));
-    bytebuf_append(buf, X86_IND_JMP);
-    bytebuf_append(buf, modrm(3, 2, reg));
-}
-
 /* Scratch: lower_* may clobber EAX/ECX/EDX, so live ranges must not span a lowering. */
 typedef void (*LowerFn)(IrInstr *in, CodegenCtx *ctx);
 

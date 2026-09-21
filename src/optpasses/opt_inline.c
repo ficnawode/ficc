@@ -299,6 +299,8 @@ static IrInstr *clone_instr(InlineCtx *ic, IrBlock *nb, const IrInstr *src)
             ni->extra.call.is_variadic = s->is_variadic;
             ni->extra.call.is_indirect = s->is_indirect;
             ni->extra.call.callee = ir_operand_imm(0);
+            ni->extra.call.arg_types = s->arg_types;
+            ni->extra.call.ret_type = s->ret_type;
             if (s->nargs > 0)
             {
                 IrOperand *args =

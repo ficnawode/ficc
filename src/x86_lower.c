@@ -9,6 +9,7 @@
 #include "util/vec.h"
 #include "x86_emit.h"
 #include "x86_frame.h"
+#include "x86_sysv.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -25,25 +26,6 @@ typedef struct
     u32 nentries;
     const char **targets;
 } LowerSwitchTable;
-
-typedef struct
-{
-    IrFunction *func;
-    IrModule *mod;
-    Arena *arena;
-    ByteBuf *buf;
-    const TargetDesc *target;
-    const RegAllocation *alloc;
-    const LinearFrame *frame;
-    Vec *patches;
-    Vec *block_patches;
-    Vec *global_patches;
-    Vec *func_patches;
-    Vec **phi_copies;
-    Vec *switch_tables;
-    size_t *block_offsets;
-    StrMap *label_to_index;
-} X86LowerCtx;
 
 #define STACK_ALIGN 16
 
@@ -375,8 +357,27 @@ static void lower_ret(IrInstr *in, X86LowerCtx *ctx)
 {
     if (in->nops > 0)
     {
-        ASSERT(!type_is_fp(ctx->func->ret_type) && "floating returns lower in the x87 module");
-        force_to_reg(ctx, in->ops[0], R_EAX);
+        u8 w = operand_width(ctx, in->ops[0]);
+        if (type_is_fp(ctx->func->ret_type))
+        {
+            ASSERT(w != W_LD && "long double returns lower in the x87 module");
+            RegLoc l = loc_of(ctx->alloc, in->ops[0]);
+            if (l.kind == LOC_REG)
+            {
+                if (l.reg != R_XMM0)
+                {
+                    emit_sse_op_reg(ctx->buf, MF_OF(w), X86_SSE_MOV, R_XMM0, l.reg);
+                }
+            }
+            else
+            {
+                emit_sse_load(ctx->buf, MF_OF(w), R_XMM0, rbp_mem(l.disp));
+            }
+        }
+        else
+        {
+            force_to_reg(ctx, in->ops[0], R_EAX);
+        }
     }
     else
     {
@@ -391,6 +392,12 @@ static void lower_unreachable(IrInstr *in, X86LowerCtx *ctx)
 {
     (void) in;
     emit_ud2(ctx->buf);
+}
+
+static void lower_noop(IrInstr *in, X86LowerCtx *ctx)
+{
+    (void) in;
+    (void) ctx;
 }
 
 static void lower_unsupported(IrInstr *in, X86LowerCtx *ctx)
@@ -592,7 +599,12 @@ typedef void (*LowerFn)(IrInstr *, X86LowerCtx *);
     X(OP_BR, lower_br)                                                                             \
     X(OP_BRCOND, lower_brcond)                                                                     \
     X(OP_SWITCH, lower_switch)                                                                     \
-    X(OP_UNREACHABLE, lower_unreachable)
+    X(OP_UNREACHABLE, lower_unreachable)                                                           \
+    X(OP_CALL, x86_sysv_lower_call)                                                                \
+    X(OP_VA_START, x86_sysv_lower_va_start)                                                        \
+    X(OP_VA_ARG, x86_sysv_lower_va_arg)                                                            \
+    X(OP_PHI, lower_noop)                                                                          \
+    X(OP_VA_END, lower_noop)
 
 /* Dispatch table indexed by opcode; unlisted opcodes hit the unsupported path. */
 static const LowerFn lower_fns[OP_FCMP_GE + 1] = {
@@ -719,10 +731,7 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
         {
             break;
         }
-        if (in->opcode != OP_PHI)
-        {
-            lower_instr(in, ctx);
-        }
+        lower_instr(in, ctx);
     }
     ASSERT(ii < ninstr && "every block ends in a terminator");
 
@@ -859,4 +868,45 @@ size_t x86_lower_module(CodegenModule *cm, IrModule *ir, bool debug, Arena *aren
         vec_push(cm->funcs, cf);
     }
     return nfuncs;
+}
+
+/* Exported views of the lowering helpers, for the SysV call/varargs layer. */
+u8 x86_lower_vreg_width(X86LowerCtx *ctx, u32 vreg)
+{
+    return vreg_width(ctx, vreg);
+}
+
+u8 x86_lower_operand_width(X86LowerCtx *ctx, IrOperand op)
+{
+    return operand_width(ctx, op);
+}
+
+X86Mem x86_lower_rbp_mem(i32 disp)
+{
+    return rbp_mem(disp);
+}
+
+void x86_lower_force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
+{
+    force_to_reg(ctx, op, reg);
+}
+
+RegLoc x86_lower_result_loc(X86LowerCtx *ctx, IrInstr *in)
+{
+    return result_loc(ctx, in);
+}
+
+void x86_lower_store_reg_result(X86LowerCtx *ctx, IrInstr *in, u8 width, u8 reg)
+{
+    store_reg_result(ctx, in, width, reg);
+}
+
+X86Mem x86_lower_pointer_in_rax(X86LowerCtx *ctx, IrOperand ptr)
+{
+    return pointer_in_rax(ctx, ptr);
+}
+
+void x86_lower_store_vreg_from_reg(X86LowerCtx *ctx, u32 vreg, u8 width, u8 reg)
+{
+    store_vreg_from_reg(ctx, vreg, width, reg);
 }

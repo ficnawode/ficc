@@ -3,6 +3,7 @@
 #include "type.h"
 #include "util/arena.h"
 #include "util/vec.h"
+#include "x86_sysv.h"
 
 static RecordField *field(Arena *a, const char *name, Type *t)
 {
@@ -206,4 +207,97 @@ TEST(abi, void_classifies_no_class)
 {
     SysVEightByte eb = sysv_eightbyte_split(type_void());
     EXPECT_EQ(eb.neightbytes, 0);
+}
+
+TEST(abi, sysv_plan_record_lanes_and_scalar)
+{
+    Arena *a = arena_new();
+    Vec *fs = vec_new(a);
+    vec_push(fs, field(a, "c", type_char()));
+    vec_push(fs, field(a, "d", type_double()));
+    Type *cd = ctx_struct("A22PlanCD", fs);
+
+    Type *types[2] = {cd, type_long()};
+    SysvArgPlan plans[2];
+    u32 fp_used = 0;
+    u32 stack = sysv_plan_args(types, 2, plans, &fp_used);
+    EXPECT_EQ(stack, 0);
+    EXPECT_EQ(fp_used, 1);
+    EXPECT_TRUE(plans[0].is_record);
+    EXPECT_TRUE(plans[0].register_passed);
+    EXPECT_EQ(plans[0].nchunks, 2);
+    EXPECT_EQ(plans[0].chunks[0].kind, SYSV_GP);
+    EXPECT_EQ(plans[0].chunks[0].chunk_off, 0);
+    EXPECT_EQ(plans[0].chunks[1].kind, SYSV_SSE);
+    EXPECT_EQ(plans[0].chunks[1].chunk_off, 8);
+    EXPECT_EQ(plans[1].nchunks, 1);
+    EXPECT_EQ(plans[1].chunks[0].kind, SYSV_GP);
+    EXPECT_EQ(plans[1].chunks[0].reg, 1);
+    arena_free(a);
+}
+
+TEST(abi, sysv_plan_integer_overflow_rides_stack)
+{
+    Type *types[7];
+    for (int i = 0; i < 7; i++)
+    {
+        types[i] = type_long();
+    }
+    SysvArgPlan plans[7];
+    u32 fp_used = 0;
+    u32 stack = sysv_plan_args(types, 7, plans, &fp_used);
+    EXPECT_EQ(stack, 8);
+    EXPECT_FALSE(plans[5].on_stack);
+    EXPECT_TRUE(plans[6].on_stack);
+    EXPECT_EQ(plans[6].stack_off, 0);
+    EXPECT_EQ(plans[6].stack_size, 8);
+}
+
+TEST(abi, sysv_plan_record_overflows_when_gp_regs_run_out)
+{
+    Arena *a = arena_new();
+    Vec *fs = vec_new(a);
+    vec_push(fs, field(a, "a", type_long()));
+    vec_push(fs, field(a, "b", type_long()));
+    Type *pair = ctx_struct("A22PlanPair", fs);
+
+    Type *types[6] = {type_long(), type_long(), type_long(), type_long(), type_long(), pair};
+    SysvArgPlan plans[6];
+    u32 fp_used = 0;
+    u32 stack = sysv_plan_args(types, 6, plans, &fp_used);
+    EXPECT_EQ(stack, 16);
+    EXPECT_TRUE(plans[5].is_record);
+    EXPECT_FALSE(plans[5].register_passed);
+    EXPECT_TRUE(plans[5].on_stack);
+    EXPECT_EQ(plans[5].stack_off, 0);
+    arena_free(a);
+}
+
+TEST(abi, sysv_plan_long_double_rides_aligned_stack)
+{
+    Type *types[1] = {type_long_double()};
+    SysvArgPlan plans[1];
+    u32 fp_used = 0;
+    u32 stack = sysv_plan_args(types, 1, plans, &fp_used);
+    EXPECT_EQ(stack, 16);
+    EXPECT_TRUE(plans[0].on_stack);
+    EXPECT_TRUE(plans[0].is_x87_stack);
+    EXPECT_EQ(plans[0].stack_off, 0);
+}
+
+TEST(abi, sysv_plan_is_deterministic)
+{
+    Type *types[3] = {type_double(), type_double(), type_long()};
+    SysvArgPlan p1[3], p2[3];
+    u32 f1 = 0, f2 = 0;
+    u32 s1 = sysv_plan_args(types, 3, p1, &f1);
+    u32 s2 = sysv_plan_args(types, 3, p2, &f2);
+    EXPECT_EQ(s1, s2);
+    EXPECT_EQ(f1, f2);
+    for (int i = 0; i < 3; i++)
+    {
+        EXPECT_EQ(p1[i].nchunks, p2[i].nchunks);
+        EXPECT_EQ(p1[i].on_stack, p2[i].on_stack);
+        EXPECT_EQ(p1[i].stack_off, p2[i].stack_off);
+    }
 }

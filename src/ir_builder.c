@@ -1593,8 +1593,9 @@ static ExprResult build_call_expr(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *bb
     bool sret = type_is_record(callee_ret);
     u32 nargs = (u32) vec_size(ce->args);
     u32 total_args = (sret ? 1 : 0) + nargs;
-    IrOperand *args =
-        arena_alloc(ctx->mod->arena, total_args * sizeof(IrOperand), sizeof(IrOperand));
+    u32 nslots = MAX(total_args, 1);
+    IrOperand *args = arena_alloc(ctx->mod->arena, nslots * sizeof(IrOperand), sizeof(IrOperand));
+    Type **arg_types = arena_alloc(ctx->mod->arena, nslots * sizeof(Type *), sizeof(Type *));
 
     u32 sret_vreg = NO_VREG;
     if (sret)
@@ -1602,14 +1603,16 @@ static ExprResult build_call_expr(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *bb
         sret_vreg = alloc_vreg_for_var(ctx, callee_ret);
         ir_emit_alloca(bb, sret_vreg, callee_ret->size);
         args[0] = ir_operand_vreg(sret_vreg);
+        arg_types[0] = type_ptr(callee_ret);
     }
 
     for (u32 i = 0; i < nargs; i++)
     {
         ASTNode *arg = (ASTNode *) vec_get(ce->args, i);
         u32 slot = sret ? i + 1 : i;
-        bb = lower_call_arg(ctx, arg, call_param_type(callee_type, i, arg->expr_type), bb,
-                            &args[slot]);
+        Type *param_type = call_param_type(callee_type, i, arg->expr_type);
+        bb = lower_call_arg(ctx, arg, param_type, bb, &args[slot]);
+        arg_types[slot] = param_type;
     }
 
     u32 dst;
@@ -1633,6 +1636,7 @@ static ExprResult build_call_expr(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *bb
         call = ir_emit_call(bb, dst, ce->callee, total_args, args);
     }
     ir_call_set_variadic(call, is_variadic);
+    ir_call_set_types(call, arg_types, callee_ret);
     if (sret)
     {
         return expr_result(ir_operand_vreg(sret_vreg), bb);
@@ -3506,12 +3510,13 @@ static IrBlock *build_stmt(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
     }
 }
 
-static void push_param(FuncBuilder *ctx, const char *name, Type *type, u32 vreg)
+static void push_param(FuncBuilder *ctx, const char *name, Type *type, u32 vreg, Type *agg_type)
 {
     IrParam *p = arena_alloc(ctx->mod->arena, sizeof(IrParam), sizeof(void *));
     p->name = name;
     p->type = type;
     p->vreg = vreg;
+    p->agg_type = agg_type;
     vec_push(ctx->f->params, p);
 }
 
@@ -3523,7 +3528,7 @@ static void setup_params(FuncBuilder *ctx, ASTFuncDef *ast, IrBlock *entry)
     {
         /* Record returns arrive through a hidden sret pointer. */
         u32 vreg = alloc_vreg_for_var(ctx, ast->sig.ret_type);
-        push_param(ctx, "__sret", type_ptr(ast->sig.ret_type), vreg);
+        push_param(ctx, "__sret", type_ptr(ast->sig.ret_type), vreg, NULL);
         ctx->sret_vreg = vreg;
     }
 
@@ -3534,7 +3539,12 @@ static void setup_params(FuncBuilder *ctx, ASTFuncDef *ast, IrBlock *entry)
         /* Record params arrive as a pointer to the caller's copy. */
         Type *ssa_type = var_ssa_type(param->type);
         u32 vreg = alloc_vreg_from_type(ctx, ssa_type);
-        push_param(ctx, param->name, ssa_type, vreg);
+        Type *agg_type = NULL;
+        if (type_is_record(param->type))
+        {
+            agg_type = param->type;
+        }
+        push_param(ctx, param->name, ssa_type, vreg, agg_type);
         write_variable(ctx, param, entry, ir_operand_vreg(vreg));
     }
 }
