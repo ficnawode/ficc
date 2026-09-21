@@ -203,8 +203,14 @@ void emit_reg_reg(ByteBuf *buf, u8 opcode, u8 dst_reg, u8 src_reg)
 
 static void emit_binop_byte(ByteBuf *buf, const ArithSpec *s, u8 dst_reg, X86Operand rhs)
 {
+    /* A byte register 4-7 is only reachable through a REX prefix (spl/bpl/sil/dil);
+       without it the same rm field names ah/ch/dh/bh. */
     if (rhs.kind == XOP_IMM)
     {
+        if (dst_reg >= 4)
+        {
+            bytebuf_append(buf, rex(false, false, false, dst_reg >= 8));
+        }
         bytebuf_append(buf, X86_GROUP1_IMM8);
         bytebuf_append(buf, modrm(3, s->digit, dst_reg));
         bytebuf_append_i8(buf, (i8) rhs.u.imm);
@@ -215,6 +221,10 @@ static void emit_binop_byte(ByteBuf *buf, const ArithSpec *s, u8 dst_reg, X86Ope
     {
         emit_mov_byte(buf, xop_reg(R_ECX), rhs);
         rhs = xop_reg(R_ECX);
+    }
+    if (dst_reg >= 4 || rhs.u.reg >= 4)
+    {
+        bytebuf_append(buf, rex(false, dst_reg >= 8, false, rhs.u.reg >= 8));
     }
     bytebuf_append(buf, (u8) (s->mem - 1));
     bytebuf_append(buf, modrm(3, dst_reg, rhs.u.reg));
@@ -356,6 +366,10 @@ void emit_test_reg(ByteBuf *buf, u8 width, u8 reg)
 {
     if (width == 1)
     {
+        if (reg >= 4)
+        {
+            bytebuf_append(buf, rex(false, false, false, reg >= 8));
+        }
         bytebuf_append(buf, X86_TEST_RM8_REG8);
         bytebuf_append(buf, modrm(3, 0, reg));
         return;
@@ -375,6 +389,10 @@ void emit_xor_eax_eax(ByteBuf *buf)
 /* setcc r8; only the low 3 bits of `reg` are used. */
 void emit_setcc_reg(ByteBuf *buf, u8 cc, u8 reg)
 {
+    if (reg >= 4)
+    {
+        bytebuf_append(buf, rex(false, false, false, reg >= 8));
+    }
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, (u8) (X86_SETCC_BASE + cc));
     bytebuf_append(buf, modrm(3, 0, reg));

@@ -1164,6 +1164,19 @@ static void add_phi_copies(X86LowerCtx *ctx)
     }
 }
 
+/* Record where `in` starts lowering; skip line-0 (pre-statement) rows. */
+static void record_line_entry(X86LowerCtx *ctx, IrInstr *in)
+{
+    if (!ctx->debug || in->line == 0)
+    {
+        return;
+    }
+    LineEntry *le = arena_alloc(ctx->arena, sizeof(LineEntry), sizeof(void *));
+    le->offset = bytebuf_len(ctx->buf);
+    le->line = in->line;
+    vec_push(ctx->lines, le);
+}
+
 static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
 {
     ctx->block_offsets[bi] = bytebuf_len(ctx->buf);
@@ -1176,6 +1189,7 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
         {
             break;
         }
+        record_line_entry(ctx, in);
         lower_instr(in, ctx);
     }
     ASSERT(ii < ninstr && "every block ends in a terminator");
@@ -1187,7 +1201,9 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
         emit_phi_copy(ctx, pc->src, pc->dst_vreg);
     }
 
-    lower_instr((IrInstr *) vec_get(blk->instrs, ii), ctx);
+    IrInstr *term = (IrInstr *) vec_get(blk->instrs, ii);
+    record_line_entry(ctx, term);
+    lower_instr(term, ctx);
     ASSERT(ii + 1 == ninstr && "the terminator is the last instruction in a block");
 }
 
@@ -1244,6 +1260,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     Vec *block_patches = vec_new(arena);
     Vec *global_patches = vec_new(arena);
     Vec *func_patches = vec_new(arena);
+    Vec *lines = debug ? vec_new(arena) : NULL;
 
     const TargetDesc *target = x86_64_target();
     LiveIntervals set = liveinterval_compute(f, mod, arena);
@@ -1275,6 +1292,8 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         .block_offsets =
             arena_alloc(arena, (nblocks ? nblocks : 1) * sizeof(size_t), sizeof(size_t)),
         .label_to_index = index_labels(f, arena),
+        .lines = lines,
+        .debug = debug,
     };
 
     x86_frame_emit_prologue(buf, f, mod, alloc, &frame);
@@ -1293,7 +1312,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     cf->patches = patches;
     cf->global_patches = global_patches;
     cf->func_patches = func_patches;
-    cf->lines = debug ? vec_new(arena) : NULL;
+    cf->lines = lines;
     cf->frame.off_push = frame.off_push;
     cf->frame.off_mov = frame.off_mov;
     cf->frame.off_sub = frame.off_sub;

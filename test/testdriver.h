@@ -21,9 +21,6 @@ i64 tc_run_interp(const char *src);
 
 int tc_run_elf(const char *src);
 
-/* Select the backend tc_run_elf drives; the default is stack. */
-void tc_set_codegen_backend(CodegenBackend backend);
-
 /* Like tc_run_elf, but links the ficc-compiled unit against an extra
    translation unit, written from `extra_src` and compiled by the host gcc.
    Used for extern-linkage tests where the referenced symbols live in a

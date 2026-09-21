@@ -8,7 +8,7 @@
 
 typedef struct X86LowerCtx X86LowerCtx;
 
-/* Raw m80 byte encoders, shared with the stack backend and the SysV call layer. */
+/* Raw m80 byte encoders, shared with the SysV call layer (RC_X87 is memory-only). */
 void x87_emit_fldt(ByteBuf *buf, X86Mem mem);
 void x87_emit_fstpt(ByteBuf *buf, X86Mem mem);
 void x87_emit_flds(ByteBuf *buf, X86Mem mem);

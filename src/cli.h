@@ -56,16 +56,9 @@ typedef struct
 {
 } IRConfig;
 
-typedef enum
-{
-    CG_STACK,  /* memory-slot stack machine */
-    CG_LINEAR, /* register-allocating backend */
-} CodegenBackend;
-
 typedef struct
 {
-    bool debug;             /* -g: emit DWARF debug info + .eh_frame CFI in the object */
-    CodegenBackend backend; /* -backend stack|linear */
+    bool debug; /* -g: emit DWARF debug info + .eh_frame CFI in the object */
 } CodegenConfig;
 
 typedef struct

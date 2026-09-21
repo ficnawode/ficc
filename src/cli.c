@@ -169,21 +169,6 @@ static bool set_opt3(CompilerConfig *cfg, const char *value)
     return true;
 }
 
-static bool set_backend(CompilerConfig *cfg, const char *value)
-{
-    if (strcmp(value, "stack") == 0)
-    {
-        cfg->codegen.backend = CG_STACK;
-        return true;
-    }
-    if (strcmp(value, "linear") == 0)
-    {
-        cfg->codegen.backend = CG_LINEAR;
-        return true;
-    }
-    return false;
-}
-
 static bool set_keep_comments(CompilerConfig *cfg, const char *value)
 {
     (void) value;
@@ -242,7 +227,6 @@ static const CLIOption option_table[] = {
     {"-O2", ARG_NONE, 0, set_opt2, "more aggressive optimizations"},
     {"-O3", ARG_NONE, 0, set_opt3, "everything in -O2 and more"},
     {"-O", ARG_NONE, 0, set_opt2, "shorthand for -O2"},
-    {"-backend", ARG_SEPARATE, "stack|linear", set_backend, "select the code generator backend"},
     {"-run", ARG_NONE, 0, set_run_interp, "execute the program in the interpreter"},
     {"-nostdinc", ARG_NONE, 0, set_nostdinc, "do not search the builtin include directory"},
     {"-tokens", ARG_NONE, 0, set_dump_tokens, "dump the token stream"},

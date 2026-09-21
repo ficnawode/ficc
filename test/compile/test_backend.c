@@ -4,8 +4,8 @@
 #include <stdio.h>
 #include <unistd.h>
 
-/* Compiles each value-path fixture on both backends and requires the same
-   exit code from the linked program at -O0 and -O1. */
+/* Compiles each fixture through the register-allocating backend and requires the
+   linked program to produce the expected exit code at -O0 and -O1. */
 
 static unsigned int backend_seq;
 
@@ -26,15 +26,13 @@ static void backend_write_src(char *out, size_t sz, const char *src)
     }
 }
 
-static void backend_run_one(const char *src_path, const char *backend, const char *level,
-                            int expected)
+static void backend_run_one(const char *src_path, const char *level, int expected)
 {
     char obj[256], bin[256], cmd[2048];
-    backend_path(obj, sizeof(obj), backend, "o");
-    backend_path(bin, sizeof(bin), backend, "bin");
+    backend_path(obj, sizeof(obj), "lin", "o");
+    backend_path(bin, sizeof(bin), "lin", "bin");
 
-    snprintf(cmd, sizeof(cmd), "%s -backend %s %s -c %s -o %s >/dev/null 2>&1", FICC_BIN, backend,
-             level, src_path, obj);
+    snprintf(cmd, sizeof(cmd), "%s %s -c %s -o %s >/dev/null 2>&1", FICC_BIN, level, src_path, obj);
     int rc = tc_run_shell(cmd);
     EXPECT_EQ(rc, 0);
     if (rc != 0)
@@ -53,8 +51,7 @@ static void backend_run_level(const char *src, const char *level, int expected)
 {
     char src_path[256];
     backend_write_src(src_path, sizeof(src_path), src);
-    backend_run_one(src_path, "stack", level, expected);
-    backend_run_one(src_path, "linear", level, expected);
+    backend_run_one(src_path, level, expected);
     unlink(src_path);
 }
 
@@ -64,14 +61,9 @@ static void backend_run(const char *src, int expected)
     backend_run_level(src, "-O1", expected);
 }
 
-/* The in-process oracle: same fixture through both backends via the testdriver. */
 static void backend_run_inproc(const char *src, int expected)
 {
-    tc_set_codegen_backend(CG_STACK);
     EXPECT_EQ(tc_run_elf(src), expected);
-    tc_set_codegen_backend(CG_LINEAR);
-    EXPECT_EQ(tc_run_elf(src), expected);
-    tc_set_codegen_backend(CG_STACK);
 }
 
 TEST(backend, return_literal)
@@ -145,6 +137,18 @@ TEST(backend, narrow_unsigned_and_signed_loads)
     backend_run("int main(void) { unsigned char c = 200; int x = c + 56;\n"
                 "                signed char d = -2; return x + d * 3 + 8; }\n",
                 2);
+}
+
+TEST(backend, narrow_byte_ops_under_pressure)
+{
+    /* Byte-width and/or/xor on values that spill into the high GP registers:
+       a byte reg 4-7 needs a REX prefix, and r8-15 needs REX.B. */
+    backend_run("int main(void) {\n"
+                "  unsigned char a = 0x11, b = 0x22, c = 0x44, d = 0x88;\n"
+                "  unsigned char e = 0x0F, f = 0xF0, g = 0x3C, h = 0x55;\n"
+                "  unsigned char r = ((a | b) & (c ^ d)) | ((e & f) ^ g) | h;\n"
+                "  return r; }\n",
+                125);
 }
 
 TEST(backend, array_alloca_gep_load_store)
@@ -458,8 +462,7 @@ static void backend_run_gcc_tu(const char *ficc_src, const char *gcc_src, int ex
         fputs(gcc_src, f);
         fclose(f);
     }
-    snprintf(cmd, sizeof(cmd), "%s -backend linear -O0 %s -c -o %s >/dev/null 2>&1", FICC_BIN, fsrc,
-             obj);
+    snprintf(cmd, sizeof(cmd), "%s -O0 %s -c -o %s >/dev/null 2>&1", FICC_BIN, fsrc, obj);
     int rc = tc_run_shell(cmd);
     EXPECT_EQ(rc, 0);
     if (rc != 0)

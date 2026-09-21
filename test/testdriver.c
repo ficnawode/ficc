@@ -140,7 +140,7 @@ static void tc_temp_cleanup(char *paths[], size_t n)
     }
 }
 
-static int tc_run_elf_cfg(const char *src, CodegenBackend backend)
+static int tc_run_elf_cfg(const char *src)
 {
     Arena *arena = arena_new();
     IrModule *mod = tc_build_module(src, arena);
@@ -152,7 +152,7 @@ static int tc_run_elf_cfg(const char *src, CodegenBackend backend)
         return -1;
     }
 
-    CodegenConfig ccfg = {.debug = false, .backend = backend};
+    CodegenConfig ccfg = {.debug = false};
     CodegenModule *cm = codegen_ir_to_machine(mod, &ccfg, arena);
     if (!cm)
     {
@@ -177,16 +177,9 @@ static int tc_run_elf_cfg(const char *src, CodegenBackend backend)
     return rc;
 }
 
-static CodegenBackend tc_backend = CG_STACK;
-
-void tc_set_codegen_backend(CodegenBackend backend)
-{
-    tc_backend = backend;
-}
-
 int tc_run_elf(const char *src)
 {
-    return tc_run_elf_cfg(src, tc_backend);
+    return tc_run_elf_cfg(src);
 }
 
 int tc_run_elf_with_extra_tu(const char *src, const char *extra_src)

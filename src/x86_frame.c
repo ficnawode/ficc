@@ -82,9 +82,9 @@ void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *targe
     u32 locals_end = out->saved_bytes + alloc->frame_size;
     if (nparams > 0)
     {
-        /* Stage slots must clear the saved %rbp at [%rbp]; an empty frame still reserves one slot.
-         */
-        out->stage_base = MAX(align_up(locals_end, STACK_ALIGN), STACK_ALIGN);
+        /* A stage slot at offset S spans [%rbp-S, %rbp-S+16), so the first one must
+           start a full slot below the locals; this also clears the saved %rbp. */
+        out->stage_base = align_up(locals_end, STACK_ALIGN) + STACK_ALIGN;
         locals_end = out->stage_base + stage_total_bytes(plans, nparams);
     }
     if (f->is_variadic)
