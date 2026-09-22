@@ -31,6 +31,7 @@ typedef struct
     ByteBuf debug_abbrev;
     ByteBuf debug_str;
     ByteBuf debug_line;
+    ByteBuf debug_loc;
     Vec *rela_info; /* Vec<DwarfReloc*> */
     Vec *rela_line; /* Vec<DwarfReloc*> */
 } DwarfOutput;

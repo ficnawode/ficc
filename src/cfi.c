@@ -179,11 +179,23 @@ static void cfi_emit_fde(CfiOutput *out, CodegenFunc *cf)
     cfa_advance(b, off_mov - off_push);
     cfa_def_cfa_register(b, CFA_REG_RBP);
 
+    /* Callee-saved pushes land one 8-byte slot below the previous, starting at
+       slot 3 (rbp itself is slot 2) in the CFA's -8 factored units. */
+    u32 pos = off_mov;
+    for (u8 i = 0; i < cf->frame.nsaved; i++)
+    {
+        u8 reg = cf->frame.saved_regs[i];
+        u32 push_bytes = reg >= R_R8 ? 2 : 1; /* r8-r15 carry a REX.B prefix byte */
+        cfa_advance(b, push_bytes);
+        pos += push_bytes;
+        cfa_offset(b, x86_dwarf_gpr_number(reg), 3 + i);
+    }
+
     /* At the ret byte the frame is gone: unwind to the caller's CFA. */
     u64 fsize = (u64) bytebuf_len(cf->bytes);
-    if (fsize >= 1 && fsize - 1 >= off_mov)
+    if (fsize >= 1 && fsize - 1 >= pos)
     {
-        cfa_advance(b, (u32) (fsize - 1 - off_mov));
+        cfa_advance(b, (u32) (fsize - 1 - pos));
         cfa_def_cfa(b, CFA_REG_RSP, 8);
     }
 

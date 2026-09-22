@@ -35,6 +35,21 @@ u8 rex(bool w, bool r, bool x, bool b)
     return 0x40 | (w ? 0x08 : 0) | (r ? 0x04 : 0) | (x ? 0x02 : 0) | (b ? 0x01 : 0);
 }
 
+/* X86Reg order is rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8-15; DWARF numbers
+   are rax, rdx, rcx, rbx, rsi, rdi, rbp, rsp, r8-15 (SysV psABI §3.6.2). */
+u8 x86_dwarf_gpr_number(u8 reg)
+{
+    static const u8 map[16] = {0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15};
+    ASSERT(reg < 16);
+    return map[reg];
+}
+
+u8 x86_dwarf_xmm_number(u8 lane)
+{
+    ASSERT(lane < 16);
+    return (u8) (17 + lane);
+}
+
 static u8 rex_mem(bool w, bool r, X86Mem m)
 {
     return rex(w, r, reg_is_extended(m.index), reg_is_extended(m.base));

@@ -108,6 +108,15 @@ static X86Mem stage_mem(const LinearFrame *frame, u32 off)
     return x86_mem_rbp(-(i32) (frame->stage_base + off));
 }
 
+/* Advance the running stage-slot cursor past `plan` and return the offset the
+   parameter occupies; parameters that stage nowhere consume no space. */
+static u32 param_stage_next(const SysvArgPlan *plan, u32 *cursor)
+{
+    u32 at = *cursor;
+    *cursor += align_up(sysv_param_stage_bytes(plan), STACK_ALIGN);
+    return at;
+}
+
 static void spill_variadic_regs(ByteBuf *buf, IrFunction *f, const TargetDesc *target,
                                 const LinearFrame *frame)
 {
@@ -190,7 +199,7 @@ static void stage_incoming(ByteBuf *buf, IrFunction *f, IrModule *mod, const Tar
     {
         IrParam *p = (IrParam *) vec_get(f->params, i);
         const SysvArgPlan *plan = &plans[i];
-        X86Mem dst = stage_mem(frame, off);
+        X86Mem dst = stage_mem(frame, param_stage_next(plan, &off));
         if (plan->is_record)
         {
             if (plan->register_passed)
@@ -202,7 +211,6 @@ static void stage_incoming(ByteBuf *buf, IrFunction *f, IrModule *mod, const Tar
         {
             stage_scalar(buf, plan, mod->widths[p->vreg], target, dst);
         }
-        off += align_up(sysv_param_stage_bytes(plan), STACK_ALIGN);
     }
 }
 
@@ -269,16 +277,16 @@ static void load_param_homes(ByteBuf *buf, IrFunction *f, IrModule *mod, const R
         IrParam *p = (IrParam *) vec_get(f->params, i);
         const SysvArgPlan *plan = &plans[i];
         RegLoc home = loc_of(alloc, ir_operand_vreg(p->vreg));
+        u32 at = param_stage_next(plan, &off);
         if (plan->is_record)
         {
-            load_record_home(buf, plan, home, frame, off);
+            load_record_home(buf, plan, home, frame, at);
         }
         else
         {
             load_scalar_home(buf, home, mod->widths[p->vreg], mod->floatness[p->vreg],
-                             stage_mem(frame, off));
+                             stage_mem(frame, at));
         }
-        off += align_up(sysv_param_stage_bytes(plan), STACK_ALIGN);
     }
 }
 
@@ -312,5 +320,25 @@ void x86_frame_restore_callee(ByteBuf *buf, const LinearFrame *frame)
     {
         emit_mov(buf, W_QWORD, xop_reg(frame->saved_regs[i]),
                  xop_mem(x86_mem_rbp(-(i32) ((u32) i + 1) * 8)));
+    }
+}
+
+void x86_frame_param_stages(IrFunction *f, const LinearFrame *frame, u32 *out)
+{
+    const SysvArgPlan *plans = plan_params(f, f->arena);
+    u32 off = 0;
+    size_t n = vec_size(f->params);
+    for (size_t i = 0; i < n; i++)
+    {
+        const SysvArgPlan *plan = &plans[i];
+        u32 at = param_stage_next(plan, &off);
+        if (sysv_param_stage_bytes(plan) > 0)
+        {
+            out[i] = frame->stage_base + at;
+        }
+        else
+        {
+            out[i] = 0;
+        }
     }
 }

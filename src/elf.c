@@ -141,6 +141,7 @@ typedef enum
     SEC_DEBUG_LINE,
     SEC_DEBUG_ABBREV,
     SEC_DEBUG_STR,
+    SEC_DEBUG_LOC,
     SEC_RELA_DEBUG_INFO,
     SEC_RELA_DEBUG_LINE,
     SEC_COUNT
@@ -352,6 +353,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
     u32 shname_debug_line = 0;
     u32 shname_debug_abbrev = 0;
     u32 shname_debug_str = 0;
+    u32 shname_debug_loc = 0;
     u32 shname_rela_debug_info = 0;
     u32 shname_rela_debug_line = 0;
     if (dwarf)
@@ -362,6 +364,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
         shname_debug_line = strtab_add(&shstrtab, ".debug_line");
         shname_debug_abbrev = strtab_add(&shstrtab, ".debug_abbrev");
         shname_debug_str = strtab_add(&shstrtab, ".debug_str");
+        shname_debug_loc = strtab_add(&shstrtab, ".debug_loc");
         shname_rela_debug_info = strtab_add(&shstrtab, ".rela.debug_info");
         shname_rela_debug_line = strtab_add(&shstrtab, ".rela.debug_line");
     }
@@ -663,6 +666,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
     size_t off_debug_line = 0;
     size_t off_debug_abbrev = 0;
     size_t off_debug_str = 0;
+    size_t off_debug_loc = 0;
     size_t off_rela_debug_info = 0;
     size_t off_rela_debug_line = 0;
     u64 eh_frame_size = 0;
@@ -671,6 +675,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
     u64 debug_line_size = 0;
     u64 debug_abbrev_size = 0;
     u64 debug_str_size = 0;
+    u64 debug_loc_size = 0;
     u64 rela_debug_info_size = 0;
     u64 rela_debug_line_size = 0;
     u16 nsections = SEC_BASE_COUNT;
@@ -683,6 +688,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
         debug_line_size = bytebuf_len(&dwarf->debug_line);
         debug_abbrev_size = bytebuf_len(&dwarf->debug_abbrev);
         debug_str_size = bytebuf_len(&dwarf->debug_str);
+        debug_loc_size = bytebuf_len(&dwarf->debug_loc);
         rela_debug_info_size = (u64) vec_size(dwarf->rela_info) * sizeof(Elf64_Rela);
         rela_debug_line_size = (u64) vec_size(dwarf->rela_line) * sizeof(Elf64_Rela);
         off_eh_frame = align_up(off, 8);
@@ -697,6 +703,8 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
         off += debug_abbrev_size;
         off_debug_str = off;
         off += debug_str_size;
+        off_debug_loc = off;
+        off += debug_loc_size;
         off = align_up(off, 8);
         off_rela_debug_info = off;
         off += rela_debug_info_size;
@@ -773,6 +781,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
         bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_abbrev),
                              bytebuf_len(&dwarf->debug_abbrev));
         bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_str), bytebuf_len(&dwarf->debug_str));
+        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_loc), bytebuf_len(&dwarf->debug_loc));
         while ((size_t) bytebuf_len(&out) < off_rela_debug_info)
         {
             bytebuf_append(&out, 0);
@@ -825,6 +834,8 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
         shdr_emit(&out, shname_debug_abbrev, SHT_PROGBITS, 0, off_debug_abbrev, debug_abbrev_size,
                   0, 0, 1, 0);
         shdr_emit(&out, shname_debug_str, SHT_PROGBITS, 0, off_debug_str, debug_str_size, 0, 0, 1,
+                  0);
+        shdr_emit(&out, shname_debug_loc, SHT_PROGBITS, 0, off_debug_loc, debug_loc_size, 0, 0, 1,
                   0);
         shdr_emit(&out, shname_rela_debug_info, SHT_RELA, SHF_INFO_LINK, off_rela_debug_info,
                   rela_debug_info_size, SEC_SYMTAB, SEC_DEBUG_INFO, 8, sizeof(Elf64_Rela));

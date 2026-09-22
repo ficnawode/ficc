@@ -78,11 +78,13 @@ enum DwarfForm
     DW_FORM_ref4 = 0x13,
     DW_FORM_udata = 0x0f,
     DW_FORM_exprloc = 0x18,
+    DW_FORM_sec_offset = 0x17,
 };
 
 enum DwarfOp
 {
     DW_OP_addr = 0x03,
+    DW_OP_reg0 = 0x50, /* reg0..reg31 = 0x50..0x6f */
     DW_OP_fbreg = 0x91,
     DW_OP_call_frame_cfa = 0x9c,
 };
@@ -307,6 +309,7 @@ typedef struct
 {
     ByteBuf *b;          /* .debug_info being built */
     Vec *relocs;         /* .rela.debug_info */
+    ByteBuf *loc;        /* .debug_loc being built */
     U64Map *type_to_die; /* Type* -> DIE byte offset (0: not yet emitted) */
     u64 void_die;        /* cached fallback DIE for `void` references */
     Vec *pending;        /* Vec<PendingRef*>: type refs patched before the CU ends */
@@ -330,15 +333,85 @@ static void info_string(InfoCtx *c, const char *s)
     bytebuf_append(c->b, 0);
 }
 
-/* exprloc = DW_OP_fbreg(disp): a fixed slot below the call-frame CFA. */
-static void info_fbreg_loc(InfoCtx *c, i64 disp)
+/* The CFA sits 16 bytes above %rbp: the saved rbp plus the return address. */
+#define CFA_TO_RBP 16
+
+/* DW_OP_fbreg plus the widest SLEB128 an i64 displacement can take. */
+#define FBREG_EXPR_MAX 11
+
+/* One `.debug_loc` range: [begin, end) carries `expr`.  DWARF4 defaults the
+   base address to the CU's `DW_AT_low_pc`, so the entries are CU-relative. */
+static void loc_range(InfoCtx *c, i64 begin, i64 end, const u8 *expr, u32 expr_len)
+{
+    bytebuf_append_u64(c->loc, (u64) begin);
+    bytebuf_append_u64(c->loc, (u64) end);
+    bytebuf_append_u16(c->loc, (u16) expr_len);
+    bytebuf_append_bytes(c->loc, expr, expr_len);
+}
+
+/* Terminate a location list (DWARF4 §2.6.2). */
+static void loc_list_end(InfoCtx *c)
+{
+    bytebuf_append_u64(c->loc, 0);
+    bytebuf_append_u64(c->loc, 0);
+}
+
+/* Write expr = DW_OP_fbreg(disp) into `out` (>= FBREG_EXPR_MAX bytes). */
+static u32 fbreg_expr(Arena *arena, u8 *out, i64 disp)
 {
     ByteBuf tmp;
-    bytebuf_init(&tmp, c->b->arena);
+    bytebuf_init(&tmp, arena);
     dwarf_sleb128(&tmp, disp);
-    bytebuf_append(c->b, (u8) (1u + (u32) bytebuf_len(&tmp)));
-    bytebuf_append(c->b, DW_OP_fbreg);
-    bytebuf_append_bytes(c->b, bytebuf_data(&tmp), bytebuf_len(&tmp));
+    out[0] = DW_OP_fbreg;
+    memcpy(out + 1, bytebuf_data(&tmp), bytebuf_len(&tmp));
+    return (u32) (1 + bytebuf_len(&tmp));
+}
+
+/* The DWARF register number a parameter lives in while it holds a physical reg. */
+static u8 dwarf_reg_number(Type *type, int phys)
+{
+    if (type_is_fp(type))
+    {
+        return x86_dwarf_xmm_number((u8) phys);
+    }
+    return x86_dwarf_gpr_number((u8) phys);
+}
+
+/* A parameter's location list: DW_OP_regN over its live range, then the stable
+   stage slot once the register home is reusable; a spilled parameter is fbreg
+   for the whole function. */
+static void emit_param_locs(InfoCtx *c, CodegenFunc *cf, IrParam *p, size_t pi)
+{
+    i64 func_off = (i64) cf->offset;
+    i64 body = func_off + (i64) cf->frame.off_params;
+    i64 end = func_off + (i64) bytebuf_len(cf->bytes);
+    int phys = cf->phys_map[p->vreg];
+    if (phys < 0)
+    {
+        u8 fexpr[FBREG_EXPR_MAX];
+        u32 flen = fbreg_expr(c->loc->arena, fexpr, -(i64) cf->slot_off[p->vreg] - CFA_TO_RBP);
+        loc_range(c, body, end, fexpr, flen);
+        loc_list_end(c);
+        return;
+    }
+
+    i64 live_end = func_off + (i64) cf->live_end[p->vreg];
+    if (live_end > end)
+    {
+        live_end = end;
+    }
+    if (live_end > body)
+    {
+        u8 rexpr = (u8) (DW_OP_reg0 + dwarf_reg_number(p->type, phys));
+        loc_range(c, body, live_end, &rexpr, 1);
+    }
+    if (live_end < end && cf->param_stage[pi] != 0)
+    {
+        u8 fexpr[FBREG_EXPR_MAX];
+        u32 flen = fbreg_expr(c->loc->arena, fexpr, -(i64) cf->param_stage[pi] - CFA_TO_RBP);
+        loc_range(c, MAX(live_end, body), end, fexpr, flen);
+    }
+    loc_list_end(c);
 }
 
 /* exprloc = DW_OP_addr: an R_X86_64_64 slot resolved to sym + addend. */
@@ -695,8 +768,9 @@ static void subprogram_emit(InfoCtx *c, CodegenFunc *cf)
         dwarf_uleb128(c->b, ABBREV_FORMAL_PARAM);
         info_string(c, p->name);
         type_ref_emit(c, p->type);
-        /* Slots sit below %rbp; the CFA is 16 bytes above it (push rbp + ret). */
-        info_fbreg_loc(c, -(i64) cf->slot_off[p->vreg] - 16);
+        u32 loc_off = (u32) bytebuf_len(c->loc);
+        emit_param_locs(c, cf, p, i);
+        bytebuf_append_u32(c->b, loc_off);
     }
     bytebuf_append(c->b, 0); /* end of this subprogram's children */
 }
@@ -775,7 +849,7 @@ static void abbrev_emit(ByteBuf *b)
     dwarf_uleb128(b, DW_AT_type);
     dwarf_uleb128(b, DW_FORM_ref4);
     dwarf_uleb128(b, DW_AT_location);
-    dwarf_uleb128(b, DW_FORM_exprloc);
+    dwarf_uleb128(b, DW_FORM_sec_offset);
     bytebuf_append(b, 0);
     bytebuf_append(b, 0);
 
@@ -953,6 +1027,7 @@ void dwarf_build(CodegenModule *cm, const char *compile_unit, const char *comp_d
     bytebuf_init(&out->debug_abbrev, arena);
     bytebuf_init(&out->debug_str, arena);
     bytebuf_init(&out->debug_line, arena);
+    bytebuf_init(&out->debug_loc, arena);
     out->rela_info = vec_new(arena);
     out->rela_line = vec_new(arena);
 
@@ -976,6 +1051,7 @@ void dwarf_build(CodegenModule *cm, const char *compile_unit, const char *comp_d
     InfoCtx c = {
         .b = &out->debug_info,
         .relocs = out->rela_info,
+        .loc = &out->debug_loc,
         .type_to_die = u64map_new(arena),
         .void_die = 0,
         .pending = vec_new(arena),

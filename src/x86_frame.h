@@ -33,4 +33,7 @@ void x86_frame_emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, const R
                              LinearFrame *frame);
 void x86_frame_restore_callee(ByteBuf *buf, const LinearFrame *frame);
 
+/* Per-parameter stage-slot offset below %rbp; 0 when the parameter stages nowhere. */
+void x86_frame_param_stages(IrFunction *f, const LinearFrame *frame, u32 *out);
+
 #endif

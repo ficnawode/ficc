@@ -45,6 +45,7 @@ enum
 enum
 {
     DW_OP_addr = 0x03,
+    DW_OP_reg0 = 0x50, /* reg0..reg31 = 0x50..0x6f */
     DW_OP_fbreg = 0x91,
     DW_OP_call_frame_cfa = 0x9c,
 };
@@ -70,6 +71,8 @@ typedef struct
     size_t debug_line_len;
     const u8 *debug_str;
     size_t debug_str_len;
+    const u8 *debug_loc;
+    size_t debug_loc_len;
     const u8 *eh_frame;
     size_t eh_frame_len;
     const u8 *text;
@@ -87,8 +90,9 @@ void dwarf_check_load(const char *path, DwarfCheck *out, Arena *arena);
 /* Fill from raw section buffers; the reloc vectors are taken over, not copied. */
 void dwarf_check_from_buffers(DwarfCheck *out, Arena *arena, const u8 *info, size_t info_len,
                               const u8 *abbrev, size_t abbrev_len, const u8 *line, size_t line_len,
-                              const u8 *eh, size_t eh_len, const u8 *text, size_t text_len,
-                              Vec *rela_info, Vec *rela_line, Vec *rela_eh);
+                              const u8 *loc, size_t loc_len, const u8 *eh, size_t eh_len,
+                              const u8 *text, size_t text_len, Vec *rela_info, Vec *rela_line,
+                              Vec *rela_eh);
 
 /* .debug_line */
 
@@ -189,6 +193,18 @@ size_t dwarf_check_sleb128(const u8 *buf, size_t len, i64 *out);
 
 /* One attr of a DIE, or NULL. */
 DwarfCheckAttr *dwarf_check_attr(const DwarfCheckDie *die, u32 attr);
+
+/* A decoded .debug_loc range; addresses are CU-relative (DWARF4 base default). */
+typedef struct
+{
+    u64 begin;
+    u64 end;
+    const u8 *expr;
+    u32 expr_len;
+} DwarfCheckLocRange;
+
+/* Decode the location list at `off` in .debug_loc; NULL on malformed input. */
+Vec *dwarf_check_locs(DwarfCheck *out, u64 off, Arena *arena);
 
 /* All DIEs with `tag`, in tree order (empty when none). */
 Vec *dwarf_check_dies_by_tag(const DwarfCheckInfo *info, u32 tag);

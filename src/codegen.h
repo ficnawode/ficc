@@ -25,9 +25,12 @@ typedef struct
 /* Measured prologue byte offsets the CFI writer follows. */
 typedef struct
 {
-    u32 off_push; /* byte offset just past `push rbp` (0 if the frame omits the push) */
-    u32 off_mov;  /* byte offset just past `mov rbp, rsp` */
-    u32 off_sub;  /* byte offset just past `sub rsp, N` (== prologue end) */
+    u32 off_push;      /* byte offset just past `push rbp` (0 if the frame omits the push) */
+    u32 off_mov;       /* byte offset just past `mov rbp, rsp` */
+    u32 off_sub;       /* byte offset just past `sub rsp, N` (== prologue end) */
+    u32 off_params;    /* byte offset where the body starts, past the parameter homes */
+    u8 saved_regs[16]; /* callee-saved pushes between off_mov and off_sub, in order */
+    u8 nsaved;
 } FuncFrame;
 
 /* Per-function machine code record */
@@ -44,7 +47,10 @@ struct CodegenFunc
     FuncFrame frame;     /* prologue layout for .eh_frame CFI */
     bool is_static;      /* emit as STB_LOCAL in the object file */
     IrFunction *func;    /* owning IR function: param names/types for .debug_info */
-    u32 *slot_off;       /* per-vreg frame offsets below %rbp; param locations (dwarf.c) */
+    u32 *slot_off;       /* per-vreg frame offsets below %rbp; spilled param locations */
+    int *phys_map;       /* per-vreg physical register id, -1 when spilled; param locations */
+    u32 *live_end;       /* per-vreg byte offset just past the value's last use (debug_loc) */
+    u32 *param_stage;    /* per-param stage-slot offset below %rbp, 0 when there is none */
 };
 
 /* IrModule-level codegen records */

@@ -26,6 +26,12 @@ typedef enum
     R_R15
 } X86Reg;
 
+/* DWARF register numbers (SysV psABI §3.6.2) for the `.debug_info` parameter
+   locations and `.eh_frame` callee-saved rules: GPRs are remapped from X86Reg
+   order, XMM lanes are 17 + lane. */
+u8 x86_dwarf_gpr_number(u8 reg);
+u8 x86_dwarf_xmm_number(u8 lane);
+
 /* x86 condition-code encodings, shared by setcc and jcc. */
 typedef enum
 {

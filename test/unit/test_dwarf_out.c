@@ -122,7 +122,7 @@ TEST(dwarf_out, line_table_matches_codegen_line_entries)
     dwarf_check_from_buffers(&dc, a, bytebuf_data(&out.debug_info), bytebuf_len(&out.debug_info),
                              bytebuf_data(&out.debug_abbrev), bytebuf_len(&out.debug_abbrev),
                              bytebuf_data(&out.debug_line), bytebuf_len(&out.debug_line), NULL, 0,
-                             NULL, 0, NULL, rela_line, NULL);
+                             NULL, 0, NULL, 0, NULL, rela_line, NULL);
 
     DwarfCheckLines *lines = dwarf_check_lines(&dc, a);
     show_dwarf_out("line", &dc);
@@ -202,7 +202,8 @@ TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
     DwarfCheck dc;
     dwarf_check_from_buffers(&dc, a, bytebuf_data(&out.debug_info), bytebuf_len(&out.debug_info),
                              bytebuf_data(&out.debug_abbrev), bytebuf_len(&out.debug_abbrev),
-                             bytebuf_data(&out.debug_line), bytebuf_len(&out.debug_line), NULL, 0,
+                             bytebuf_data(&out.debug_line), bytebuf_len(&out.debug_line),
+                             bytebuf_data(&out.debug_loc), bytebuf_len(&out.debug_loc), NULL, 0,
                              bytebuf_data(&out.debug_str), bytebuf_len(&out.debug_str),
                              norm_relas(a, out.rela_info, 0), norm_relas(a, out.rela_line, 0),
                              NULL);
@@ -228,7 +229,8 @@ TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
         EXPECT_TRUE(low->kind == DW_ATTR_ADDR);
         DwarfCheckAttr *high = dwarf_check_attr(die, DW_AT_high_pc);
         EXPECT_TRUE(high && high->num == bytebuf_len(cf->bytes));
-        /* Parameter DIEs in IR order: name + exact fbreg displacement. */
+        /* Parameter DIEs in IR order: a location list whose first range is the
+           register home and, when the home is reusable, a stage-slot fallback. */
         for (size_t p = 0; p < vec_size(cf->func->params); p++)
         {
             IrParam *pp = (IrParam *) vec_get(cf->func->params, p);
@@ -242,12 +244,54 @@ TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
             DwarfCheckAttr *loc = dwarf_check_attr(pd, DW_AT_location);
             EXPECT_NOTNULL(loc);
             EXPECT_TRUE(loc->kind == DW_ATTR_LOC);
-            EXPECT_TRUE(loc->loc_len >= 2);
-            if (loc->kind == DW_ATTR_LOC && loc->loc_len >= 2)
+            if (loc->kind != DW_ATTR_LOC)
             {
-                EXPECT_EQ(loc->loc[0], DW_OP_fbreg);
+                continue;
+            }
+            int phys = cf->phys_map ? cf->phys_map[pp->vreg] : -1;
+            Vec *ranges = dwarf_check_locs(&dc, loc->num, a);
+            EXPECT_NOTNULL(ranges);
+            if (!ranges || vec_size(ranges) == 0)
+            {
+                continue;
+            }
+            DwarfCheckLocRange *first = (DwarfCheckLocRange *) vec_get(ranges, 0);
+            u64 func_off = (u64) cf->offset;
+            u64 func_size = (u64) bytebuf_len(cf->bytes);
+            EXPECT_EQ(first->begin, func_off + cf->frame.off_params);
+            if (phys >= 0)
+            {
+                /* The register home is a one-byte DW_OP_regN with the exact lane. */
+                u8 want;
+                if (type_is_fp(pp->type))
+                {
+                    want = x86_dwarf_xmm_number((u8) phys);
+                }
+                else
+                {
+                    want = x86_dwarf_gpr_number((u8) phys);
+                }
+                EXPECT_EQ(first->expr_len, 1);
+                EXPECT_EQ(first->expr[0], (u8) (DW_OP_reg0 + want));
+                EXPECT_EQ(first->end, func_off + cf->live_end[pp->vreg]);
+                if (vec_size(ranges) == 2)
+                {
+                    DwarfCheckLocRange *fb = (DwarfCheckLocRange *) vec_get(ranges, 1);
+                    EXPECT_EQ(fb->begin, func_off + cf->live_end[pp->vreg]);
+                    EXPECT_EQ(fb->end, func_off + func_size);
+                    EXPECT_EQ(fb->expr[0], DW_OP_fbreg);
+                    i64 disp;
+                    EXPECT_TRUE(dwarf_check_sleb128(fb->expr + 1, fb->expr_len - 1, &disp) > 0);
+                    EXPECT_EQ(disp, -(i64) cf->param_stage[p] - 16);
+                }
+            }
+            else
+            {
+                EXPECT_EQ(vec_size(ranges), 1);
+                EXPECT_EQ(first->end, func_off + func_size);
+                EXPECT_EQ(first->expr[0], DW_OP_fbreg);
                 i64 disp;
-                EXPECT_TRUE(dwarf_check_sleb128(loc->loc + 1, loc->loc_len - 1, &disp) > 0);
+                EXPECT_TRUE(dwarf_check_sleb128(first->expr + 1, first->expr_len - 1, &disp) > 0);
                 EXPECT_EQ(disp, -(i64) cf->slot_off[pp->vreg] - 16);
             }
         }
@@ -341,7 +385,7 @@ TEST(dwarf_out, eh_fdes_match_codegen)
     DwarfCheck dc;
     dwarf_check_from_buffers(&dc, a, bytebuf_data(&out.debug_info), bytebuf_len(&out.debug_info),
                              bytebuf_data(&out.debug_abbrev), bytebuf_len(&out.debug_abbrev), NULL,
-                             0, bytebuf_data(&cfi->eh_frame), bytebuf_len(&cfi->eh_frame),
+                             0, NULL, 0, bytebuf_data(&cfi->eh_frame), bytebuf_len(&cfi->eh_frame),
                              bytebuf_data(&out.debug_str), bytebuf_len(&out.debug_str), NULL, NULL,
                              norm_cfi_relas(a, cfi));
 

@@ -33,6 +33,8 @@ struct X86LowerCtx
     Vec *switch_tables;
     size_t *block_offsets;
     StrMap *label_to_index;
+    const IrPositions *pos; /* position numbering; position_offsets maps to bytes */
+    u32 *position_offsets;
     Vec *lines;    /* Vec<LineEntry*> when recording -g line rows, else NULL */
     bool debug;    /* record line boundaries for DWARF */
     int fpu_depth; /* x87 stack depth; every lowering leaves it at 0 */

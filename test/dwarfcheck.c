@@ -63,6 +63,7 @@ enum
     FORM_flag = 0x0c,
     FORM_ref4 = 0x13,
     FORM_exprloc = 0x18,
+    FORM_sec_offset = 0x17,
 };
 
 /* .eh_frame (DWARF4 §6.4.2) constants. */
@@ -304,6 +305,11 @@ static void sec_route(DwarfCheck *out, const u8 *img, const char *name, Sec s)
         out->debug_str = p;
         out->debug_str_len = n;
     }
+    else if (strcmp(name, ".debug_loc") == 0)
+    {
+        out->debug_loc = p;
+        out->debug_loc_len = n;
+    }
     else if (strcmp(name, ".eh_frame") == 0)
     {
         out->eh_frame = p;
@@ -409,8 +415,9 @@ void dwarf_check_load(const char *path, DwarfCheck *out, Arena *arena)
 
 void dwarf_check_from_buffers(DwarfCheck *out, Arena *arena, const u8 *info, size_t info_len,
                               const u8 *abbrev, size_t abbrev_len, const u8 *line, size_t line_len,
-                              const u8 *eh, size_t eh_len, const u8 *text, size_t text_len,
-                              Vec *rela_info, Vec *rela_line, Vec *rela_eh)
+                              const u8 *loc, size_t loc_len, const u8 *eh, size_t eh_len,
+                              const u8 *text, size_t text_len, Vec *rela_info, Vec *rela_line,
+                              Vec *rela_eh)
 {
     memset(out, 0, sizeof(*out));
     out->arena = arena;
@@ -421,6 +428,8 @@ void dwarf_check_from_buffers(DwarfCheck *out, Arena *arena, const u8 *info, siz
     out->debug_abbrev_len = abbrev_len;
     out->debug_line = line;
     out->debug_line_len = line_len;
+    out->debug_loc = loc;
+    out->debug_loc_len = loc_len;
     out->eh_frame = eh;
     out->eh_frame_len = eh_len;
     out->text = text;
@@ -784,6 +793,53 @@ static const Abbrev *abbrev_lookup(InfoCtx *ctx, u32 code)
     return NULL;
 }
 
+Vec *dwarf_check_locs(DwarfCheck *out, u64 off, Arena *arena)
+{
+    Vec *ranges = vec_new(arena);
+    const u8 *p = out->debug_loc;
+    size_t len = out->debug_loc_len;
+    size_t q = (size_t) off;
+    while (p && q + 2 * ADDR_BYTES + 2 <= len)
+    {
+        u64 begin = rd64(p + q);
+        u64 end = rd64(p + q + ADDR_BYTES);
+        q += 2 * ADDR_BYTES;
+        if (begin == 0 && end == 0)
+        {
+            break; /* end-of-list marker */
+        }
+        u16 elen = rd16(p + q);
+        q += 2;
+        if (q + elen > len)
+        {
+            dc_err(out, "debug_loc expression overruns the section");
+            return NULL;
+        }
+        DwarfCheckLocRange *r = arena_alloc(arena, sizeof(DwarfCheckLocRange), sizeof(void *));
+        r->begin = begin;
+        r->end = end;
+        r->expr = p + q;
+        r->expr_len = elen;
+        vec_push(ranges, r);
+        q += elen;
+    }
+    return ranges;
+}
+
+/* Resolve a .debug_loc offset to the first entry's expression bytes. */
+static bool loc_first_expr(DwarfCheck *out, u64 off, const u8 **expr, u32 *expr_len)
+{
+    Vec *ranges = dwarf_check_locs(out, off, out->arena);
+    if (!ranges || vec_size(ranges) == 0)
+    {
+        return false;
+    }
+    DwarfCheckLocRange *first = (DwarfCheckLocRange *) vec_get(ranges, 0);
+    *expr = first->expr;
+    *expr_len = first->expr_len;
+    return true;
+}
+
 /* Read one attribute value into *attr; *next advances past it. False on error. */
 static bool info_read_attr(InfoCtx *ctx, AttrSpec *spec, size_t pos, DwarfCheckAttr **attr,
                            size_t *next)
@@ -885,6 +941,27 @@ static bool info_read_attr(InfoCtx *ctx, AttrSpec *spec, size_t pos, DwarfCheckA
             a->loc = ctx->p + pos;
             a->loc_len = (u32) elen;
             pos += (size_t) elen;
+            break;
+        }
+        case FORM_sec_offset:
+        {
+            if (pos + sizeof(u32) > ctx->end)
+            {
+                goto overrun;
+            }
+            u32 off = rd32(ctx->p + pos);
+            pos += sizeof(u32);
+            a->kind = DW_ATTR_NUM;
+            a->num = off;
+            /* A location attr is a .debug_loc offset; expose its first entry's expr. */
+            const u8 *expr;
+            u32 expr_len;
+            if (a->attr == DW_AT_location && loc_first_expr(ctx->out, off, &expr, &expr_len))
+            {
+                a->kind = DW_ATTR_LOC;
+                a->loc = expr;
+                a->loc_len = expr_len;
+            }
             break;
         }
         default:

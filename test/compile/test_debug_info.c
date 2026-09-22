@@ -102,7 +102,8 @@ TEST(debug_info, program_surface_dies)
     EXPECT_EQ(fb->loc_len, 1);
     EXPECT_EQ(fb->loc[0], DW_OP_call_frame_cfa);
 
-    /* add3's three parameters are named and live in frame slots (DW_OP_fbreg). */
+    /* add3's three int parameters are named and located: a register home is a
+       GPR DW_OP_regN, a spill is DW_OP_fbreg. */
     DwarfCheckDie *params[] = {dwarf_check_die_named(info, "x"), dwarf_check_die_named(info, "y"),
                                dwarf_check_die_named(info, "z")};
     for (size_t i = 0; i < sizeof(params) / sizeof(params[0]); i++)
@@ -112,8 +113,10 @@ TEST(debug_info, program_surface_dies)
         DwarfCheckAttr *loc = dwarf_check_attr(p, DW_AT_location);
         EXPECT_NOTNULL(loc);
         EXPECT_TRUE(loc->kind == DW_ATTR_LOC);
-        EXPECT_TRUE(loc->loc_len >= 2);
-        EXPECT_EQ(loc->loc[0], DW_OP_fbreg);
+        EXPECT_TRUE(loc->loc_len >= 1);
+        bool is_reg = loc->loc[0] >= DW_OP_reg0 && loc->loc[0] <= DW_OP_reg0 + 15;
+        bool is_fbreg = loc->loc[0] == DW_OP_fbreg;
+        EXPECT_TRUE(is_reg || is_fbreg);
     }
 
     /* Globals addressable via DW_OP_addr; the extern declares no location. */
@@ -180,6 +183,7 @@ TEST(debug_info, non_debug_object_has_no_debug_sections)
     EXPECT_TRUE(out->debug_info == NULL);
     EXPECT_TRUE(out->debug_line == NULL);
     EXPECT_TRUE(out->debug_abbrev == NULL);
+    EXPECT_TRUE(out->debug_loc == NULL);
     EXPECT_TRUE(out->eh_frame == NULL);
     EXPECT_TRUE(out->text != NULL); /* the code itself compiled */
 

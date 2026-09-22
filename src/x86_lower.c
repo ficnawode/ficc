@@ -13,6 +13,7 @@
 #include "x87.h"
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #define BIT_63 63
 
@@ -42,6 +43,9 @@ typedef struct
 } LowerSwitchTable;
 
 #define STACK_ALIGN 16
+
+/* Sentinel for a position slot whose byte offset has not been recorded yet. */
+#define POS_UNSET UINT32_MAX
 
 static u32 align_up(u32 n, u32 a)
 {
@@ -1177,8 +1181,28 @@ static void record_line_entry(X86LowerCtx *ctx, IrInstr *in)
     vec_push(ctx->lines, le);
 }
 
+/* Position of block-local instruction `ii`: two slots per instruction. */
+static u32 pos_of(u32 base, size_t ii)
+{
+    return base + 2u * (u32) ii;
+}
+
+/* Fill still-unset position slots in [from, to) with `value`. */
+static void fill_unset_positions(u32 *offsets, u32 from, u32 to, u32 value)
+{
+    for (u32 p = from; p < to; p++)
+    {
+        if (offsets[p] == POS_UNSET)
+        {
+            offsets[p] = value;
+        }
+    }
+}
+
 static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
 {
+    u32 base = ctx->pos->block_base[bi];
+    u32 bend = ctx->pos->block_end[bi];
     ctx->block_offsets[bi] = bytebuf_len(ctx->buf);
     size_t ninstr = vec_size(blk->instrs);
     size_t ii = 0;
@@ -1191,6 +1215,7 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
         }
         record_line_entry(ctx, in);
         lower_instr(in, ctx);
+        ctx->position_offsets[pos_of(base, ii)] = (u32) bytebuf_len(ctx->buf);
     }
     ASSERT(ii < ninstr && "every block ends in a terminator");
 
@@ -1204,6 +1229,9 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
     IrInstr *term = (IrInstr *) vec_get(blk->instrs, ii);
     record_line_entry(ctx, term);
     lower_instr(term, ctx);
+    ctx->position_offsets[pos_of(base, ii)] = (u32) bytebuf_len(ctx->buf);
+    /* Gap positions (phi-copy and scheduling slots) run to the block end. */
+    fill_unset_positions(ctx->position_offsets, base, bend, (u32) bytebuf_len(ctx->buf));
     ASSERT(ii + 1 == ninstr && "the terminator is the last instruction in a block");
 }
 
@@ -1275,6 +1303,13 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         phi_copies[bi] = vec_new(arena);
     }
 
+    u32 *position_offsets = arena_alloc(
+        arena, (set.pos.npositions ? set.pos.npositions : 1) * sizeof(u32), sizeof(u32));
+    for (u32 p = 0; p < set.pos.npositions; p++)
+    {
+        position_offsets[p] = POS_UNSET;
+    }
+
     X86LowerCtx ctx = {
         .func = f,
         .mod = mod,
@@ -1292,11 +1327,14 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         .block_offsets =
             arena_alloc(arena, (nblocks ? nblocks : 1) * sizeof(size_t), sizeof(size_t)),
         .label_to_index = index_labels(f, arena),
+        .pos = &set.pos,
+        .position_offsets = position_offsets,
         .lines = lines,
         .debug = debug,
     };
 
     x86_frame_emit_prologue(buf, f, mod, alloc, &frame);
+    u32 off_params = (u32) bytebuf_len(buf);
 
     add_phi_copies(&ctx);
     for (size_t bi = 0; bi < nblocks; bi++)
@@ -1305,6 +1343,20 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     }
     emit_switch_tables(&ctx);
     resolve_block_patches(&ctx);
+
+    fill_unset_positions(position_offsets, 0, set.pos.npositions, (u32) bytebuf_len(buf));
+    u32 *live_end = arena_alloc(arena, (set.nvregs ? set.nvregs : 1) * sizeof(u32), sizeof(u32));
+    for (u32 v = 0; v < set.nvregs; v++)
+    {
+        live_end[v] = (u32) bytebuf_len(buf);
+    }
+    for (u32 i = 0; i < set.n; i++)
+    {
+        live_end[set.ivs[i].vreg] = position_offsets[set.ivs[i].end];
+    }
+    size_t nparams = vec_size(f->params);
+    u32 *param_stage = arena_alloc(arena, (nparams ? nparams : 1) * sizeof(u32), sizeof(u32));
+    x86_frame_param_stages(f, &frame, param_stage);
 
     cf->name = f->name;
     cf->bytes = buf;
@@ -1316,9 +1368,15 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     cf->frame.off_push = frame.off_push;
     cf->frame.off_mov = frame.off_mov;
     cf->frame.off_sub = frame.off_sub;
+    cf->frame.off_params = off_params;
+    memcpy(cf->frame.saved_regs, frame.saved_regs, frame.nsaved);
+    cf->frame.nsaved = frame.nsaved;
     cf->is_static = f->is_static;
     cf->func = f;
     cf->slot_off = alloc->slot_map;
+    cf->phys_map = alloc->phys_map;
+    cf->live_end = live_end;
+    cf->param_stage = param_stage;
 }
 
 size_t x86_lower_module(CodegenModule *cm, IrModule *ir, bool debug, Arena *arena)
