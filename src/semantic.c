@@ -966,10 +966,53 @@ static bool check_float_literal(ASTFloatLiteral *fl, SemanticCtx *ctx)
     return true;
 }
 
+/* Element type of a string/char literal by encoding (§6.4.5): char for a plain
+   or u8 literal, wchar_t for L, char16_t for u, char32_t for U. */
+static Type *string_literal_elem_type(StrKind kind)
+{
+    switch (kind)
+    {
+        case STRK_WIDE:
+            return type_int(); /* wchar_t */
+        case STRK_UTF16:
+            return type_ushort(); /* char16_t */
+        case STRK_UTF32:
+            return type_uint(); /* char32_t */
+        case STRK_NARROW:
+        default:
+            return type_char();
+    }
+}
+
+/* Element count of a string literal, including the terminating NUL element. */
+static u64 string_literal_elem_count(const ASTStringLiteral *sl)
+{
+    return sl->length / str_kind_elem_size(sl->str_kind) + 1;
+}
+
+/* Initialized element count, excluding the terminating NUL element. */
+static u64 string_literal_content_len(const ASTStringLiteral *sl)
+{
+    return sl->length / str_kind_elem_size(sl->str_kind);
+}
+
+/* True when `elem` is a character type the given string literal may initialize
+   (C11 §6.7.9p14): the literal's element type, or any char-like type for a
+   plain/u8 literal. */
+static bool string_kind_matches_elem(StrKind kind, Type *elem)
+{
+    if (kind == STRK_NARROW && is_char_like(elem))
+    {
+        return true;
+    }
+    return type_compatible(string_literal_elem_type(kind), type_unqual(elem));
+}
+
 static bool check_string_literal(ASTStringLiteral *sl, SemanticCtx *ctx)
 {
     ASTNode *node = &sl->base;
-    node->expr_type = type_decay(type_array(type_char(), sl->length + 1));
+    node->expr_type = type_decay(
+        type_array(string_literal_elem_type(sl->str_kind), string_literal_elem_count(sl)));
     (void) ctx;
     return true;
 }
@@ -1084,7 +1127,8 @@ static bool check_sizeof_expr(ASTSizeofExpr *se, SemanticCtx *ctx)
     else if (se->operand->kind == AST_STRING_LITERAL)
     {
         /* sizeof a string literal is the array length incl. NUL, not char*. */
-        op_type = type_array(type_char(), ast_as(ASTStringLiteral, se->operand)->length + 1);
+        ASTStringLiteral *sl = ast_as(ASTStringLiteral, se->operand);
+        op_type = type_array(string_literal_elem_type(sl->str_kind), string_literal_elem_count(sl));
     }
     else if (se->operand->kind == AST_COMPOUND_LITERAL &&
              type_is_array(ast_as(ASTCompoundLiteral, se->operand)->type))
@@ -1740,14 +1784,14 @@ static bool plan_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *cty, u32 
         {
             return sem_error(ctx, loc, "array has incomplete type");
         }
-        if (!is_char_like(type_array_elem(cty)))
-        {
-            return sem_error(ctx, loc, "string literal only initializes a char array");
-        }
         ASTStringLiteral *sl = ast_as(ASTStringLiteral, value);
-        if (sl->length > cty->arr.length)
+        if (!string_kind_matches_elem(sl->str_kind, type_array_elem(cty)))
         {
-            return sem_error(ctx, loc, "initializer-string for array of chars is too long");
+            return sem_error(ctx, loc, "string literal initializes an incompatible array type");
+        }
+        if (string_literal_content_len(sl) > cty->arr.length)
+        {
+            return sem_error(ctx, loc, "initializer-string for array is too long");
         }
         plan_new_write(ctx, plan, coff, cty, value, true);
         return true;
@@ -1767,7 +1811,7 @@ static PlanResult plan_char_string_clause(SemanticCtx *ctx, InitPlan *plan, Type
         return PLAN_NONE;
     }
     ASTStringLiteral *sl = ast_as(ASTStringLiteral, e->value);
-    u64 need = sl->length + 1;
+    u64 need = string_literal_elem_count(sl);
     if (t->arr.length == 0)
     {
         if (!plan->grow_array)
@@ -1782,9 +1826,9 @@ static PlanResult plan_char_string_clause(SemanticCtx *ctx, InitPlan *plan, Type
         plan_new_write(ctx, plan, base_off, t, e->value, true);
         return PLAN_HANDLED;
     }
-    if (sl->length > t->arr.length)
+    if (string_literal_content_len(sl) > t->arr.length)
     {
-        sem_error(ctx, e->loc, "initializer-string for array of chars is too long");
+        sem_error(ctx, e->loc, "initializer-string for array is too long");
         return PLAN_ERROR;
     }
     plan_new_write(ctx, plan, base_off, t, e->value, true);
@@ -1901,7 +1945,11 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
         return true; /* `{}`: zero-init, nothing to write */
     }
 
-    if (type_is_array(t) && type_array_elem(t)->kind == TYPE_CHAR && nel == 1)
+    if (type_is_array(t) && nel == 1 &&
+        ((InitElem *) vec_get(list->elems, 0))->value->kind == AST_STRING_LITERAL &&
+        string_kind_matches_elem(
+            ast_as(ASTStringLiteral, ((InitElem *) vec_get(list->elems, 0))->value)->str_kind,
+            type_array_elem(t)))
     {
         InitElem *e = (InitElem *) vec_get(list->elems, 0);
         PlanResult r = plan_char_string_clause(ctx, plan, t, list, e, base_off);
@@ -1984,13 +2032,14 @@ static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
     {
         return sem_error(ctx, vd->base.loc, "array '%s' has incomplete type", vd->name);
     }
-    if (!is_char_like(type_array_elem(arr)))
+    if (!string_kind_matches_elem(sl->str_kind, type_array_elem(arr)))
     {
-        return sem_error(ctx, vd->base.loc, "string-literal initializer requires a 'char' array");
+        return sem_error(ctx, vd->base.loc,
+                         "string-literal initializer has an incompatible array type");
     }
-    if (sl->length > type_array_len(arr))
+    if (string_literal_content_len(sl) > type_array_len(arr))
     {
-        return sem_error(ctx, vd->base.loc, "initializer-string for array of chars is too long");
+        return sem_error(ctx, vd->base.loc, "initializer-string for array is too long");
     }
     InitPlan *plan = init_plan_new(ctx, arr);
     plan_new_write(ctx, plan, 0, arr, vd->init, true);
@@ -2055,7 +2104,7 @@ static bool plan_var_aggregate_init(SemanticCtx *ctx, ASTVarDecl *vd, bool *hand
         if (type_array_len(vd->type) == 0)
         {
             ASTStringLiteral *sl = ast_as(ASTStringLiteral, vd->init);
-            vd->type = type_array(type_array_elem(vd->type), sl->length + 1);
+            vd->type = type_array(type_array_elem(vd->type), string_literal_elem_count(sl));
         }
         return plan_char_array_from_string(ctx, vd);
     }
@@ -3046,11 +3095,13 @@ static bool merge_function_decl(ASTNode *decl, ASTNode *prev, SemanticCtx *ctx)
 {
     FuncSig *fn = func_sig_of(decl);
     FuncSig *pfn = func_sig_of(prev);
-    if ((pfn->spec.storage == SC_STATIC) != (fn->spec.storage == SC_STATIC))
+    /* §6.2.2p4-5: a later `extern` (or no storage-class specifier, which is as
+       if `extern` for a function) inherits the prior declaration's linkage.
+       Only a `static` declaration after a non-static one conflicts. */
+    if (pfn->spec.storage != SC_STATIC && fn->spec.storage == SC_STATIC)
     {
-        return sem_error(ctx, decl->loc, "%s declaration of '%s' follows %s declaration",
-                         fn->spec.storage == SC_STATIC ? "static" : "non-static", fn->name,
-                         pfn->spec.storage == SC_STATIC ? "static" : "non-static");
+        return sem_error(ctx, decl->loc,
+                         "static declaration of '%s' follows non-static declaration", fn->name);
     }
     if (func_node_defined(prev) && func_node_defined(decl))
     {

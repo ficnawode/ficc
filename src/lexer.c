@@ -197,6 +197,21 @@ static void finalize_error(FinalizeCtx *ctx, Loc loc, const char *msg)
     ctx->error_count++;
 }
 
+u32 str_kind_elem_size(StrKind kind)
+{
+    switch (kind)
+    {
+        case STRK_UTF16:
+            return 2;
+        case STRK_WIDE:
+        case STRK_UTF32:
+            return 4;
+        case STRK_NARROW:
+        default:
+            return 1;
+    }
+}
+
 /* Appends token, merging it into the previous token when both are adjacent
    string literals (C11 §5.1.1.2 phase 6). */
 static void finalize_push_token(FinalizeCtx *ctx, Token token)
@@ -204,7 +219,7 @@ static void finalize_push_token(FinalizeCtx *ctx, Token token)
     if (token.kind == TOK_STRING_LIT && vec_size(ctx->tokens) > 0)
     {
         Token *prev = vec_last(ctx->tokens);
-        if (prev->kind == TOK_STRING_LIT)
+        if (prev->kind == TOK_STRING_LIT && prev->str_kind == token.str_kind)
         {
             u32 prev_len = prev->str_len;
             u32 add_len = token.str_len;
@@ -405,50 +420,87 @@ static int finalize_escape(const char **pp, const char *end, FinalizeCtx *ctx, L
     return 0;
 }
 
+/* Splits an optional encoding prefix off a literal spelling; *pp points at the
+   opening quote on success. Returns false for a malformed prefix. */
+static bool literal_prefix(const char *spell, u32 len, const char **pp, StrKind *kind)
+{
+    const char *p = spell;
+    *kind = STRK_NARROW;
+    if (p < spell + len && p[0] == 'u' && p[1] == '8')
+    {
+        p += 2;
+    }
+    else if (p < spell + len && (p[0] == 'L' || p[0] == 'u' || p[0] == 'U'))
+    {
+        *kind = p[0] == 'L' ? STRK_WIDE : p[0] == 'u' ? STRK_UTF16 : STRK_UTF32;
+        p += 1;
+    }
+    if (p >= spell + len || (p[0] != '"' && p[0] != '\''))
+    {
+        return false;
+    }
+    *pp = p;
+    return true;
+}
+
 static void finalize_string(FinalizeCtx *ctx, const PpToken *tok)
 {
-    if (tok->spell[0] != '"')
+    const char *p;
+    StrKind kind;
+    if (!literal_prefix(tok->spell, tok->len, &p, &kind) || *p != '"')
     {
-        finalize_error(ctx, tok->loc, "wide/UTF string not supported");
+        finalize_error(ctx, tok->loc, "malformed string literal");
         return;
     }
 
-    const char *p = tok->spell + 1;
+    u32 esz = str_kind_elem_size(kind);
+    p++;
     const char *end = tok->spell + tok->len - 1;
 
     ByteBuf buf;
     bytebuf_init(&buf, ctx->arena);
     while (p < end)
     {
+        u32 val;
         if (*p == '\\')
         {
             p++;
-            bytebuf_append(&buf, (u8) finalize_escape(&p, end, ctx, tok->loc));
+            val = (u32) finalize_escape(&p, end, ctx, tok->loc);
         }
         else
         {
-            bytebuf_append(&buf, (u8) *p);
+            val = (u8) *p;
             p++;
+        }
+        for (u32 b = 0; b < esz; b++)
+        {
+            bytebuf_append(&buf, (u8) ((val >> (8 * b)) & 0xFF));
         }
     }
 
     size_t content_len = bytebuf_len(&buf);
-    bytebuf_append(&buf, '\0');
+    for (u32 b = 0; b < esz; b++)
+    {
+        bytebuf_append(&buf, 0);
+    }
     finalize_push_token(ctx, (Token) {.kind = TOK_STRING_LIT,
                                       .loc = tok->loc,
                                       .payload.str = (const char *) bytebuf_data(&buf),
-                                      .str_len = (u32) content_len});
+                                      .str_len = (u32) content_len,
+                                      .str_kind = kind});
 }
 
 static void finalize_char(FinalizeCtx *ctx, const PpToken *tok)
 {
-    if (tok->spell[0] != '\'')
+    const char *p;
+    StrKind kind;
+    if (!literal_prefix(tok->spell, tok->len, &p, &kind) || *p != '\'')
     {
-        finalize_error(ctx, tok->loc, "wide/UTF character constant not supported");
+        finalize_error(ctx, tok->loc, "malformed character constant");
         return;
     }
 
-    const char *p = tok->spell + 1;
+    p++;
     const char *end = tok->spell + tok->len - 1;
     if (p >= end)
     {
@@ -473,13 +525,17 @@ static void finalize_char(FinalizeCtx *ctx, const PpToken *tok)
         finalize_error(ctx, tok->loc, "multi-character character constant");
         return;
     }
-    if (val > 0xFF)
+    /* §6.4.4.4: the value must fit the element type (a plain char constant is
+       an int, but its value must fit in an unsigned char). */
+    u32 limit = kind == STRK_NARROW ? 0xFFu : kind == STRK_UTF16 ? 0xFFFFu : 0x10FFFFu;
+    if ((u32) val > limit)
     {
-        finalize_error(ctx, tok->loc, "character constant exceeds bounds of type char");
+        finalize_error(ctx, tok->loc, "character constant out of range");
         return;
     }
-    finalize_push_token(ctx,
-                        (Token) {.kind = TOK_CHAR_LIT, .loc = tok->loc, .payload.int_val = val});
+    finalize_push_token(
+        ctx,
+        (Token) {.kind = TOK_CHAR_LIT, .loc = tok->loc, .payload.int_val = val, .str_kind = kind});
 }
 
 static bool pp_number_is_float(const char *s, u32 len)

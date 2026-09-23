@@ -2498,8 +2498,9 @@ static RelocTarget serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap
    there is room (`char s[2] = "hi"` drops it, §6.7.9p14). */
 static u32 clamped_string_len(ASTStringLiteral *sl, Type *array_type)
 {
-    u32 need = (u32) sl->length + 1;
-    u32 bound = array_type->arr.length;
+    u32 esz = str_kind_elem_size(sl->str_kind);
+    u32 need = (u32) sl->length + esz;
+    u32 bound = (u32) array_type->arr.length * esz;
     if (bound != 0 && need > bound)
     {
         return bound;
@@ -2696,15 +2697,32 @@ static u32 emit_block_static(ASTVarDecl *vd, IrModule *mod, Arena *arena, U64Map
     return idx;
 }
 
+static Type *string_literal_ir_elem_type(StrKind kind)
+{
+    switch (kind)
+    {
+        case STRK_WIDE:
+            return type_int(); /* wchar_t */
+        case STRK_UTF16:
+            return type_ushort(); /* char16_t */
+        case STRK_UTF32:
+            return type_uint(); /* char32_t */
+        case STRK_NARROW:
+        default:
+            return type_char();
+    }
+}
+
 static u32 ir_add_string_global(ASTStringLiteral *sl, IrModule *mod, Arena *arena)
 {
+    u32 esz = str_kind_elem_size(sl->str_kind);
     u32 idx = (u32) vec_size(mod->globals);
     IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
     g->name = anon_name(arena, "__str", idx);
-    g->type = type_array(type_char(), sl->length + 1);
+    g->type = type_array(string_literal_ir_elem_type(sl->str_kind), sl->length / esz + 1);
     g->init_data = (const u8 *) sl->data;
-    g->init_len = sl->length + 1;
-    g->align = 1;
+    g->init_len = sl->length + esz;
+    g->align = esz;
     g->section = IR_SECTION_RODATA;
     g->linkage = IR_LINK_LOCAL;
     g->relocs = NULL;

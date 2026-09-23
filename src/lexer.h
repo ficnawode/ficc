@@ -14,6 +14,21 @@ typedef enum
     FK_LONG, /* x87 80-bit long double */
 } FloatKind;
 
+/* Character/string literal element kind (§6.4.4.4, §6.4.5). The encoding
+   prefix selects the element width: none / u8 -> char (1), L -> wchar_t (4),
+   u -> char16_t (2), U -> char32_t (4). `payload.str` holds the decoded
+   elements in little-endian order, NUL-terminated by one element. */
+typedef enum
+{
+    STRK_NARROW, /* "" or u8"" */
+    STRK_WIDE,   /* L""  */
+    STRK_UTF16,  /* u""  */
+    STRK_UTF32,  /* U""  */
+} StrKind;
+
+/* Element size in bytes for a string/char literal kind. */
+u32 str_kind_elem_size(StrKind kind);
+
 #define TOKEN_KINDS(X)                                                                             \
     X(TOK_EOF)                                                                                     \
     X(TOK_IDENT)                                                                                   \
@@ -142,6 +157,7 @@ typedef struct
     } int_suffix;
     FloatKind float_kind; /* valid when kind == TOK_FLOAT_LIT */
     u32 str_len;
+    StrKind str_kind; /* valid when kind == TOK_STRING_LIT / TOK_CHAR_LIT */
 } Token;
 
 typedef struct LexResult LexResult;

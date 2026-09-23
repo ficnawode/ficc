@@ -821,22 +821,51 @@ TEST(finalize, chars_are_not_concatenated)
     arena_free(a);
 }
 
-TEST(finalize, wide_string_rejected)
+TEST(finalize, wide_and_utf_strings_lex)
 {
     Arena *a = arena_new();
-    EXPECT_NULL(lex_text("L\"a\"", a).tokens);
-    EXPECT_NULL(lex_text("u8\"a\"", a).tokens);
-    EXPECT_NULL(lex_text("u\"a\"", a).tokens);
-    EXPECT_NULL(lex_text("U\"a\"", a).tokens);
+    LexResult r = lex_text("L\"a\"", a);
+    Token *t = r.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(t[0].kind, TOK_STRING_LIT);
+    EXPECT_EQ(t[0].str_kind, STRK_WIDE);
+    EXPECT_EQ(t[0].str_len, 4);
+    EXPECT_EQ((unsigned char) t[0].payload.str[0], 'a');
+    EXPECT_EQ((unsigned char) t[0].payload.str[1], 0);
+
+    LexResult r2 = lex_text("u8\"a\"", a);
+    EXPECT_NOTNULL(r2.tokens);
+    EXPECT_EQ(r2.tokens[0].str_kind, STRK_NARROW);
+    EXPECT_EQ(r2.tokens[0].str_len, 1);
+
+    LexResult r3 = lex_text("u\"a\"", a);
+    EXPECT_NOTNULL(r3.tokens);
+    EXPECT_EQ(r3.tokens[0].str_kind, STRK_UTF16);
+    EXPECT_EQ(r3.tokens[0].str_len, 2);
+
+    LexResult r4 = lex_text("U\"a\"", a);
+    EXPECT_NOTNULL(r4.tokens);
+    EXPECT_EQ(r4.tokens[0].str_kind, STRK_UTF32);
+    EXPECT_EQ(r4.tokens[0].str_len, 4);
     arena_free(a);
 }
 
-TEST(finalize, wide_char_rejected)
+TEST(finalize, wide_and_utf_chars_lex)
 {
     Arena *a = arena_new();
-    EXPECT_NULL(lex_text("L'a'", a).tokens);
-    EXPECT_NULL(lex_text("u'a'", a).tokens);
-    EXPECT_NULL(lex_text("U'a'", a).tokens);
+    LexResult r = lex_text("L'a'", a);
+    EXPECT_NOTNULL(r.tokens);
+    EXPECT_EQ(r.tokens[0].kind, TOK_CHAR_LIT);
+    EXPECT_EQ(r.tokens[0].payload.int_val, 'a');
+    EXPECT_EQ(r.tokens[0].str_kind, STRK_WIDE);
+
+    LexResult r2 = lex_text("u'a'", a);
+    EXPECT_NOTNULL(r2.tokens);
+    EXPECT_EQ(r2.tokens[0].str_kind, STRK_UTF16);
+
+    LexResult r3 = lex_text("U'a'", a);
+    EXPECT_NOTNULL(r3.tokens);
+    EXPECT_EQ(r3.tokens[0].str_kind, STRK_UTF32);
     arena_free(a);
 }
 

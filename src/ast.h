@@ -427,8 +427,9 @@ typedef struct ASTStringLiteral ASTStringLiteral;
 struct ASTStringLiteral
 {
     ASTNode base;
-    const char *data;
-    u64 length;
+    const char *data; /* decoded elements, little-endian, NUL-terminated */
+    u64 length;       /* content bytes, excluding the terminating element */
+    StrKind str_kind; /* element encoding (§6.4.5) */
 };
 
 typedef struct ASTStructDecl ASTStructDecl;
@@ -634,6 +635,7 @@ ASTNode *ast_alignof_expr(ASTNode *operand, u64 align_value, Loc loc, Arena *are
 ASTNode *ast_alignof_type(Type *type, u64 align_value, Loc loc, Arena *arena);
 ASTNode *ast_static_assert(ASTNode *expr, const char *msg, Loc loc, Arena *arena);
 ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena);
+ASTNode *ast_string_literal_kind(const char *data, u64 len, StrKind kind, Loc loc, Arena *arena);
 ASTNode *ast_struct_decl(const char *tag, bool is_union, Vec *fields, Loc loc, Arena *arena);
 ASTNode *ast_enum_decl(const char *tag, Vec *constants, Loc loc, Arena *arena);
 ASTNode *ast_member_access(ASTNode *object, const char *member, bool is_arrow, Loc loc,

@@ -147,10 +147,23 @@ TEST(prototypes, negative_conflicting_return)
                       "}\n");
 }
 
-TEST(prototypes, negative_static_linkage_mismatch)
+TEST(prototypes, positive_static_then_plain_definition_inherits_linkage)
 {
-    EXPECT_BUILD_FAIL("static int f(int a);\n"
-                      "int f(int a) {\n"
+    /* §6.2.2p5: the later definition has no storage-class specifier, so it has
+       the linkage of `extern` and inherits the prior `static` declaration. */
+    EXPECT_BUILD_SUCCEED("static int f(int a);\n"
+                         "int f(int a) {\n"
+                         "    return a;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return f(1);\n"
+                         "}\n");
+}
+
+TEST(prototypes, negative_global_then_static)
+{
+    EXPECT_BUILD_FAIL("int f(int a);\n"
+                      "static int f(int a) {\n"
                       "    return a;\n"
                       "}\n"
                       "int main(void) {\n"

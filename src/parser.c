@@ -239,8 +239,8 @@ static bool parse_declarator(Parser *p, Type *base, Declarator *out);
 
 static bool is_attribute_name(Token *t)
 {
-    return t->kind == TOK_IDENT &&
-           (strcmp(t->payload.str, "__attribute__") == 0 || strcmp(t->payload.str, "__attribute") == 0);
+    return t->kind == TOK_IDENT && (strcmp(t->payload.str, "__attribute__") == 0 ||
+                                    strcmp(t->payload.str, "__attribute") == 0);
 }
 
 static void skip_attribute(Parser *p)
@@ -1481,8 +1481,8 @@ static ASTNode *parse_typedef_decl(Parser *p)
         {
             push_scope(p);
             u32 suffix_ptrs = 0;
-            d.type = parse_group_suffixes(p, d.type, &suffix_ptrs, &d.func_params,
-                                          &d.func_variadic);
+            d.type =
+                parse_group_suffixes(p, d.type, &suffix_ptrs, &d.func_params, &d.func_variadic);
             pop_scope(p);
             if (!d.type)
             {
@@ -2480,7 +2480,8 @@ static ASTNode *parse_primary(Parser *p)
             return parse_identifier(p, t);
         case TOK_STRING_LIT:
             next_token(p);
-            return ast_string_literal(t->payload.str, t->str_len, t->loc, p->arena);
+            return ast_string_literal_kind(t->payload.str, t->str_len, t->str_kind, t->loc,
+                                           p->arena);
         case TOK_KW_GENERIC:
             return parse_generic_selection(p, t->loc);
         case TOK_LPAREN:
@@ -3245,13 +3246,13 @@ static bool folded_const(Parser *p, ASTNode *node, i64 *out)
             *out = (i64) type_sizeof(ast_as(ASTSizeofType, node)->type);
             return true;
         case AST_SIZEOF_EXPR:
-            /* sizeof of a string literal is the array length incl. NUL. */
+            /* sizeof of a string literal is the array size incl. the NUL. */
             if (ast_as(ASTSizeofExpr, node)->operand &&
                 ast_as(ASTSizeofExpr, node)->operand->kind == AST_STRING_LITERAL)
             {
-                *out =
-                    (i64) ast_as(ASTStringLiteral, ast_as(ASTSizeofExpr, node)->operand)->length +
-                    1;
+                ASTStringLiteral *sl =
+                    ast_as(ASTStringLiteral, ast_as(ASTSizeofExpr, node)->operand);
+                *out = (i64) (sl->length + str_kind_elem_size(sl->str_kind));
                 return true;
             }
             return false;

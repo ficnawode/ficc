@@ -871,10 +871,33 @@ TEST(semantic, prototype_conflicting_arity)
                       "}");
 }
 
-TEST(semantic, prototype_static_then_global)
+TEST(semantic, prototype_static_then_plain_definition_inherits_linkage)
 {
-    EXPECT_BUILD_FAIL("static int f(int a);\n"
-                      "int f(int a) {\n"
+    /* §6.2.2p5: a definition with no storage-class specifier has the linkage of
+       `extern` and so inherits the prior `static` declaration's internal
+       linkage. */
+    EXPECT_BUILD_SUCCEED("static int f(int a);\n"
+                         "int f(int a) {\n"
+                         "    return a;\n"
+                         "}\n"
+                         "int main(void) {\n"
+                         "    return f(1);\n"
+                         "}");
+}
+
+TEST(semantic, prototype_static_then_extern_allowed)
+{
+    EXPECT_BUILD_SUCCEED("static int f(int a);\n"
+                         "extern int f(int a);\n"
+                         "int main(void) {\n"
+                         "    return f(1);\n"
+                         "}");
+}
+
+TEST(semantic, prototype_global_then_static_rejected)
+{
+    EXPECT_BUILD_FAIL("int f(int a);\n"
+                      "static int f(int a) {\n"
                       "    return a;\n"
                       "}\n"
                       "int main(void) {\n"

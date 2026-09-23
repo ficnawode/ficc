@@ -328,12 +328,18 @@ ASTNode *ast_static_assert(ASTNode *expr, const char *msg, Loc loc, Arena *arena
     return &n->base;
 }
 
-ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena)
+ASTNode *ast_string_literal_kind(const char *data, u64 len, StrKind kind, Loc loc, Arena *arena)
 {
     ASTStringLiteral *n = ast_new_node(sizeof(ASTStringLiteral), AST_STRING_LITERAL, loc, arena);
     n->data = data;
     n->length = len;
+    n->str_kind = kind;
     return &n->base;
+}
+
+ASTNode *ast_string_literal(const char *data, u64 len, Loc loc, Arena *arena)
+{
+    return ast_string_literal_kind(data, len, STRK_NARROW, loc, arena);
 }
 
 ASTNode *ast_struct_decl(const char *tag, bool is_union, Vec *fields, Loc loc, Arena *arena)
