@@ -234,6 +234,47 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
                                   bool inner_group);
 static bool parse_declarator(Parser *p, Type *base, Declarator *out);
 
+static bool is_attribute_name(Token *t)
+{
+    return t->kind == TOK_IDENT &&
+           (strcmp(t->payload.str, "__attribute__") == 0 || strcmp(t->payload.str, "__attribute") == 0);
+}
+
+static void skip_attribute(Parser *p)
+{
+    if (!is_attribute_name(peek_token(p)))
+    {
+        return;
+    }
+    next_token(p);
+    if (peek_token(p)->kind != TOK_LPAREN)
+    {
+        return;
+    }
+    i32 depth = 0;
+    do
+    {
+        TokenKind k = peek_token(p)->kind;
+        if (k == TOK_LPAREN)
+        {
+            depth++;
+        }
+        else if (k == TOK_RPAREN)
+        {
+            depth--;
+        }
+        next_token(p);
+    } while (depth > 0 && peek_token(p)->kind != TOK_EOF);
+}
+
+static void skip_attributes(Parser *p)
+{
+    while (is_attribute_name(peek_token(p)))
+    {
+        skip_attribute(p);
+    }
+}
+
 static ASTNode *parse_member_decl(Parser *p, Type *base, u32 alignas, Token *start)
 {
     if (peek_token(p)->kind == TOK_SEMI)
@@ -793,6 +834,7 @@ static Type *apply_quals(Type *t, u8 quals)
 static Specs parse_decl_specifiers(Parser *p)
 {
     Specs s = {0};
+    skip_attributes(p);
     /* Function specifiers (§6.7.4): `inline` drives the tier-1 inliner. */
     while (peek_token(p)->kind == TOK_KW_INLINE)
     {
@@ -867,6 +909,7 @@ static Specs parse_decl_specifiers(Parser *p)
     {
         s.type = apply_quals(s.type, trail_quals);
     }
+    skip_attributes(p);
     return s;
 }
 
@@ -1036,6 +1079,7 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
     out->func_params = NULL;
     out->func_variadic = false;
 
+    skip_attributes(p);
     u32 nptr = 0;
     u8 ptr_quals = 0;
     while (peek_token(p)->kind == TOK_STAR)
@@ -1095,6 +1139,7 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
             return false;
         }
     }
+    skip_attributes(p);
     return true;
 }
 
@@ -1205,8 +1250,26 @@ static Type *parse_array_suffix(Parser *p, Type *type, u32 *ndim_out)
     while (peek_token(p)->kind == TOK_LBRACKET)
     {
         next_token(p);
+        while (peek_token(p)->kind == TOK_KW_CONST || peek_token(p)->kind == TOK_KW_VOLATILE ||
+               peek_token(p)->kind == TOK_KW_RESTRICT)
+        {
+            next_token(p);
+        }
+        if (peek_token(p)->kind == TOK_KW_STATIC)
+        {
+            next_token(p);
+            while (peek_token(p)->kind == TOK_KW_CONST || peek_token(p)->kind == TOK_KW_VOLATILE ||
+                   peek_token(p)->kind == TOK_KW_RESTRICT)
+            {
+                next_token(p);
+            }
+        }
         u64 len = 0;
-        if (peek_token(p)->kind != TOK_RBRACKET)
+        if (peek_token(p)->kind == TOK_STAR)
+        {
+            next_token(p);
+        }
+        else if (peek_token(p)->kind != TOK_RBRACKET)
         {
             ASTNode *size_expr = parse_assign(p);
             i64 folded;
@@ -1321,6 +1384,18 @@ static ASTNode *parse_typedef_decl(Parser *p)
         if (!parse_declarator(p, s.type, &d))
         {
             return NULL;
+        }
+        if (peek_token(p)->kind == TOK_LPAREN)
+        {
+            push_scope(p);
+            u32 suffix_ptrs = 0;
+            d.type = parse_group_suffixes(p, d.type, &suffix_ptrs, &d.func_params,
+                                          &d.func_variadic);
+            pop_scope(p);
+            if (!d.type)
+            {
+                return NULL;
+            }
         }
         if (!check_not_enumerator(p, d.name))
         {
@@ -1499,6 +1574,7 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
     {
         return NULL;
     }
+    skip_attributes(p);
 
     if (peek_token(p)->kind == TOK_SEMI)
     {
@@ -1544,6 +1620,7 @@ static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start
     {
         return NULL;
     }
+    skip_attributes(p);
     bool is_definition = peek_token(p)->kind == TOK_LBRACE;
 
     Vec *params;

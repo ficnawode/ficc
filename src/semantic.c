@@ -1034,6 +1034,10 @@ static bool check_sizeof_type(ASTSizeofType *st, SemanticCtx *ctx)
     {
         return sem_error(ctx, node->loc, "sizeof(void) is invalid");
     }
+    if (type_is_function(st->type))
+    {
+        return sem_error(ctx, node->loc, "invalid application of 'sizeof' to a function type");
+    }
     if (type_is_record(st->type) && !type_is_complete(st->type))
     {
         return sem_error(ctx, node->loc, "sizeof of incomplete type");
@@ -2408,13 +2412,11 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
 }
 
 /* A typedef names an existing interned type (§6.7.7); the parser registered the
-   name, so semantic only rejects the unsupported function-type target. */
+   name, so semantic has nothing to resolve. Function-type targets are legal
+   (§6.7.7p3); uses of the name decay or declare a function as usual. */
 static bool check_typedef_decl(ASTTypedefDecl *td, SemanticCtx *ctx)
 {
-    if (td->type->kind == TYPE_FUNC)
-    {
-        return sem_error(ctx, td->base.loc, "typedef of a function type is not supported");
-    }
+    (void) td;
     (void) ctx;
     return true;
 }

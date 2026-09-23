@@ -143,6 +143,40 @@ static void pp_predefine(Pp *pp, const char *name, const char *spelling)
     strmap_set(pp->macros, name, macro);
 }
 
+static void pp_predefine_type(Pp *pp, const char *name, const char *spelling)
+{
+    Vec *body = vec_new(pp->arena);
+    const char *p = spelling;
+    while (*p)
+    {
+        while (*p == ' ')
+        {
+            p++;
+        }
+        const char *word = p;
+        while (*p && *p != ' ')
+        {
+            p++;
+        }
+        if (p == word)
+        {
+            break;
+        }
+        PpToken *tok = arena_alloc(pp->arena, sizeof(PpToken), sizeof(void *));
+        *tok = (PpToken) {.kind = TOK_PP_IDENT, .spell = word, .len = (u32) (p - word)};
+        vec_push(body, tok);
+    }
+
+    Macro *macro = arena_alloc(pp->arena, sizeof(Macro), sizeof(void *));
+    *macro = (Macro) {
+        .name = name,
+        .kind = MACRO_OBJ,
+        .body = body,
+        .predefined = true,
+    };
+    strmap_set(pp->macros, name, macro);
+}
+
 static void pp_load_source_date_epoch(Pp *pp)
 {
     const char *sde = getenv("SOURCE_DATE_EPOCH");
@@ -194,6 +228,17 @@ Pp *pp_new(Arena *arena)
     pp_predefine(pp, "__STDC_NO_THREADS__", "1");
     pp_predefine(pp, "__STDC_NO_VLA__", "1");
     pp_predefine(pp, "__STDC_NO_COMPLEX__", "1");
+    pp_predefine_type(pp, "__SIZE_TYPE__", "long unsigned int");
+    pp_predefine_type(pp, "__PTRDIFF_TYPE__", "long int");
+    pp_predefine_type(pp, "__WCHAR_TYPE__", "int");
+    pp_predefine_type(pp, "__WINT_TYPE__", "unsigned int");
+    pp_predefine_type(pp, "__INTMAX_TYPE__", "long int");
+    pp_predefine_type(pp, "__UINTMAX_TYPE__", "long unsigned int");
+    pp_predefine_type(pp, "__INTPTR_TYPE__", "long int");
+    pp_predefine_type(pp, "__UINTPTR_TYPE__", "long unsigned int");
+    pp_predefine_type(pp, "__CHAR16_TYPE__", "short unsigned int");
+    pp_predefine_type(pp, "__CHAR32_TYPE__", "unsigned int");
+    pp_predefine_type(pp, "__SSIZE_TYPE__", "long int");
 
     Macro *pragma = arena_alloc(pp->arena, sizeof(Macro), sizeof(void *));
     *pragma = (Macro) {.name = "_Pragma", .kind = MACRO_OBJ, .predefined = true, .is_pragma = true};
