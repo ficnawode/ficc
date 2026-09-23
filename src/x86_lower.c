@@ -246,11 +246,9 @@ static void lower_div(IrInstr *in, X86LowerCtx *ctx)
     store_reg_result(ctx, in, w, src);
 }
 
-static void lower_icmp(IrInstr *in, X86LowerCtx *ctx)
+/* Compare `lhs` and `rhs` into EFLAGS, shared by lower_icmp and the brcond fold. */
+static void emit_icmp_cmp(X86LowerCtx *ctx, IrOperand lhs, IrOperand rhs)
 {
-    u8 rw = vreg_width(ctx, in->result);
-    IrOperand lhs = in->ops[0];
-    IrOperand rhs = in->ops[1];
     u8 w0 = operand_width(ctx, lhs);
     u8 w1 = operand_width(ctx, rhs);
     u8 w = MAX(w0, w1);
@@ -260,12 +258,29 @@ static void lower_icmp(IrInstr *in, X86LowerCtx *ctx)
     {
         emit_movzx(ctx->buf, w0, w, R_EAX, xop_reg(R_EAX));
     }
+    if (rhs.is_imm && w == 8 && !fits_i32(rhs.u.imm))
+    {
+        force_to_reg(ctx, rhs, R_ECX);
+        emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, xop_reg(R_ECX));
+        return;
+    }
+    if (rhs.is_imm)
+    {
+        emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, xop_imm(rhs.u.imm));
+        return;
+    }
     force_to_reg(ctx, rhs, R_ECX);
-    if (!rhs.is_imm && w1 < w && w1 < 4)
+    if (w1 < w && w1 < 4)
     {
         emit_movzx(ctx->buf, w1, w, R_ECX, xop_reg(R_ECX));
     }
     emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, xop_reg(R_ECX));
+}
+
+static void lower_icmp(IrInstr *in, X86LowerCtx *ctx)
+{
+    u8 rw = vreg_width(ctx, in->result);
+    emit_icmp_cmp(ctx, in->ops[0], in->ops[1]);
     emit_setcc(ctx->buf, icmp_cc[in->opcode]);
     emit_movzbl_al_eax(ctx->buf);
     store_reg_result(ctx, in, rw, R_EAX);
@@ -806,6 +821,32 @@ static void lower_br(IrInstr *in, X86LowerCtx *ctx)
     emit_jmp(ctx->buf, in->extra.br.target_label, ctx->block_patches, ctx->arena);
 }
 
+/* Jcc predicate pairs differ only in the low bit. */
+static u8 invert_cc(u8 cc)
+{
+    return (u8) (cc ^ 1);
+}
+
+/* Branch on `cc`; an edge that is the next block falls through instead. */
+static void emit_cond_branch(X86LowerCtx *ctx, u8 cc, const char *true_label,
+                             const char *false_label)
+{
+    const char *next = ctx->next_label;
+    if (next && strcmp(false_label, next) == 0)
+    {
+        emit_jcc(ctx->buf, cc, true_label, ctx->block_patches, ctx->arena);
+    }
+    else if (next && strcmp(true_label, next) == 0)
+    {
+        emit_jcc(ctx->buf, invert_cc(cc), false_label, ctx->block_patches, ctx->arena);
+    }
+    else
+    {
+        emit_jcc(ctx->buf, cc, true_label, ctx->block_patches, ctx->arena);
+        emit_jmp(ctx->buf, false_label, ctx->block_patches, ctx->arena);
+    }
+}
+
 /* Read the tested operand before loop-carried writes that may overwrite it. */
 static void lower_brcond_test(IrInstr *in, X86LowerCtx *ctx)
 {
@@ -814,16 +855,20 @@ static void lower_brcond_test(IrInstr *in, X86LowerCtx *ctx)
     emit_test_reg(ctx->buf, cw, R_EAX);
 }
 
-static void lower_brcond_branch(IrInstr *in, X86LowerCtx *ctx)
+static void lower_brcond_branch(IrInstr *in, X86LowerCtx *ctx, u8 cc)
 {
-    emit_jcc(ctx->buf, CC_E, in->extra.brcond.false_label, ctx->block_patches, ctx->arena);
-    emit_jmp(ctx->buf, in->extra.brcond.true_label, ctx->block_patches, ctx->arena);
+    emit_cond_branch(ctx, cc, in->extra.brcond.true_label, in->extra.brcond.false_label);
 }
 
 static void lower_brcond(IrInstr *in, X86LowerCtx *ctx)
 {
     lower_brcond_test(in, ctx);
-    lower_brcond_branch(in, ctx);
+    lower_brcond_branch(in, ctx, CC_NE);
+}
+
+static bool is_icmp(IrOpcode op)
+{
+    return op >= OP_ICMP_EQ && op <= OP_ICMP_SGE;
 }
 
 /* Load the switch control into %rax at its exact 64-bit semantic value. */
@@ -922,7 +967,10 @@ static void emit_switch_chain(X86LowerCtx *ctx, IrSwitchCase *cases, u32 n,
         }
         emit_jcc(ctx->buf, CC_E, cases[i].label, ctx->block_patches, ctx->arena);
     }
-    emit_jmp(ctx->buf, default_label, ctx->block_patches, ctx->arena);
+    if (!(ctx->next_label && strcmp(default_label, ctx->next_label) == 0))
+    {
+        emit_jmp(ctx->buf, default_label, ctx->block_patches, ctx->arena);
+    }
 }
 
 static void lower_switch(IrInstr *in, X86LowerCtx *ctx)
@@ -1210,12 +1258,38 @@ static void fill_unset_positions(u32 *offsets, u32 from, u32 to, u32 value)
     }
 }
 
+/* A brcond over a single-use icmp immediately before it compares into the flags. */
+static IrInstr *foldable_brcond_icmp(IrBlock *blk, X86LowerCtx *ctx)
+{
+    size_t n = vec_size(blk->instrs);
+    if (n < 2)
+    {
+        return NULL;
+    }
+    IrInstr *term = (IrInstr *) vec_get(blk->instrs, n - 1);
+    if (term->opcode != OP_BRCOND || !ir_operand_is_vreg(term->ops[0]))
+    {
+        return NULL;
+    }
+    IrInstr *prev = (IrInstr *) vec_get(blk->instrs, n - 2);
+    u32 cond = term->ops[0].u.vreg;
+    if (!is_icmp(prev->opcode) || prev->result != cond || cond >= ctx->alloc->nvregs ||
+        ctx->use_count[cond] != 1)
+    {
+        return NULL;
+    }
+    return prev;
+}
+
 static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
 {
     u32 base = ctx->pos->block_base[bi];
     u32 bend = ctx->pos->block_end[bi];
     ctx->block_offsets[bi] = bytebuf_len(ctx->buf);
     size_t ninstr = vec_size(blk->instrs);
+
+    IrInstr *fold_icmp = foldable_brcond_icmp(blk, ctx);
+
     size_t ii = 0;
     for (; ii < ninstr; ii++)
     {
@@ -1224,8 +1298,11 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
         {
             break;
         }
-        record_line_entry(ctx, in);
-        lower_instr(in, ctx);
+        if (in != fold_icmp)
+        {
+            record_line_entry(ctx, in);
+            lower_instr(in, ctx);
+        }
         ctx->position_offsets[pos_of(base, ii)] = (u32) bytebuf_len(ctx->buf);
     }
     ASSERT(ii < ninstr && "every block ends in a terminator");
@@ -1234,7 +1311,14 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
     bool is_brcond = term->opcode == OP_BRCOND;
     if (is_brcond)
     {
-        lower_brcond_test(term, ctx);
+        if (fold_icmp)
+        {
+            emit_icmp_cmp(ctx, fold_icmp->ops[0], fold_icmp->ops[1]);
+        }
+        else
+        {
+            lower_brcond_test(term, ctx);
+        }
     }
 
     size_t npc = vec_size(ctx->phi_copies[bi]);
@@ -1247,9 +1331,11 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
     record_line_entry(ctx, term);
     if (is_brcond)
     {
-        lower_brcond_branch(term, ctx);
+        u8 cc = fold_icmp ? icmp_cc[fold_icmp->opcode] : CC_NE;
+        lower_brcond_branch(term, ctx, cc);
     }
-    else
+    else if (term->opcode != OP_BR || !ctx->next_label ||
+             strcmp(term->extra.br.target_label, ctx->next_label) != 0)
     {
         lower_instr(term, ctx);
     }
@@ -1304,6 +1390,164 @@ static StrMap *index_labels(IrFunction *f, Arena *arena)
     return m;
 }
 
+static IrInstr *block_terminator(IrBlock *blk)
+{
+    size_t n = vec_size(blk->instrs);
+    return n ? (IrInstr *) vec_get(blk->instrs, n - 1) : NULL;
+}
+
+/* The successor a block falls through to: false edge, jump target, or default. */
+static const char *fallthrough_label(IrBlock *blk)
+{
+    IrInstr *t = block_terminator(blk);
+    if (!t)
+    {
+        return NULL;
+    }
+    switch (t->opcode)
+    {
+        case OP_BR:
+            return t->extra.br.target_label;
+        case OP_BRCOND:
+            return t->extra.brcond.false_label;
+        case OP_SWITCH:
+            return t->extra.sw.default_label;
+        default:
+            return NULL;
+    }
+}
+
+/* Push non-fallthrough edges (index+1) for later traces. */
+static void push_cold_succs(IrBlock *blk, const char *fallthrough, X86LowerCtx *ctx, Vec *stack)
+{
+    IrInstr *t = block_terminator(blk);
+    if (!t)
+    {
+        return;
+    }
+    if (t->opcode == OP_BRCOND)
+    {
+        const char *cold = t->extra.brcond.true_label;
+        if (!fallthrough || strcmp(cold, fallthrough) != 0)
+        {
+            void *v = strmap_get(ctx->label_to_index, cold);
+            if (v)
+            {
+                vec_push(stack, v);
+            }
+        }
+    }
+    else if (t->opcode == OP_SWITCH)
+    {
+        for (u32 c = 0; c < t->extra.sw.ncases; c++)
+        {
+            const char *l = t->extra.sw.cases[c].label;
+            if (fallthrough && strcmp(l, fallthrough) == 0)
+            {
+                continue;
+            }
+            void *v = strmap_get(ctx->label_to_index, l);
+            if (v)
+            {
+                vec_push(stack, v);
+            }
+        }
+    }
+}
+
+/* Trace layout: follow fallthrough edges, deferring cold ones; entry stays first. */
+static size_t *layout_blocks(IrFunction *f, X86LowerCtx *ctx, size_t nblocks, Arena *arena)
+{
+    size_t *order = arena_alloc(arena, (nblocks ? nblocks : 1) * sizeof(size_t), sizeof(size_t));
+    u8 *visited = arena_alloc(arena, (nblocks ? nblocks : 1) * sizeof(u8), sizeof(u8));
+    for (size_t i = 0; i < nblocks; i++)
+    {
+        visited[i] = 0;
+    }
+    Vec *stack = vec_new(arena);
+    size_t n = 0;
+    if (nblocks > 0)
+    {
+        vec_push(stack, (void *) (uintptr_t) 1); /* entry index 0, encoded as index+1 */
+    }
+    while (vec_size(stack) > 0)
+    {
+        size_t bi = (size_t) (uintptr_t) vec_pop(stack) - 1;
+        while (bi < nblocks && !visited[bi])
+        {
+            visited[bi] = 1;
+            order[n++] = bi;
+            IrBlock *blk = (IrBlock *) vec_get(f->blocks, bi);
+            const char *ft = fallthrough_label(blk);
+            push_cold_succs(blk, ft, ctx, stack);
+            void *v = ft ? strmap_get(ctx->label_to_index, ft) : NULL;
+            if (!v)
+            {
+                break;
+            }
+            bi = (size_t) (uintptr_t) v - 1;
+        }
+    }
+    for (size_t i = 0; i < nblocks; i++)
+    {
+        if (!visited[i])
+        {
+            order[n++] = i;
+        }
+    }
+    return order;
+}
+
+static void count_vreg_uses(IrFunction *f, u32 nvregs, u32 *counts)
+{
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        counts[v] = 0;
+    }
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            for (u8 oi = 0; oi < in->nops; oi++)
+            {
+                if (ir_operand_is_vreg(in->ops[oi]))
+                {
+                    counts[in->ops[oi].u.vreg]++;
+                }
+            }
+            if (in->opcode == OP_PHI)
+            {
+                for (u32 e = 0; e < in->extra.phi.nentries; e++)
+                {
+                    IrOperand v = in->extra.phi.entries[e].val;
+                    if (ir_operand_is_vreg(v))
+                    {
+                        counts[v.u.vreg]++;
+                    }
+                }
+            }
+            else if (in->opcode == OP_CALL)
+            {
+                if (in->extra.call.is_indirect && ir_operand_is_vreg(in->extra.call.callee))
+                {
+                    counts[in->extra.call.callee.u.vreg]++;
+                }
+                for (u32 a = 0; a < in->extra.call.nargs; a++)
+                {
+                    if (ir_operand_is_vreg(in->extra.call.args[a]))
+                    {
+                        counts[in->extra.call.args[a].u.vreg]++;
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *arena, bool debug)
 {
     ByteBuf *buf = arena_alloc(arena, sizeof(ByteBuf), sizeof(void *));
@@ -1318,7 +1562,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     LiveIntervals set = liveinterval_compute(f, mod, arena);
     RegAllocation *alloc = regalloc_linear(f, &set, target, arena);
     LinearFrame frame = {0};
-    x86_frame_plan(alloc, f, target, &frame);
+    x86_frame_plan(alloc, f, target, debug, &frame);
 
     size_t nblocks = vec_size(f->blocks);
     Vec **phi_copies = arena_alloc(arena, (nblocks ? nblocks : 1) * sizeof(Vec *), sizeof(void *));
@@ -1333,6 +1577,9 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     {
         position_offsets[p] = POS_UNSET;
     }
+
+    u32 *use_count = arena_alloc(arena, (set.nvregs ? set.nvregs : 1) * sizeof(u32), sizeof(u32));
+    count_vreg_uses(f, set.nvregs, use_count);
 
     X86LowerCtx ctx = {
         .func = f,
@@ -1353,16 +1600,21 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         .label_to_index = index_labels(f, arena),
         .pos = &set.pos,
         .position_offsets = position_offsets,
+        .use_count = use_count,
         .lines = lines,
         .debug = debug,
     };
 
-    x86_frame_emit_prologue(buf, f, mod, alloc, &frame);
+    x86_frame_emit_prologue(buf, f, mod, alloc, &frame, debug);
     u32 off_params = (u32) bytebuf_len(buf);
 
     add_phi_copies(&ctx);
-    for (size_t bi = 0; bi < nblocks; bi++)
+    size_t *order = layout_blocks(f, &ctx, nblocks, arena);
+    for (size_t pos = 0; pos < nblocks; pos++)
     {
+        size_t bi = order[pos];
+        ctx.next_label =
+            (pos + 1 < nblocks) ? ((IrBlock *) vec_get(f->blocks, order[pos + 1]))->label : NULL;
         emit_block_linear((IrBlock *) vec_get(f->blocks, bi), bi, &ctx);
     }
     emit_switch_tables(&ctx);
@@ -1380,7 +1632,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     }
     size_t nparams = vec_size(f->params);
     u32 *param_stage = arena_alloc(arena, (nparams ? nparams : 1) * sizeof(u32), sizeof(u32));
-    x86_frame_param_stages(f, &frame, param_stage);
+    x86_frame_param_stages(f, &frame, debug, param_stage);
 
     cf->name = f->name;
     cf->bytes = buf;

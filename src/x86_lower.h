@@ -35,9 +35,11 @@ struct X86LowerCtx
     StrMap *label_to_index;
     const IrPositions *pos; /* position numbering; position_offsets maps to bytes */
     u32 *position_offsets;
-    Vec *lines;    /* Vec<LineEntry*> when recording -g line rows, else NULL */
-    bool debug;    /* record line boundaries for DWARF */
-    int fpu_depth; /* x87 stack depth; every lowering leaves it at 0 */
+    u32 *use_count;         /* operand-reference count per vreg (brcond fold) */
+    const char *next_label; /* label of the block emitted next (fallthrough) */
+    Vec *lines;             /* Vec<LineEntry*> when recording -g line rows, else NULL */
+    bool debug;             /* record line boundaries for DWARF */
+    int fpu_depth;          /* x87 stack depth; every lowering leaves it at 0 */
 };
 
 u8 x86_lower_vreg_width(X86LowerCtx *ctx, u32 vreg);

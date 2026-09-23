@@ -26,14 +26,14 @@ typedef struct
 
 /* Shift spill slots past the pushed registers and size the frame.  Mutates the
    allocation's slot table so loc_of resolves against the final %rbp layout. */
-void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *target,
+void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *target, bool debug,
                     LinearFrame *out);
 
 void x86_frame_emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, const RegAllocation *alloc,
-                             LinearFrame *frame);
+                             LinearFrame *frame, bool debug);
 void x86_frame_restore_callee(ByteBuf *buf, const LinearFrame *frame);
 
 /* Per-parameter stage-slot offset below %rbp; 0 when the parameter stages nowhere. */
-void x86_frame_param_stages(IrFunction *f, const LinearFrame *frame, u32 *out);
+void x86_frame_param_stages(IrFunction *f, const LinearFrame *frame, bool debug, u32 *out);
 
 #endif

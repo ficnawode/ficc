@@ -42,12 +42,22 @@ static SysvArgPlan *plan_params(IrFunction *f, Arena *arena)
     return plans;
 }
 
-static u32 stage_total_bytes(const SysvArgPlan *plans, size_t n)
+/* Records always stage (their home points into the slot); scalars only under -g. */
+static u32 frame_param_stage_bytes(const SysvArgPlan *plan, bool debug)
+{
+    if (plan->is_record)
+    {
+        return sysv_param_stage_bytes(plan);
+    }
+    return debug ? STACK_ALIGN : 0;
+}
+
+static u32 stage_total_bytes(const SysvArgPlan *plans, size_t n, bool debug)
 {
     u32 total = 0;
     for (size_t i = 0; i < n; i++)
     {
-        total += align_up(sysv_param_stage_bytes(&plans[i]), STACK_ALIGN);
+        total += align_up(frame_param_stage_bytes(&plans[i], debug), STACK_ALIGN);
     }
     return total;
 }
@@ -65,7 +75,8 @@ static void collect_saved(RegAllocation *alloc, const TargetDesc *target, Linear
     out->saved_bytes = align_up((u32) out->nsaved * 8, STACK_ALIGN);
 }
 
-void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *target, LinearFrame *out)
+void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *target, bool debug,
+                    LinearFrame *out)
 {
     size_t nparams = vec_size(f->params);
     const SysvArgPlan *plans = plan_params(f, f->arena);
@@ -80,12 +91,17 @@ void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *targe
     }
 
     u32 locals_end = out->saved_bytes + alloc->frame_size;
-    if (nparams > 0)
+    u32 stage_bytes = nparams > 0 ? stage_total_bytes(plans, nparams, debug) : 0;
+    if (stage_bytes > 0)
     {
         /* A stage slot at offset S spans [%rbp-S, %rbp-S+16), so the first one must
            start a full slot below the locals; this also clears the saved %rbp. */
         out->stage_base = align_up(locals_end, STACK_ALIGN) + STACK_ALIGN;
-        locals_end = out->stage_base + stage_total_bytes(plans, nparams);
+        locals_end = out->stage_base + stage_bytes;
+    }
+    else
+    {
+        out->stage_base = 0;
     }
     if (f->is_variadic)
     {
@@ -110,10 +126,10 @@ static X86Mem stage_mem(const LinearFrame *frame, u32 off)
 
 /* Advance the running stage-slot cursor past `plan` and return the offset the
    parameter occupies; parameters that stage nowhere consume no space. */
-static u32 param_stage_next(const SysvArgPlan *plan, u32 *cursor)
+static u32 param_stage_next(const SysvArgPlan *plan, bool debug, u32 *cursor)
 {
     u32 at = *cursor;
-    *cursor += align_up(sysv_param_stage_bytes(plan), STACK_ALIGN);
+    *cursor += align_up(frame_param_stage_bytes(plan, debug), STACK_ALIGN);
     return at;
 }
 
@@ -191,7 +207,7 @@ static void stage_scalar(ByteBuf *buf, const SysvArgPlan *plan, u8 width, const 
 }
 
 static void stage_incoming(ByteBuf *buf, IrFunction *f, IrModule *mod, const TargetDesc *target,
-                           const LinearFrame *frame, const SysvArgPlan *plans)
+                           const LinearFrame *frame, const SysvArgPlan *plans, bool debug)
 {
     u32 off = 0;
     size_t nparams = vec_size(f->params);
@@ -199,7 +215,7 @@ static void stage_incoming(ByteBuf *buf, IrFunction *f, IrModule *mod, const Tar
     {
         IrParam *p = (IrParam *) vec_get(f->params, i);
         const SysvArgPlan *plan = &plans[i];
-        X86Mem dst = stage_mem(frame, param_stage_next(plan, &off));
+        X86Mem dst = stage_mem(frame, param_stage_next(plan, debug, &off));
         if (plan->is_record)
         {
             if (plan->register_passed)
@@ -207,7 +223,7 @@ static void stage_incoming(ByteBuf *buf, IrFunction *f, IrModule *mod, const Tar
                 stage_record(buf, plan, target, dst);
             }
         }
-        else
+        else if (debug)
         {
             stage_scalar(buf, plan, mod->widths[p->vreg], target, dst);
         }
@@ -240,36 +256,84 @@ static void load_record_home(ByteBuf *buf, const SysvArgPlan *plan, RegLoc home,
     }
 }
 
-static void load_scalar_home(ByteBuf *buf, RegLoc home, u8 width, bool is_fp, X86Mem stage)
+/* Move a scalar parameter into its home from its incoming register or stack slot. */
+static void load_scalar_home(ByteBuf *buf, RegLoc home, u8 width, bool is_fp, X86Operand src)
 {
     if (is_fp && width == W_LD)
     {
-        ASSERT(home.kind == LOC_MEM && "x87 values are memory-only");
-        emit_mov16(buf, stage, x86_mem_rbp(home.disp));
+        ASSERT(home.kind == LOC_MEM && src.kind == XOP_MEM && "x87 values are memory-only");
+        emit_mov16(buf, src.u.mem, x86_mem_rbp(home.disp));
     }
     else if (is_fp && home.kind == LOC_REG)
     {
-        emit_sse_load(buf, MF_OF(width), home.reg, stage);
+        if (src.kind == XOP_REG)
+        {
+            if (src.u.reg != home.reg)
+            {
+                emit_sse_op_reg(buf, MF_OF(width), X86_SSE_MOV, home.reg, src.u.reg);
+            }
+        }
+        else
+        {
+            emit_sse_load(buf, MF_OF(width), home.reg, src.u.mem);
+        }
     }
     else if (is_fp)
     {
-        emit_sse_load(buf, MF_OF(width), R_XMM0, stage);
-        emit_sse_store(buf, MF_OF(width), x86_mem_rbp(home.disp), R_XMM0);
+        if (src.kind == XOP_REG)
+        {
+            emit_sse_store(buf, MF_OF(width), x86_mem_rbp(home.disp), src.u.reg);
+        }
+        else
+        {
+            emit_sse_load(buf, MF_OF(width), R_XMM0, src.u.mem);
+            emit_sse_store(buf, MF_OF(width), x86_mem_rbp(home.disp), R_XMM0);
+        }
     }
     else if (home.kind == LOC_REG)
     {
-        emit_mov(buf, width, xop_reg(home.reg), xop_mem(stage));
+        if (src.kind == XOP_REG)
+        {
+            if (src.u.reg != home.reg)
+            {
+                emit_mov(buf, width, xop_reg(home.reg), xop_reg(src.u.reg));
+            }
+        }
+        else
+        {
+            emit_mov(buf, width, xop_reg(home.reg), xop_mem(src.u.mem));
+        }
+    }
+    else if (src.kind == XOP_REG)
+    {
+        emit_mov(buf, width, xop_mem(x86_mem_rbp(home.disp)), xop_reg(src.u.reg));
     }
     else
     {
-        emit_mov(buf, width, xop_reg(R_EAX), xop_mem(stage));
+        emit_mov(buf, width, xop_reg(R_EAX), xop_mem(src.u.mem));
         emit_mov(buf, width, xop_mem(x86_mem_rbp(home.disp)), xop_reg(R_EAX));
     }
 }
 
-static void load_param_homes(ByteBuf *buf, IrFunction *f, IrModule *mod, const RegAllocation *alloc,
-                             const LinearFrame *frame, const SysvArgPlan *plans)
+/* A scalar parameter's incoming register, or its caller stack slot. */
+static X86Operand scalar_param_src(IrParam *p, const SysvArgPlan *plan, IrModule *mod,
+                                   const TargetDesc *target)
 {
+    if (plan->on_stack)
+    {
+        return xop_mem(x86_mem_rbp(STACK_PARAM_BASE + (i32) plan->stack_off));
+    }
+    if (mod->floatness[p->vreg])
+    {
+        return xop_reg(plan->chunks[0].reg);
+    }
+    return xop_reg(target->gp_args[plan->chunks[0].reg]);
+}
+
+static void load_param_homes(ByteBuf *buf, IrFunction *f, IrModule *mod, const RegAllocation *alloc,
+                             const LinearFrame *frame, const SysvArgPlan *plans, bool debug)
+{
+    const TargetDesc *target = x86_64_target();
     u32 off = 0;
     size_t nparams = vec_size(f->params);
     for (size_t i = 0; i < nparams; i++)
@@ -277,7 +341,7 @@ static void load_param_homes(ByteBuf *buf, IrFunction *f, IrModule *mod, const R
         IrParam *p = (IrParam *) vec_get(f->params, i);
         const SysvArgPlan *plan = &plans[i];
         RegLoc home = loc_of(alloc, ir_operand_vreg(p->vreg));
-        u32 at = param_stage_next(plan, &off);
+        u32 at = param_stage_next(plan, debug, &off);
         if (plan->is_record)
         {
             load_record_home(buf, plan, home, frame, at);
@@ -285,13 +349,13 @@ static void load_param_homes(ByteBuf *buf, IrFunction *f, IrModule *mod, const R
         else
         {
             load_scalar_home(buf, home, mod->widths[p->vreg], mod->floatness[p->vreg],
-                             stage_mem(frame, at));
+                             scalar_param_src(p, plan, mod, target));
         }
     }
 }
 
 void x86_frame_emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, const RegAllocation *alloc,
-                             LinearFrame *frame)
+                             LinearFrame *frame, bool debug)
 {
     const TargetDesc *target = x86_64_target();
     size_t before = bytebuf_len(buf);
@@ -309,8 +373,8 @@ void x86_frame_emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, const R
     if (vec_size(f->params) > 0)
     {
         const SysvArgPlan *plans = plan_params(f, f->arena);
-        stage_incoming(buf, f, mod, target, frame, plans);
-        load_param_homes(buf, f, mod, alloc, frame, plans);
+        stage_incoming(buf, f, mod, target, frame, plans, debug);
+        load_param_homes(buf, f, mod, alloc, frame, plans, debug);
     }
 }
 
@@ -323,7 +387,7 @@ void x86_frame_restore_callee(ByteBuf *buf, const LinearFrame *frame)
     }
 }
 
-void x86_frame_param_stages(IrFunction *f, const LinearFrame *frame, u32 *out)
+void x86_frame_param_stages(IrFunction *f, const LinearFrame *frame, bool debug, u32 *out)
 {
     const SysvArgPlan *plans = plan_params(f, f->arena);
     u32 off = 0;
@@ -331,8 +395,8 @@ void x86_frame_param_stages(IrFunction *f, const LinearFrame *frame, u32 *out)
     for (size_t i = 0; i < n; i++)
     {
         const SysvArgPlan *plan = &plans[i];
-        u32 at = param_stage_next(plan, &off);
-        if (sysv_param_stage_bytes(plan) > 0)
+        u32 at = param_stage_next(plan, debug, &off);
+        if (frame_param_stage_bytes(plan, debug) > 0)
         {
             out[i] = frame->stage_base + at;
         }

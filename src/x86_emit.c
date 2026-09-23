@@ -35,6 +35,15 @@ u8 rex(bool w, bool r, bool x, bool b)
     return 0x40 | (w ? 0x08 : 0) | (r ? 0x04 : 0) | (x ? 0x02 : 0) | (b ? 0x01 : 0);
 }
 
+/* A bare 0x40 is a no-op for 16/32/64-bit operands; byte paths keep their own REX. */
+static void emit_rex_if(ByteBuf *buf, bool w, bool r, bool x, bool b)
+{
+    if (w || r || x || b)
+    {
+        bytebuf_append(buf, rex(w, r, x, b));
+    }
+}
+
 /* X86Reg order is rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8-15; DWARF numbers
    are rax, rdx, rcx, rbx, rsi, rdi, rbp, rsp, r8-15 (SysV psABI §3.6.2). */
 u8 x86_dwarf_gpr_number(u8 reg)
@@ -53,6 +62,16 @@ u8 x86_dwarf_xmm_number(u8 lane)
 static u8 rex_mem(bool w, bool r, X86Mem m)
 {
     return rex(w, r, reg_is_extended(m.index), reg_is_extended(m.base));
+}
+
+static void emit_rex_mem_if(ByteBuf *buf, bool w, bool r, X86Mem m)
+{
+    bool x = reg_is_extended(m.index);
+    bool b = reg_is_extended(m.base);
+    if (w || r || x || b)
+    {
+        bytebuf_append(buf, rex(w, r, x, b));
+    }
 }
 
 void emit_mem_operand(ByteBuf *buf, u8 reg, X86Mem m)
@@ -142,7 +161,7 @@ void emit_mov_scalar(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
 
     if (src.kind == XOP_IMM)
     {
-        bytebuf_append(buf, rex(width == 8, false, false, dst.u.reg >= 8));
+        emit_rex_if(buf, width == 8, false, false, dst.u.reg >= 8);
         bytebuf_append(buf, (u8) (X86_MOV_REG_IMM_BASE + (dst.u.reg & 7)));
         if (width == 2)
         {
@@ -163,7 +182,7 @@ void emit_mov_scalar(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
 
     if (dst.kind == XOP_REG && src.kind == XOP_REG)
     {
-        bytebuf_append(buf, rex(width == 8, src.u.reg >= 8, false, dst.u.reg >= 8));
+        emit_rex_if(buf, width == 8, src.u.reg >= 8, false, dst.u.reg >= 8);
         bytebuf_append(buf, X86_MOV_RM32_REG32);
         bytebuf_append(buf, modrm(3, src.u.reg, dst.u.reg));
         return;
@@ -173,7 +192,7 @@ void emit_mov_scalar(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
     u8 reg = to_reg ? dst.u.reg : src.u.reg;
     X86Mem mem = to_reg ? src.u.mem : dst.u.mem;
     u8 mov_op = to_reg ? X86_MOV_REG32_RM32 : X86_MOV_RM32_REG32;
-    bytebuf_append(buf, rex_mem(width == 8, reg >= 8, mem));
+    emit_rex_mem_if(buf, width == 8, reg >= 8, mem);
     bytebuf_append(buf, mov_op);
     emit_mem_operand(buf, reg, mem);
 }
@@ -249,7 +268,7 @@ static void emit_binop_imm(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_re
 {
     emit_os16(buf, width);
     u8 reg_field = s->imm_dst ? dst_reg : s->digit;
-    bytebuf_append(buf, rex(width == 8, reg_field >= 8, false, dst_reg >= 8));
+    emit_rex_if(buf, width == 8, reg_field >= 8, false, dst_reg >= 8);
     if (fits_i8(v))
     {
         bytebuf_append(buf, s->imm8);
@@ -279,7 +298,7 @@ void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_reg, X86O
     if (rhs.kind == XOP_REG)
     {
         emit_os16(buf, width);
-        bytebuf_append(buf, rex(width == 8, dst_reg >= 8, false, rhs.u.reg >= 8));
+        emit_rex_if(buf, width == 8, dst_reg >= 8, false, rhs.u.reg >= 8);
         if (s->mem_0f)
         {
             bytebuf_append(buf, X86_TWO_BYTE_ESC);
@@ -289,8 +308,7 @@ void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_reg, X86O
         return;
     }
     emit_os16(buf, width);
-    bytebuf_append(buf, rex(width == 8, dst_reg >= 8, reg_is_extended(rhs.u.mem.index),
-                            reg_is_extended(rhs.u.mem.base)));
+    emit_rex_mem_if(buf, width == 8, dst_reg >= 8, rhs.u.mem);
     if (s->mem_0f)
     {
         bytebuf_append(buf, X86_TWO_BYTE_ESC);
@@ -302,7 +320,7 @@ void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_reg, X86O
 void emit_unary(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 {
     emit_os16(buf, width);
-    bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
+    emit_rex_if(buf, width == 8, false, false, reg >= 8);
     bytebuf_append(buf, GRP3_OPCODE(width));
     bytebuf_append(buf, modrm(3, digit, reg));
 }
@@ -310,7 +328,7 @@ void emit_unary(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 void emit_shift_cl(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 {
     emit_os16(buf, width);
-    bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
+    emit_rex_if(buf, width == 8, false, false, reg >= 8);
     bytebuf_append(buf, SHIFT_OPCODE(width));
     bytebuf_append(buf, modrm(3, digit, reg));
 }
@@ -346,7 +364,7 @@ void emit_cdq(ByteBuf *buf, u8 width, bool is_unsigned)
 /* /7 digit: idiv (GRP3 keeps the 8-bit F6 form). */
 void emit_idiv(ByteBuf *buf, u8 width, u8 reg)
 {
-    bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
+    emit_rex_if(buf, width == 8, false, false, reg >= 8);
     bytebuf_append(buf, GRP3_OPCODE(width));
     bytebuf_append(buf, modrm(3, 7, reg));
 }
@@ -354,14 +372,14 @@ void emit_idiv(ByteBuf *buf, u8 width, u8 reg)
 /* /6 digit: div (GRP3 keeps the 8-bit F6 form). */
 void emit_div(ByteBuf *buf, u8 width, u8 reg)
 {
-    bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
+    emit_rex_if(buf, width == 8, false, false, reg >= 8);
     bytebuf_append(buf, GRP3_OPCODE(width));
     bytebuf_append(buf, modrm(3, 6, reg));
 }
 
 void emit_imul_imm(ByteBuf *buf, u8 width, u8 reg, i64 imm)
 {
-    bytebuf_append(buf, rex(width == 8, reg >= 8, false, reg >= 8));
+    emit_rex_if(buf, width == 8, reg >= 8, false, reg >= 8);
     if (fits_i8(imm))
     {
         bytebuf_append(buf, X86_IMUL_IMM8);
@@ -390,7 +408,7 @@ void emit_test_reg(ByteBuf *buf, u8 width, u8 reg)
         return;
     }
     emit_os16(buf, width);
-    bytebuf_append(buf, rex(width == 8, false, false, reg >= 8));
+    emit_rex_if(buf, width == 8, false, false, reg >= 8);
     bytebuf_append(buf, X86_TEST_REG_RM);
     bytebuf_append(buf, modrm(3, 0, reg));
 }
@@ -501,7 +519,7 @@ void patch_rel32(ByteBuf *buf, size_t field_off, size_t target)
 void emit_sse_load(ByteBuf *buf, u8 mf, u8 xmm, X86Mem mem)
 {
     bytebuf_append(buf, mf);
-    bytebuf_append(buf, rex_mem(false, xmm >= 8, mem));
+    emit_rex_mem_if(buf, false, xmm >= 8, mem);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_MOV);
     emit_mem_operand(buf, xmm, mem);
@@ -510,7 +528,7 @@ void emit_sse_load(ByteBuf *buf, u8 mf, u8 xmm, X86Mem mem)
 void emit_sse_store(ByteBuf *buf, u8 mf, X86Mem mem, u8 xmm)
 {
     bytebuf_append(buf, mf);
-    bytebuf_append(buf, rex_mem(false, xmm >= 8, mem));
+    emit_rex_mem_if(buf, false, xmm >= 8, mem);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_MOV_RM);
     emit_mem_operand(buf, xmm, mem);
@@ -519,11 +537,11 @@ void emit_sse_store(ByteBuf *buf, u8 mf, X86Mem mem, u8 xmm)
 /* movups 16-byte copy through xmm0 (scalar movs only admit 2|4|8). */
 void emit_mov16(ByteBuf *buf, X86Mem src, X86Mem dst)
 {
-    bytebuf_append(buf, rex_mem(false, false, src));
+    emit_rex_mem_if(buf, false, false, src);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_MOV);
     emit_mem_operand(buf, R_XMM0, src);
-    bytebuf_append(buf, rex_mem(false, false, dst));
+    emit_rex_mem_if(buf, false, false, dst);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_MOV_RM);
     emit_mem_operand(buf, R_XMM0, dst);
@@ -531,7 +549,7 @@ void emit_mov16(ByteBuf *buf, X86Mem src, X86Mem dst)
 
 void emit_mov16_store(ByteBuf *buf, X86Mem dst)
 {
-    bytebuf_append(buf, rex_mem(false, false, dst));
+    emit_rex_mem_if(buf, false, false, dst);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_SSE_MOV_RM);
     emit_mem_operand(buf, R_XMM0, dst);
@@ -625,7 +643,7 @@ void emit_movd_to_xmm(ByteBuf *buf, u8 dst_xmm, u8 src_reg, bool is64)
 void emit_sse_op_mem(ByteBuf *buf, u8 mf, u8 op, u8 dst_xmm, X86Mem mem)
 {
     bytebuf_append(buf, mf);
-    bytebuf_append(buf, rex_mem(false, dst_xmm >= 8, mem));
+    emit_rex_mem_if(buf, false, dst_xmm >= 8, mem);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, op);
     emit_mem_operand(buf, dst_xmm, mem);
@@ -666,10 +684,16 @@ static void emit_rm_operand(ByteBuf *buf, u8 dst_reg, X86Operand src)
     }
 }
 
-/* REX for a reg, r/m form: the R bit comes from `dst_reg`, the B bit from an extended base. */
-static u8 rex_rm(bool w, u8 dst_reg, X86Operand src)
+/* REX for a reg, r/m form; `force` covers a byte source in spl/bpl/sil/dil. */
+static void emit_rex_rm_if(ByteBuf *buf, bool w, u8 dst_reg, X86Operand src, bool force)
 {
-    return rex(w, dst_reg >= 8, false, src.kind == XOP_MEM && reg_is_extended(src.u.mem.base));
+    bool r = dst_reg >= 8;
+    bool b = src.kind == XOP_MEM ? reg_is_extended(src.u.mem.base)
+                                 : (src.kind == XOP_REG && src.u.reg >= 8);
+    if (w || r || b || force)
+    {
+        bytebuf_append(buf, rex(w, r, false, b));
+    }
 }
 
 void emit_movzx(ByteBuf *buf, u8 src_width, u8 dst_width, u8 dst_reg, X86Operand src)
@@ -682,7 +706,8 @@ void emit_movzx(ByteBuf *buf, u8 src_width, u8 dst_width, u8 dst_reg, X86Operand
     }
     ASSERT(dst_width == 2 || dst_width == 4 || dst_width == 8);
     emit_os16(buf, dst_width);
-    bytebuf_append(buf, rex_rm(dst_width == 8, dst_reg, src));
+    emit_rex_rm_if(buf, dst_width == 8, dst_reg, src,
+                   src_width == 1 && src.kind == XOP_REG && src.u.reg >= 4);
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     /* Source width 1 → reg8 form, 2 → reg16 form. */
     u8 ext_op = src_width == 1 ? X86_MOVZX_REG8 : X86_MOVZX_REG16;
@@ -697,12 +722,13 @@ void emit_movsx(ByteBuf *buf, u8 src_width, u8 dst_width, u8 dst_reg, X86Operand
     if (src_width == 4)
     {
         ASSERT(dst_width == 8);
-        bytebuf_append(buf, rex_rm(true, dst_reg, src));
+        emit_rex_rm_if(buf, true, dst_reg, src, false);
         bytebuf_append(buf, X86_MOVSXD_REG32);
     }
     else
     {
-        bytebuf_append(buf, rex_rm(dst_width == 8, dst_reg, src));
+        emit_rex_rm_if(buf, dst_width == 8, dst_reg, src,
+                       src_width == 1 && src.kind == XOP_REG && src.u.reg >= 4);
         bytebuf_append(buf, X86_TWO_BYTE_ESC);
         /* Source width 1 → reg8 form, 2 → reg16 form. */
         u8 ext_op = src_width == 1 ? X86_MOVSX_REG8 : X86_MOVSX_REG16;
