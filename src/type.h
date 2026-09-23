@@ -171,6 +171,7 @@ Type *type_va_list(void);
 Type *type_enum(const char *tag);
 Type *type_enum_anon(void);
 Type *type_record_lookup(const char *tag);
+bool type_record_has_fam(Type *t); /* last member is a flexible array `T x[]` */
 Type *type_record_field(Type *t, const char *name);
 u32 type_record_field_offset(Type *t, const char *name);
 

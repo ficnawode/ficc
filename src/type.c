@@ -837,6 +837,12 @@ void type_record_complete(Type *t, Vec *fields)
                 cursor = (cursor + 7) / 8 * 8;
                 u32 offset = align_up((u32) (cursor / 8), f->type->align);
                 f->offset = offset;
+                /* A flexible array member (§6.7.2.1p18) is the last member and
+                   contributes no bytes; sizeof stops at its aligned offset. */
+                if (i == n - 1 && type_is_array(f->type) && f->type->arr.length == 0)
+                {
+                    continue;
+                }
                 cursor = ((u64) offset + f->type->size) * 8;
             }
             else
@@ -987,6 +993,22 @@ static RecordField *find_record_field(Type *t, const char *name, u32 *off_out)
         }
     }
     return NULL;
+}
+
+bool type_record_has_fam(Type *t)
+{
+    t = type_unqual(t);
+    if (!type_is_record(t) || !type_is_complete(t))
+    {
+        return false;
+    }
+    size_t n = vec_size(t->record.fields);
+    if (n == 0)
+    {
+        return false;
+    }
+    RecordField *last = (RecordField *) vec_get(t->record.fields, n - 1);
+    return type_is_array(last->type) && last->type->arr.length == 0;
 }
 
 Type *type_record_field(Type *t, const char *name)

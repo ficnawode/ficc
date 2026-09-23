@@ -1188,6 +1188,15 @@ static bool check_alignof_type(ASTAlignofType *at, SemanticCtx *ctx)
     return true;
 }
 
+static bool check_no_fam_array(Type *type, Loc loc, SemanticCtx *ctx)
+{
+    if (type_is_array(type) && type_record_has_fam(type_array_elem(type)))
+    {
+        return sem_error(ctx, loc, "array of a record with a flexible array member");
+    }
+    return true;
+}
+
 static bool check_generic_assoc_type(Type *type, Loc loc, SemanticCtx *ctx)
 {
     if (type_is_function(type) || type->kind == TYPE_VOID || !type_is_complete(type))
@@ -1401,7 +1410,8 @@ static bool check_auto_initializer(ASTVarDecl *var_decl, SemanticCtx *ctx)
 
 static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
 {
-    if (!sem_resolve_type(&var_decl->type, ctx))
+    if (!sem_resolve_type(&var_decl->type, ctx) ||
+        !check_no_fam_array(var_decl->type, var_decl->base.loc, ctx))
     {
         return false;
     }
@@ -2861,7 +2871,7 @@ static bool global_replaced(ASTVarDecl *vd, ASTVarDecl *existing)
    merge, two constant definitions collide, and the most-defined one wins. */
 static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
 {
-    if (!sem_resolve_type(&vd->type, ctx))
+    if (!sem_resolve_type(&vd->type, ctx) || !check_no_fam_array(vd->type, vd->base.loc, ctx))
     {
         return false;
     }

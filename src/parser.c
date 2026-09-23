@@ -371,6 +371,46 @@ static void collect_member_fields(Arena *arena, Vec *record_fields, ASTNode *mem
     }
 }
 
+static bool validate_flexible_members(Parser *p, Type *rec, Vec *fields)
+{
+    size_t n = vec_size(fields);
+    for (size_t i = 0; i < n; i++)
+    {
+        RecordField *f = (RecordField *) vec_get(fields, i);
+        if (type_is_record(f->type) && type_record_has_fam(f->type))
+        {
+            parse_error(p, "record with a flexible array member cannot be a member");
+            return false;
+        }
+        if (!type_is_array(f->type) || f->type->arr.length != 0 || type_array_is_pending(f->type))
+        {
+            continue;
+        }
+        if (rec->kind != TYPE_STRUCT)
+        {
+            parse_error(p, "flexible array member in a union");
+            return false;
+        }
+        if (i != n - 1)
+        {
+            parse_error(p, "flexible array member must be the last member");
+            return false;
+        }
+        if (n < 2)
+        {
+            parse_error(p, "flexible array member in a struct with no other members");
+            return false;
+        }
+        Type *elem = f->type->arr.elem;
+        if (elem->kind == TYPE_VOID || type_is_function(elem) || !type_is_complete(elem))
+        {
+            parse_error(p, "flexible array member has incomplete element type");
+            return false;
+        }
+    }
+    return true;
+}
+
 static Vec *parse_record_body(Parser *p, Type *rec)
 {
     if (!expect_token(p, TOK_LBRACE, "'{'"))
@@ -412,6 +452,10 @@ static Vec *parse_record_body(Parser *p, Type *rec)
         collect_member_fields(p->arena, record_fields, member);
     }
     if (!expect_token(p, TOK_RBRACE, "'}'"))
+    {
+        return NULL;
+    }
+    if (!validate_flexible_members(p, rec, record_fields))
     {
         return NULL;
     }
