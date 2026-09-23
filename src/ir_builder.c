@@ -1505,6 +1505,13 @@ static ExprResult build_va_builtin(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *b
         ir_emit_va_end(ap.block, ap.value);
         return expr_void(ap.block);
     }
+    if (strcmp(ce->callee, "__builtin_va_copy") == 0)
+    {
+        ExprResult dst = build_expr(ctx, (ASTNode *) vec_get(ce->args, 0), bb);
+        ExprResult src = build_expr(ctx, (ASTNode *) vec_get(ce->args, 1), dst.block);
+        ir_emit_memcpy(src.block, dst.value, src.value, type_array_elem(type_va_list())->size);
+        return expr_void(src.block);
+    }
     ir_error((ASTNode *) ce, "unknown builtin '%s'", ce->callee);
     ctx->failed = true;
     return expr_void(bb);

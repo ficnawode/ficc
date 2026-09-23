@@ -637,6 +637,19 @@ static bool check_va_builtin(ASTCallExpr *call_expr, SemanticCtx *ctx)
                 "'__builtin_va_start' second argument must be a parameter of the function");
         }
     }
+    else if (strcmp(call_expr->callee, "__builtin_va_copy") == 0)
+    {
+        if (got != 2)
+        {
+            return sem_error(ctx, call_expr->base.loc,
+                             "'__builtin_va_copy' expects 2 arguments, got %zu", got);
+        }
+        if (!builtin_check_va_list_arg((ASTNode *) vec_get(call_expr->args, 0), ctx) ||
+            !builtin_check_va_list_arg((ASTNode *) vec_get(call_expr->args, 1), ctx))
+        {
+            return false;
+        }
+    }
     else
     {
         if (got != 1)
@@ -770,7 +783,8 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
     /* va_start/va_end builtins are never ASTFuncDefs; a user definition of the
        same name wins (the globals lookup above). */
     if (strcmp(call_expr->callee, "__builtin_va_start") == 0 ||
-        strcmp(call_expr->callee, "__builtin_va_end") == 0)
+        strcmp(call_expr->callee, "__builtin_va_end") == 0 ||
+        strcmp(call_expr->callee, "__builtin_va_copy") == 0)
     {
         return check_va_builtin(call_expr, ctx);
     }
@@ -2883,7 +2897,9 @@ static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
     {
         return sem_error(ctx, vd->base.loc, "variable '%s' has void type", vd->name);
     }
-    if (type_is_record(vd->type) && !type_is_complete(vd->type))
+    /* §6.9.2p3: an `extern` declaration may name an incomplete type (the tag
+       may complete later in the TU); a definition may not. */
+    if (vd->storage != SC_EXTERN && type_is_record(vd->type) && !type_is_complete(vd->type))
     {
         return sem_error(ctx, vd->base.loc, "variable '%s' has incomplete type", vd->name);
     }

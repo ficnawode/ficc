@@ -118,6 +118,23 @@ TEST(varargs, overflow_arg_area_after_named_stack_args)
                           42);
 }
 
+TEST(varargs, va_copy_copies_state)
+{
+    /* §7.16.1.2: va_copy makes an independent copy of the argument state, so
+       both cursors read the same first unnamed argument. */
+    EXPECT_INTERP_AND_ELF("int f(int a, ...) {\n"
+                          "    __builtin_va_list ap;\n"
+                          "    __builtin_va_list cp;\n"
+                          "    __builtin_va_start(ap, a);\n"
+                          "    __builtin_va_copy(cp, ap);\n"
+                          "    int x = __builtin_va_arg(ap, int);\n"
+                          "    int y = __builtin_va_arg(cp, int);\n"
+                          "    return x + y;\n"
+                          "}\n"
+                          "int main(void) { return f(0, 21); }\n",
+                          42);
+}
+
 TEST(varargs, va_end_runs)
 {
     EXPECT_INTERP_AND_ELF("int f(int a, ...) {\n"
