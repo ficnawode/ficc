@@ -197,6 +197,8 @@ static void pp_load_source_date_epoch(Pp *pp)
     pp->source_date_epoch = (i64) value;
 }
 
+static void pp_predefine_func_macro(Pp *pp, const char *name, const char *params, const char *body);
+
 Pp *pp_new(Arena *arena)
 {
     Pp *pp = arena_alloc(arena, sizeof(Pp), sizeof(void *));
@@ -240,6 +242,9 @@ Pp *pp_new(Arena *arena)
     pp_predefine_type(pp, "__CHAR16_TYPE__", "short unsigned int");
     pp_predefine_type(pp, "__CHAR32_TYPE__", "unsigned int");
     pp_predefine_type(pp, "__SSIZE_TYPE__", "long int");
+    pp_predefine_func_macro(pp, "__REDIRECT", "name,proto,alias", "name proto");
+    pp_predefine_func_macro(pp, "__REDIRECT_NTH", "name,proto,alias", "name proto");
+    pp_predefine_func_macro(pp, "__REDIRECT_NTHNL", "name,proto,alias", "name proto");
 
     Macro *pragma = arena_alloc(pp->arena, sizeof(Macro), sizeof(void *));
     *pragma = (Macro) {.name = "_Pragma", .kind = MACRO_OBJ, .predefined = true, .is_pragma = true};
@@ -569,6 +574,57 @@ static Vec *pp_mark_params(Pp *pp, Vec *body, Vec *params, bool variadic, const 
         vec_push(marked, copy);
     }
     return marked;
+}
+
+/* Installs a predefined function-like macro from comma-separated parameter
+   names and body text (used for glibc's __REDIRECT family, whose asm-label
+   form we replace with a plain declaration). */
+static void pp_predefine_func_macro(Pp *pp, const char *name, const char *params, const char *body)
+{
+    Loc loc = (Loc) {.file = "<built-in>", .line = 1, .col = 1};
+    Vec *param_names = vec_new(pp->arena);
+    Vec *ptoks = pp_lex("<built-in>", params, pp->arena);
+    if (!ptoks)
+    {
+        return;
+    }
+    for (size_t i = 0; i < vec_size(ptoks); i++)
+    {
+        PpToken *t = vec_get(ptoks, i);
+        if (t->kind == TOK_PP_IDENT)
+        {
+            vec_push(param_names, (void *) pp_token_text(pp, t));
+        }
+    }
+
+    Vec *raw = vec_new(pp->arena);
+    Vec *btoks = pp_lex("<built-in>", body, pp->arena);
+    if (!btoks)
+    {
+        return;
+    }
+    for (size_t i = 0; i < vec_size(btoks); i++)
+    {
+        PpToken *t = vec_get(btoks, i);
+        if (!pp_is_trivia(t) && t->kind != TOK_PP_EOF)
+        {
+            vec_push(raw, t);
+        }
+    }
+    Vec *marked = pp_mark_params(pp, raw, param_names, false, NULL);
+    if (!marked)
+    {
+        return;
+    }
+
+    Macro *m = arena_alloc(pp->arena, sizeof(Macro), sizeof(void *));
+    *m = (Macro) {.name = name,
+                  .kind = MACRO_FUNC,
+                  .loc = loc,
+                  .body = marked,
+                  .param_count = (u32) vec_size(param_names),
+                  .predefined = true};
+    strmap_set(pp->macros, name, m);
 }
 
 static bool pp_check_va_args(Pp *pp, Vec *body)

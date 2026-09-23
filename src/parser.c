@@ -2336,7 +2336,7 @@ static ASTNode *parse_builtin_va_arg(Parser *p, Token *t)
     {
         return NULL;
     }
-    if (!is_typename_start_at(p, p->pos))
+    if (!is_typename_start_at(p, skip_quals(p, p->pos)))
     {
         parse_error(p, "expected a type name after ',' in '__builtin_va_arg'");
         return NULL;
@@ -2613,6 +2613,13 @@ static ASTNode *parse_unary(Parser *p)
             return NULL;
         }
         return ast_incdec_expr(operand, t->kind == TOK_PLUS_PLUS, false, t->loc, p->arena);
+    }
+
+    if (t->kind == TOK_PLUS)
+    {
+        /* Unary plus is the identity (after integer promotion). */
+        next_token(p);
+        return parse_unary(p);
     }
 
     static const struct

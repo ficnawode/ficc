@@ -1172,6 +1172,18 @@ TEST(pp, gcc_builtin_type_macros_expand)
     arena_free(a);
 }
 
+TEST(pp, redirect_macro_expands_to_plain_decl)
+{
+    /* glibc's __REDIRECT uses an asm label; the ficc predefine drops it to a
+       plain declaration (the alias symbol is not needed on x86-64). */
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "int __REDIRECT(foo, (int x), foo64);\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "foo"));
+    EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "foo64"));
+    arena_free(a);
+}
+
 TEST(pp, include_angle_with_isystem)
 {
     Arena *a = arena_new();
