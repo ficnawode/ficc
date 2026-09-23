@@ -3313,12 +3313,10 @@ static bool resolve_constant_init(Parser *p, ASTVarDecl *vd, ASTNode *expr)
         vd->has_const_init = true;
         return true;
     }
-    if (expr->kind == AST_STRING_LITERAL)
-    {
-        vd->init = expr;
-        return true;
-    }
-    return false;
+    /* Not foldable without types (e.g. `sizeof(x)`): defer to semantic, which
+       folds it as an integer constant expression or rejects it. */
+    vd->init = expr;
+    return true;
 }
 
 ASTNode *parse(Token *tokens, u64 count, const ParserConfig *cfg, Arena *arena)

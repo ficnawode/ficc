@@ -88,6 +88,16 @@ TEST(deferred_bounds, file_scope_bound)
                           42);
 }
 
+TEST(deferred_bounds, file_scope_scalar_init)
+{
+    /* A file-scope scalar whose initializer needs expression types (here
+       sizeof of an earlier array) is folded in semantic, not the parser. */
+    EXPECT_INTERP_AND_ELF("static const int arr[3] = { 1, 2, 3 };\n"
+                          "const int n = sizeof(arr) / sizeof(arr[0]);\n"
+                          "int main(void) { return n * 14; }\n",
+                          42);
+}
+
 TEST(deferred_bounds, negative_variable_length)
 {
     EXPECT_BUILD_FAIL("int main(void) {\n"

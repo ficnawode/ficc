@@ -2118,6 +2118,24 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
         vd->plan = plan;
         return PLAN_HANDLED;
     }
+    if (!vd->has_const_init && vd->init != NULL && type_is_integer(type_unqual(vd->type)))
+    {
+        /* An integer scalar the parser could not fold (needs expression types,
+           e.g. `sizeof(x)`) folds here as an integer constant expression. */
+        if (!check_expr(vd->init, ctx))
+        {
+            return PLAN_ERROR;
+        }
+        i64 value;
+        if (!fold_integer_constant(vd->init, &value))
+        {
+            sem_error(ctx, vd->base.loc, "initializer element is not a constant");
+            return PLAN_ERROR;
+        }
+        vd->const_init = type_reduce_int(type_unqual(vd->type), value);
+        vd->has_const_init = true;
+        return PLAN_HANDLED;
+    }
     if (vd->init->kind == AST_UNARY_EXPR || vd->init->kind == AST_IDENT)
     {
         return plan_ptr_initializer(ctx, vd) ? PLAN_HANDLED : PLAN_ERROR;
