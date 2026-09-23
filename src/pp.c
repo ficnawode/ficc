@@ -207,6 +207,7 @@ Pp *pp_new(Arena *arena)
     pp->conds = vec_new(arena);
     pp->cfg = (PPConfig) {0};
     pp->cfg.include_paths = vec_new(arena);
+    pp->cfg.system_include_paths = vec_new(arena);
     pp->physical = (Loc) {.file = NULL, .line = 1, .col = 1};
     pp->presumed = (Loc) {.file = NULL, .line = 1, .col = 1};
     pp->skipping = false;
@@ -259,6 +260,10 @@ void pp_apply_config(Pp *pp, const PPConfig *cfg)
     {
         vec_push(pp->cfg.include_paths, vec_get(cfg->include_paths, k));
     }
+    for (size_t k = 0; k < vec_size(cfg->system_include_paths); k++)
+    {
+        vec_push(pp->cfg.system_include_paths, vec_get(cfg->system_include_paths, k));
+    }
     for (size_t k = 0; k < vec_size(cfg->cmds); k++)
     {
         PPCommand *cmd = vec_get(cfg->cmds, k);
@@ -277,7 +282,7 @@ void pp_apply_config(Pp *pp, const PPConfig *cfg)
     }
 }
 
-static void pp_push_include(Pp *pp, const char *file, Vec *tokens)
+static void pp_push_include(Pp *pp, const char *file, Vec *tokens, bool system)
 {
     PpIncludeFrame *frame = arena_alloc(pp->arena, sizeof(PpIncludeFrame), sizeof(void *));
     frame->file = file;
@@ -285,7 +290,7 @@ static void pp_push_include(Pp *pp, const char *file, Vec *tokens)
     frame->cursor = 0;
     frame->presumed_line = 1;
     frame->presumed_file = file;
-    frame->system_header = false;
+    frame->system_header = system;
     vec_push(pp->includes, frame);
 }
 
@@ -1001,16 +1006,22 @@ static const char *pp_builtin_dir(Pp *pp)
     return pp->builtin_dir;
 }
 
+typedef struct
+{
+    const char *path;
+    bool system;
+} IncludeHit;
+
 /* Quoted headers try the including file's directory first (gcc). */
-static const char *pp_include_find(Pp *pp, bool quoted, const char *name,
-                                   const char *including_file, bool next_mode)
+static IncludeHit pp_include_find(Pp *pp, bool quoted, const char *name, const char *including_file,
+                                  bool next_mode)
 {
     if (quoted && !next_mode && including_file)
     {
         const char *cand = pp_path_join(pp, pp_path_dirname(pp, including_file), name);
         if (pp_file_exists(cand))
         {
-            return cand;
+            return (IncludeHit) {.path = cand, .system = false};
         }
     }
 
@@ -1033,7 +1044,16 @@ static const char *pp_include_find(Pp *pp, bool quoted, const char *name,
         const char *cand = pp_path_join(pp, vec_get(pp->cfg.include_paths, i), name);
         if (pp_file_exists(cand))
         {
-            return cand;
+            return (IncludeHit) {.path = cand, .system = false};
+        }
+    }
+
+    for (size_t i = 0; i < vec_size(pp->cfg.system_include_paths); i++)
+    {
+        const char *cand = pp_path_join(pp, vec_get(pp->cfg.system_include_paths, i), name);
+        if (pp_file_exists(cand))
+        {
+            return (IncludeHit) {.path = cand, .system = true};
         }
     }
 
@@ -1042,13 +1062,13 @@ static const char *pp_include_find(Pp *pp, bool quoted, const char *name,
         const char *cand = pp_path_join(pp, pp_builtin_dir(pp), name);
         if (pp_file_exists(cand))
         {
-            return cand;
+            return (IncludeHit) {.path = cand, .system = true};
         }
     }
-    return NULL;
+    return (IncludeHit) {.path = NULL, .system = false};
 }
 
-static void pp_include_file(Pp *pp, const char *path)
+static void pp_include_file(Pp *pp, const char *path, bool system)
 {
     if (vec_size(pp->includes) >= 200)
     {
@@ -1068,7 +1088,7 @@ static void pp_include_file(Pp *pp, const char *path)
         pp_error(pp, (Loc) {.file = path, .line = 1, .col = 1}, "cannot preprocess include file");
         return;
     }
-    pp_push_include(pp, path, tokens);
+    pp_push_include(pp, path, tokens, system);
 }
 
 /* Reads `<...>` in a raw line; comments or newlines inside are errors. */
@@ -1235,19 +1255,19 @@ static void pp_include_common(Pp *pp, PpIncludeFrame *frame, size_t start, size_
                 "extra tokens at end of #include directive");
     }
 
-    const char *path = pp_include_find(pp, op.quoted, op.name, frame->file, next_mode);
-    if (!path)
+    IncludeHit hit = pp_include_find(pp, op.quoted, op.name, frame->file, next_mode);
+    if (!hit.path)
     {
         pp_error(pp, directive_loc,
                  next_mode ? "no such #include_next file: '%s'" : "include file not found: '%s'",
                  op.name);
         return;
     }
-    if (hashset_contains(pp->pragma_once, path))
+    if (hashset_contains(pp->pragma_once, hit.path))
     {
         return;
     }
-    pp_include_file(pp, path);
+    pp_include_file(pp, hit.path, hit.system);
 }
 
 static void pp_include_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
@@ -1425,7 +1445,7 @@ static bool pp_header_found(Pp *pp, Vec *operand, const char *including_file, bo
         pp_error(pp, loc, "__has_include requires a single header-name operand");
         return false;
     }
-    return pp_include_find(pp, quoted, name, including_file, next) != NULL;
+    return pp_include_find(pp, quoted, name, including_file, next).path != NULL;
 }
 
 /* Cooks `__has_include(...)` / `__has_include_next(...)` into 0/1. */
@@ -2652,13 +2672,14 @@ void pp_undef_cmdline(Pp *pp, const char *name)
 void pp_include_cmdline(Pp *pp, const char *file)
 {
     Loc loc = (Loc) {.file = file, .line = 1, .col = 1};
-    const char *path = pp_file_exists(file) ? file : pp_include_find(pp, false, file, NULL, false);
+    IncludeHit hit = pp_include_find(pp, false, file, NULL, false);
+    const char *path = pp_file_exists(file) ? file : hit.path;
     if (!path)
     {
         pp_error(pp, loc, "include file not found: '%s'", file);
         return;
     }
-    pp_include_file(pp, path);
+    pp_include_file(pp, path, false);
     pp_run(pp);
 }
 
@@ -2669,7 +2690,7 @@ Vec *pp_preprocess(Pp *pp, const char *file, const char *src)
     {
         return NULL;
     }
-    pp_push_include(pp, file, tokens);
+    pp_push_include(pp, file, tokens, false);
     pp_run(pp);
     if (pp->error_count > 0)
     {

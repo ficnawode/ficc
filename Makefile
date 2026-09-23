@@ -39,7 +39,9 @@ DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_BIN) $(T
 
 FORMAT_FILES := $(shell find src include test \( -name '*.c' -o -name '*.h' \))
 
-.PHONY: all clean test test-gdb selftest dirs compile-commands format format-check
+.PHONY: all clean test test-gdb selftest dirs compile-commands format format-check git-sweep
+
+GIT ?= ../git
 
 all: $(FICC_BIN)
 
@@ -55,6 +57,10 @@ test: $(TEST_BIN) $(FICC_BIN)
 # Real-debugger certificate (opt-in; skips with a warning when gdb is absent).
 test-gdb: $(FICC_BIN)
 	./test/debug_gdb.sh $(abspath $(FICC_BIN))
+
+# Phase 23 progress meter: compile every Git translation unit, bucket failures.
+git-sweep: $(FICC_BIN)
+	FICC=$(abspath $(FICC_BIN)) GIT=$(abspath $(GIT)) ./test/git-sweep.sh
 
 $(FICC_BIN): $(OBJ_SRC) | dirs
 	$(CC) $(LDFLAGS) $^ -o $@

@@ -1160,6 +1160,84 @@ TEST(pp, include_angle_with_I)
     arena_free(a);
 }
 
+TEST(pp, gcc_builtin_type_macros_expand)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "unsigned long x = __SIZE_TYPE__;\nlong y = __PTRDIFF_TYPE__;\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "long"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "unsigned"));
+    EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "__SIZE_TYPE__"));
+    EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "__PTRDIFF_TYPE__"));
+    arena_free(a);
+}
+
+TEST(pp, include_angle_with_isystem)
+{
+    Arena *a = arena_new();
+    const char *dir = pp_test_mkdir(a, "isys");
+    char hpath[200];
+    snprintf(hpath, sizeof(hpath), "%s/h.h", dir);
+    pp_test_write_at(hpath, "#define FROM_ISYS 88\n");
+
+    Pp *pp = pp_new(a);
+    vec_push(pp->cfg.system_include_paths, (void *) dir);
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "#include <h.h>\nint v = FROM_ISYS;\n"));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "88"));
+    arena_free(a);
+}
+
+TEST(pp, isystem_searched_after_I)
+{
+    Arena *a = arena_new();
+    const char *user = pp_test_mkdir(a, "iuser");
+    const char *sys = pp_test_mkdir(a, "isys2");
+    char upath[200];
+    snprintf(upath, sizeof(upath), "%s/h.h", user);
+    pp_test_write_at(upath, "#define PICK 11\n");
+    char spath[200];
+    snprintf(spath, sizeof(spath), "%s/h.h", sys);
+    pp_test_write_at(spath, "#define PICK 22\n");
+
+    Pp *pp = pp_new(a);
+    vec_push(pp->cfg.include_paths, (void *) user);
+    vec_push(pp->cfg.system_include_paths, (void *) sys);
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "#include <h.h>\nint v = PICK;\n"));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "11"));
+    EXPECT_FALSE(soup_has_token(pp, TOK_PP_NUMBER, "22"));
+    arena_free(a);
+}
+
+TEST(pp, isystem_header_warnings_suppressed)
+{
+    Arena *a = arena_new();
+    const char *sys = pp_test_mkdir(a, "isyswarn");
+    char spath[200];
+    snprintf(spath, sizeof(spath), "%s/h.h", sys);
+    pp_test_write_at(spath, "#warning suppressed_here\n");
+
+    Pp *pp = pp_new(a);
+    vec_push(pp->cfg.system_include_paths, (void *) sys);
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "#include <h.h>\n"));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_EQ(pp->warning_count, 0);
+    arena_free(a);
+
+    Arena *a2 = arena_new();
+    const char *user = pp_test_mkdir(a2, "iuserwarn");
+    char upath[200];
+    snprintf(upath, sizeof(upath), "%s/h.h", user);
+    pp_test_write_at(upath, "#warning visible_here\n");
+    Pp *pp2 = pp_new(a2);
+    vec_push(pp2->cfg.include_paths, (void *) user);
+    EXPECT_NOTNULL(pp_preprocess(pp2, "<test>", "#include <h.h>\n"));
+    EXPECT_EQ(pp2->error_count, 0);
+    EXPECT_EQ(pp2->warning_count, 1);
+    arena_free(a2);
+}
+
 TEST(pp, include_builtin_shim_resolves)
 {
     Arena *a = arena_new();

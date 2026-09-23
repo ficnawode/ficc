@@ -7,12 +7,13 @@
 
 typedef struct
 {
-    bool keep_comments; /* -C: print comment trivia (implies emit_pp) */
-    bool no_markers;    /* -P: omit #line markers (implies emit_pp) */
-    bool nostdinc;      /* -nostdinc */
-    bool pedantic;      /* -fpedantic / -fno-pedantic */
-    Vec *include_paths; /* Vec<const char*> — -I dir, in order */
-    Vec *cmds;          /* Vec<PPCommand*>: -D/-U/-include in command-line order */
+    bool keep_comments;        /* -C: print comment trivia (implies emit_pp) */
+    bool no_markers;           /* -P: omit #line markers (implies emit_pp) */
+    bool nostdinc;             /* -nostdinc */
+    bool pedantic;             /* -fpedantic / -fno-pedantic */
+    Vec *include_paths;        /* Vec<const char*> — -I dir, in order */
+    Vec *system_include_paths; /* Vec<const char*> — -isystem dir, after -I */
+    Vec *cmds;                 /* Vec<PPCommand*>: -D/-U/-include in command-line order */
 } PPConfig;
 
 typedef enum

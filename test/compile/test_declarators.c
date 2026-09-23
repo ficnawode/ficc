@@ -313,6 +313,38 @@ TEST(declarators, pointer_param_and_return_types)
                           42);
 }
 
+TEST(declarators, array_param_qualifiers)
+{
+    /* §6.7.6.3p7: an array parameter may carry `restrict`/`static`/`const`
+       between the brackets; they qualify the adjusted pointer, not the
+       element. */
+    EXPECT_INTERP_AND_ELF("int sum(int n, const int a[restrict], int b[static 1]) {\n"
+                          "    int s = 0;\n"
+                          "    for (int i = 0; i < n; i++)\n"
+                          "        s += a[i] + b[i];\n"
+                          "    return s;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    int x[2] = { 20, 0 };\n"
+                          "    int y[2] = { 22, 0 };\n"
+                          "    return sum(1, x, y);\n"
+                          "}\n",
+                          42);
+}
+
+TEST(declarators, array_param_unspecified_bound)
+{
+    /* §6.7.6.3p4: `T a[*]` is only allowed in a prototype and declares an
+       adjusted pointer. */
+    EXPECT_INTERP_AND_ELF("int first(int a[*]);\n"
+                          "int first(int a[4]) { return a[0]; }\n"
+                          "int main(void) {\n"
+                          "    int x[2] = { 42, 0 };\n"
+                          "    return first(x);\n"
+                          "}\n",
+                          42);
+}
+
 /* negatives (all must fail to build) */
 
 TEST(declarators, negative_char_with_long)

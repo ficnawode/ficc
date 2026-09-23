@@ -136,6 +136,38 @@ TEST(cli, include_path_forms)
     arena_free(a);
 }
 
+static const char *system_include_path_at(CompilerConfig *cfg, size_t i)
+{
+    return (const char *) vec_get(cfg->pp.system_include_paths, i);
+}
+
+TEST(cli, system_include_path_forms)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-isystem", "sys1", "-isystem=sys2", "-isystemsys3", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_EQ(vec_size(cfg->pp.system_include_paths), 3);
+    EXPECT_STR_EQ(system_include_path_at(cfg, 0), "sys1");
+    EXPECT_STR_EQ(system_include_path_at(cfg, 1), "sys2");
+    EXPECT_STR_EQ(system_include_path_at(cfg, 2), "sys3");
+    EXPECT_EQ(vec_size(cfg->pp.include_paths), 0);
+    arena_free(a);
+}
+
+TEST(cli, isystem_kept_separate_from_I)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-I", "user", "-isystem", "sys", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_EQ(vec_size(cfg->pp.include_paths), 1);
+    EXPECT_STR_EQ(include_path_at(cfg, 0), "user");
+    EXPECT_EQ(vec_size(cfg->pp.system_include_paths), 1);
+    EXPECT_STR_EQ(system_include_path_at(cfg, 0), "sys");
+    arena_free(a);
+}
+
 TEST(cli, define_forms_and_order)
 {
     Arena *a = arena_new();

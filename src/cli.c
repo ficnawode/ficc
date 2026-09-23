@@ -28,6 +28,7 @@ static void cli_config_init(CompilerConfig *cfg, Arena *arena, const char *exe_p
     cfg->exe_path = exe_path;
     cfg->inputs = vec_new(arena);
     cfg->pp.include_paths = vec_new(arena);
+    cfg->pp.system_include_paths = vec_new(arena);
     cfg->pp.cmds = vec_new(arena);
 }
 
@@ -44,6 +45,16 @@ static bool add_include_path(CompilerConfig *cfg, const char *value)
         return false;
     }
     vec_push(cfg->pp.include_paths, (void *) value);
+    return true;
+}
+
+static bool add_system_include_path(CompilerConfig *cfg, const char *value)
+{
+    if (value[0] == '\0')
+    {
+        return false;
+    }
+    vec_push(cfg->pp.system_include_paths, (void *) value);
     return true;
 }
 
@@ -238,6 +249,8 @@ static const CLIOption option_table[] = {
     {"-fpedantic", ARG_NONE, 0, set_pedantic, "enable pedantic diagnostics"},
     {"-fno-pedantic", ARG_NONE, 0, clear_pedantic, "disable pedantic diagnostics"},
     {"-I", ARG_EITHER, "dir", add_include_path, "add a directory to the include search path"},
+    {"-isystem", ARG_EITHER, "dir", add_system_include_path,
+     "add a system directory to the include search path"},
     {"-D", ARG_EITHER, "name[=val]", add_define, "define a macro"},
     {"-U", ARG_EITHER, "name", add_undef, "undefine a macro"},
     {"-include", ARG_EITHER, "file", add_include_file, "include a file before the main input"},
