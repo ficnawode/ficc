@@ -397,6 +397,22 @@ static void rename_phi_pred(IrFunction *f, const char *old_label, const char *ne
     }
 }
 
+static void hoist_to_entry(IrBlock *entry, Vec *instrs)
+{
+    size_t pos = 0;
+    for (; pos < vec_size(entry->instrs); pos++)
+    {
+        if (((IrInstr *) vec_get(entry->instrs, pos))->opcode != OP_PHI)
+        {
+            break;
+        }
+    }
+    for (size_t i = 0; i < vec_size(instrs); i++)
+    {
+        vec_insert(entry->instrs, pos++, (IrInstr *) vec_get(instrs, i));
+    }
+}
+
 static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 ci, IrInstr *call,
                            IrFunction *callee, Vec *parent_lineage)
 {
@@ -487,6 +503,8 @@ static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 
 
     InlineCtx ic = {.nvregs = nvregs, .vreg_map = vreg_map, .labels = labels};
 
+    /* Allocate the callee's allocas once in the caller's entry, not per site. */
+    Vec *hoisted = vec_new(arena);
     u32 ncloned = 0;
     for (size_t cbi = 0; cbi < ncb; cbi++)
     {
@@ -497,6 +515,7 @@ static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 
         {
             IrInstr *in = (IrInstr *) vec_get(cb->instrs, j);
             IrInstr *ni;
+            bool is_deferred = false;
             switch (in->opcode)
             {
                 case OP_PHI:
@@ -509,15 +528,25 @@ static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 
                     }
                     ni = ret_as_br(nb, in->line, cont->label);
                     break;
+                case OP_ALLOCA:
+                    ni = clone_instr(&ic, nb, in);
+                    vec_push(hoisted, ni);
+                    is_deferred = true;
+                    break;
                 default:
                     ni = clone_instr(&ic, nb, in);
                     break;
             }
-            vec_push(nb->instrs, ni);
+            if (!is_deferred)
+            {
+                vec_push(nb->instrs, ni);
+            }
             ip->budget--;
             ncloned++;
         }
     }
+
+    hoist_to_entry((IrBlock *) vec_get(caller->blocks, 0), hoisted);
 
     charge_caller(ip, caller, ncloned);
     ir_emit_br(bb, ((IrBlock *) vec_get(cloned, 0))->label);

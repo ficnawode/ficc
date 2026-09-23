@@ -806,13 +806,24 @@ static void lower_br(IrInstr *in, X86LowerCtx *ctx)
     emit_jmp(ctx->buf, in->extra.br.target_label, ctx->block_patches, ctx->arena);
 }
 
-static void lower_brcond(IrInstr *in, X86LowerCtx *ctx)
+/* Read the tested operand before loop-carried writes that may overwrite it. */
+static void lower_brcond_test(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 cw = operand_width(ctx, in->ops[0]);
     force_to_reg(ctx, in->ops[0], R_EAX);
     emit_test_reg(ctx->buf, cw, R_EAX);
+}
+
+static void lower_brcond_branch(IrInstr *in, X86LowerCtx *ctx)
+{
     emit_jcc(ctx->buf, CC_E, in->extra.brcond.false_label, ctx->block_patches, ctx->arena);
     emit_jmp(ctx->buf, in->extra.brcond.true_label, ctx->block_patches, ctx->arena);
+}
+
+static void lower_brcond(IrInstr *in, X86LowerCtx *ctx)
+{
+    lower_brcond_test(in, ctx);
+    lower_brcond_branch(in, ctx);
 }
 
 /* Load the switch control into %rax at its exact 64-bit semantic value. */
@@ -1219,6 +1230,13 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
     }
     ASSERT(ii < ninstr && "every block ends in a terminator");
 
+    IrInstr *term = (IrInstr *) vec_get(blk->instrs, ii);
+    bool is_brcond = term->opcode == OP_BRCOND;
+    if (is_brcond)
+    {
+        lower_brcond_test(term, ctx);
+    }
+
     size_t npc = vec_size(ctx->phi_copies[bi]);
     for (size_t pi = 0; pi < npc; pi++)
     {
@@ -1226,9 +1244,15 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
         emit_phi_copy(ctx, pc->src, pc->dst_vreg);
     }
 
-    IrInstr *term = (IrInstr *) vec_get(blk->instrs, ii);
     record_line_entry(ctx, term);
-    lower_instr(term, ctx);
+    if (is_brcond)
+    {
+        lower_brcond_branch(term, ctx);
+    }
+    else
+    {
+        lower_instr(term, ctx);
+    }
     ctx->position_offsets[pos_of(base, ii)] = (u32) bytebuf_len(ctx->buf);
     /* Gap positions (phi-copy and scheduling slots) run to the block end. */
     fill_unset_positions(ctx->position_offsets, base, bend, (u32) bytebuf_len(ctx->buf));

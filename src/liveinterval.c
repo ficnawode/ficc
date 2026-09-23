@@ -119,6 +119,7 @@ typedef struct
     u32 nvregs;
     Bitset **defs;
     Bitset **use_before_def;
+    Bitset **local_defs;
 } BlockSets;
 
 static void record_use(Bitset *seen_defs, Bitset *use_before_def, IrOperand op)
@@ -157,10 +158,36 @@ static void record_phi_edges(const BlockTable *bt, BlockSets *s, IrInstr *in)
             continue;
         }
         bitset_set(s->defs[pj], in->result);
-        IrOperand op = in->extra.phi.entries[e].val;
-        if (ir_operand_is_vreg(op))
+    }
+}
+
+static void add_phi_edge_uses(IrFunction *f, const BlockTable *bt, BlockSets *s)
+{
+    size_t nblocks = bt->nblocks;
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
         {
-            bitset_set(s->use_before_def[pj], op.u.vreg);
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode != OP_PHI)
+            {
+                continue;
+            }
+            for (u32 e = 0; e < in->extra.phi.nentries; e++)
+            {
+                size_t pj;
+                if (!block_index_by_label(bt, in->extra.phi.entries[e].label, &pj))
+                {
+                    continue;
+                }
+                IrOperand op = in->extra.phi.entries[e].val;
+                if (ir_operand_is_vreg(op) && !bitset_test(s->local_defs[pj], op.u.vreg))
+                {
+                    bitset_set(s->use_before_def[pj], op.u.vreg);
+                }
+            }
         }
     }
 }
@@ -177,6 +204,7 @@ static void scan_block_sets(const BlockTable *bt, BlockSets *s, IrBlock *blk, si
         {
             bitset_set(seen_defs, in->result);
             bitset_set(s->defs[b], in->result);
+            bitset_set(s->local_defs[b], in->result);
         }
         for (u8 oi = 0; oi < in->nops; oi++)
         {
@@ -188,6 +216,9 @@ static void scan_block_sets(const BlockTable *bt, BlockSets *s, IrBlock *blk, si
         }
         else if (in->opcode == OP_PHI && in->result != NO_VREG)
         {
+            bitset_set(seen_defs, in->result);
+            bitset_set(s->defs[b], in->result);
+            bitset_set(s->local_defs[b], in->result);
             record_phi_edges(bt, s, in);
         }
     }
@@ -201,10 +232,12 @@ static BlockSets build_block_sets(IrFunction *f, const BlockTable *bt, u32 nvreg
     s.nvregs = nvregs;
     s.defs = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
     s.use_before_def = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
+    s.local_defs = arena_alloc(arena, nblocks * sizeof(Bitset *), sizeof(void *));
     for (size_t b = 0; b < nblocks; b++)
     {
         s.defs[b] = bitset_new(arena, nvregs);
         s.use_before_def[b] = bitset_new(arena, nvregs);
+        s.local_defs[b] = bitset_new(arena, nvregs);
     }
 
     size_t nparams = vec_size(f->params);
@@ -214,6 +247,7 @@ static BlockSets build_block_sets(IrFunction *f, const BlockTable *bt, u32 nvreg
         if (pv != NO_VREG && nblocks > 0)
         {
             bitset_set(s.defs[0], pv);
+            bitset_set(s.local_defs[0], pv);
         }
     }
 
@@ -221,6 +255,7 @@ static BlockSets build_block_sets(IrFunction *f, const BlockTable *bt, u32 nvreg
     {
         scan_block_sets(bt, &s, (IrBlock *) vec_get(f->blocks, b), b, arena);
     }
+    add_phi_edge_uses(f, bt, &s);
     return s;
 }
 
@@ -442,6 +477,10 @@ static Bitset **phi_copy_marks(IntervalCtx *cx, IrFunction *f, Arena *arena)
             if (in->opcode != OP_PHI || in->result == NO_VREG)
             {
                 continue;
+            }
+            if (cx->pos->block_base[b] < cx->start[in->result])
+            {
+                cx->start[in->result] = cx->pos->block_base[b];
             }
             for (u32 e = 0; e < in->extra.phi.nentries; e++)
             {

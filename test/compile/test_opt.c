@@ -342,3 +342,50 @@ TEST(opt, level2_inline_loop_discount)
 {
     opt_run_level(inline_loop_leaf_src, "-O2", 0);
 }
+
+/* The back-edge write shares a block with the branch testing b. */
+static const char *dowhile_postdec_src = "int main(void)\n"
+                                         "{\n"
+                                         "    int b = 3;\n"
+                                         "    int count = 0;\n"
+                                         "    do {\n"
+                                         "        count = count + 1;\n"
+                                         "    } while (b--);\n"
+                                         "    return count;\n"
+                                         "}\n";
+
+TEST(opt, level1_dowhile_postdec)
+{
+    opt_run_level(dowhile_postdec_src, "-O1", 4);
+}
+
+TEST(opt, level2_dowhile_postdec)
+{
+    opt_run_level(dowhile_postdec_src, "-O2", 4);
+}
+
+TEST(opt, level3_dowhile_postdec)
+{
+    opt_run_level(dowhile_postdec_src, "-O3", 4);
+}
+
+/* Inlining a callee with an alloca into a loop must not leak stack per step. */
+static const char *inline_alloca_loop_src =
+    "struct big { int a[64]; };\n"
+    "static int leaf(int x) { struct big s; s.a[0] = x; return s.a[0]; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    int sum = 0;\n"
+    "    for (int i = 0; i < 100000; i = i + 1) sum = sum + leaf(i);\n"
+    "    return sum == 704982704 ? 0 : 1;\n"
+    "}\n";
+
+TEST(opt, level1_inline_alloca_loop)
+{
+    opt_run_level(inline_alloca_loop_src, "-O1", 0);
+}
+
+TEST(opt, level2_inline_alloca_loop)
+{
+    opt_run_level(inline_alloca_loop_src, "-O2", 0);
+}

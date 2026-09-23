@@ -203,7 +203,7 @@ static void finalize_push_token(FinalizeCtx *ctx, Token token)
         }
     }
 
-    Token *slot = arena_alloc(ctx->arena, sizeof(Token), sizeof(void *));
+    Token *slot = arena_alloc(ctx->arena, sizeof(Token), _Alignof(Token));
     *slot = token;
     if (slot->loc.file)
     {
@@ -703,7 +703,7 @@ LexResult lex_finalize(const Vec *soup, Arena *arena)
     finalize_push_token(&ctx, (Token) {.kind = TOK_EOF, .loc = eof_loc});
 
     size_t count = vec_size(ctx.tokens);
-    Token *arr = arena_alloc(arena, count * sizeof(Token), sizeof(void *));
+    Token *arr = arena_alloc(arena, count * sizeof(Token), _Alignof(Token));
     for (size_t i = 0; i < count; i++)
     {
         Token *slot = (Token *) vec_get(ctx.tokens, i);
