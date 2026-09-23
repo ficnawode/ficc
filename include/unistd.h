@@ -2,6 +2,7 @@
 #define FICC_UNISTD_H
 
 #include <stddef.h>
+#include <sys/types.h>
 
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1
@@ -12,8 +13,6 @@
 #define W_OK 2
 #define R_OK 4
 
-typedef long ssize_t;
-
 int close(int fd);
 int isatty(int fd);
 int access(const char *path, int mode);
@@ -21,6 +20,7 @@ int unlink(const char *path);
 int link(const char *oldpath, const char *newpath);
 ssize_t read(int fd, void *buf, size_t count);
 ssize_t write(int fd, const void *buf, size_t count);
+off_t lseek(int fd, off_t offset, int whence);
 int mkstemp(char *template_);
 int getpid(void);
 char *getcwd(char *buf, size_t size);

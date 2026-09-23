@@ -389,3 +389,51 @@ TEST(opt, level2_inline_alloca_loop)
 {
     opt_run_level(inline_alloca_loop_src, "-O2", 0);
 }
+
+/* Constant folding must evaluate at the operand width: `(unsigned)-1 >> 2` is
+   0x3fffffff, not a 64-bit shift truncated back to 0xffffffff. */
+static const char *fold_unsigned_shift_src =
+    "int main(void)\n"
+    "{\n"
+    "    unsigned max = ((unsigned)-1 >> 2) + 1;\n"
+    "    unsigned half = (unsigned)-1 >> 1;\n"
+    "    return (max == 1073741824u && half == 2147483647u) ? 0 : 1;\n"
+    "}\n";
+
+TEST(opt, level1_fold_unsigned_shift_width)
+{
+    opt_run_level(fold_unsigned_shift_src, "-O1", 0);
+}
+
+TEST(opt, level2_fold_unsigned_shift_width)
+{
+    opt_run_level(fold_unsigned_shift_src, "-O2", 0);
+}
+
+TEST(opt, level3_fold_unsigned_shift_width)
+{
+    opt_run_level(fold_unsigned_shift_src, "-O3", 0);
+}
+
+/* A shift's result type is the promoted left operand (§6.5.7p3); the right
+   operand must not turn a signed comparison unsigned. */
+static const char *shift_result_type_src =
+    "int main(void)\n"
+    "{\n"
+    "    return ((long)1 << (sizeof(long) * 8 - 2)) > -1 ? 0 : 1;\n"
+    "}\n";
+
+TEST(opt, level1_shift_result_type_signed)
+{
+    opt_run_level(shift_result_type_src, "-O1", 0);
+}
+
+TEST(opt, level2_shift_result_type_signed)
+{
+    opt_run_level(shift_result_type_src, "-O2", 0);
+}
+
+TEST(opt, level3_shift_result_type_signed)
+{
+    opt_run_level(shift_result_type_src, "-O3", 0);
+}

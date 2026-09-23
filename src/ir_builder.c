@@ -2401,6 +2401,10 @@ static RelocTarget serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap
         case AST_STRING_LITERAL:
             return reloc_target_object(
                 ir_add_string_global(ast_as(ASTStringLiteral, value), mod, arena));
+        case AST_CAST_EXPR:
+            /* A cast only adjusts the pointer type; the address constant is in the operand. */
+            return serializer_reloc_target(ast_as(ASTCastExpr, value)->operand, mod, global_map,
+                                           static_map, arena);
         case AST_IDENT:
         {
             ASTIdent *id = ast_as(ASTIdent, value);

@@ -112,3 +112,16 @@ TEST(qualifiers, volatile_deref_pointer_casts)
                           "}\n",
                           0);
 }
+
+/* Declaration specifiers are unordered (§6.7.1p6): a qualifier may sit between
+   the signedness keyword and the base type, as in `unsigned const char`. */
+TEST(qualifiers, qualifier_between_type_specifiers)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    unsigned const char c = 200;\n"
+                          "    unsigned const int i = 7;\n"
+                          "    const unsigned long l = 9;\n"
+                          "    return (c == 200 && i == 7 && l == 9) ? 0 : 1;\n"
+                          "}\n",
+                          0);
+}

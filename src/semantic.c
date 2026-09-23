@@ -360,6 +360,11 @@ static Type *value_op_result(BinOpKind op, Type *lt, Type *rt)
     {
         return NULL;
     }
+    /* §6.5.7p3: a shift's result type is the promoted left operand. */
+    if (op == BIN_SHL || op == BIN_SHR)
+    {
+        return type_promote(lt);
+    }
     return type_common(type_promote(lt), type_promote(rt));
 }
 

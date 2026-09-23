@@ -211,6 +211,7 @@ static bool paren_is_typename(Parser *p)
 }
 
 static Type *parse_type_specifier(Parser *p);
+static Type *apply_quals(Type *t, u8 quals);
 static Type *parse_abstract_declarator(Parser *p, Type *base);
 static Type *parse_array_suffix(Parser *p, Type *type);
 static Vec *parse_param_list(Parser *p, bool *out_variadic);
@@ -564,14 +565,25 @@ static Type *parse_integer_specifiers(Parser *p)
     int n_long = 0;
     int n_float = 0;
     int n_double = 0;
+    u8 mid_quals = 0;
 
     Token *t = peek_token(p);
     while (t->kind == TOK_KW_SIGNED || t->kind == TOK_KW_UNSIGNED || t->kind == TOK_KW_CHAR ||
            t->kind == TOK_KW_SHORT || t->kind == TOK_KW_INT || t->kind == TOK_KW_LONG ||
-           t->kind == TOK_KW_FLOAT || t->kind == TOK_KW_DOUBLE)
+           t->kind == TOK_KW_FLOAT || t->kind == TOK_KW_DOUBLE || t->kind == TOK_KW_CONST ||
+           t->kind == TOK_KW_VOLATILE || t->kind == TOK_KW_RESTRICT)
     {
         switch (t->kind)
         {
+            case TOK_KW_CONST:
+                mid_quals |= Q_CONST;
+                break;
+            case TOK_KW_VOLATILE:
+                mid_quals |= Q_VOLATILE;
+                break;
+            case TOK_KW_RESTRICT:
+                mid_quals |= Q_RESTRICT;
+                break;
             case TOK_KW_SIGNED:
                 n_signed++;
                 break;
@@ -639,9 +651,9 @@ static Type *parse_integer_specifiers(Parser *p)
         }
         if (n_double && n_long)
         {
-            return type_long_double();
+            return apply_quals(type_long_double(), mid_quals);
         }
-        return n_float ? type_float() : type_double();
+        return apply_quals(n_float ? type_float() : type_double(), mid_quals);
     }
 
     if (n_char && (n_short || n_int || n_long))
@@ -662,21 +674,21 @@ static Type *parse_integer_specifiers(Parser *p)
 
     if (n_char)
     {
-        return n_unsigned ? type_uchar() : type_char();
+        return apply_quals(n_unsigned ? type_uchar() : type_char(), mid_quals);
     }
     if (n_short)
     {
-        return n_unsigned ? type_ushort() : type_short();
+        return apply_quals(n_unsigned ? type_ushort() : type_short(), mid_quals);
     }
     if (n_long)
     {
         if (n_unsigned)
         {
-            return n_long >= 2 ? type_ullong() : type_ulong();
+            return apply_quals(n_long >= 2 ? type_ullong() : type_ulong(), mid_quals);
         }
-        return n_long >= 2 ? type_llong() : type_long();
+        return apply_quals(n_long >= 2 ? type_llong() : type_long(), mid_quals);
     }
-    return n_unsigned ? type_uint() : type_int();
+    return apply_quals(n_unsigned ? type_uint() : type_int(), mid_quals);
 }
 
 static u32 parse_alignas_specifier(Parser *p)
@@ -870,18 +882,6 @@ static Type *ptr_layers(Type *t, u32 n)
     return t;
 }
 
-static u32 strip_ptrs(Type *t, Type **innermost)
-{
-    u32 n = 0;
-    while (t->kind == TYPE_PTR)
-    {
-        n++;
-        t = t->ptr.pointee;
-    }
-    *innermost = t;
-    return n;
-}
-
 static Type *parse_group_suffixes(Parser *p, Type *t, u32 *nptr, Vec **captured_params,
                                   bool *captured_variadic)
 {
@@ -945,17 +945,14 @@ static bool parse_declarator_group(Parser *p, Type *base, u32 nptr, Declarator *
         return false;
     }
 
-    Type *core;
-    u32 inner_ptrs;
-    /* An explicit `*` wraps the suffix; a base-type pointer stays in the return type. */
-    if (inner.stars > 0)
+    Type *core = inner.type;
+    u32 inner_ptrs = 0;
+    /* Strip only the declarator's own `*` layers; pointer layers from the base
+       type (e.g. a pointer typedef return type) belong to the return type. */
+    while (inner_ptrs < inner.stars && core->kind == TYPE_PTR)
     {
-        inner_ptrs = strip_ptrs(inner.type, &core);
-    }
-    else
-    {
-        core = inner.type;
-        inner_ptrs = 0;
+        core = core->ptr.pointee;
+        inner_ptrs++;
     }
 
     out->func_params = NULL;

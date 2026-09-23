@@ -52,11 +52,20 @@ i64 opt_normalize(i64 raw, u8 width_bytes, bool is_signed)
     }
 }
 
+static bool is_icmp(IrOpcode op)
+{
+    return op >= OP_ICMP_EQ && op <= OP_ICMP_SGE;
+}
+
 bool opt_fold_int(const IrModule *mod, const IrInstr *in, i64 *out)
 {
     u8 w = mod->widths[in->result];
     bool is_signed = mod->signedness[in->result];
-    i64 lhs = in->ops[0].u.imm;
+    /* Arithmetic/bitwise/shift operands share the result width, so fold there:
+       a sign-extended -1 must act like its truncated unsigned value. Comparison
+       operands may be wider than the i32 result, so leave those raw. */
+    bool cmp = is_icmp(in->opcode);
+    i64 lhs = cmp ? in->ops[0].u.imm : opt_normalize(in->ops[0].u.imm, w, is_signed);
     i64 raw = 0;
     if (in->opcode == OP_NEG || in->opcode == OP_NOT)
     {
@@ -64,7 +73,7 @@ bool opt_fold_int(const IrModule *mod, const IrInstr *in, i64 *out)
     }
     else
     {
-        i64 rhs = in->ops[1].u.imm;
+        i64 rhs = cmp ? in->ops[1].u.imm : opt_normalize(in->ops[1].u.imm, w, is_signed);
         switch (in->opcode)
         {
             case OP_ADD:

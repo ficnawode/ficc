@@ -568,18 +568,30 @@ static void finalize_number(FinalizeCtx *ctx, const PpToken *tok)
 
     u64 base = 10;
     bool is_hex = false;
+    bool is_octal = false;
     if (len >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
     {
         base = 16;
         is_hex = true;
     }
+    else if (len >= 2 && s[0] == '0')
+    {
+        /* C11 §6.4.4.1: a leading 0 introduces an octal constant. */
+        base = 8;
+        is_octal = true;
+    }
 
     u32 i = is_hex ? 2 : 0;
     u64 val = 0;
     bool overflow = false;
-    while (i < len && (base == 16 ? is_hex_digit(s[i]) : is_digit(s[i])))
+    while (i < len)
     {
+        /* hex_digit_value returns >= base for any character outside the radix. */
         u64 digit = hex_digit_value(s[i]);
+        if (digit >= base)
+        {
+            break;
+        }
         if (!overflow && val > ((u64) UINT64_MAX - digit) / base)
         {
             overflow = true;
@@ -620,30 +632,31 @@ static void finalize_number(FinalizeCtx *ctx, const PpToken *tok)
         return;
     }
 
-    /* C11 §6.4.4.1: hex and octal literals may take an unsigned type when the
-       value exceeds the widest signed type; decimal literals are signed-only,
-       and an explicit u/U suffix widens the range to UINT64_MAX. */
+    /* C11 §6.4.4.1: hex/octal ("non-decimal") literals may take an unsigned
+       type when the value exceeds the widest signed type; decimal literals are
+       signed-only, and an explicit u/U suffix widens the range to UINT64_MAX. */
+    bool is_non_decimal = is_hex || is_octal;
     if (overflow)
     {
         finalize_error(ctx, tok->loc, "integer literal overflow");
         return;
     }
-    if (!is_unsigned && !is_hex && val > (u64) INT64_MAX)
+    if (!is_unsigned && !is_non_decimal && val > (u64) INT64_MAX)
     {
         finalize_error(ctx, tok->loc, "integer literal overflow");
         return;
     }
-    if (!is_unsigned && is_hex && val > (u64) INT64_MAX)
+    if (!is_unsigned && is_non_decimal && val > (u64) INT64_MAX)
     {
         is_unsigned = true;
     }
 
-    finalize_push_token(
-        ctx,
-        (Token) {.kind = TOK_INT_LIT,
-                 .loc = tok->loc,
-                 .payload = {.int_val = (i64) val},
-                 .int_suffix = {.is_unsigned = is_unsigned, .length = length, .is_hex = is_hex}});
+    finalize_push_token(ctx, (Token) {.kind = TOK_INT_LIT,
+                                      .loc = tok->loc,
+                                      .payload = {.int_val = (i64) val},
+                                      .int_suffix = {.is_unsigned = is_unsigned,
+                                                     .length = length,
+                                                     .is_hex = is_non_decimal}});
 }
 
 static void finalize_pp_token(FinalizeCtx *ctx, const PpToken *tok)

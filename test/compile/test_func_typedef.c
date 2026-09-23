@@ -65,3 +65,21 @@ TEST(func_typedef, plain_name_form_unchanged)
                           "}\n",
                           42);
 }
+
+/* The function-pointer typedef's return type is itself a pointer typedef
+   (zlib's alloc_func); that pointer layer belongs to the return type, not to
+   the declarator's `*`. */
+TEST(func_typedef, pointer_typedef_return_type)
+{
+    EXPECT_INTERP_AND_ELF("typedef void *VP;\n"
+                          "typedef VP (*AF)(VP, unsigned);\n"
+                          "struct S { AF f; };\n"
+                          "static VP ident(VP p, unsigned n) { (void) n; return p; }\n"
+                          "int main(void) {\n"
+                          "    struct S s;\n"
+                          "    int v = 7;\n"
+                          "    s.f = ident;\n"
+                          "    return s.f(&v, 1) == &v ? 0 : 1;\n"
+                          "}\n",
+                          0);
+}

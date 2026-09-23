@@ -37,6 +37,20 @@ TEST(static_ptr_init, array_of_string_pointer_const)
                           0);
 }
 
+/* A cast of a string literal to a pointer type is still an address constant
+   (zlib's `z_errmsg[] = { (z_const char *)"need dictionary", ... }`). */
+TEST(static_ptr_init, cast_string_literal_pointer_array)
+{
+    EXPECT_INTERP_AND_ELF("static const char *const msgs[3] = {\n"
+                          "    (const char *) \"a\", (char *) \"bb\", \"ccc\"\n"
+                          "};\n"
+                          "int main(void) {\n"
+                          "    return msgs[0][0] == 'a' && msgs[1][1] == 'b' && msgs[2][2] == 'c'\n"
+                          "               ? 0 : 1;\n"
+                          "}\n",
+                          0);
+}
+
 TEST(static_ptr_init, pointer_array_of_static_arrays)
 {
     EXPECT_INTERP_AND_ELF("static char a[3] = \"ab\";\n"

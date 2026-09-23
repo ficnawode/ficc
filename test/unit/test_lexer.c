@@ -905,6 +905,22 @@ TEST(finalize, hex_int_is_not_float)
     arena_free(a);
 }
 
+TEST(finalize, octal_int_literals)
+{
+    Arena *a = arena_new();
+    LexResult res = lex_text("0644 010 0777 0", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 5);
+    EXPECT_EQ(t[0].kind, TOK_INT_LIT);
+    EXPECT_EQ(t[0].payload.int_val, 420); /* 0644 octal */
+    EXPECT_EQ(t[1].payload.int_val, 8);   /* 010 octal */
+    EXPECT_EQ(t[2].payload.int_val, 511); /* 0777 octal */
+    EXPECT_EQ(t[3].payload.int_val, 0);
+    EXPECT_TRUE(t[0].int_suffix.is_hex); /* non-decimal: unsigned-capable */
+    arena_free(a);
+}
+
 TEST(finalize, integer_suffixes)
 {
     Arena *a = arena_new();
