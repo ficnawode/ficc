@@ -49,6 +49,8 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd);
 static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type);
 static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx);
 static bool check_generic_selection(ASTGenericSelection *gs, SemanticCtx *ctx);
+static bool fold_integer_constant(ASTNode *node, i64 *out);
+static bool sem_resolve_type(Type **slot, SemanticCtx *ctx);
 
 static bool sem_error(SemanticCtx *ctx, Loc loc, const char *fmt, ...)
 {
@@ -827,6 +829,10 @@ static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx)
     {
         return false;
     }
+    if (!sem_resolve_type(&ce->target_type, ctx))
+    {
+        return false;
+    }
     Type *target = ce->target_type;
     Type *op = ce->operand->expr_type;
     if (target->kind == TYPE_VOID)
@@ -968,6 +974,69 @@ static bool check_subscript_expr(ASTSubscriptExpr *se, SemanticCtx *ctx)
     return true;
 }
 
+/* Resolves a parser-deferred array bound as an integer constant expression
+   (§6.6) once expression types are known; VLAs are out of scope. */
+static bool sem_resolve_type(Type **slot, SemanticCtx *ctx)
+{
+    Type *type = *slot;
+    if (!type)
+    {
+        return true;
+    }
+    if (type_array_is_pending(type))
+    {
+        ASTNode *bound = type->arr.bound_expr;
+        if (!check_expr(bound, ctx))
+        {
+            return false;
+        }
+        i64 length;
+        if (!fold_integer_constant(bound, &length))
+        {
+            return sem_error(ctx, bound->loc, "array size must be an integer constant");
+        }
+        if (length < 0)
+        {
+            return sem_error(ctx, bound->loc, "array size must not be negative");
+        }
+        Type *elem = type->arr.elem;
+        if (!sem_resolve_type(&elem, ctx))
+        {
+            return false;
+        }
+        type->arr.elem = elem;
+        *slot = type_array_resolve(type, (u64) length);
+        return true;
+    }
+    if (type->kind == TYPE_ARRAY)
+    {
+        Type *elem = type->arr.elem;
+        if (!sem_resolve_type(&elem, ctx))
+        {
+            return false;
+        }
+        if (elem != type->arr.elem)
+        {
+            *slot = type_array(elem, type->arr.length);
+        }
+        return true;
+    }
+    if (type->kind == TYPE_PTR)
+    {
+        Type *pointee = type->ptr.pointee;
+        if (!sem_resolve_type(&pointee, ctx))
+        {
+            return false;
+        }
+        if (pointee != type->ptr.pointee)
+        {
+            *slot = type_ptr(pointee);
+        }
+        return true;
+    }
+    return true;
+}
+
 static bool check_sizeof_expr(ASTSizeofExpr *se, SemanticCtx *ctx)
 {
     ASTNode *node = &se->base;
@@ -1011,6 +1080,10 @@ static bool check_sizeof_expr(ASTSizeofExpr *se, SemanticCtx *ctx)
             op_type = ft;
         }
     }
+    if (!sem_resolve_type(&op_type, ctx))
+    {
+        return false;
+    }
     if (op_type->kind == TYPE_VOID)
     {
         return sem_error(ctx, node->loc, "sizeof(void) is invalid");
@@ -1031,6 +1104,10 @@ static bool check_sizeof_expr(ASTSizeofExpr *se, SemanticCtx *ctx)
 static bool check_sizeof_type(ASTSizeofType *st, SemanticCtx *ctx)
 {
     ASTNode *node = &st->base;
+    if (!sem_resolve_type(&st->type, ctx))
+    {
+        return false;
+    }
     if (st->type->kind == TYPE_VOID)
     {
         return sem_error(ctx, node->loc, "sizeof(void) is invalid");
@@ -1074,6 +1151,10 @@ static bool check_alignof_expr(ASTAlignofExpr *ae, SemanticCtx *ctx)
             op_type = ft;
         }
     }
+    if (!sem_resolve_type(&op_type, ctx))
+    {
+        return false;
+    }
     if (op_type->kind == TYPE_VOID)
     {
         return sem_error(ctx, node->loc, "_Alignof(void) is invalid");
@@ -1090,6 +1171,10 @@ static bool check_alignof_expr(ASTAlignofExpr *ae, SemanticCtx *ctx)
 static bool check_alignof_type(ASTAlignofType *at, SemanticCtx *ctx)
 {
     ASTNode *node = &at->base;
+    if (!sem_resolve_type(&at->type, ctx))
+    {
+        return false;
+    }
     if (at->type->kind == TYPE_VOID)
     {
         return sem_error(ctx, node->loc, "_Alignof(void) is invalid");
@@ -1316,6 +1401,10 @@ static bool check_auto_initializer(ASTVarDecl *var_decl, SemanticCtx *ctx)
 
 static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
 {
+    if (!sem_resolve_type(&var_decl->type, ctx))
+    {
+        return false;
+    }
     if (scope_top_lookup(ctx, var_decl->name))
     {
         return sem_error(ctx, var_decl->base.loc, "redeclaration of '%s'", var_decl->name);
@@ -2021,6 +2110,10 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
    qualifiers intact; initialization itself bypasses the write gate. */
 static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx)
 {
+    if (!sem_resolve_type(&cl->type, ctx))
+    {
+        return false;
+    }
     Type *ty = type_unqual(cl->type);
     if (ty->kind == TYPE_VOID)
     {
@@ -2768,6 +2861,10 @@ static bool global_replaced(ASTVarDecl *vd, ASTVarDecl *existing)
    merge, two constant definitions collide, and the most-defined one wins. */
 static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
 {
+    if (!sem_resolve_type(&vd->type, ctx))
+    {
+        return false;
+    }
     if (strmap_get(ctx->globals, vd->name))
     {
         return sem_error(ctx, vd->base.loc, "redefinition of '%s' as a global variable", vd->name);

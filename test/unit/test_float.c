@@ -455,7 +455,7 @@ TEST(float, fp_integer_only_contexts_reject_floats)
     EXPECT_BUILD_FAIL("int main(void) { switch (1) { case 1.5: break; } return 0; }");
     EXPECT_BUILD_FAIL("_Static_assert(1.5, \"nope\");\n"
                       "int main(void) { return 0; }");
-    EXPECT_PARSE_FAIL("int a[1.5];");
+    EXPECT_BUILD_FAIL("int main(void) { int a[1.5]; return 0; }");
     EXPECT_PARSE_FAIL("enum E { A = 1.5 };");
     EXPECT_PARSE_FAIL("_Alignas(1.5) int x;");
 }

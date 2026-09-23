@@ -84,6 +84,8 @@ struct Type
         {
             Type *elem;
             u64 length;
+            struct ASTNode *bound_expr; /* non-NULL: constant bound not yet folded
+                                           (§6.7.6.2); `length` is 0 until resolved */
         } arr;
         struct
         {
@@ -147,6 +149,14 @@ bool type_is_volatile(Type *t);
 
 Type *type_ptr(Type *pointee);
 Type *type_array(Type *elem, u64 length);
+
+/* An array whose bound is a constant expression not yet folded at parse time
+   (`T a[sizeof(x)]`). Semantic resolves it with type_array once the bound
+   folds to an integer constant; the pending type never escapes semantic. */
+Type *type_array_pending(Type *elem, struct ASTNode *bound_expr);
+Type *type_array_resolve(Type *pending, u64 length);
+bool type_array_is_pending(Type *t);
+
 Type *type_func(Type *ret, Vec *params, bool is_variadic);
 bool type_is_variadic(Type *t);
 Type *type_record(TypeKind kind, const char *tag);

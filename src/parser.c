@@ -15,6 +15,7 @@ struct Parser
     StrMap *enum_consts;
     Vec *name_scopes;
     ParserConfig cfg;
+    const char *cur_func; /* enclosing function name for the `__func__` identifier */
 };
 
 typedef enum
@@ -1248,6 +1249,7 @@ static Type *parse_array_suffix(Parser *p, Type *type, u32 *ndim_out)
         MAX_ARRAY_DIM = 32,
     };
     u64 dims[MAX_ARRAY_DIM];
+    ASTNode *dim_exprs[MAX_ARRAY_DIM];
     size_t ndim = 0;
     while (peek_token(p)->kind == TOK_LBRACKET)
     {
@@ -1267,6 +1269,7 @@ static Type *parse_array_suffix(Parser *p, Type *type, u32 *ndim_out)
             }
         }
         u64 len = 0;
+        ASTNode *bound_expr = NULL;
         if (peek_token(p)->kind == TOK_STAR)
         {
             next_token(p);
@@ -1274,13 +1277,19 @@ static Type *parse_array_suffix(Parser *p, Type *type, u32 *ndim_out)
         else if (peek_token(p)->kind != TOK_RBRACKET)
         {
             ASTNode *size_expr = parse_assign(p);
-            i64 folded;
-            if (!size_expr || !folded_const(p, size_expr, &folded))
+            if (!size_expr)
             {
-                parse_error(p, "array size must be an integer constant");
                 return NULL;
             }
-            len = (u64) folded;
+            i64 folded;
+            if (folded_const(p, size_expr, &folded))
+            {
+                len = (u64) folded;
+            }
+            else
+            {
+                bound_expr = size_expr;
+            }
         }
         expect_token(p, TOK_RBRACKET, "]");
         if (ndim == MAX_ARRAY_DIM)
@@ -1288,11 +1297,20 @@ static Type *parse_array_suffix(Parser *p, Type *type, u32 *ndim_out)
             parse_error(p, "too many array dimensions");
             return NULL;
         }
-        dims[ndim++] = len;
+        dims[ndim] = len;
+        dim_exprs[ndim] = bound_expr;
+        ndim++;
     }
     for (size_t i = ndim; i > 0; i--)
     {
-        type = type_array(type, dims[i - 1]);
+        if (dim_exprs[i - 1])
+        {
+            type = type_array_pending(type, dim_exprs[i - 1]);
+        }
+        else
+        {
+            type = type_array(type, dims[i - 1]);
+        }
     }
     if (ndim_out)
     {
@@ -1595,7 +1613,10 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
         }
     }
 
+    const char *saved_func = p->cur_func;
+    p->cur_func = d.name;
     ASTNode *body = parse_compound_stmt(p);
+    p->cur_func = saved_func;
     if (!body)
     {
         return NULL;
@@ -1662,7 +1683,10 @@ static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start
         }
     }
     push_scope(p);
+    const char *saved_func = p->cur_func;
+    p->cur_func = d.name;
     ASTNode *body = parse_compound_stmt(p);
+    p->cur_func = saved_func;
     if (!body)
     {
         return NULL;
@@ -2366,6 +2390,11 @@ static ASTNode *parse_primary(Parser *p)
                 p->tokens[p->pos + 1].kind == TOK_LPAREN)
             {
                 return parse_builtin_va_arg(p, t);
+            }
+            if (strcmp(t->payload.str, "__func__") == 0 && p->cur_func)
+            {
+                next_token(p);
+                return ast_string_literal(p->cur_func, (u64) strlen(p->cur_func), t->loc, p->arena);
             }
             {
                 i64 *const_val = strmap_get(p->enum_consts, t->payload.str);
@@ -3227,7 +3256,7 @@ ASTNode *parse(Token *tokens, u64 count, const ParserConfig *cfg, Arena *arena)
     {
         pc = *cfg;
     }
-    Parser p = {tokens, count, 0, arena, strmap_new(arena), vec_new(arena), pc};
+    Parser p = {tokens, count, 0, arena, strmap_new(arena), vec_new(arena), pc, NULL};
     push_scope(&p);
 
     if (!declare_name(&p, "__builtin_va_list", BIND_TYPEDEF, type_va_list()))

@@ -49,3 +49,15 @@ TEST(string_literal, string_init_fills_array)
                           "}\n",
                           0);
 }
+TEST(string_literal, func_identifier)
+{
+    /* C11 §6.4.2.2: `__func__` is the enclosing function name as a static
+       const char array. */
+    EXPECT_INTERP_AND_ELF("static int len(void) { return (int) sizeof(__func__); }\n"
+                          "int main(void) {\n"
+                          "    if (len() != 4) return 1;\n"
+                          "    if (__func__[0] != 'm') return 2;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}

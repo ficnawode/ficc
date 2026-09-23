@@ -471,8 +471,35 @@ Type *type_array(Type *elem, u64 length)
     t->unqual_base = NULL;
     t->arr.elem = elem;
     t->arr.length = length;
+    t->arr.bound_expr = NULL;
     u64map_set(array_cache, key, t);
     return t;
+}
+
+Type *type_array_pending(Type *elem, struct ASTNode *bound_expr)
+{
+    type_init_pool();
+    Type *t = arena_alloc(type_arena, sizeof(Type), _Alignof(Type));
+    t->kind = TYPE_ARRAY;
+    t->width = elem->width;
+    t->align = elem->align;
+    t->size = 0;
+    t->qualifiers = 0;
+    t->unqual_base = NULL;
+    t->arr.elem = elem;
+    t->arr.length = 0;
+    t->arr.bound_expr = bound_expr;
+    return t;
+}
+
+Type *type_array_resolve(Type *pending, u64 length)
+{
+    return type_array(pending->arr.elem, length);
+}
+
+bool type_array_is_pending(Type *t)
+{
+    return t && t->kind == TYPE_ARRAY && t->arr.bound_expr != NULL;
 }
 
 /* Structural key for an interned function type: mixes the (interned, so
@@ -631,7 +658,12 @@ Type *type_qualify(Type *t, u8 qbits)
        lvalues are const through the element type. */
     if (t->kind == TYPE_ARRAY)
     {
-        return type_array(type_qualify(t->arr.elem, qbits), t->arr.length);
+        Type *elem = type_qualify(t->arr.elem, qbits);
+        if (t->arr.bound_expr)
+        {
+            return type_array_pending(elem, t->arr.bound_expr);
+        }
+        return type_array(elem, t->arr.length);
     }
     type_init_pool();
     Type *base = t;
@@ -678,6 +710,10 @@ Type *type_unqual(Type *t)
         if (elem == t->arr.elem)
         {
             return t;
+        }
+        if (t->arr.bound_expr)
+        {
+            return type_array_pending(elem, t->arr.bound_expr);
         }
         return type_array(elem, t->arr.length);
     }
