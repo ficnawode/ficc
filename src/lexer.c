@@ -50,6 +50,7 @@ static const Keyword KEYWORDS[] = {
     {"_Alignas", TOK_KW_ALIGNAS},
     {"_Alignof", TOK_KW_ALIGNOF},
     {"_Bool", TOK_KW_BOOL},
+    {"_Generic", TOK_KW_GENERIC},
     {"_Static_assert", TOK_KW_STATIC_ASSERT},
     {"break", TOK_KW_BREAK},
     {"case", TOK_KW_CASE},

@@ -49,7 +49,8 @@
     X(AST_DECL_LIST)                                                                               \
     X(AST_STATIC_ASSERT)                                                                           \
     X(AST_VA_ARG_EXPR)                                                                             \
-    X(AST_FUNC_DECL)
+    X(AST_FUNC_DECL)                                                                               \
+    X(AST_GENERIC_SELECTION)
 
 typedef enum
 {
@@ -565,6 +566,30 @@ struct ASTCompoundLiteral
     struct InitPlan *plan; /* flattening plan (filled by semantic) */
 };
 
+/* One generic association `type : expr` (C11 §6.5.15). `type` is NULL for the
+   `default` association, whose expression lives in the selection's
+   `default_expr`. */
+typedef struct GenericAssoc GenericAssoc;
+struct GenericAssoc
+{
+    Type *type;
+    ASTNode *expr;
+};
+
+/* Generic selection `_Generic(controlling, assoc-list)` (§6.5.15): a
+   compile-time choice among association expressions. Semantic resolves the
+   compatible association (or `default`) and records it in `selected`; only
+   that expression is evaluated and lowered. */
+typedef struct ASTGenericSelection ASTGenericSelection;
+struct ASTGenericSelection
+{
+    ASTNode base;
+    ASTNode *controlling;
+    Vec *assocs;           /* Vec<GenericAssoc*> — non-default associations */
+    ASTNode *default_expr; /* NULL when no `default` association */
+    ASTNode *selected;     /* filled by semantic: the chosen expression */
+};
+
 ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body, FuncSpecs spec,
                       bool is_variadic, Loc loc, Arena *arena);
 ASTNode *ast_func_decl(Type *ret_type, const char *name, Vec *params, FuncSpecs spec,
@@ -618,6 +643,8 @@ ASTNode *ast_va_arg_expr(ASTNode *ap, Type *type, Loc loc, Arena *arena);
 ASTNode *ast_typedef_decl(Type *type, const char *name, Loc loc, Arena *arena);
 ASTNode *ast_init_list(Vec *elems, Loc loc, Arena *arena);
 ASTNode *ast_compound_literal(Type *type, ASTNode *init, Loc loc, Arena *arena);
+ASTNode *ast_generic_selection(ASTNode *controlling, Vec *assocs, ASTNode *default_expr, Loc loc,
+                               Arena *arena);
 
 void ast_dump(ASTNode *node);
 

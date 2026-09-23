@@ -316,6 +316,56 @@ Type *type_common(Type *a, Type *b)
     return signed_type;
 }
 
+bool type_compatible(Type *a, Type *b)
+{
+    if (a == b)
+    {
+        return true;
+    }
+    if (!a || !b || a->kind != b->kind)
+    {
+        return false;
+    }
+    switch (a->kind)
+    {
+        case TYPE_PTR:
+            return type_compatible(a->ptr.pointee, b->ptr.pointee);
+        case TYPE_ARRAY:
+            if (a->arr.length != b->arr.length && a->arr.length != 0 && b->arr.length != 0)
+            {
+                return false;
+            }
+            return type_compatible(a->arr.elem, b->arr.elem);
+        case TYPE_FUNC:
+        {
+            if (a->func.is_variadic != b->func.is_variadic)
+            {
+                return false;
+            }
+            if (!type_compatible(a->func.ret, b->func.ret))
+            {
+                return false;
+            }
+            size_t n = vec_size(a->func.params);
+            if (n != vec_size(b->func.params))
+            {
+                return false;
+            }
+            for (size_t i = 0; i < n; i++)
+            {
+                if (!type_compatible((Type *) vec_get(a->func.params, i),
+                                     (Type *) vec_get(b->func.params, i)))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
 static Type *fit_hex(u64 uval, bool has_ullong)
 {
     if (uval <= (u64) INT32_MAX)

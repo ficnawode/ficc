@@ -1981,6 +1981,8 @@ static bool fold_constant_ir(ASTNode *node, i64 *out)
             }
             return false;
         }
+        case AST_GENERIC_SELECTION:
+            return fold_constant_ir(ast_as(ASTGenericSelection, node)->selected, out);
         default:
             return false;
     }
@@ -2219,6 +2221,8 @@ static bool fold_float_constant(ASTNode *node, FpConst *out)
             }
             return true;
         }
+        case AST_GENERIC_SELECTION:
+            return fold_float_constant(ast_as(ASTGenericSelection, node)->selected, out);
         default:
             break;
     }
@@ -2424,6 +2428,9 @@ static RelocTarget serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap
             }
             break;
         }
+        case AST_GENERIC_SELECTION:
+            return serializer_reloc_target(ast_as(ASTGenericSelection, value)->selected, mod,
+                                           global_map, static_map, arena);
         default:
             break;
     }
@@ -2846,6 +2853,8 @@ static ExprResult build_expr(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
             return build_va_arg_expr(ctx, ast_as(ASTVaArgExpr, node), bb);
         case AST_COMPOUND_LITERAL:
             return build_compound_literal_expr(ctx, ast_as(ASTCompoundLiteral, node), bb);
+        case AST_GENERIC_SELECTION:
+            return build_expr(ctx, ast_as(ASTGenericSelection, node)->selected, bb);
         default:
             ir_error(node, "unsupported expression kind %s", ast_kind_name(node->kind));
             return expr_void(bb);
@@ -3656,6 +3665,9 @@ static void mark_addr_taken_expr(FuncBuilder *ctx, ASTNode *node)
             break;
         case AST_CAST_EXPR:
             mark_addr_taken_expr(ctx, ast_as(ASTCastExpr, node)->operand);
+            break;
+        case AST_GENERIC_SELECTION:
+            mark_addr_taken_expr(ctx, ast_as(ASTGenericSelection, node)->selected);
             break;
         case AST_ALIGNOF_EXPR:
         case AST_ALIGNOF_TYPE:

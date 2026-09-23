@@ -198,6 +198,11 @@ Type *type_promote(Type *t);
 /* C11 §6.3.1.8 usual arithmetic conversions: common type for binary operations. */
 Type *type_common(Type *a, Type *b);
 
+/* C11 §6.2.7: true when two types are compatible (used by `_Generic`
+   association matching, §6.5.15p2). Composites are interned, so structural
+   equality is pointer equality; only pointers/arrays/functions recurse. */
+bool type_compatible(Type *a, Type *b);
+
 /* C11 §6.4.4.1 integer constant typing. Returns the smallest type that can
    represent `value` given the suffix constraints, per LP64 data model. */
 Type *type_int_literal(i64 value, bool is_hex, bool is_unsigned, IntSuffix length);

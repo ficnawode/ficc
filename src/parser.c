@@ -223,7 +223,9 @@ static ASTNode *parse_initializer(Parser *p);
 static ASTNode *parse_postfix(Parser *p);
 static ASTNode *parse_postfix_ops(Parser *p, ASTNode *node);
 static ASTNode *parse_init_list(Parser *p);
+static ASTNode *parse_generic_selection(Parser *p, Loc loc);
 static Type *parse_paren_type_name(Parser *p);
+static Type *parse_type_name(Parser *p);
 static ASTNode *parse_compound_stmt(Parser *p);
 static ASTNode *parse_static_assert(Parser *p);
 static ASTNode *parse_var_decl(Parser *p, Specs s);
@@ -2261,6 +2263,78 @@ static ASTNode *parse_builtin_va_arg(Parser *p, Token *t)
     return ast_va_arg_expr(ap, ty, t->loc, p->arena);
 }
 
+static ASTNode *parse_generic_selection(Parser *p, Loc loc)
+{
+    next_token(p);
+    if (!expect_token(p, TOK_LPAREN, "'('"))
+    {
+        return NULL;
+    }
+    ASTNode *controlling = parse_assign(p);
+    if (!controlling)
+    {
+        return NULL;
+    }
+    if (!expect_token(p, TOK_COMMA, "','"))
+    {
+        return NULL;
+    }
+    Vec *assocs = vec_new(p->arena);
+    ASTNode *default_expr = NULL;
+    for (;;)
+    {
+        if (peek_token(p)->kind == TOK_KW_DEFAULT)
+        {
+            next_token(p);
+            if (default_expr)
+            {
+                parse_error(p, "duplicate 'default' association in _Generic");
+                return NULL;
+            }
+            if (!expect_token(p, TOK_COLON, "':'"))
+            {
+                return NULL;
+            }
+            default_expr = parse_assign(p);
+            if (!default_expr)
+            {
+                return NULL;
+            }
+        }
+        else
+        {
+            Type *type = parse_type_name(p);
+            if (!type)
+            {
+                return NULL;
+            }
+            if (!expect_token(p, TOK_COLON, "':'"))
+            {
+                return NULL;
+            }
+            ASTNode *expr = parse_assign(p);
+            if (!expr)
+            {
+                return NULL;
+            }
+            GenericAssoc *assoc = arena_alloc(p->arena, sizeof(GenericAssoc), sizeof(void *));
+            assoc->type = type;
+            assoc->expr = expr;
+            vec_push(assocs, assoc);
+        }
+        if (peek_token(p)->kind != TOK_COMMA)
+        {
+            break;
+        }
+        next_token(p);
+    }
+    if (!expect_token(p, TOK_RPAREN, "')'"))
+    {
+        return NULL;
+    }
+    return ast_generic_selection(controlling, assocs, default_expr, loc, p->arena);
+}
+
 static ASTNode *parse_primary(Parser *p)
 {
     Token *t = peek_token(p);
@@ -2305,6 +2379,8 @@ static ASTNode *parse_primary(Parser *p)
         case TOK_STRING_LIT:
             next_token(p);
             return ast_string_literal(t->payload.str, t->str_len, t->loc, p->arena);
+        case TOK_KW_GENERIC:
+            return parse_generic_selection(p, t->loc);
         case TOK_LPAREN:
         {
             next_token(p);
@@ -2335,7 +2411,7 @@ static ASTNode *parse_compound_literal(Parser *p, Type *target, Loc start)
     return parse_postfix_ops(p, ast_compound_literal(target, init, start, p->arena));
 }
 
-static Type *parse_paren_type_name(Parser *p)
+static Type *parse_type_name(Parser *p)
 {
     Type *ty = parse_type_specifier(p);
     if (!ty)
@@ -2347,7 +2423,12 @@ static Type *parse_paren_type_name(Parser *p)
     {
         return NULL;
     }
-    ty = parse_array_suffix(p, ty, NULL);
+    return parse_array_suffix(p, ty, NULL);
+}
+
+static Type *parse_paren_type_name(Parser *p)
+{
+    Type *ty = parse_type_name(p);
     if (!ty)
     {
         return NULL;

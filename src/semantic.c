@@ -48,6 +48,7 @@ static bool check_aggregate_const_init(ASTVarDecl *vd, SemanticCtx *ctx);
 static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd);
 static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type);
 static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx);
+static bool check_generic_selection(ASTGenericSelection *gs, SemanticCtx *ctx);
 
 static bool sem_error(SemanticCtx *ctx, Loc loc, const char *fmt, ...)
 {
@@ -1102,6 +1103,70 @@ static bool check_alignof_type(ASTAlignofType *at, SemanticCtx *ctx)
     return true;
 }
 
+static bool check_generic_assoc_type(Type *type, Loc loc, SemanticCtx *ctx)
+{
+    if (type_is_function(type) || type->kind == TYPE_VOID || !type_is_complete(type))
+    {
+        return sem_error(ctx, loc, "generic association type must be a complete object type");
+    }
+    return true;
+}
+
+static bool check_generic_selection(ASTGenericSelection *gs, SemanticCtx *ctx)
+{
+    ASTNode *node = &gs->base;
+    if (!check_expr(gs->controlling, ctx))
+    {
+        return false;
+    }
+    Type *controlling = type_decay(type_rvalue(gs->controlling->expr_type));
+
+    size_t nassocs = vec_size(gs->assocs);
+    for (size_t i = 0; i < nassocs; i++)
+    {
+        GenericAssoc *assoc = (GenericAssoc *) vec_get(gs->assocs, i);
+        if (!check_generic_assoc_type(assoc->type, assoc->expr->loc, ctx))
+        {
+            return false;
+        }
+        for (size_t j = 0; j < i; j++)
+        {
+            GenericAssoc *prev = (GenericAssoc *) vec_get(gs->assocs, j);
+            if (type_compatible(prev->type, assoc->type))
+            {
+                return sem_error(ctx, assoc->expr->loc,
+                                 "generic association type is compatible with an earlier one");
+            }
+        }
+    }
+
+    ASTNode *selected = NULL;
+    for (size_t i = 0; i < nassocs; i++)
+    {
+        GenericAssoc *assoc = (GenericAssoc *) vec_get(gs->assocs, i);
+        if (type_compatible(controlling, assoc->type))
+        {
+            selected = assoc->expr;
+            break;
+        }
+    }
+    if (!selected)
+    {
+        selected = gs->default_expr;
+    }
+    if (!selected)
+    {
+        return sem_error(ctx, node->loc, "no compatible generic association and no 'default'");
+    }
+    if (!check_expr(selected, ctx))
+    {
+        return false;
+    }
+    gs->selected = selected;
+    node->expr_type = selected->expr_type;
+    return true;
+}
+
 static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
 {
     switch (node->kind)
@@ -1142,6 +1207,8 @@ static Type *check_expr(ASTNode *node, SemanticCtx *ctx)
             return expr_done(check_va_arg_expr(ast_as(ASTVaArgExpr, node), ctx), node);
         case AST_COMPOUND_LITERAL:
             return expr_done(check_compound_literal(ast_as(ASTCompoundLiteral, node), ctx), node);
+        case AST_GENERIC_SELECTION:
+            return expr_done(check_generic_selection(ast_as(ASTGenericSelection, node), ctx), node);
         default:
             sem_error(ctx, node->loc, "unsupported expression kind %s", ast_kind_name(node->kind));
             return NULL;
@@ -2256,6 +2323,8 @@ static bool fold_integer_constant(ASTNode *node, i64 *out)
             *out = type_reduce_int(ce->target_type, v);
             return true;
         }
+        case AST_GENERIC_SELECTION:
+            return fold_integer_constant(ast_as(ASTGenericSelection, node)->selected, out);
         default:
             return false;
     }

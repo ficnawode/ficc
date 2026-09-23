@@ -1669,3 +1669,39 @@ TEST(parser, abstract_fn_ptr_cast_typename)
     EXPECT_NOTNULL(ast);
     arena_free(a);
 }
+
+TEST(parser, generic_selection_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    return _Generic(1, int: 2, double: 3, default: 4);\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(ret->expr->kind, AST_GENERIC_SELECTION);
+    ASTGenericSelection *gs = ast_as(ASTGenericSelection, ret->expr);
+    EXPECT_EQ(vec_size(gs->assocs), 2);
+    EXPECT_NOTNULL(gs->default_expr);
+    GenericAssoc *first = (GenericAssoc *) vec_get(gs->assocs, 0);
+    EXPECT_EQ(first->type->kind, TYPE_INT);
+    arena_free(a);
+}
+
+TEST(parser, generic_selection_requires_comma)
+{
+    EXPECT_PARSE_FAIL("int main(void) { return _Generic(1 int: 2); }");
+}
+
+TEST(parser, generic_selection_requires_colon)
+{
+    EXPECT_PARSE_FAIL("int main(void) { return _Generic(1, int 2); }");
+}
+
+TEST(parser, generic_selection_duplicate_default_fails)
+{
+    EXPECT_PARSE_FAIL("int main(void) { return _Generic(1, default: 2, default: 3); }");
+}

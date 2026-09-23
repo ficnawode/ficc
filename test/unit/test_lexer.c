@@ -446,6 +446,18 @@ TEST(lexer, alignof_keyword)
     arena_free(a);
 }
 
+TEST(lexer, generic_keyword)
+{
+    Arena *a = arena_new();
+    LexResult res = lex_text("_Generic", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_KW_GENERIC);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
 TEST(lexer, static_assert_keyword)
 {
     Arena *a = arena_new();

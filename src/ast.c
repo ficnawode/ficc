@@ -397,6 +397,18 @@ ASTNode *ast_init_list(Vec *elems, Loc loc, Arena *arena)
     return &n->base;
 }
 
+ASTNode *ast_generic_selection(ASTNode *controlling, Vec *assocs, ASTNode *default_expr, Loc loc,
+                               Arena *arena)
+{
+    ASTGenericSelection *n =
+        ast_new_node(sizeof(ASTGenericSelection), AST_GENERIC_SELECTION, loc, arena);
+    n->controlling = controlling;
+    n->assocs = assocs;
+    n->default_expr = default_expr;
+    n->selected = NULL;
+    return &n->base;
+}
+
 ASTNode *ast_compound_literal(Type *type, ASTNode *init, Loc loc, Arena *arena)
 {
     ASTCompoundLiteral *n =
@@ -887,6 +899,24 @@ static void ast_dump_rec(ASTNode *node, int depth)
             ASTCompoundLiteral *cl = ast_as(ASTCompoundLiteral, node);
             printf("COMPOUND_LITERAL -> %s\n", type_kind_name(cl->type->kind));
             ast_dump_rec(cl->init, depth + 1);
+            break;
+        }
+        case AST_GENERIC_SELECTION:
+        {
+            ASTGenericSelection *gs = ast_as(ASTGenericSelection, node);
+            printf("GENERIC_SELECTION (%zu assocs)\n", vec_size(gs->assocs));
+            ast_dump_rec(gs->controlling, depth + 1);
+            for (size_t i = 0; i < vec_size(gs->assocs); i++)
+            {
+                GenericAssoc *assoc = (GenericAssoc *) vec_get(gs->assocs, i);
+                printf("%*s%s:\n", depth + 1, "", type_kind_name(assoc->type->kind));
+                ast_dump_rec(assoc->expr, depth + 2);
+            }
+            if (gs->default_expr)
+            {
+                printf("%*sdefault:\n", depth + 1, "");
+                ast_dump_rec(gs->default_expr, depth + 2);
+            }
             break;
         }
         default:
