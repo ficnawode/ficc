@@ -2205,6 +2205,22 @@ static bool is_address_constant(ASTNode *e)
     }
 }
 
+/* A pointer constant initializer: an integer constant expression cast to a
+   pointer type (e.g. `(const char *)-1`), or a bare integer constant used as a
+   null pointer. §6.7.9p4 admits both in a static initializer. */
+static bool fold_pointer_constant(ASTNode *node, i64 *out)
+{
+    if (node->kind == AST_CAST_EXPR)
+    {
+        ASTCastExpr *ce = ast_as(ASTCastExpr, node);
+        if (type_is_ptr(ce->target_type))
+        {
+            return fold_integer_constant(ce->operand, out);
+        }
+    }
+    return fold_integer_constant(node, out);
+}
+
 /* Plan a declaration's initializer when it is an aggregate, string, or address
    constant; scalar initializers return PLAN_NONE and are checked as ordinary
    expressions by the caller. */
@@ -2247,6 +2263,22 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
         vd->const_init = type_reduce_int(type_unqual(vd->type), value);
         vd->has_const_init = true;
         return PLAN_HANDLED;
+    }
+    if (!vd->has_const_init && vd->init != NULL && type_is_ptr(type_unqual(vd->type)))
+    {
+        /* A pointer initialized by an integer constant (typically a cast such
+           as `(const char *)-1`): fold it to the pointer bit pattern. */
+        if (!check_expr(vd->init, ctx))
+        {
+            return PLAN_ERROR;
+        }
+        i64 value;
+        if (fold_pointer_constant(vd->init, &value))
+        {
+            vd->const_init = value;
+            vd->has_const_init = true;
+            return PLAN_HANDLED;
+        }
     }
     if (type_is_ptr(vd->type) && is_address_constant(vd->init))
     {

@@ -762,3 +762,14 @@ TEST(globals, file_scope_empty_braces)
                           "}\n",
                           0);
 }
+
+/* Regression: a pointer static initialized by an integer constant cast
+   (`(const char *)-1`) keeps its bit pattern; it must not fold to a null
+   pointer (Git uses this sentinel in builtin/commit.c). */
+TEST(globals, pointer_constant_cast)
+{
+    EXPECT_INTERP_AND_ELF("#include <stdint.h>\n"
+                          "static const char *sentinel = (const char *) -1;\n"
+                          "int main(void) { return (intptr_t) sentinel == -1 ? 42 : 1; }\n",
+                          42);
+}
