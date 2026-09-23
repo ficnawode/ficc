@@ -238,6 +238,7 @@ struct GlobalReloc
     int target;            /* global index whose address is written here; -1 when is_func */
     bool is_func;          /* the address written is a function's */
     const char *func_name; /* the referenced function, when is_func */
+    i64 addend;            /* symbol-relative addend (e.g. &obj.member) */
 };
 
 typedef struct IrGlobal IrGlobal;

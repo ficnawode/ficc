@@ -635,7 +635,7 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
             {
                 sym_idx = global_sym_index(cm->globals, gr->target, &layout);
             }
-            rela_emit(target, global_off[i] + gr->offset, sym_idx, R_X86_64_64, 0);
+            rela_emit(target, global_off[i] + gr->offset, sym_idx, R_X86_64_64, gr->addend);
         }
     }
 

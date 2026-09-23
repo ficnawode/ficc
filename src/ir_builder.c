@@ -2269,17 +2269,19 @@ static GlobalReloc *push_reloc(IrGlobal *g, Arena *arena)
         g->relocs = vec_new(arena);
     }
     GlobalReloc *r = arena_alloc(arena, sizeof(GlobalReloc), _Alignof(GlobalReloc));
+    *r = (GlobalReloc) {0};
     vec_push(g->relocs, r);
     return r;
 }
 
-static void ir_global_add_reloc(IrGlobal *g, u32 offset, int target, Arena *arena)
+static void ir_global_add_reloc(IrGlobal *g, u32 offset, int target, i64 addend, Arena *arena)
 {
     GlobalReloc *r = push_reloc(g, arena);
     r->offset = offset;
     r->target = target;
     r->is_func = false;
     r->func_name = NULL;
+    r->addend = addend;
 }
 
 /* A data-side function-address relocation: elf.c resolves it against the
@@ -2291,6 +2293,7 @@ static void ir_global_add_func_reloc(IrGlobal *g, u32 offset, const char *func_n
     r->target = -1;
     r->is_func = true;
     r->func_name = func_name;
+    r->addend = 0;
 }
 
 static char *anon_name(Arena *arena, const char *prefix, u32 idx)
@@ -2315,6 +2318,7 @@ typedef struct
     RelocTargetKind kind;
     u32 index;        /* valid for RELOC_TARGET_OBJECT */
     const char *func; /* valid for RELOC_TARGET_FUNC */
+    i64 addend;       /* symbol-relative byte offset (e.g. &obj.member) */
 } RelocTarget;
 
 static RelocTarget reloc_target_none(void)
@@ -2326,6 +2330,12 @@ static RelocTarget reloc_target_none(void)
 static RelocTarget reloc_target_object(u32 index)
 {
     RelocTarget t = {.kind = RELOC_TARGET_OBJECT, .index = index};
+    return t;
+}
+
+static RelocTarget reloc_target_add(RelocTarget t, i64 delta)
+{
+    t.addend += delta;
     return t;
 }
 
@@ -2399,6 +2409,28 @@ static RelocTarget serializer_addr_target(ASTNode *operand, IrModule *mod, StrMa
             u32 *p = strmap_get(global_map, decl->name);
             return p ? reloc_target_object(*p) : reloc_target_none();
         }
+        case AST_MEMBER_ACCESS:
+        {
+            /* `&obj.member`: the object's address plus the member offset. */
+            ASTMemberAccess *ma = ast_as(ASTMemberAccess, operand);
+            RelocTarget base =
+                serializer_addr_target(ma->object, mod, global_map, static_map, arena);
+            return base.kind == RELOC_TARGET_NONE ? base : reloc_target_add(base, ma->field_offset);
+        }
+        case AST_SUBSCRIPT_EXPR:
+        {
+            /* `&arr[i]`: the array address plus a constant element offset. */
+            ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, operand);
+            RelocTarget base =
+                serializer_addr_target(se->array, mod, global_map, static_map, arena);
+            i64 index;
+            if (base.kind == RELOC_TARGET_NONE || !fold_constant_ir(se->index, &index))
+            {
+                return reloc_target_none();
+            }
+            Type *elem = type_deref(type_decay(node_type(se->array)));
+            return reloc_target_add(base, index * (i64) elem->size);
+        }
         default:
             return reloc_target_none();
     }
@@ -2434,6 +2466,24 @@ static RelocTarget serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap
                 return serializer_addr_target(u->operand, mod, global_map, static_map, arena);
             }
             break;
+        }
+        case AST_BINARY_EXPR:
+        {
+            /* An address constant adjusted by a constant: `&obj + n`. */
+            ASTBinaryExpr *b = ast_as(ASTBinaryExpr, value);
+            if (b->op != BIN_ADD && b->op != BIN_SUB)
+            {
+                break;
+            }
+            RelocTarget base = serializer_reloc_target(b->left, mod, global_map, static_map, arena);
+            i64 delta;
+            if (base.kind == RELOC_TARGET_NONE || !fold_constant_ir(b->right, &delta))
+            {
+                break;
+            }
+            Type *ptr = type_decay(node_type(b->left));
+            i64 scale = type_is_ptr(ptr) ? (i64) type_deref(ptr)->size : 1;
+            return reloc_target_add(base, (b->op == BIN_SUB ? -delta : delta) * scale);
         }
         case AST_GENERIC_SELECTION:
             return serializer_reloc_target(ast_as(ASTGenericSelection, value)->selected, mod,
@@ -2493,7 +2543,7 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
                 ir_error(w->value, "initializer element is not a constant");
                 return false;
             }
-            ir_global_add_reloc(g, w->offset, target.index, arena);
+            ir_global_add_reloc(g, w->offset, target.index, target.addend, arena);
             continue;
         }
         if (type_is_fp(type_unqual(w->type)))
@@ -2579,7 +2629,7 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
         g->init_len = 8;
         g->section = is_const ? IR_SECTION_RODATA : IR_SECTION_DATA;
         g->linkage = vd->storage == SC_STATIC ? IR_LINK_LOCAL : IR_LINK_GLOBAL;
-        ir_global_add_reloc(g, 0, str.index, arena);
+        ir_global_add_reloc(g, 0, str.index, str.addend, arena);
     }
     else if (vd->has_const_init && vd->const_init != 0)
     {

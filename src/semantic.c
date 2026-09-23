@@ -51,6 +51,7 @@ static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx);
 static bool check_generic_selection(ASTGenericSelection *gs, SemanticCtx *ctx);
 static bool fold_integer_constant(ASTNode *node, i64 *out);
 static bool sem_resolve_type(Type **slot, SemanticCtx *ctx);
+static bool is_address_constant(ASTNode *e);
 
 static bool sem_error(SemanticCtx *ctx, Loc loc, const char *fmt, ...)
 {
@@ -1996,33 +1997,7 @@ static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
    relocation write (§6.6p9 — a compound literal is an address constant). */
 static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
 {
-    if (vd->init->kind != AST_UNARY_EXPR)
-    {
-        if (vd->init->kind == AST_IDENT)
-        {
-            /* A bare function designator (`fp = f;`): an address constant whose
-               reloc the serializer emits; check_expr resolves the designator. */
-            if (!type_is_ptr(vd->type) || type_deref(vd->type)->kind != TYPE_FUNC)
-            {
-                return false;
-            }
-            InitPlan *plan = init_plan_new(ctx, vd->type);
-            if (!plan_scalar_write(ctx, plan, type_unqual(vd->type), 0, vd->init, vd->base.loc))
-            {
-                return false;
-            }
-            vd->plan = plan;
-            return true;
-        }
-        return false;
-    }
-    ASTUnaryExpr *u = ast_as(ASTUnaryExpr, vd->init);
-    if (u->op != UN_ADDR ||
-        (u->operand->kind != AST_IDENT && u->operand->kind != AST_COMPOUND_LITERAL))
-    {
-        return false;
-    }
-    if (!type_is_ptr(vd->type))
+    if (!type_is_ptr(vd->type) || !is_address_constant(vd->init))
     {
         return false;
     }
@@ -2093,6 +2068,45 @@ static bool check_aggregate_const_init(ASTVarDecl *vd, SemanticCtx *ctx)
     return true;
 }
 
+/* §6.6p9 address constant: a designator, a string literal, `&obj.member`,
+   `&arr[i]`, `&x + n`, or a cast/generic-selection wrapper around one. */
+static bool is_address_constant(ASTNode *e)
+{
+    switch (e->kind)
+    {
+        case AST_STRING_LITERAL:
+        case AST_IDENT:
+            return true;
+        case AST_CAST_EXPR:
+            return is_address_constant(ast_as(ASTCastExpr, e)->operand);
+        case AST_GENERIC_SELECTION:
+            return is_address_constant(ast_as(ASTGenericSelection, e)->selected);
+        case AST_UNARY_EXPR:
+        {
+            ASTUnaryExpr *u = ast_as(ASTUnaryExpr, e);
+            if (u->op != UN_ADDR)
+            {
+                return false;
+            }
+            ASTKind k = u->operand->kind;
+            return k == AST_IDENT || k == AST_MEMBER_ACCESS || k == AST_SUBSCRIPT_EXPR ||
+                   k == AST_COMPOUND_LITERAL;
+        }
+        case AST_BINARY_EXPR:
+        {
+            ASTBinaryExpr *b = ast_as(ASTBinaryExpr, e);
+            i64 offset;
+            if (b->op != BIN_ADD && b->op != BIN_SUB)
+            {
+                return false;
+            }
+            return is_address_constant(b->left) && fold_integer_constant(b->right, &offset);
+        }
+        default:
+            return false;
+    }
+}
+
 /* Plan a declaration's initializer when it is an aggregate, string, or address
    constant; scalar initializers return PLAN_NONE and are checked as ordinary
    expressions by the caller. */
@@ -2136,7 +2150,7 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
         vd->has_const_init = true;
         return PLAN_HANDLED;
     }
-    if (vd->init->kind == AST_UNARY_EXPR || vd->init->kind == AST_IDENT)
+    if (type_is_ptr(vd->type) && is_address_constant(vd->init))
     {
         return plan_ptr_initializer(ctx, vd) ? PLAN_HANDLED : PLAN_ERROR;
     }

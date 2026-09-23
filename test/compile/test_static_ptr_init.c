@@ -82,3 +82,26 @@ TEST(static_ptr_init, const_object_decay_in_pointer_array)
                           "}\n",
                           0);
 }
+
+TEST(static_ptr_init, address_of_member)
+{
+    /* `&obj.member` is a constant address: the object symbol plus the member
+       offset (Git's option tables use this). */
+    EXPECT_INTERP_AND_ELF("struct opts { int a; int b; };\n"
+                          "static struct opts o = { 1, 2 };\n"
+                          "static int *pb = &o.b;\n"
+                          "static int *pa = &o.a;\n"
+                          "int main(void) {\n"
+                          "    *pb = 41;\n"
+                          "    return *pa + *pb;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(static_ptr_init, address_plus_constant)
+{
+    EXPECT_INTERP_AND_ELF("static int a[4] = { 10, 20, 22, 40 };\n"
+                          "static int *p = &a[1] + 1;\n"
+                          "int main(void) { return *p; }\n",
+                          22);
+}

@@ -828,6 +828,19 @@ static u32 parse_alignas_specifier(Parser *p)
     return (u32) align;
 }
 
+static u8 qual_bit(TokenKind kind)
+{
+    switch (kind)
+    {
+        case TOK_KW_CONST:
+            return Q_CONST;
+        case TOK_KW_VOLATILE:
+            return Q_VOLATILE;
+        default:
+            return Q_RESTRICT;
+    }
+}
+
 static bool parse_qualifiers(Parser *p, u8 *quals, u32 *alignas)
 {
     for (;;)
@@ -835,11 +848,8 @@ static bool parse_qualifiers(Parser *p, u8 *quals, u32 *alignas)
         Token *t = peek_token(p);
         if (t->kind == TOK_KW_CONST || t->kind == TOK_KW_VOLATILE || t->kind == TOK_KW_RESTRICT)
         {
-            u8 q = t->kind == TOK_KW_CONST      ? Q_CONST
-                   : t->kind == TOK_KW_VOLATILE ? Q_VOLATILE
-                                                : Q_RESTRICT;
             next_token(p);
-            *quals |= q;
+            *quals |= qual_bit(t->kind);
         }
         else if (t->kind == TOK_KW_ALIGNAS)
         {
@@ -1161,10 +1171,7 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
         while (peek_token(p)->kind == TOK_KW_CONST || peek_token(p)->kind == TOK_KW_VOLATILE ||
                peek_token(p)->kind == TOK_KW_RESTRICT)
         {
-            TokenKind qk = peek_token(p)->kind;
-            quals |= qk == TOK_KW_CONST      ? Q_CONST
-                     : qk == TOK_KW_VOLATILE ? Q_VOLATILE
-                                             : Q_RESTRICT;
+            quals |= qual_bit(peek_token(p)->kind);
             next_token(p);
         }
         ptr_layer_quals[nptr] = quals;
@@ -1190,8 +1197,8 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
 
     if (peek_token(p)->kind == TOK_LBRACKET)
     {
-        out->type =
-            parse_array_suffix(p, ptr_layers_quals(out->type, nptr, ptr_layer_quals), &out->array_dims);
+        out->type = parse_array_suffix(p, ptr_layers_quals(out->type, nptr, ptr_layer_quals),
+                                       &out->array_dims);
         if (!out->type)
         {
             return false;

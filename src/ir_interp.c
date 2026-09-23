@@ -1352,12 +1352,12 @@ static void apply_global_relocs(IrModule *m, InterpGlobal *globals)
             GlobalReloc *reloc = (GlobalReloc *) vec_get(global->relocs, r);
             if (reloc->is_func)
             {
-                i64 addr = func_addr_by_name(m, reloc->func_name);
+                i64 addr = func_addr_by_name(m, reloc->func_name) + reloc->addend;
                 memcpy(globals[i].data + reloc->offset, &addr, 8);
             }
             else
             {
-                u64 addr = (u64) (uintptr_t) globals[reloc->target].data;
+                u64 addr = (u64) (uintptr_t) globals[reloc->target].data + (u64) reloc->addend;
                 memcpy(globals[i].data + reloc->offset, &addr, 8);
             }
         }
