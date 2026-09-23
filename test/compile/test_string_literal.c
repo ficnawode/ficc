@@ -61,3 +61,12 @@ TEST(string_literal, func_identifier)
                           "}\n",
                           0);
 }
+
+TEST(string_literal, unsigned_char_array_init)
+{
+    /* C11 §6.7.9p14: a string literal initializes an array of unsigned char
+       too (Git's object_id hash buffers). */
+    EXPECT_INTERP_AND_ELF("static unsigned char h[4] = \"ab\";\n"
+                          "int main(void) { return h[0] + h[1] - 195; }\n",
+                          0);
+}

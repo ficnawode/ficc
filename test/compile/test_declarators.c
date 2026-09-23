@@ -498,3 +498,15 @@ TEST(declarators, typedef_multiple_declarators)
                           "}\n",
                           42);
 }
+TEST(declarators, abstract_function_pointer_cast)
+{
+    /* A function-pointer type-name with a pointer return and no name:
+       `(void *(*)(long))`. */
+    EXPECT_INTERP_AND_ELF("typedef void *(*Alloc)(long);\n"
+                          "static void *impl(long n) { (void) n; return 0; }\n"
+                          "int main(void) {\n"
+                          "    Alloc a = (void *(*)(long)) impl;\n"
+                          "    return a(1) == 0 ? 42 : 0;\n"
+                          "}\n",
+                          42);
+}

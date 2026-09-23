@@ -2442,3 +2442,13 @@ TEST(pp, hostile_system_header_silences_warning_but_not_poison)
     EXPECT_EQ(pp->error_count, 0);
     arena_free(a);
 }
+
+TEST(pp, target_architecture_macros)
+{
+    /* glibc's bits/wordsize.h needs __x86_64__ to pick 64-bit __WORDSIZE. */
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#ifdef __x86_64__\nint x = 1;\n#endif\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "1"));
+    arena_free(a);
+}

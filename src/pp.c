@@ -231,6 +231,14 @@ Pp *pp_new(Arena *arena)
     pp_predefine(pp, "__STDC_NO_THREADS__", "1");
     pp_predefine(pp, "__STDC_NO_VLA__", "1");
     pp_predefine(pp, "__STDC_NO_COMPLEX__", "1");
+    pp_predefine(pp, "__x86_64__", "1");
+    pp_predefine(pp, "__x86_64", "1");
+    pp_predefine(pp, "__amd64__", "1");
+    pp_predefine(pp, "__amd64", "1");
+    pp_predefine(pp, "__LP64__", "1");
+    pp_predefine(pp, "_LP64", "1");
+    pp_predefine(pp, "__SIZEOF_POINTER__", "8");
+    pp_predefine(pp, "__SIZEOF_LONG__", "8");
     pp_predefine_type(pp, "__SIZE_TYPE__", "long unsigned int");
     pp_predefine_type(pp, "__PTRDIFF_TYPE__", "long int");
     pp_predefine_type(pp, "__WCHAR_TYPE__", "int");

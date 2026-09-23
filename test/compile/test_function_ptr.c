@@ -353,3 +353,18 @@ TEST(function_ptr, file_scope_single_fp_init)
     EXPECT_EQ(tc_run_interp(src), 42);
     EXPECT_EQ(tc_run_elf(src), 42);
 }
+
+TEST(function_ptr, enum_param_matches_unsigned)
+{
+    /* An enum is compatible with its underlying integer type, so a callback
+       declared with `enum E` and defined with `unsigned` still matches. */
+    EXPECT_INTERP_AND_ELF("enum flags { F_ONE = 1, F_TWO = 2 };\n"
+                          "struct ops { int (*fn)(enum flags); };\n"
+                          "static int impl(unsigned f) { return (int) f + 40; }\n"
+                          "static struct ops o;\n"
+                          "int main(void) {\n"
+                          "    o.fn = impl;\n"
+                          "    return o.fn(F_TWO);\n"
+                          "}\n",
+                          42);
+}

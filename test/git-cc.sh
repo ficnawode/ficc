@@ -15,6 +15,7 @@ FICC_INCLUDE="${FICC_INCLUDE:-$root/include}"
 GITDIR="${GITDIR:-$PWD}"
 
 compile=0
+preprocess=0
 args=()
 i=1
 while [ "$i" -le "$#" ]; do
@@ -22,6 +23,10 @@ while [ "$i" -le "$#" ]; do
     case "$a" in
         -c)
             compile=1
+            args+=("$a")
+            ;;
+        -E | -P | -tokens | -ast | -ir)
+            preprocess=1
             args+=("$a")
             ;;
         -o)
@@ -45,7 +50,7 @@ while [ "$i" -le "$#" ]; do
     i=$((i + 1))
 done
 
-if [ "$compile" = 1 ]; then
+if [ "$compile" = 1 ] || [ "$preprocess" = 1 ]; then
     exec "$FICC" -nostdinc \
         -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu \
         -isystem "$FICC_INCLUDE" -I"$GITDIR" "${args[@]}"

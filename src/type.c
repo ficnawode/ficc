@@ -322,7 +322,19 @@ bool type_compatible(Type *a, Type *b)
     {
         return true;
     }
-    if (!a || !b || a->kind != b->kind)
+    if (!a || !b)
+    {
+        return false;
+    }
+    /* An enum is compatible with its underlying integer type (C11 §6.7.2.2p4);
+       ficc does not track the exact underlying kind, so match any non-enum
+       integer of the same width. */
+    if ((a->kind == TYPE_ENUM && type_is_integer(b) && b->kind != TYPE_ENUM) ||
+        (b->kind == TYPE_ENUM && type_is_integer(a) && a->kind != TYPE_ENUM))
+    {
+        return a->size == b->size;
+    }
+    if (a->kind != b->kind)
     {
         return false;
     }

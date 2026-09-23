@@ -228,11 +228,10 @@ static bool type_assignable(Type *dst, Type *src)
         {
             return true;
         }
-        if (pd->kind == TYPE_PTR || ps->kind == TYPE_PTR)
-        {
-            return pd == ps;
-        }
-        if (type_unqual(pd) != type_unqual(ps))
+        /* §6.5.16.1p1: the pointed-to types must be compatible and the target
+           must carry every qualifier of the source (`char **` -> `char *const *`
+           is legal; `char **` -> `const char **` is not). */
+        if (!type_compatible(type_unqual(pd), type_unqual(ps)))
         {
             return false;
         }
@@ -930,6 +929,13 @@ static bool check_member_access(ASTMemberAccess *ma, SemanticCtx *ctx)
 static Type *expr_done(bool ok, ASTNode *node)
 {
     return ok ? node->expr_type : NULL;
+}
+
+/* §6.7.9p14: a string literal initializes an array of char, signed char, or
+   unsigned char. */
+static bool is_char_like(Type *t)
+{
+    return t->kind == TYPE_CHAR || t->kind == TYPE_UCHAR;
 }
 
 static bool check_int_literal(ASTIntLiteral *lit, SemanticCtx *ctx)
@@ -1734,7 +1740,7 @@ static bool plan_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *cty, u32 
         {
             return sem_error(ctx, loc, "array has incomplete type");
         }
-        if (type_array_elem(cty)->kind != TYPE_CHAR)
+        if (!is_char_like(type_array_elem(cty)))
         {
             return sem_error(ctx, loc, "string literal only initializes a char array");
         }
@@ -1978,7 +1984,7 @@ static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
     {
         return sem_error(ctx, vd->base.loc, "array '%s' has incomplete type", vd->name);
     }
-    if (type_array_elem(arr)->kind != TYPE_CHAR)
+    if (!is_char_like(type_array_elem(arr)))
     {
         return sem_error(ctx, vd->base.loc, "string-literal initializer requires a 'char' array");
     }

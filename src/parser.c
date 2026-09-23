@@ -892,15 +892,28 @@ static Specs parse_decl_specifiers(Parser *p)
 {
     Specs s = {0};
     skip_attributes(p);
-    while (peek_token(p)->kind == TOK_KW_EXTENSION)
+    for (;;)
     {
-        next_token(p);
-    }
-    /* Function specifiers (§6.7.4): `inline` drives the tier-1 inliner. */
-    while (peek_token(p)->kind == TOK_KW_INLINE)
-    {
-        s.is_inline = true;
-        next_token(p);
+        TokenKind k = peek_token(p)->kind;
+        if (k == TOK_KW_EXTENSION)
+        {
+            next_token(p);
+        }
+        else if (k == TOK_KW_INLINE)
+        {
+            /* Function specifiers (§6.7.4): `inline` drives the tier-1 inliner. */
+            s.is_inline = true;
+            next_token(p);
+        }
+        else if (k == TOK_KW_REGISTER || k == TOK_KW_AUTO || k == TOK_KW_NORETURN)
+        {
+            /* Storage-class/specifier spellings with no effect here. */
+            next_token(p);
+        }
+        else
+        {
+            break;
+        }
     }
     u8 lead_quals = 0;
     if (!parse_qualifiers(p, &lead_quals, &s.alignas))
@@ -1116,30 +1129,12 @@ static bool parse_declarator_group(Parser *p, Type *base, u32 nptr, Declarator *
 
 static Type *parse_abstract_declarator(Parser *p, Type *base)
 {
-    if (peek_token(p)->kind == TOK_LPAREN)
+    Declarator d;
+    if (!parse_declarator_core(p, base, &d, true, false))
     {
-        next_token(p);
-        Declarator d;
-        if (!parse_declarator_group(p, base, 0, &d, true))
-        {
-            return NULL;
-        }
-        return d.type;
+        return NULL;
     }
-    while (peek_token(p)->kind == TOK_STAR)
-    {
-        next_token(p);
-        base = type_ptr(base);
-        while (peek_token(p)->kind == TOK_KW_CONST || peek_token(p)->kind == TOK_KW_VOLATILE ||
-               peek_token(p)->kind == TOK_KW_RESTRICT)
-        {
-            TokenKind qk = peek_token(p)->kind;
-            u8 q = qk == TOK_KW_CONST ? Q_CONST : qk == TOK_KW_VOLATILE ? Q_VOLATILE : Q_RESTRICT;
-            next_token(p);
-            base = apply_quals(base, q);
-        }
-    }
-    return base;
+    return d.type;
 }
 
 static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool name_optional,
@@ -2223,7 +2218,8 @@ static ASTNode *parse_stmt(Parser *p)
     }
     if (is_type_start(t->kind) || t->kind == TOK_KW_ALIGNAS || t->kind == TOK_KW_CONST ||
         t->kind == TOK_KW_VOLATILE || t->kind == TOK_KW_RESTRICT || t->kind == TOK_KW_STATIC ||
-        t->kind == TOK_KW_EXTERN)
+        t->kind == TOK_KW_EXTERN || t->kind == TOK_KW_REGISTER || t->kind == TOK_KW_AUTO ||
+        t->kind == TOK_KW_INLINE || t->kind == TOK_KW_NORETURN || t->kind == TOK_KW_EXTENSION)
     {
         Specs s = parse_specs_storage(p, true);
         if (!s.type)

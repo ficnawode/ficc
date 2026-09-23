@@ -2537,7 +2537,9 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
         }
         if (target.kind == RELOC_TARGET_OBJECT)
         {
-            if (!type_is_ptr(type_unqual(w->type)))
+            Type *wt = type_unqual(w->type);
+            bool ptr_sized_int = type_is_integer(wt) && wt->size == 8;
+            if (!type_is_ptr(wt) && !ptr_sized_int)
             {
                 /* A scalar initializer must not decay into a silent relocation. */
                 ir_error(w->value, "initializer element is not a constant");

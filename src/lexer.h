@@ -104,7 +104,10 @@ typedef enum
     X(TOK_SHR)                                                                                     \
     X(TOK_TILDE)                                                                                   \
     X(TOK_KW_GENERIC)                                                                              \
-    X(TOK_KW_EXTENSION)
+    X(TOK_KW_EXTENSION)                                                                            \
+    X(TOK_KW_REGISTER)                                                                             \
+    X(TOK_KW_AUTO)                                                                                 \
+    X(TOK_KW_NORETURN)
 
 typedef enum
 {

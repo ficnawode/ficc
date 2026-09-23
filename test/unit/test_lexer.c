@@ -971,3 +971,14 @@ TEST(finalize, stray_hash_is_error)
     EXPECT_NULL(lex_text("a ## b", a).tokens);
     arena_free(a);
 }
+
+TEST(lexer, storage_and_noreturn_keywords)
+{
+    Arena *a = arena_new();
+    LexResult res = lex_text("register auto _Noreturn", a);
+    EXPECT_NOTNULL(res.tokens);
+    EXPECT_EQ(res.tokens[0].kind, TOK_KW_REGISTER);
+    EXPECT_EQ(res.tokens[1].kind, TOK_KW_AUTO);
+    EXPECT_EQ(res.tokens[2].kind, TOK_KW_NORETURN);
+    arena_free(a);
+}
