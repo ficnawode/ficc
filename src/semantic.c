@@ -2903,6 +2903,13 @@ static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
     {
         return sem_error(ctx, vd->base.loc, "variable '%s' has incomplete type", vd->name);
     }
+    /* §6.2.1p7: the identifier is in scope for its own initializer, so a
+       self-referential static (`struct list_head h = { &h, &h }`) resolves. */
+    ASTVarDecl *existing = strmap_get(ctx->global_vars, vd->name);
+    if (!existing)
+    {
+        strmap_set(ctx->global_vars, vd->name, vd);
+    }
     if (vd->init)
     {
         /* Initializer lists are flattened by the planner (completing a `[]`
@@ -2931,7 +2938,6 @@ static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
         vd->storage = SC_NONE;
     }
 
-    ASTVarDecl *existing = strmap_get(ctx->global_vars, vd->name);
     if (existing && !merge_global_var(vd, existing, ctx))
     {
         return false;

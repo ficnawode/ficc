@@ -2611,17 +2611,18 @@ static u32 emit_global_decl(ASTVarDecl *vd, IrModule *mod, Arena *arena, StrMap 
 {
     IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
     g->name = vd->name;
+    /* Reserve the index and register the name before filling so a
+       self-referential initializer (`&g` inside g's own initializer) resolves;
+       string globals appended by fill land after it. */
+    u32 idx = (u32) vec_size(mod->globals);
+    vec_push(mod->globals, g);
+    u32 *slot = arena_alloc(arena, sizeof(u32), sizeof(u32));
+    *slot = idx;
+    strmap_set(global_map, vd->name, slot);
     if (!fill_global(g, vd, mod, global_map, static_map, arena))
     {
         return NO_VREG;
     }
-    /* Index after fill_global: it may append string globals. */
-    u32 idx = (u32) vec_size(mod->globals);
-    vec_push(mod->globals, g);
-
-    u32 *slot = arena_alloc(arena, sizeof(u32), sizeof(u32));
-    *slot = idx;
-    strmap_set(global_map, vd->name, slot);
     return idx;
 }
 
