@@ -163,13 +163,13 @@ static bool bank_allows(const RegBank *bank, u8 reg)
     return true;
 }
 
-/* A call clobbers the caller-saved set at its position; a value strictly
-   spanning that position must ride a callee-saved register or a slot. */
+/* A value live at a call must ride a callee-saved register or a slot. The start
+   bound is inclusive: an entry parameter (position 0) survives an entry call. */
 static bool crosses_call(const u32 *calls, u32 ncall, u32 start, u32 end)
 {
     for (u32 i = 0; i < ncall; i++)
     {
-        if (calls[i] > start && calls[i] < end)
+        if (calls[i] >= start && calls[i] < end)
         {
             return true;
         }

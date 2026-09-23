@@ -35,7 +35,8 @@ typedef struct Declarator
 {
     Type *type;
     const char *name;
-    u32 stars; /* explicit `*` count */
+    u32 stars;      /* explicit `*` count */
+    u32 array_dims; /* explicit `[..]` count (not array-typedef base layers) */
     /* Parameters captured when the outermost suffix folded the signature. */
     Vec *func_params;
     bool func_variadic;
@@ -213,7 +214,7 @@ static bool paren_is_typename(Parser *p)
 static Type *parse_type_specifier(Parser *p);
 static Type *apply_quals(Type *t, u8 quals);
 static Type *parse_abstract_declarator(Parser *p, Type *base);
-static Type *parse_array_suffix(Parser *p, Type *type);
+static Type *parse_array_suffix(Parser *p, Type *type, u32 *ndim_out);
 static Vec *parse_param_list(Parser *p, bool *out_variadic);
 static Specs parse_decl_specifiers(Parser *p);
 static ASTNode *parse_expression(Parser *p);
@@ -229,7 +230,8 @@ static ASTNode *parse_var_decl(Parser *p, Specs s);
 static ASTNode *parse_stmt(Parser *p);
 static bool folded_const(Parser *p, ASTNode *node, i64 *out);
 static bool resolve_constant_init(Parser *p, ASTVarDecl *vd, ASTNode *expr);
-static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool name_optional);
+static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool name_optional,
+                                  bool inner_group);
 static bool parse_declarator(Parser *p, Type *base, Declarator *out);
 
 static ASTNode *parse_member_decl(Parser *p, Type *base, u32 alignas, Token *start)
@@ -890,7 +892,7 @@ static Type *parse_group_suffixes(Parser *p, Type *t, u32 *nptr, Vec **captured_
         TokenKind k = peek_token(p)->kind;
         if (k == TOK_LBRACKET)
         {
-            t = parse_array_suffix(p, ptr_layers(t, *nptr));
+            t = parse_array_suffix(p, ptr_layers(t, *nptr), NULL);
             if (!t)
             {
                 return NULL;
@@ -932,11 +934,23 @@ static Type *parse_group_suffixes(Parser *p, Type *t, u32 *nptr, Vec **captured_
     }
 }
 
+/* C11 §6.7.6.1: `[N]` binds tighter than `*`, so an outer suffix binds below
+   the declarator's own array layers. */
+static Type *collect_array_layers(Vec *arrays, Type *t, u32 dims)
+{
+    for (u32 i = 0; i < dims && t->kind == TYPE_ARRAY; i++)
+    {
+        vec_push(arrays, t);
+        t = t->arr.elem;
+    }
+    return t;
+}
+
 static bool parse_declarator_group(Parser *p, Type *base, u32 nptr, Declarator *out,
                                    bool name_optional)
 {
     Declarator inner;
-    if (!parse_declarator_core(p, base, &inner, name_optional))
+    if (!parse_declarator_core(p, base, &inner, name_optional, true))
     {
         return false;
     }
@@ -945,7 +959,10 @@ static bool parse_declarator_group(Parser *p, Type *base, u32 nptr, Declarator *
         return false;
     }
 
-    Type *core = inner.type;
+    Vec *arrays = vec_new(p->arena);
+    bool inner_is_func = inner.type->kind == TYPE_FUNC;
+    Type *core = inner_is_func ? inner.type->func.ret : inner.type;
+    core = collect_array_layers(arrays, core, inner.array_dims);
     u32 inner_ptrs = 0;
     /* Strip only the declarator's own `*` layers; pointer layers from the base
        type (e.g. a pointer typedef return type) belong to the return type. */
@@ -955,16 +972,29 @@ static bool parse_declarator_group(Parser *p, Type *base, u32 nptr, Declarator *
         inner_ptrs++;
     }
 
-    out->func_params = NULL;
-    out->func_variadic = false;
-    Type *suffix = parse_group_suffixes(p, core, &nptr, &out->func_params, &out->func_variadic);
+    Vec *outer_params = NULL;
+    bool outer_variadic = false;
+    Type *suffix = parse_group_suffixes(p, core, &nptr, &outer_params, &outer_variadic);
     if (!suffix)
     {
         return false;
     }
-    out->type = ptr_layers(ptr_layers(suffix, nptr), inner_ptrs);
+    Type *result = ptr_layers(ptr_layers(suffix, nptr), inner_ptrs);
+    if (inner_is_func)
+    {
+        result = type_func(result, inner.type->func.params, inner.type->func.is_variadic);
+    }
+    for (size_t i = vec_size(arrays); i > 0; i--)
+    {
+        Type *arr = (Type *) vec_get(arrays, i - 1);
+        result = type_array(result, arr->arr.length);
+    }
+    out->type = result;
     out->name = inner.name;
     out->stars = 0;
+    out->array_dims = 0;
+    out->func_params = inner_is_func ? inner.func_params : outer_params;
+    out->func_variadic = inner_is_func ? inner.func_variadic : outer_variadic;
     return true;
 }
 
@@ -996,11 +1026,15 @@ static Type *parse_abstract_declarator(Parser *p, Type *base)
     return base;
 }
 
-static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool name_optional)
+static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool name_optional,
+                                  bool inner_group)
 {
     out->type = base;
     out->name = NULL;
     out->stars = 0;
+    out->array_dims = 0;
+    out->func_params = NULL;
+    out->func_variadic = false;
 
     u32 nptr = 0;
     u8 ptr_quals = 0;
@@ -1025,7 +1059,6 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
         next_token(p);
         return parse_declarator_group(p, base, nptr, out, true);
     }
-
     if (peek_token(p)->kind == TOK_IDENT)
     {
         out->name = peek_token(p)->payload.str;
@@ -1039,7 +1072,7 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
 
     if (peek_token(p)->kind == TOK_LBRACKET)
     {
-        out->type = parse_array_suffix(p, ptr_layers(out->type, nptr));
+        out->type = parse_array_suffix(p, ptr_layers(out->type, nptr), &out->array_dims);
         if (!out->type)
         {
             return false;
@@ -1051,12 +1084,23 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
     {
         out->type = apply_quals(out->type, ptr_quals);
     }
+    /* A `(params)` suffix inside the group belongs to this declarator. */
+    if (inner_group && peek_token(p)->kind == TOK_LPAREN)
+    {
+        u32 suffix_ptrs = 0;
+        out->type = parse_group_suffixes(p, out->type, &suffix_ptrs, &out->func_params,
+                                         &out->func_variadic);
+        if (!out->type)
+        {
+            return false;
+        }
+    }
     return true;
 }
 
 static bool parse_declarator(Parser *p, Type *base, Declarator *out)
 {
-    return parse_declarator_core(p, base, out, false);
+    return parse_declarator_core(p, base, out, false, false);
 }
 
 static ASTNode *parse_param(Parser *p)
@@ -1069,7 +1113,7 @@ static ASTNode *parse_param(Parser *p)
     }
 
     Declarator d;
-    if (!parse_declarator_core(p, s.type, &d, true))
+    if (!parse_declarator_core(p, s.type, &d, true, false))
     {
         return NULL;
     }
@@ -1150,7 +1194,7 @@ static Vec *parse_param_list(Parser *p, bool *out_variadic)
     return params;
 }
 
-static Type *parse_array_suffix(Parser *p, Type *type)
+static Type *parse_array_suffix(Parser *p, Type *type, u32 *ndim_out)
 {
     enum
     {
@@ -1184,6 +1228,10 @@ static Type *parse_array_suffix(Parser *p, Type *type)
     for (size_t i = ndim; i > 0; i--)
     {
         type = type_array(type, dims[i - 1]);
+    }
+    if (ndim_out)
+    {
+        *ndim_out = (u32) ndim;
     }
     return type;
 }
@@ -1266,25 +1314,38 @@ static ASTNode *parse_typedef_decl(Parser *p)
         return NULL;
     }
 
-    Declarator d;
-    if (!parse_declarator(p, s.type, &d))
+    Vec *decls = vec_new(p->arena);
+    while (true)
     {
-        return NULL;
-    }
-
-    if (!check_not_enumerator(p, d.name))
-    {
-        return NULL;
-    }
-    if (!declare_name(p, d.name, BIND_TYPEDEF, d.type))
-    {
-        return NULL;
+        Declarator d;
+        if (!parse_declarator(p, s.type, &d))
+        {
+            return NULL;
+        }
+        if (!check_not_enumerator(p, d.name))
+        {
+            return NULL;
+        }
+        if (!declare_name(p, d.name, BIND_TYPEDEF, d.type))
+        {
+            return NULL;
+        }
+        vec_push(decls, ast_typedef_decl(d.type, d.name, start->loc, p->arena));
+        if (peek_token(p)->kind != TOK_COMMA)
+        {
+            break;
+        }
+        next_token(p);
     }
     if (!expect_token(p, TOK_SEMI, "';'"))
     {
         return NULL;
     }
-    return ast_typedef_decl(d.type, d.name, start->loc, p->arena);
+    if (vec_size(decls) == 1)
+    {
+        return (ASTNode *) vec_get(decls, 0);
+    }
+    return ast_decl_list(decls, start->loc, p->arena);
 }
 
 static bool push_declarator(Parser *p, Specs s, Declarator d, Loc start, Vec *decls,
@@ -2209,7 +2270,7 @@ static Type *parse_paren_type_name(Parser *p)
     {
         return NULL;
     }
-    ty = parse_array_suffix(p, ty);
+    ty = parse_array_suffix(p, ty, NULL);
     if (!ty)
     {
         return NULL;

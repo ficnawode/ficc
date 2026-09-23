@@ -1200,3 +1200,16 @@ TEST(records, union_payload_not_bitfield)
 {
     EXPECT_INTERP_AND_ELF(union_payload_src, 0);
 }
+
+TEST(records, sizeof_member_array)
+{
+    /* §6.5.3.4p1: sizeof suppresses decay, so a member array keeps its extent. */
+    EXPECT_INTERP_AND_ELF("struct S { char m[64]; int a[10]; };\n"
+                          "struct S g;\n"
+                          "int main(void) {\n"
+                          "    struct S *p = &g;\n"
+                          "    return (int)sizeof g.m + (int)sizeof(p->m)\n"
+                          "         + (int)sizeof g.a + (int)sizeof(p->a) - 128;\n"
+                          "}\n",
+                          80);
+}

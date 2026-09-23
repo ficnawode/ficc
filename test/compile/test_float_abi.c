@@ -145,3 +145,18 @@ TEST(float_abi, long_double_libm_call)
         unlink(paths[i]);
     }
 }
+
+TEST(float_abi, fp_value_live_across_call)
+{
+    /* SysV AMD64: no callee-saved XMM, so a live-across-call double must spill.
+       The host TU clobbers xmm9 to expose an allocator that keeps it there. */
+    EXPECT_EQ(tc_run_elf_with_extra_tu(
+                  "double clobber(double x);\n"
+                  "double combine(double a, double b) { return clobber(a) + clobber(b); }\n"
+                  "int main(void) { return (int)(combine(1.5, 2.5) * 10.0); }\n",
+                  "double clobber(double x) {\n"
+                  "    __asm__ volatile(\"movsd %%xmm0, %%xmm9\" ::: \"xmm9\");\n"
+                  "    return x;\n"
+                  "}\n"),
+              40);
+}

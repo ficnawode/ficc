@@ -3913,7 +3913,12 @@ static bool emit_file_globals(ASTNode *decl, IrModule *mod, Arena *arena, StrMap
         size_t n = vec_size(dl->decls);
         for (size_t j = 0; j < n; j++)
         {
-            ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, j));
+            ASTNode *member = (ASTNode *) vec_get(dl->decls, j);
+            if (member->kind != AST_VAR_DECL)
+            {
+                continue;
+            }
+            ASTVarDecl *vd = ast_as(ASTVarDecl, member);
             if (emit_global_decl(vd, mod, arena, global_map, NULL) == NO_VREG)
             {
                 return false;

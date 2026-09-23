@@ -454,16 +454,21 @@ static Type *check_address_of(ASTNode *operand, SemanticCtx *ctx)
     }
     if (operand->kind == AST_MEMBER_ACCESS)
     {
-        if (ast_as(ASTMemberAccess, operand)->is_bitfield)
+        ASTMemberAccess *ma = ast_as(ASTMemberAccess, operand);
+        if (ma->is_bitfield)
         {
             sem_error(ctx, operand->loc, "cannot take address of bit-field");
             return NULL;
         }
-        return type_ptr(operand->expr_type);
+        /* §6.5.3.2p3: no decay, so `&s.arr` is a pointer to the array. */
+        return type_ptr(ma->field_type);
     }
     if (operand->kind == AST_SUBSCRIPT_EXPR)
     {
-        return type_ptr(operand->expr_type);
+        /* §6.5.3.2p3: no decay on the lvalue, so `&m[i]` points at the element. */
+        ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, operand);
+        Type *ptr_type = type_decay(se->array->expr_type);
+        return type_ptr(type_deref(ptr_type));
     }
     if (operand->kind == AST_IDENT)
     {
@@ -477,14 +482,14 @@ static Type *check_address_of(ASTNode *operand, SemanticCtx *ctx)
             sem_error(ctx, operand->loc, "cannot take address of this expression");
             return NULL;
         }
-        return type_ptr(type_decay(id->decl->type));
+        return type_ptr(id->decl->type);
     }
     if (operand->kind == AST_COMPOUND_LITERAL)
     {
         /* The anonymous object's address; pointee qualifiers survive, so
            `&(const struct S){...}` is `const struct S *`. */
         Type *ty = ast_as(ASTCompoundLiteral, operand)->type;
-        return type_ptr(type_decay(ty));
+        return type_ptr(ty);
     }
     sem_error(ctx, operand->loc, "cannot take address of this expression");
     return NULL;
@@ -996,6 +1001,15 @@ static bool check_sizeof_expr(ASTSizeofExpr *se, SemanticCtx *ctx)
         /* Compound literals do not decay either (§6.5.2.5p4 note). */
         op_type = ast_as(ASTCompoundLiteral, se->operand)->type;
     }
+    else if (se->operand->kind == AST_MEMBER_ACCESS)
+    {
+        /* §6.5.3.4p1: sizeof suppresses decay, so a member array keeps its extent. */
+        Type *ft = ast_as(ASTMemberAccess, se->operand)->field_type;
+        if (ft)
+        {
+            op_type = ft;
+        }
+    }
     if (op_type->kind == TYPE_VOID)
     {
         return sem_error(ctx, node->loc, "sizeof(void) is invalid");
@@ -1045,6 +1059,14 @@ static bool check_alignof_expr(ASTAlignofExpr *ae, SemanticCtx *ctx)
         if (decl && type_is_array(decl->type))
         {
             op_type = decl->type;
+        }
+    }
+    else if (ae->operand->kind == AST_MEMBER_ACCESS)
+    {
+        Type *ft = ast_as(ASTMemberAccess, ae->operand)->field_type;
+        if (ft)
+        {
+            op_type = ft;
         }
     }
     if (op_type->kind == TYPE_VOID)
@@ -2436,8 +2458,16 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
             size_t n = vec_size(dl->decls);
             for (size_t i = 0; i < n; i++)
             {
-                if (!check_variable_declaration(
-                        ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, i)), ctx))
+                ASTNode *member = (ASTNode *) vec_get(dl->decls, i);
+                if (member->kind == AST_TYPEDEF_DECL)
+                {
+                    if (!check_typedef_decl(ast_as(ASTTypedefDecl, member), ctx))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+                if (!check_variable_declaration(ast_as(ASTVarDecl, member), ctx))
                 {
                     return false;
                 }
@@ -2738,8 +2768,12 @@ static bool register_globals(ASTProgram *prog, SemanticCtx *ctx)
             size_t n = vec_size(dl->decls);
             for (size_t j = 0; j < n; j++)
             {
-                if (!collect_one_global_var(ast_as(ASTVarDecl, (ASTNode *) vec_get(dl->decls, j)),
-                                            ctx))
+                ASTNode *member = (ASTNode *) vec_get(dl->decls, j);
+                if (member->kind != AST_VAR_DECL)
+                {
+                    continue;
+                }
+                if (!collect_one_global_var(ast_as(ASTVarDecl, member), ctx))
                 {
                     return false;
                 }
@@ -2803,9 +2837,24 @@ static bool register_functions(ASTProgram *prog, SemanticCtx *ctx)
     for (size_t i = 0; i < ndecls; i++)
     {
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
+        if (decl->kind == AST_DECL_LIST)
+        {
+            /* A file-scope decl list is all vars or all typedefs; check the latter. */
+            ASTDeclList *dl = ast_as(ASTDeclList, decl);
+            size_t n = vec_size(dl->decls);
+            for (size_t j = 0; j < n; j++)
+            {
+                ASTNode *member = (ASTNode *) vec_get(dl->decls, j);
+                if (member->kind == AST_TYPEDEF_DECL &&
+                    !check_typedef_decl(ast_as(ASTTypedefDecl, member), ctx))
+                {
+                    return false;
+                }
+            }
+            continue;
+        }
         if (decl->kind == AST_STRUCT_DECL || decl->kind == AST_ENUM_DECL ||
-            decl->kind == AST_VAR_DECL || decl->kind == AST_DECL_LIST ||
-            decl->kind == AST_STATIC_ASSERT)
+            decl->kind == AST_VAR_DECL || decl->kind == AST_STATIC_ASSERT)
         {
             continue;
         }

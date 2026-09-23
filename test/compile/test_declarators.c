@@ -405,3 +405,51 @@ TEST(declarators, negative_incomplete_tag_list)
                       "    return 0;\n"
                       "}\n");
 }
+
+TEST(declarators, pointer_to_array_address_of)
+{
+    /* §6.5.3.2p3: `&array` is a pointer to the array, not its first element. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a[4];\n"
+                          "    int (*p)[4] = &a;\n"
+                          "    (*p)[0] = 7;\n"
+                          "    (*p)[3] = 35;\n"
+                          "    return a[0] + a[3];\n"
+                          "}\n",
+                          42);
+}
+
+TEST(declarators, array_of_function_pointers)
+{
+    /* §6.7.6.1: `[N]` binds tighter than `*`, so this is an array of pointers. */
+    EXPECT_INTERP_AND_ELF("int add1(int x) { return x + 1; }\n"
+                          "int add2(int x) { return x + 2; }\n"
+                          "int (*tab[2])(int);\n"
+                          "int main(void) {\n"
+                          "    tab[0] = add1;\n"
+                          "    tab[1] = add2;\n"
+                          "    return tab[1](40);\n"
+                          "}\n",
+                          42);
+}
+
+TEST(declarators, function_returning_function_pointer)
+{
+    /* The inner `(int)` suffix makes `get` return a function pointer. */
+    EXPECT_INTERP_AND_ELF("int add1(int x) { return x + 1; }\n"
+                          "int (*get(int tag))(int) { return tag == 1 ? add1 : 0; }\n"
+                          "int main(void) { return get(1)(41); }\n",
+                          42);
+}
+
+TEST(declarators, typedef_multiple_declarators)
+{
+    /* §6.7.7: one typedef may introduce several names sharing the specifier. */
+    EXPECT_INTERP_AND_ELF("typedef int A, B[3];\n"
+                          "int main(void) {\n"
+                          "    A x = 42;\n"
+                          "    B y = {1, 2, 3};\n"
+                          "    return x + (int)sizeof(y) - 12;\n"
+                          "}\n",
+                          42);
+}

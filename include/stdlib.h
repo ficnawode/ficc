@@ -15,6 +15,7 @@ void exit(int status);
 int atexit(void (*function)(void));
 void abort(void);
 int atoi(const char *nptr);
+double atof(const char *nptr);
 long atol(const char *nptr);
 long long atoll(const char *nptr);
 float strtof(const char *str, char **endptr);
