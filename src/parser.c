@@ -882,6 +882,10 @@ static Specs parse_decl_specifiers(Parser *p)
 {
     Specs s = {0};
     skip_attributes(p);
+    while (peek_token(p)->kind == TOK_KW_EXTENSION)
+    {
+        next_token(p);
+    }
     /* Function specifiers (§6.7.4): `inline` drives the tier-1 inliner. */
     while (peek_token(p)->kind == TOK_KW_INLINE)
     {
@@ -2615,6 +2619,11 @@ static ASTNode *parse_unary(Parser *p)
         return ast_incdec_expr(operand, t->kind == TOK_PLUS_PLUS, false, t->loc, p->arena);
     }
 
+    if (t->kind == TOK_KW_EXTENSION)
+    {
+        next_token(p);
+        return parse_unary(p);
+    }
     if (t->kind == TOK_PLUS)
     {
         /* Unary plus is the identity (after integer promotion). */
