@@ -974,6 +974,18 @@ static Type *ptr_layers(Type *t, u32 n)
     return t;
 }
 
+/* Pointer layers with per-level qualifiers: the leftmost `*` is the innermost
+   (closest to the base), so `T * const *` is a pointer to a const pointer. */
+static Type *ptr_layers_quals(Type *t, u32 n, const u8 *quals)
+{
+    for (u32 i = 0; i < n; i++)
+    {
+        t = type_ptr(t);
+        t = apply_quals(t, quals[i]);
+    }
+    return t;
+}
+
 static Type *parse_group_suffixes(Parser *p, Type *t, u32 *nptr, Vec **captured_params,
                                   bool *captured_variadic)
 {
@@ -1127,21 +1139,32 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
     out->func_variadic = false;
 
     skip_attributes(p);
+    enum
+    {
+        MAX_PTR_LAYERS = 64,
+    };
     u32 nptr = 0;
-    u8 ptr_quals = 0;
+    u8 ptr_layer_quals[MAX_PTR_LAYERS];
     while (peek_token(p)->kind == TOK_STAR)
     {
         next_token(p);
-        nptr++;
+        if (nptr == MAX_PTR_LAYERS)
+        {
+            parse_error(p, "too many pointer levels");
+            return false;
+        }
+        u8 quals = 0;
         while (peek_token(p)->kind == TOK_KW_CONST || peek_token(p)->kind == TOK_KW_VOLATILE ||
                peek_token(p)->kind == TOK_KW_RESTRICT)
         {
             TokenKind qk = peek_token(p)->kind;
-            ptr_quals |= qk == TOK_KW_CONST      ? Q_CONST
-                         : qk == TOK_KW_VOLATILE ? Q_VOLATILE
-                                                 : Q_RESTRICT;
+            quals |= qk == TOK_KW_CONST      ? Q_CONST
+                     : qk == TOK_KW_VOLATILE ? Q_VOLATILE
+                                             : Q_RESTRICT;
             next_token(p);
         }
+        ptr_layer_quals[nptr] = quals;
+        nptr++;
     }
     out->stars = nptr;
 
@@ -1163,17 +1186,16 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
 
     if (peek_token(p)->kind == TOK_LBRACKET)
     {
-        out->type = parse_array_suffix(p, ptr_layers(out->type, nptr), &out->array_dims);
+        out->type =
+            parse_array_suffix(p, ptr_layers_quals(out->type, nptr, ptr_layer_quals), &out->array_dims);
         if (!out->type)
         {
             return false;
         }
-        nptr = 0;
     }
-    out->type = ptr_layers(out->type, nptr);
-    if (ptr_quals)
+    else
     {
-        out->type = apply_quals(out->type, ptr_quals);
+        out->type = ptr_layers_quals(out->type, nptr, ptr_layer_quals);
     }
     /* A `(params)` suffix inside the group belongs to this declarator. */
     if (inner_group && peek_token(p)->kind == TOK_LPAREN)

@@ -465,6 +465,19 @@ TEST(declarators, array_of_function_pointers)
                           42);
 }
 
+TEST(declarators, pointer_qualifiers_per_level)
+{
+    /* §6.7.6: `const char * const *` is a pointer to a const pointer to const
+       char; the qualifier after a `*` binds to that pointer level. */
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    const char *s = \"x\";\n"
+                          "    const char * const p = s;\n"
+                          "    const char * const *pp = &p;\n"
+                          "    return (*pp)[0] == 'x' ? 42 : 0;\n"
+                          "}\n",
+                          42);
+}
+
 TEST(declarators, function_returning_function_pointer)
 {
     /* The inner `(int)` suffix makes `get` return a function pointer. */
