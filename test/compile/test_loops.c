@@ -280,3 +280,36 @@ TEST(loops, phi_sized_sentinel)
 {
     EXPECT_INTERP_AND_ELF(phi_width_src, 0);
 }
+
+/* Regression: a for-post comma cross-assignment (`i = j, j = i + 1`) makes one
+   PHI's incoming value another PHI of the same block. Phis are parallel, so the
+   copy of `i` must read the old `j` before `j` is overwritten. */
+static const char *phi_parallel_cross_src = "int main(void) {\n"
+                                            "    int i, j, sum = 0;\n"
+                                            "    for (i = 0, j = 1; i < 3; i = j, j = i + 1)\n"
+                                            "        sum = sum * 10 + i;\n"
+                                            "    return sum;\n"
+                                            "}\n";
+
+TEST(loops, phi_parallel_cross_assignment)
+{
+    EXPECT_INTERP_AND_ELF(phi_parallel_cross_src, 12);
+}
+
+/* Regression: the list_for_each_safe pattern (`pos = tmp, tmp = pos->next`)
+   advances two loop-carried pointers through a parallel PHI copy. */
+static const char *phi_parallel_list_src =
+    "struct node { int v; struct node *next; };\n"
+    "int main(void) {\n"
+    "    struct node n3 = {3, 0}, n2 = {2, &n3}, n1 = {1, &n2};\n"
+    "    int sum = 0;\n"
+    "    struct node *pos = &n1, *tmp = n1.next;\n"
+    "    for (; pos; pos = tmp, tmp = pos ? pos->next : 0)\n"
+    "        sum = sum * 10 + pos->v;\n"
+    "    return sum;\n"
+    "}\n";
+
+TEST(loops, phi_parallel_list_walk)
+{
+    EXPECT_INTERP_AND_ELF(phi_parallel_list_src, 123);
+}

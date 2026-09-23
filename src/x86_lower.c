@@ -32,6 +32,7 @@ typedef struct
 {
     IrOperand src;
     u32 dst_vreg;
+    bool src_is_scratch; /* the source was spilled to the cycle-break scratch slot */
 } LowerPhiCopy;
 
 /* Jump table appended to the function's .text, indexed by `val - min`. */
@@ -1079,9 +1080,8 @@ static void lower_instr(IrInstr *in, X86LowerCtx *ctx)
     fn(in, ctx);
 }
 
-static void store_vreg_from_reg(X86LowerCtx *ctx, u32 vreg, u8 width, u8 reg)
+static void store_reg_to_loc(X86LowerCtx *ctx, RegLoc l, u8 width, u8 reg)
 {
-    RegLoc l = loc_of(ctx->alloc, ir_operand_vreg(vreg));
     if (l.kind == LOC_REG)
     {
         if (l.reg != reg)
@@ -1093,12 +1093,14 @@ static void store_vreg_from_reg(X86LowerCtx *ctx, u32 vreg, u8 width, u8 reg)
     emit_mov(ctx->buf, width, xop_mem(rbp_mem(l.disp)), xop_reg(reg));
 }
 
-/* A PHI edge's copy runs at its predecessor's end, so it reads the incoming
-   value at its final use and defines the phi result at the same position. */
-static void emit_phi_copy(X86LowerCtx *ctx, IrOperand src, u32 dst_vreg)
+static void store_vreg_from_reg(X86LowerCtx *ctx, u32 vreg, u8 width, u8 reg)
 {
-    u8 dw = vreg_width(ctx, dst_vreg);
-    RegLoc dl = loc_of(ctx->alloc, ir_operand_vreg(dst_vreg));
+    store_reg_to_loc(ctx, loc_of(ctx->alloc, ir_operand_vreg(vreg)), width, reg);
+}
+
+/* Emits `dst <- src` for an already-resolved destination location. */
+static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
+{
     if (dw == W_LD)
     {
         if (src.is_imm)
@@ -1116,13 +1118,13 @@ static void emit_phi_copy(X86LowerCtx *ctx, IrOperand src, u32 dst_vreg)
     if (src.is_global)
     {
         emit_global_addr_to(ctx->buf, R_EAX, src.u.global_index, ctx->global_patches, ctx->arena);
-        store_vreg_from_reg(ctx, dst_vreg, dw, R_EAX);
+        store_reg_to_loc(ctx, dl, dw, R_EAX);
         return;
     }
     if (src.is_func)
     {
         emit_func_addr_to(ctx->buf, R_EAX, src.u.func_name, ctx->func_patches, ctx->arena);
-        store_vreg_from_reg(ctx, dst_vreg, dw, R_EAX);
+        store_reg_to_loc(ctx, dl, dw, R_EAX);
         return;
     }
     if (dl.cls == RC_XMM)
@@ -1200,6 +1202,206 @@ static void emit_phi_copy(X86LowerCtx *ctx, IrOperand src, u32 dst_vreg)
     emit_mov(ctx->buf, dw, xop_mem(rbp_mem(dl.disp)), xop_reg(R_EAX));
 }
 
+/* A PHI edge's copy runs at its predecessor's end, so it reads the incoming
+   value at its final use and defines the phi result at the same position. */
+static void emit_phi_copy(X86LowerCtx *ctx, IrOperand src, u32 dst_vreg)
+{
+    u8 dw = vreg_width(ctx, dst_vreg);
+    RegLoc dl = loc_of(ctx->alloc, ir_operand_vreg(dst_vreg));
+    emit_copy_to_loc(ctx, src, dl, dw);
+}
+
+/* Saves `src` into the 16-byte scratch slot used to break phi-copy cycles. */
+static void emit_scratch_store(X86LowerCtx *ctx, IrOperand src)
+{
+    X86Mem sm = rbp_mem(ctx->scratch_disp);
+    if (src.is_imm)
+    {
+        emit_mov(ctx->buf, W_QWORD, xop_reg(R_EAX), xop_imm(src.u.imm));
+        emit_mov(ctx->buf, W_QWORD, xop_mem(sm), xop_reg(R_EAX));
+        return;
+    }
+    if (src.is_global)
+    {
+        emit_global_addr_to(ctx->buf, R_EAX, src.u.global_index, ctx->global_patches, ctx->arena);
+        emit_mov(ctx->buf, W_QWORD, xop_mem(sm), xop_reg(R_EAX));
+        return;
+    }
+    if (src.is_func)
+    {
+        emit_func_addr_to(ctx->buf, R_EAX, src.u.func_name, ctx->func_patches, ctx->arena);
+        emit_mov(ctx->buf, W_QWORD, xop_mem(sm), xop_reg(R_EAX));
+        return;
+    }
+    RegLoc sl = loc_of(ctx->alloc, src);
+    u8 w = vreg_width(ctx, src.u.vreg);
+    if (w == W_LD)
+    {
+        ASSERT(sl.kind == LOC_MEM && "x87 values are memory-only");
+        emit_mov16(ctx->buf, sm, rbp_mem(sl.disp));
+        return;
+    }
+    if (sl.cls == RC_XMM)
+    {
+        ASSERT(sl.kind == LOC_REG);
+        emit_sse_store(ctx->buf, MF_OF(w), sm, sl.reg);
+        return;
+    }
+    if (sl.kind == LOC_REG)
+    {
+        emit_mov(ctx->buf, w, xop_mem(sm), xop_reg(sl.reg));
+    }
+    else
+    {
+        emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_mem(rbp_mem(sl.disp)));
+        emit_mov(ctx->buf, w, xop_mem(sm), xop_reg(R_EAX));
+    }
+}
+
+/* Restores the scratch slot into the phi destination `dst_vreg`. */
+static void emit_scratch_load(X86LowerCtx *ctx, u32 dst_vreg)
+{
+    X86Mem sm = rbp_mem(ctx->scratch_disp);
+    u8 dw = vreg_width(ctx, dst_vreg);
+    RegLoc dl = loc_of(ctx->alloc, ir_operand_vreg(dst_vreg));
+    if (dw == W_LD)
+    {
+        ASSERT(dl.kind == LOC_MEM && "x87 values are memory-only");
+        emit_mov16(ctx->buf, rbp_mem(dl.disp), sm);
+        return;
+    }
+    if (dl.cls == RC_XMM)
+    {
+        u8 mf = MF_OF(dw);
+        if (dl.kind == LOC_REG)
+        {
+            emit_sse_load(ctx->buf, mf, dl.reg, sm);
+        }
+        else
+        {
+            emit_sse_load(ctx->buf, mf, R_XMM0, sm);
+            emit_sse_store(ctx->buf, mf, rbp_mem(dl.disp), R_XMM0);
+        }
+        return;
+    }
+    if (dl.kind == LOC_REG)
+    {
+        emit_mov(ctx->buf, dw, xop_reg(dl.reg), xop_mem(sm));
+    }
+    else
+    {
+        emit_mov(ctx->buf, dw, xop_reg(R_EAX), xop_mem(sm));
+        emit_mov(ctx->buf, dw, xop_mem(rbp_mem(dl.disp)), xop_reg(R_EAX));
+    }
+}
+
+static bool phi_operand_same(IrOperand a, IrOperand b)
+{
+    if (a.is_imm != b.is_imm || a.is_global != b.is_global || a.is_func != b.is_func)
+    {
+        return false;
+    }
+    if (a.is_imm)
+    {
+        return a.u.imm == b.u.imm;
+    }
+    if (a.is_global)
+    {
+        return a.u.global_index == b.u.global_index;
+    }
+    if (a.is_func)
+    {
+        return a.u.func_name == b.u.func_name || strcmp(a.u.func_name, b.u.func_name) == 0;
+    }
+    return a.u.vreg == b.u.vreg;
+}
+
+/* Emits a block's PHI copies with parallel-copy semantics. A copy whose
+   destination is still a source of a pending copy must wait; when every
+   remaining destination is a source (a cycle, e.g. a loop-carried swap), the
+   cycle is broken through the scratch slot. */
+static void emit_block_phi_copies(X86LowerCtx *ctx, size_t bi)
+{
+    Vec *pcs = ctx->phi_copies[bi];
+    size_t n = vec_size(pcs);
+    if (n == 0)
+    {
+        return;
+    }
+    LowerPhiCopy **work = arena_alloc(ctx->arena, n * sizeof(LowerPhiCopy *), sizeof(void *));
+    bool *done = arena_alloc(ctx->arena, n, 1);
+    memset(done, 0, n);
+    for (size_t i = 0; i < n; i++)
+    {
+        work[i] = (LowerPhiCopy *) vec_get(pcs, i);
+    }
+
+    size_t remaining = n;
+    while (remaining > 0)
+    {
+        size_t pick = n;
+        for (size_t i = 0; i < n; i++)
+        {
+            if (done[i])
+            {
+                continue;
+            }
+            u32 dst = work[i]->dst_vreg;
+            bool dst_is_source = false;
+            for (size_t j = 0; j < n; j++)
+            {
+                if (done[j] || j == i || work[j]->src_is_scratch)
+                {
+                    continue;
+                }
+                IrOperand s = work[j]->src;
+                if (!s.is_imm && !s.is_global && !s.is_func && s.u.vreg == dst)
+                {
+                    dst_is_source = true;
+                    break;
+                }
+            }
+            if (!dst_is_source)
+            {
+                pick = i;
+                break;
+            }
+        }
+
+        if (pick < n)
+        {
+            if (work[pick]->src_is_scratch)
+            {
+                emit_scratch_load(ctx, work[pick]->dst_vreg);
+            }
+            else
+            {
+                emit_phi_copy(ctx, work[pick]->src, work[pick]->dst_vreg);
+            }
+            done[pick] = true;
+            remaining--;
+            continue;
+        }
+
+        /* Cycle: spill one pending source to the scratch slot and redirect every
+           pending copy that reads it. */
+        size_t c = 0;
+        while (done[c])
+        {
+            c++;
+        }
+        emit_scratch_store(ctx, work[c]->src);
+        for (size_t i = 0; i < n; i++)
+        {
+            if (!done[i] && !work[i]->src_is_scratch &&
+                phi_operand_same(work[i]->src, work[c]->src))
+            {
+                work[i]->src_is_scratch = true;
+            }
+        }
+    }
+}
+
 static void add_phi_copies(X86LowerCtx *ctx)
 {
     size_t nblocks = vec_size(ctx->func->blocks);
@@ -1221,6 +1423,7 @@ static void add_phi_copies(X86LowerCtx *ctx)
                 LowerPhiCopy *pc = arena_alloc(ctx->arena, sizeof(LowerPhiCopy), sizeof(void *));
                 pc->src = entry->val;
                 pc->dst_vreg = in->result;
+                pc->src_is_scratch = false;
                 vec_push(ctx->phi_copies[pj], pc);
             }
         }
@@ -1321,12 +1524,7 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
         }
     }
 
-    size_t npc = vec_size(ctx->phi_copies[bi]);
-    for (size_t pi = 0; pi < npc; pi++)
-    {
-        LowerPhiCopy *pc = (LowerPhiCopy *) vec_get(ctx->phi_copies[bi], pi);
-        emit_phi_copy(ctx, pc->src, pc->dst_vreg);
-    }
+    emit_block_phi_copies(ctx, bi);
 
     record_line_entry(ctx, term);
     if (is_brcond)
@@ -1561,8 +1759,13 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     const TargetDesc *target = x86_64_target();
     LiveIntervals set = liveinterval_compute(f, mod, arena);
     RegAllocation *alloc = regalloc_linear(f, &set, target, arena);
+    /* Reserve a 16-byte slot for breaking phi-copy cycles (parallel moves). */
+    alloc->frame_size += 16;
     LinearFrame frame = {0};
     x86_frame_plan(alloc, f, target, debug, &frame);
+    /* The scratch sits in the reserved bytes at the bottom of the spill area,
+       below every real spill slot (whose offsets were shifted by saved_bytes). */
+    i32 scratch_disp = -(i32) (frame.saved_bytes + alloc->frame_size);
 
     size_t nblocks = vec_size(f->blocks);
     Vec **phi_copies = arena_alloc(arena, (nblocks ? nblocks : 1) * sizeof(Vec *), sizeof(void *));
@@ -1603,6 +1806,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         .use_count = use_count,
         .lines = lines,
         .debug = debug,
+        .scratch_disp = scratch_disp,
     };
 
     x86_frame_emit_prologue(buf, f, mod, alloc, &frame, debug);

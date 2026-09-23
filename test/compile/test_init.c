@@ -481,3 +481,17 @@ TEST(init, negative_overlong_struct)
                       "    return 0;\n"
                       "}\n");
 }
+/* Regression: a local aggregate may take its own address in its initializer
+   (`struct S s = { .self = &s }`); the slot must be published before the init
+   plan runs. */
+TEST(init, local_self_reference)
+{
+    EXPECT_INTERP_AND_ELF("struct S { void *self; int x; };\n"
+                          "int main(void) {\n"
+                          "    struct S s = { .self = &s, .x = 5 };\n"
+                          "    if (s.self != &s) return 1;\n"
+                          "    if (s.x != 5) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}

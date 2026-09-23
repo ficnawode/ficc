@@ -15,9 +15,11 @@ struct SemanticCtx
     StrMap *labels;      /* label name -> ASTLabelStmt (collected per function) */
     int loop_depth;
     int switch_depth;
-    Vec *switch_sem_stack; /* Vec<SwitchSem*> — per-switch case-value sets */
-    Vec *fn_params;        /* enclosing function's ASTVarDecl* list (for builtin
-                              va_start validation), NULL outside function bodies */
+    Vec *switch_sem_stack;  /* Vec<SwitchSem*> — per-switch case-value sets */
+    Vec *fn_params;         /* enclosing function's ASTVarDecl* list (for builtin
+                               va_start validation), NULL outside function bodies */
+    Vec *resolving_records; /* Vec<Type*> — records on the type-resolution stack,
+                               to break self-referential cycles */
     SemanticConfig cfg;
     bool error;
 };
@@ -1095,6 +1097,47 @@ static bool sem_resolve_type(Type **slot, SemanticCtx *ctx)
         if (pointee != type->ptr.pointee)
         {
             *slot = type_ptr(pointee);
+        }
+        return true;
+    }
+    if (type->kind == TYPE_STRUCT || type->kind == TYPE_UNION)
+    {
+        /* A member array bound deferred by the parser (e.g. `int a[sizeof(x)]`)
+           is resolved here, then the record is re-laid-out. Self-referential
+           members are broken by the resolution stack. */
+        Vec *fields = type->record.fields;
+        if (!type->record.complete || !fields)
+        {
+            return true;
+        }
+        for (size_t i = 0; i < vec_size(ctx->resolving_records); i++)
+        {
+            if (vec_get(ctx->resolving_records, i) == type)
+            {
+                return true;
+            }
+        }
+        vec_push(ctx->resolving_records, type);
+        bool changed = false;
+        for (size_t i = 0; i < vec_size(fields); i++)
+        {
+            RecordField *f = (RecordField *) vec_get(fields, i);
+            Type *ft = f->type;
+            if (!sem_resolve_type(&ft, ctx))
+            {
+                vec_pop(ctx->resolving_records);
+                return false;
+            }
+            if (ft != f->type)
+            {
+                f->type = ft;
+                changed = true;
+            }
+        }
+        vec_pop(ctx->resolving_records);
+        if (changed)
+        {
+            type_record_relayout(type);
         }
         return true;
     }
@@ -3224,6 +3267,7 @@ ASTNode *semantic_check(ASTNode *ast, const SemanticConfig *cfg, Arena *arena)
         .loop_depth = 0,
         .switch_depth = 0,
         .switch_sem_stack = vec_new(arena),
+        .resolving_records = vec_new(arena),
         .cfg = sc,
         .error = false,
     };

@@ -824,7 +824,17 @@ void type_record_complete(Type *t, Vec *fields)
     ASSERT(type_is_record(t));
     t = type_base(t);
     t->record.fields = fields;
+    type_record_relayout(t);
+}
 
+/* Recomputes member offsets and the record's size/align from the current field
+   types. Layout is first done at parse time; semantic calls this again after
+   resolving a member array bound that had been deferred (§6.7.6.2). */
+void type_record_relayout(Type *t)
+{
+    ASSERT(type_is_record(t));
+    t = type_base(t);
+    Vec *fields = t->record.fields;
     size_t n = vec_size(fields);
     if (t->kind == TYPE_STRUCT)
     {

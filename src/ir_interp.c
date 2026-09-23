@@ -1128,31 +1128,47 @@ static i64 eval_memcpy(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
+/* Resolves the block's phi nodes for a jump from `pred`. Phis are parallel:
+   one phi may name another phi of the same block (a loop-carried cross
+   assignment, e.g. `a = b, b = a->next`), so every incoming value is read from
+   the pre-entry registers before any result is written. */
 static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
 {
     size_t ninstr = vec_size(bb->instrs);
-    for (size_t i = 0; i < ninstr; i++)
+    size_t nphi = 0;
+    while (nphi < ninstr && ((IrInstr *) vec_get(bb->instrs, nphi))->opcode == OP_PHI)
+    {
+        nphi++;
+    }
+    if (nphi == 0)
+    {
+        return;
+    }
+
+    u32 *results = malloc(nphi * sizeof(u32));
+    i64 *vals = malloc(nphi * 2 * sizeof(i64)); /* low, high (width-16) per phi */
+    ASSERT(results && vals);
+
+    for (size_t i = 0; i < nphi; i++)
     {
         IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
-        if (in->opcode != OP_PHI)
-        {
-            break;
-        }
         bool found = false;
         for (u32 e = 0; e < in->extra.phi.nentries; e++)
         {
             if (strcmp(in->extra.phi.entries[e].label, pred->label) == 0)
             {
+                IrOperand v = in->extra.phi.entries[e].val;
+                results[i] = in->result;
                 if (ctx->mod->widths[in->result] == 16)
                 {
-                    IrOperand v = in->extra.phi.entries[e].val;
                     ASSERT(!v.is_imm && !v.is_global && !v.is_func); /* width-16 ⇒ vreg */
-                    copy_cell(ctx, regs, in->result, regs, v.u.vreg);
+                    vals[i * 2] = regs[v.u.vreg];
+                    vals[i * 2 + 1] = regs[ctx->nregs + v.u.vreg];
                 }
                 else
                 {
-                    regs[in->result] = operand_val(ctx, in->extra.phi.entries[e].val, regs);
-                    apply_vreg_width(ctx, regs, in->result);
+                    vals[i * 2] = operand_val(ctx, v, regs);
+                    vals[i * 2 + 1] = 0;
                 }
                 found = true;
                 break;
@@ -1160,6 +1176,24 @@ static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
         }
         ASSERT(found && "phi entry names a real predecessor block");
     }
+
+    for (size_t i = 0; i < nphi; i++)
+    {
+        u32 r = results[i];
+        if (ctx->mod->widths[r] == 16)
+        {
+            regs[r] = vals[i * 2];
+            regs[ctx->nregs + r] = vals[i * 2 + 1];
+        }
+        else
+        {
+            regs[r] = vals[i * 2];
+            apply_vreg_width(ctx, regs, r);
+        }
+    }
+
+    free(results);
+    free(vals);
 }
 
 #define EVAL_ENTRIES(X)                                                                            \

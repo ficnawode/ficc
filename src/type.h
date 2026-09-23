@@ -162,6 +162,9 @@ bool type_is_variadic(Type *t);
 Type *type_record(TypeKind kind, const char *tag);
 Type *type_record_anon(TypeKind kind);
 void type_record_complete(Type *t, Vec *fields);
+/* Recompute a completed record's layout from its (possibly re-resolved) member
+   types; used by semantic after deferring a member array bound. */
+void type_record_relayout(Type *t);
 
 /* The builtin `va_list`: glibc's x86-64 shape, a 24-byte struct
    `{u32 gp_offset; u32 fp_offset; void *overflow_arg_area; void

@@ -2515,7 +2515,9 @@ static Vec *pp_prescan_args(Pp *pp, Vec *args)
         Vec *arg = vec_new(pp->arena);
         for (TokList *r = pp_expand_list(pp, list); r; r = r->next)
         {
-            vec_push(arg, r->tok);
+            /* Materialize `__LINE__`/`__FILE__` in the argument before it is
+               substituted or stringized (C11 §6.10.3.1). */
+            vec_push(arg, pp_cook_predefined(pp, r->tok, r->tok->loc.line, r->tok->loc.file));
         }
         vec_push(expanded, arg);
     }

@@ -3499,6 +3499,9 @@ static IrBlock *build_var_decl_stmt(FuncBuilder *ctx, ASTVarDecl *vd, IrBlock *b
            plan writes zero-fill + store, an expression init applies via memcpy. */
         u32 dst = alloc_vreg_for_var(ctx, vd->type);
         ir_emit_alloca(bb, dst, vd->type->size);
+        /* Publish the slot before the initializer: a self-reference such as
+           `struct S s = { .self = &s }` must resolve to this address. */
+        write_variable(ctx, vd, bb, ir_operand_vreg(dst));
         if (vd->plan)
         {
             bb = emit_init_plan(ctx, bb, ir_operand_vreg(dst), vd->plan);
@@ -3509,7 +3512,6 @@ static IrBlock *build_var_decl_stmt(FuncBuilder *ctx, ASTVarDecl *vd, IrBlock *b
             bb = init.block;
             ir_emit_memcpy(bb, ir_operand_vreg(dst), init.value, vd->type->size);
         }
-        write_variable(ctx, vd, bb, ir_operand_vreg(dst));
         return bb;
     }
 

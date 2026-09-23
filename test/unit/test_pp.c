@@ -255,6 +255,21 @@ TEST(pp, nested_object_macros)
     arena_free(a);
 }
 
+TEST(pp, line_macro_expands_in_stringize_argument)
+{
+    /* `STR(__LINE__)` stringizes the invocation line, so `__LINE__` must be
+       materialized while the argument is expanded (§6.10.3.1). */
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define STR2(x) #x\n"
+                            "#define STR(x) STR2(x)\n"
+                            "STR(__LINE__)\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_EQ(vec_size(pp->out), 2);
+    expect_out(pp, 0, TOK_PP_STRING, "\"3\"");
+    expect_out(pp, 1, TOK_PP_TRIVIA_NL, "\n");
+    arena_free(a);
+}
+
 TEST(pp, macro_body_keeps_all_tokens)
 {
     Arena *a = arena_new();
