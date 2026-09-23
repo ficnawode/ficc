@@ -39,7 +39,7 @@ DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_BIN) $(T
 
 FORMAT_FILES := $(shell find src include test \( -name '*.c' -o -name '*.h' \))
 
-.PHONY: all clean test test-gdb selftest dirs compile-commands format format-check git-sweep
+.PHONY: all clean test test-gdb selftest dirs compile-commands format format-check git-sweep git-smoke
 
 GIT ?= ../git
 
@@ -61,6 +61,10 @@ test-gdb: $(FICC_BIN)
 # Phase 23 progress meter: compile every Git translation unit, bucket failures.
 git-sweep: $(FICC_BIN)
 	FICC=$(abspath $(FICC_BIN)) GIT=$(abspath $(GIT)) ./test/git-sweep.sh
+
+# Functional certificate for a ficc-built git binary (see test/git-cc.sh).
+git-smoke:
+	GIT=$(abspath $(GIT)) ./test/git-smoke.sh
 
 $(FICC_BIN): $(OBJ_SRC) | dirs
 	$(CC) $(LDFLAGS) $^ -o $@
