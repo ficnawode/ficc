@@ -609,8 +609,9 @@ static void push_succ_pred(IrBlock *from, Vec *succ_preds)
 }
 
 /* Regenerate preds from terminators, matching the CFG builder / opt_verify. */
-static void rebuild_preds(IrFunction *f)
+static void rebuild_preds(IrFunction *f, Arena *arena)
 {
+    StrMap *labels = opt_label_map_build(f, arena);
     size_t n = vec_size(f->blocks);
     for (size_t i = 0; i < n; i++)
     {
@@ -632,7 +633,7 @@ static void rebuild_preds(IrFunction *f)
         {
             case OP_BR:
             {
-                IrBlock *to = opt_block_by_label(f, last->extra.br.target_label);
+                IrBlock *to = (IrBlock *) strmap_get(labels, last->extra.br.target_label);
                 if (to)
                 {
                     push_succ_pred(bb, to->preds);
@@ -641,12 +642,12 @@ static void rebuild_preds(IrFunction *f)
             }
             case OP_BRCOND:
             {
-                IrBlock *t = opt_block_by_label(f, last->extra.brcond.true_label);
+                IrBlock *t = (IrBlock *) strmap_get(labels, last->extra.brcond.true_label);
                 if (t)
                 {
                     push_succ_pred(bb, t->preds);
                 }
-                IrBlock *f2 = opt_block_by_label(f, last->extra.brcond.false_label);
+                IrBlock *f2 = (IrBlock *) strmap_get(labels, last->extra.brcond.false_label);
                 if (f2)
                 {
                     push_succ_pred(bb, f2->preds);
@@ -656,7 +657,7 @@ static void rebuild_preds(IrFunction *f)
             case OP_SWITCH:
                 for (u32 c = 0; c < last->extra.sw.ncases; c++)
                 {
-                    IrBlock *to = opt_block_by_label(f, last->extra.sw.cases[c].label);
+                    IrBlock *to = (IrBlock *) strmap_get(labels, last->extra.sw.cases[c].label);
                     if (to)
                     {
                         push_succ_pred(bb, to->preds);
@@ -664,7 +665,7 @@ static void rebuild_preds(IrFunction *f)
                 }
                 if (last->extra.sw.default_label)
                 {
-                    IrBlock *to = opt_block_by_label(f, last->extra.sw.default_label);
+                    IrBlock *to = (IrBlock *) strmap_get(labels, last->extra.sw.default_label);
                     if (to)
                     {
                         push_succ_pred(bb, to->preds);
@@ -687,7 +688,7 @@ static bool process_caller(InlinePass *ip, IrFunction *caller)
     /* Loop info is pooled before cloning; the growth/lineage maps persist. */
     LoopInfo *loops = opt_get_loops(ip->ctx, caller);
     scan_blocks(ip, caller, loops);
-    rebuild_preds(caller);
+    rebuild_preds(caller, ip->ctx->arena);
     return ip->ctx->inline_sites != sites_before;
 }
 

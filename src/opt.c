@@ -529,28 +529,78 @@ void opt_make_value_analysis(OptimizerContext *ctx, IrFunction *f)
     ctx->use_count = uses;
 }
 
-static void rewrite_slot(IrOperand *slot, u32 vreg, IrOperand val, bool *changed)
+void opt_repl_begin(OptimizerContext *ctx)
+{
+    u32 n = ctx->mod->width_count;
+    if (n > ctx->repl_cap)
+    {
+        u32 cap = n < 64 ? 64 : n;
+        ctx->repl_val = arena_alloc(ctx->arena, cap * sizeof(IrOperand), _Alignof(IrOperand));
+        ctx->repl_gen = arena_alloc(ctx->arena, cap * sizeof(u32), sizeof(u32));
+        for (u32 i = 0; i < cap; i++)
+        {
+            ctx->repl_gen[i] = 0;
+        }
+        ctx->repl_cap = cap;
+        ctx->repl_serial = 0;
+    }
+    if (++ctx->repl_serial == 0)
+    {
+        for (u32 i = 0; i < ctx->repl_cap; i++)
+        {
+            ctx->repl_gen[i] = 0;
+        }
+        ctx->repl_serial = 1;
+    }
+}
+
+void opt_repl_set(OptimizerContext *ctx, u32 vreg, IrOperand val)
+{
+    ASSERT(vreg != NO_VREG && vreg < ctx->mod->width_count);
+    if (vreg >= ctx->repl_cap)
+    {
+        return;
+    }
+    ctx->repl_val[vreg] = val;
+    ctx->repl_gen[vreg] = ctx->repl_serial;
+}
+
+/* Follow a pending replacement to its final operand (with a cycle guard). */
+static IrOperand repl_resolve(OptimizerContext *ctx, IrOperand op)
+{
+    u32 nvregs = ctx->mod->width_count;
+    u32 guard = 0;
+    while (!op.is_imm && !op.is_global && !op.is_func && op.u.vreg < nvregs &&
+           op.u.vreg < ctx->repl_cap && ctx->repl_gen[op.u.vreg] == ctx->repl_serial)
+    {
+        op = ctx->repl_val[op.u.vreg];
+        if (++guard > nvregs)
+        {
+            break;
+        }
+    }
+    return op;
+}
+
+static void repl_rewrite_slot(OptimizerContext *ctx, IrOperand *slot)
 {
     if (slot->is_imm || slot->is_global || slot->is_func)
     {
         return;
     }
-    if (slot->u.vreg == vreg)
+    u32 v = slot->u.vreg;
+    if (v >= ctx->repl_cap || ctx->repl_gen[v] != ctx->repl_serial)
     {
-        *slot = val;
-        *changed = true;
+        return;
     }
+    IrOperand resolved = repl_resolve(ctx, *slot);
+    ctx->repl_val[v] = resolved; /* path-compress repeated chains */
+    *slot = resolved;
 }
 
-bool opt_replace_def(OptimizerContext *ctx, IrFunction *f, IrInstr *def, IrOperand val)
+bool opt_repl_apply(OptimizerContext *ctx, IrFunction *f)
 {
-    (void) ctx;
-    u32 vreg = def->result;
-    if (vreg == NO_VREG)
-    {
-        return false;
-    }
-    bool changed = false;
+    u32 serial = ctx->repl_serial;
     size_t nblocks = vec_size(f->blocks);
     for (size_t b = 0; b < nblocks; b++)
     {
@@ -561,38 +611,53 @@ bool opt_replace_def(OptimizerContext *ctx, IrFunction *f, IrInstr *def, IrOpera
             IrInstr *in = (IrInstr *) vec_get(bb->instrs, j);
             for (u8 o = 0; o < in->nops; o++)
             {
-                rewrite_slot(&in->ops[o], vreg, val, &changed);
+                repl_rewrite_slot(ctx, &in->ops[o]);
             }
             if (in->opcode == OP_PHI)
             {
                 for (u32 e = 0; e < in->extra.phi.nentries; e++)
                 {
-                    rewrite_slot(&in->extra.phi.entries[e].val, vreg, val, &changed);
+                    repl_rewrite_slot(ctx, &in->extra.phi.entries[e].val);
                 }
             }
             else if (in->opcode == OP_CALL)
             {
-                for (u32 arg = 0; arg < in->extra.call.nargs; arg++)
+                for (u32 a = 0; a < in->extra.call.nargs; a++)
                 {
-                    rewrite_slot(&in->extra.call.args[arg], vreg, val, &changed);
+                    repl_rewrite_slot(ctx, &in->extra.call.args[a]);
                 }
                 if (in->extra.call.is_indirect)
                 {
-                    rewrite_slot(&in->extra.call.callee, vreg, val, &changed);
+                    repl_rewrite_slot(ctx, &in->extra.call.callee);
                 }
             }
         }
     }
+
+    bool erased = false;
     for (size_t b = 0; b < nblocks; b++)
     {
         IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
-        if (opt_instr_index(bb, def) != UINT32_MAX)
+        size_t n = vec_size(bb->instrs);
+        size_t write = 0;
+        for (size_t read = 0; read < n; read++)
         {
-            opt_erase_instr(bb, def);
-            break;
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, read);
+            if (in->result != NO_VREG && in->result < ctx->repl_cap &&
+                ctx->repl_gen[in->result] == serial)
+            {
+                erased = true;
+                continue;
+            }
+            vec_set(bb->instrs, write, in);
+            write++;
+        }
+        while (vec_size(bb->instrs) > write)
+        {
+            vec_pop(bb->instrs);
         }
     }
-    return true;
+    return erased;
 }
 
 void optimize(IrModule *mod, OptLevel level, Arena *arena)

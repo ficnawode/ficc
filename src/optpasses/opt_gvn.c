@@ -203,16 +203,16 @@ bool opt_pass_gvn(OptimizerContext *ctx)
         build_def_block(f, def_block);
 
         HashMap *table = hashmap_new(ctx->arena, vn_key_hash, vn_key_eq);
+        opt_repl_begin(ctx);
         for (u32 k = 0; k < cfg->nreach; k++)
         {
             IrBlock *bb = cfg->rpo[k];
-            size_t i = 0;
-            while (i < vec_size(bb->instrs))
+            size_t ninstr = vec_size(bb->instrs);
+            for (size_t i = 0; i < ninstr; i++)
             {
                 IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
                 if (in->result == NO_VREG || !vn_numberable(in->opcode))
                 {
-                    i++;
                     continue;
                 }
                 VnKey key;
@@ -225,20 +225,21 @@ bool opt_pass_gvn(OptimizerContext *ctx)
                     u32 leader_block = opt_block_index(f, def_block[leader]);
                     if (opt_doms_dominates(doms, leader_block, cur_block))
                     {
-                        opt_replace_def(ctx, f, in, ir_operand_vreg(leader));
+                        opt_repl_set(ctx, in->result, ir_operand_vreg(leader));
                         changed = true;
-                        continue; /* def erased; re-check the shifted slot */
                     }
-                    i++;
                 }
                 else
                 {
                     VnKey *stored = arena_alloc(ctx->arena, sizeof(VnKey), _Alignof(VnKey));
                     *stored = key;
                     hashmap_set(table, stored, (void *) (uintptr_t) (in->result + 1));
-                    i++;
                 }
             }
+        }
+        if (opt_repl_apply(ctx, f))
+        {
+            changed = true;
         }
     }
     return changed;

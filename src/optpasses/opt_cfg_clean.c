@@ -4,7 +4,7 @@
 
 #include <string.h>
 
-static void succs_of(IrFunction *f, IrBlock *bb, Vec *out)
+static void succs_of(StrMap *labels, IrBlock *bb, Vec *out)
 {
     if (vec_size(bb->instrs) == 0)
     {
@@ -15,7 +15,7 @@ static void succs_of(IrFunction *f, IrBlock *bb, Vec *out)
     {
         case OP_BR:
         {
-            IrBlock *t = opt_block_by_label(f, last->extra.br.target_label);
+            IrBlock *t = (IrBlock *) strmap_get(labels, last->extra.br.target_label);
             if (t)
             {
                 vec_push(out, t);
@@ -24,8 +24,8 @@ static void succs_of(IrFunction *f, IrBlock *bb, Vec *out)
         }
         case OP_BRCOND:
         {
-            IrBlock *t = opt_block_by_label(f, last->extra.brcond.true_label);
-            IrBlock *e = opt_block_by_label(f, last->extra.brcond.false_label);
+            IrBlock *t = (IrBlock *) strmap_get(labels, last->extra.brcond.true_label);
+            IrBlock *e = (IrBlock *) strmap_get(labels, last->extra.brcond.false_label);
             if (t)
             {
                 vec_push(out, t);
@@ -39,7 +39,7 @@ static void succs_of(IrFunction *f, IrBlock *bb, Vec *out)
         case OP_SWITCH:
             for (u32 c = 0; c < last->extra.sw.ncases; c++)
             {
-                IrBlock *t = opt_block_by_label(f, last->extra.sw.cases[c].label);
+                IrBlock *t = (IrBlock *) strmap_get(labels, last->extra.sw.cases[c].label);
                 if (t)
                 {
                     vec_push(out, t);
@@ -47,7 +47,7 @@ static void succs_of(IrFunction *f, IrBlock *bb, Vec *out)
             }
             if (last->extra.sw.default_label)
             {
-                IrBlock *t = opt_block_by_label(f, last->extra.sw.default_label);
+                IrBlock *t = (IrBlock *) strmap_get(labels, last->extra.sw.default_label);
                 if (t)
                 {
                     vec_push(out, t);
@@ -60,7 +60,7 @@ static void succs_of(IrFunction *f, IrBlock *bb, Vec *out)
 }
 
 /* Blocks reachable from the entry, iterated worklist-style (no recursion). */
-static u8 *reachable(IrFunction *f, Arena *arena)
+static u8 *reachable(IrFunction *f, StrMap *labels, Arena *arena)
 {
     size_t nblocks = vec_size(f->blocks);
     u8 *seen = arena_alloc(arena, nblocks, sizeof(u8));
@@ -72,7 +72,7 @@ static u8 *reachable(IrFunction *f, Arena *arena)
     {
         IrBlock *bb = (IrBlock *) vec_pop(stack);
         Vec *succs = vec_new(arena);
-        succs_of(f, bb, succs);
+        succs_of(labels, bb, succs);
         size_t n = vec_size(succs);
         for (size_t s = 0; s < n; s++)
         {
@@ -103,7 +103,7 @@ static void vec_remove_at(Vec *v, size_t i)
     (void) vec_pop(v);
 }
 
-static void remove_block(IrFunction *f, IrBlock *bb)
+static void remove_block(IrFunction *f, StrMap *labels, IrBlock *bb)
 {
     size_t nblocks = vec_size(f->blocks);
     for (size_t b = 0; b < nblocks; b++)
@@ -123,12 +123,13 @@ static void remove_block(IrFunction *f, IrBlock *bb)
             }
         }
     }
-    vec_remove_at(f->blocks, opt_block_index(f, bb));
+    hashmap_remove(labels, bb->label);
+    ir_func_remove_block(f, bb);
 }
 
-static bool prune_unreachable(OptimizerContext *ctx, IrFunction *f)
+static bool prune_unreachable(OptimizerContext *ctx, IrFunction *f, StrMap *labels)
 {
-    u8 *seen = reachable(f, ctx->arena);
+    u8 *seen = reachable(f, labels, ctx->arena);
     bool pruned = false;
     size_t n = vec_size(f->blocks);
     for (size_t k = n; k-- > 1;)
@@ -136,7 +137,7 @@ static bool prune_unreachable(OptimizerContext *ctx, IrFunction *f)
         IrBlock *bb = (IrBlock *) vec_get(f->blocks, k);
         if (!seen[k])
         {
-            remove_block(f, bb);
+            remove_block(f, labels, bb);
             pruned = true;
         }
     }
@@ -144,7 +145,7 @@ static bool prune_unreachable(OptimizerContext *ctx, IrFunction *f)
 }
 
 /* Fold a brcond whose condition is a constant into an unconditional br. */
-static bool fold_constant_brcond(OptimizerContext *ctx, IrFunction *f)
+static bool fold_constant_brcond(OptimizerContext *ctx, IrFunction *f, StrMap *labels)
 {
     (void) ctx;
     bool changed = false;
@@ -167,7 +168,7 @@ static bool fold_constant_brcond(OptimizerContext *ctx, IrFunction *f)
                                                       : last->extra.brcond.true_label;
         if (strcmp(taken, skipped) != 0)
         {
-            IrBlock *dead = opt_block_by_label(f, skipped);
+            IrBlock *dead = (IrBlock *) strmap_get(labels, skipped);
             if (dead)
             {
                 opt_drop_edge(bb, dead);
@@ -261,7 +262,7 @@ static bool phis_reference_label(IrBlock *bb, const char *label)
 }
 
 /* True when `bb`'s terminator can reach more than one block. */
-static bool block_has_split_exit(IrFunction *f, IrBlock *bb)
+static bool block_has_split_exit(StrMap *labels, IrBlock *bb)
 {
     if (vec_size(bb->instrs) == 0)
     {
@@ -276,8 +277,7 @@ static bool block_has_split_exit(IrFunction *f, IrBlock *bb)
     {
         const char *a = last->extra.brcond.true_label;
         const char *b = last->extra.brcond.false_label;
-        return strcmp(a, b) != 0 && opt_block_by_label(f, a) != NULL &&
-               opt_block_by_label(f, b) != NULL;
+        return strcmp(a, b) != 0 && strmap_get(labels, a) != NULL && strmap_get(labels, b) != NULL;
     }
     return last->extra.sw.ncases > 0 || last->extra.sw.default_label != NULL;
 }
@@ -295,7 +295,7 @@ static size_t vec_index_ptr(Vec *v, void *item)
     return n;
 }
 
-static bool merge_jump_stubs(OptimizerContext *ctx, IrFunction *f)
+static bool merge_jump_stubs(OptimizerContext *ctx, IrFunction *f, StrMap *labels)
 {
     (void) ctx;
     bool changed = false;
@@ -312,14 +312,14 @@ static bool merge_jump_stubs(OptimizerContext *ctx, IrFunction *f)
                 continue;
             }
             IrBlock *pred = (IrBlock *) vec_get(bb->preds, 0);
-            IrBlock *target = opt_block_by_label(f, br->extra.br.target_label);
+            IrBlock *target = (IrBlock *) strmap_get(labels, br->extra.br.target_label);
             if (pred == bb || !target || target == bb || vec_contains_ptr(target->preds, pred))
             {
                 continue;
             }
             /* Skip: the phi copy's successor would become a block that also
                branches elsewhere, so the copy would run for the wrong target. */
-            if (phis_reference_label(target, bb->label) && block_has_split_exit(f, pred))
+            if (phis_reference_label(target, bb->label) && block_has_split_exit(labels, pred))
             {
                 continue;
             }
@@ -332,12 +332,13 @@ static bool merge_jump_stubs(OptimizerContext *ctx, IrFunction *f)
         }
         IrBlock *pred = (IrBlock *) vec_get(merge->preds, 0);
         IrInstr *br = (IrInstr *) vec_get(merge->instrs, 0);
-        IrBlock *target = opt_block_by_label(f, br->extra.br.target_label);
+        IrBlock *target = (IrBlock *) strmap_get(labels, br->extra.br.target_label);
         opt_retarget_terminator(pred, merge->label, target->label);
         phi_rename_label(target, merge->label, pred->label);
         vec_push(target->preds, pred);
         vec_remove_at(target->preds, vec_index_ptr(target->preds, merge));
-        vec_remove_at(f->blocks, opt_block_index(f, merge));
+        hashmap_remove(labels, merge->label);
+        ir_func_remove_block(f, merge);
         changed = true;
     }
 }
@@ -349,10 +350,11 @@ bool opt_pass_cfg_clean(OptimizerContext *ctx)
     for (size_t fi = 0; fi < nfuncs; fi++)
     {
         IrFunction *f = (IrFunction *) vec_get(ctx->mod->funcs, fi);
-        changed |= prune_unreachable(ctx, f);
-        changed |= fold_constant_brcond(ctx, f);
-        changed |= merge_jump_stubs(ctx, f);
-        changed |= prune_unreachable(ctx, f);
+        StrMap *labels = opt_label_map_build(f, ctx->arena);
+        changed |= prune_unreachable(ctx, f, labels);
+        changed |= fold_constant_brcond(ctx, f, labels);
+        changed |= merge_jump_stubs(ctx, f, labels);
+        changed |= prune_unreachable(ctx, f, labels);
     }
     return changed;
 }

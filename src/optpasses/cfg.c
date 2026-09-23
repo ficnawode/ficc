@@ -2,20 +2,14 @@
 
 #include "ir.h"
 #include "util/arena.h"
+#include "util/assert.h"
 
 #include <string.h>
 
 u32 opt_block_index(IrFunction *f, IrBlock *bb)
 {
-    size_t n = vec_size(f->blocks);
-    for (size_t i = 0; i < n; i++)
-    {
-        if (vec_get(f->blocks, i) == bb)
-        {
-            return (u32) i;
-        }
-    }
-    return UINT32_MAX;
+    ASSERT(bb->func == f && bb->index < vec_size(f->blocks) && vec_get(f->blocks, bb->index) == bb);
+    return bb->index;
 }
 
 IrBlock *opt_block_by_label(IrFunction *f, const char *label)
@@ -32,6 +26,18 @@ IrBlock *opt_block_by_label(IrFunction *f, const char *label)
     return NULL;
 }
 
+StrMap *opt_label_map_build(IrFunction *f, Arena *arena)
+{
+    StrMap *labels = strmap_new(arena);
+    size_t n = vec_size(f->blocks);
+    for (size_t i = 0; i < n; i++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, i);
+        strmap_set(labels, bb->label, bb);
+    }
+    return labels;
+}
+
 static void push_unique_succ(Vec *succs, IrBlock *target)
 {
     size_t n = vec_size(succs);
@@ -45,7 +51,7 @@ static void push_unique_succ(Vec *succs, IrBlock *target)
     vec_push(succs, target);
 }
 
-static Vec *succs_of(IrFunction *f, IrBlock *bb, Arena *arena)
+static Vec *succs_of(StrMap *labels, IrBlock *bb, Arena *arena)
 {
     Vec *succs = vec_new(arena);
     if (vec_size(bb->instrs) == 0)
@@ -56,20 +62,22 @@ static Vec *succs_of(IrFunction *f, IrBlock *bb, Arena *arena)
     switch (last->opcode)
     {
         case OP_BR:
-            push_unique_succ(succs, opt_block_by_label(f, last->extra.br.target_label));
+            push_unique_succ(succs, (IrBlock *) strmap_get(labels, last->extra.br.target_label));
             break;
         case OP_BRCOND:
-            push_unique_succ(succs, opt_block_by_label(f, last->extra.brcond.true_label));
-            push_unique_succ(succs, opt_block_by_label(f, last->extra.brcond.false_label));
+            push_unique_succ(succs, (IrBlock *) strmap_get(labels, last->extra.brcond.true_label));
+            push_unique_succ(succs, (IrBlock *) strmap_get(labels, last->extra.brcond.false_label));
             break;
         case OP_SWITCH:
             for (u32 c = 0; c < last->extra.sw.ncases; c++)
             {
-                push_unique_succ(succs, opt_block_by_label(f, last->extra.sw.cases[c].label));
+                push_unique_succ(succs,
+                                 (IrBlock *) strmap_get(labels, last->extra.sw.cases[c].label));
             }
             if (last->extra.sw.default_label)
             {
-                push_unique_succ(succs, opt_block_by_label(f, last->extra.sw.default_label));
+                push_unique_succ(succs,
+                                 (IrBlock *) strmap_get(labels, last->extra.sw.default_label));
             }
             break;
         default:
@@ -141,10 +149,11 @@ CfgInfo *opt_cfg_build(IrFunction *f, Arena *arena)
     cfg->succs = arena_alloc(arena, n * sizeof(Vec *), sizeof(void *));
     cfg->rpo = arena_alloc(arena, n * sizeof(IrBlock *), sizeof(void *));
     cfg->rpo_index = arena_alloc(arena, n * sizeof(u32), sizeof(u32));
+    StrMap *labels = opt_label_map_build(f, arena);
 
     for (u32 i = 0; i < cfg->nblocks; i++)
     {
-        cfg->succs[i] = succs_of(f, (IrBlock *) vec_get(f->blocks, i), arena);
+        cfg->succs[i] = succs_of(labels, (IrBlock *) vec_get(f->blocks, i), arena);
         cfg->rpo_index[i] = UINT32_MAX;
     }
     build_rpo(cfg, f, arena);

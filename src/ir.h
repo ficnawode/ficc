@@ -189,6 +189,7 @@ struct IrBlock
     Vec *preds;          /* Vec<IrBlock*> — predecessor blocks */
     bool sealed;         /* all predecessors known? */
     bool is_loop_header; /* block is a loop header (back edges added later) */
+    u32 index;           /* position in f->blocks; maintained by add/remove */
 };
 
 typedef struct IrParam IrParam;
@@ -273,6 +274,8 @@ struct IrModule
 IrModule *ir_module_new(Arena *arena);
 IrFunction *ir_module_add_func(IrModule *m, const char *name, Type *ret_type);
 IrBlock *ir_func_add_block(IrFunction *f, const char *label);
+/* Unlink `bb` from f->blocks, renumbering the blocks that follow it. */
+void ir_func_remove_block(IrFunction *f, IrBlock *bb);
 
 /* vreg allocation */
 u32 ir_alloc_vreg(IrModule *m, u8 width, bool is_signed, bool is_float);

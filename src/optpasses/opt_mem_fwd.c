@@ -64,6 +64,7 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx)
     for (size_t fi = 0; fi < nfuncs; fi++)
     {
         IrFunction *f = (IrFunction *) vec_get(mod->funcs, fi);
+        opt_repl_begin(ctx);
         size_t nblocks = vec_size(f->blocks);
         for (size_t bi = 0; bi < nblocks; bi++)
         {
@@ -126,7 +127,7 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx)
                         if (fact->kind == FWD_STORE && fact->width == w &&
                             store_value_reproducible(mod, fact->val, w, is_signed))
                         {
-                            opt_replace_def(ctx, f, in, fact->val);
+                            opt_repl_set(ctx, in->result, fact->val);
                             changed = true;
                             fwd = true;
                             break;
@@ -135,7 +136,7 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx)
                             fact->is_signed == is_signed &&
                             fact->is_float == mod->floatness[in->result])
                         {
-                            opt_replace_def(ctx, f, in, fact->val);
+                            opt_repl_set(ctx, in->result, fact->val);
                             changed = true;
                             fwd = true;
                             break;
@@ -143,7 +144,8 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx)
                     }
                     if (fwd)
                     {
-                        continue; /* load erased; re-check the slot */
+                        i++;
+                        continue; /* load is replaced; do not record it as a fact */
                     }
                     if (w != 16)
                     {
@@ -162,6 +164,10 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx)
                 }
                 i++;
             }
+        }
+        if (opt_repl_apply(ctx, f))
+        {
+            changed = true;
         }
     }
     return changed;

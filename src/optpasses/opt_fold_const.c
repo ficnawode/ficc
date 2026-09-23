@@ -56,14 +56,19 @@ bool opt_pass_fold_const(OptimizerContext *ctx)
     for (size_t fi = 0; fi < nfuncs; fi++)
     {
         IrFunction *f = (IrFunction *) vec_get(mod->funcs, fi);
+        opt_repl_begin(ctx);
         size_t nblocks = vec_size(f->blocks);
         for (size_t b = 0; b < nblocks; b++)
         {
             IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
-            size_t i = 0;
-            while (i < vec_size(bb->instrs))
+            size_t ninstr = vec_size(bb->instrs);
+            for (size_t i = 0; i < ninstr; i++)
             {
                 IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
+                if (in->result == NO_VREG)
+                {
+                    continue;
+                }
                 i64 val = 0;
                 bool foldable = false;
                 if ((in->opcode == OP_NEG || in->opcode == OP_NOT) && in->ops[0].is_imm)
@@ -88,14 +93,14 @@ bool opt_pass_fold_const(OptimizerContext *ctx)
                 }
                 if (foldable)
                 {
-                    opt_replace_def(ctx, f, in, ir_operand_imm(val));
+                    opt_repl_set(ctx, in->result, ir_operand_imm(val));
                     changed = true;
                 }
-                else
-                {
-                    i++;
-                }
             }
+        }
+        if (opt_repl_apply(ctx, f))
+        {
+            changed = true;
         }
     }
     return changed;

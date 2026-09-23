@@ -62,6 +62,8 @@ bool opt_loops_verify_shapes(LoopInfo *loops);
 
 u32 opt_block_index(struct IrFunction *f, struct IrBlock *bb);
 struct IrBlock *opt_block_by_label(struct IrFunction *f, const char *label);
+/* label -> block map for the hot label-resolution paths. */
+struct HashMap *opt_label_map_build(struct IrFunction *f, Arena *arena);
 
 /* Optimizer context and shared magic (opt.c). */
 
@@ -129,6 +131,10 @@ struct OptimizerContext
     u64 inline_sites;                   /* monotonic inline-site counter (unique clone labels) */
     struct HashMap *inline_lineage;     /* IrBlock* -> Vec<IrFunction*>: a clone's ancestry */
     struct HashMap *inline_caller_used; /* IrFunction* -> u32: clones a caller absorbed overall */
+    IrOperand *repl_val;                /* per-vreg pending replacement operand */
+    u32 *repl_gen;                      /* repl_val[l] is live when repl_gen[l] == repl_serial */
+    u32 repl_serial;                    /* current replacement generation */
+    u32 repl_cap;                       /* capacity of repl_val/repl_gen */
 };
 
 /* Cached per-function analysis, rebuilt when the function or cfg_epoch changes. */
@@ -167,11 +173,10 @@ void opt_drop_edge(struct IrBlock *from, struct IrBlock *to);
 /* Fill ctx->def_vreg/ctx->use_count for f (fresh arena arrays, module-sized). */
 void opt_make_value_analysis(OptimizerContext *ctx, struct IrFunction *f);
 
-/* Def replacement (opt.c). */
-
-/* Rewrite every use of def->result to `val`, then erase the def. */
-bool opt_replace_def(OptimizerContext *ctx, struct IrFunction *f, struct IrInstr *def,
-                     IrOperand val);
+/* Def replacement (opt.c): schedule vreg -> operand substitutions, then resolve. */
+void opt_repl_begin(OptimizerContext *ctx);
+void opt_repl_set(OptimizerContext *ctx, u32 vreg, IrOperand val);
+bool opt_repl_apply(OptimizerContext *ctx, struct IrFunction *f);
 
 /* Scalar value semantics (opt_value.c). */
 

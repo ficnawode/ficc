@@ -10,14 +10,19 @@ bool opt_pass_cprop(OptimizerContext *ctx)
     {
         IrFunction *f = (IrFunction *) vec_get(ctx->mod->funcs, fi);
         opt_make_value_analysis(ctx, f);
+        opt_repl_begin(ctx);
         size_t nblocks = vec_size(f->blocks);
         for (size_t b = 0; b < nblocks; b++)
         {
             IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
-            size_t i = 0;
-            while (i < vec_size(bb->instrs))
+            size_t ninstr = vec_size(bb->instrs);
+            for (size_t i = 0; i < ninstr; i++)
             {
                 IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
+                if (in->result == NO_VREG)
+                {
+                    continue;
+                }
                 IrOperand src;
                 bool copy = false;
                 if (in->opcode == OP_NEG && !in->ops[0].is_imm && !in->ops[0].is_global &&
@@ -41,14 +46,14 @@ bool opt_pass_cprop(OptimizerContext *ctx)
                 }
                 if (copy)
                 {
-                    opt_replace_def(ctx, f, in, src);
+                    opt_repl_set(ctx, in->result, src);
                     changed = true;
                 }
-                else
-                {
-                    i++;
-                }
             }
+        }
+        if (opt_repl_apply(ctx, f))
+        {
+            changed = true;
         }
     }
     return changed;

@@ -9,12 +9,13 @@ bool opt_pass_phi_simp(OptimizerContext *ctx)
     for (size_t fi = 0; fi < nfuncs; fi++)
     {
         IrFunction *f = (IrFunction *) vec_get(ctx->mod->funcs, fi);
+        opt_repl_begin(ctx);
         size_t nblocks = vec_size(f->blocks);
         for (size_t b = 0; b < nblocks; b++)
         {
             IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
-            size_t i = 0;
-            while (i < vec_size(bb->instrs))
+            size_t ninstr = vec_size(bb->instrs);
+            for (size_t i = 0; i < ninstr; i++)
             {
                 IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
                 if (in->opcode != OP_PHI)
@@ -46,14 +47,14 @@ bool opt_pass_phi_simp(OptimizerContext *ctx)
                 }
                 if (have && !conflict)
                 {
-                    opt_replace_def(ctx, f, in, common);
+                    opt_repl_set(ctx, in->result, common);
                     changed = true;
                 }
-                else
-                {
-                    i++;
-                }
             }
+        }
+        if (opt_repl_apply(ctx, f))
+        {
+            changed = true;
         }
     }
     return changed;

@@ -67,40 +67,32 @@ bool opt_pass_dce(OptimizerContext *ctx)
         for (;;)
         {
             opt_make_value_analysis(ctx, f);
-            Vec *dead = vec_new(ctx->arena);
             bool found = false;
             size_t nblocks = vec_size(f->blocks);
             for (size_t b = 0; b < nblocks; b++)
             {
                 IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
                 size_t ninstr = vec_size(bb->instrs);
+                size_t write = 0;
                 for (size_t j = 0; j < ninstr; j++)
                 {
                     IrInstr *in = (IrInstr *) vec_get(bb->instrs, j);
                     if (in->result != NO_VREG && is_pure(in) && ctx->use_count[in->result] == 0)
                     {
-                        vec_push(dead, in);
                         found = true;
+                        continue;
                     }
+                    vec_set(bb->instrs, write, in);
+                    write++;
+                }
+                while (vec_size(bb->instrs) > write)
+                {
+                    vec_pop(bb->instrs);
                 }
             }
             if (!found)
             {
                 break;
-            }
-            for (size_t j = 0; j < vec_size(dead); j++)
-            {
-                IrInstr *in = (IrInstr *) vec_get(dead, j);
-                size_t nblocks = vec_size(f->blocks);
-                for (size_t b = 0; b < nblocks; b++)
-                {
-                    IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
-                    if (opt_instr_index(bb, in) != UINT32_MAX)
-                    {
-                        opt_erase_instr(bb, in);
-                        break;
-                    }
-                }
             }
             changed = true;
         }

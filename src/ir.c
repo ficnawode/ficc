@@ -55,8 +55,22 @@ IrBlock *ir_func_add_block(IrFunction *f, const char *label)
     bb->preds = vec_new(f->arena);
     bb->sealed = false;
     bb->is_loop_header = false;
+    bb->index = (u32) vec_size(f->blocks);
     vec_push(f->blocks, bb);
     return bb;
+}
+
+void ir_func_remove_block(IrFunction *f, IrBlock *bb)
+{
+    size_t n = vec_size(f->blocks);
+    ASSERT(bb->func == f && bb->index < n && vec_get(f->blocks, bb->index) == bb);
+    for (size_t i = bb->index; i + 1 < n; i++)
+    {
+        IrBlock *moved = (IrBlock *) vec_get(f->blocks, i + 1);
+        vec_set(f->blocks, i, moved);
+        moved->index = (u32) i;
+    }
+    vec_pop(f->blocks);
 }
 
 u32 ir_alloc_vreg(IrModule *m, u8 width, bool is_signed, bool is_float)
