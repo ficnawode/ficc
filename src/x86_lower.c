@@ -1763,8 +1763,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     alloc->frame_size += 16;
     LinearFrame frame = {0};
     x86_frame_plan(alloc, f, target, debug, &frame);
-    /* The scratch sits in the reserved bytes at the bottom of the spill area,
-       below every real spill slot (whose offsets were shifted by saved_bytes). */
+    /* Reserved slot sits below every real spill slot. */
     i32 scratch_disp = -(i32) (frame.saved_bytes + alloc->frame_size);
 
     size_t nblocks = vec_size(f->blocks);

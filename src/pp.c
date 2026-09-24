@@ -237,6 +237,8 @@ Pp *pp_new(Arena *arena)
     pp_predefine(pp, "__amd64", "1");
     pp_predefine(pp, "__LP64__", "1");
     pp_predefine(pp, "_LP64", "1");
+    /* <sys/cdefs.h> keeps `__attribute__` only for GNU/clang/tinycc identity. */
+    pp_predefine(pp, "__TINYC__", "927");
     pp_predefine(pp, "__SIZEOF_POINTER__", "8");
     pp_predefine(pp, "__SIZEOF_LONG__", "8");
     pp_predefine_type(pp, "__SIZE_TYPE__", "long unsigned int");

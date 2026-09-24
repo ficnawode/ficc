@@ -2205,9 +2205,8 @@ static bool is_address_constant(ASTNode *e)
     }
 }
 
-/* A pointer constant initializer: an integer constant expression cast to a
-   pointer type (e.g. `(const char *)-1`), or a bare integer constant used as a
-   null pointer. §6.7.9p4 admits both in a static initializer. */
+/* §6.7.9p4: a static pointer initializer may be an integer constant cast to a
+   pointer (e.g. `(const char *)-1`). */
 static bool fold_pointer_constant(ASTNode *node, i64 *out)
 {
     if (node->kind == AST_CAST_EXPR)

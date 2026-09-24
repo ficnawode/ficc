@@ -284,8 +284,7 @@ static AttrKind attribute_kind(const char *name, u64 *align, bool *has_align)
     return ATTR_UNKNOWN;
 }
 
-/* An attribute name is an identifier; GNU spelling aliases such as `__const__`
-   and `__noreturn__` lex as keywords but still carry their spelling. */
+/* Attribute names include GNU spelling aliases that lex as keywords. */
 static bool attribute_name_token(Token *t)
 {
     switch (t->kind)
@@ -305,9 +304,7 @@ static bool attribute_name_token(Token *t)
     }
 }
 
-/* Consumes one `__attribute__ (( name[(args)] , ... ))` group, appending an
-   `Attr` per name to `out`. Arguments other than `aligned(n)` are parsed and
-   discarded. */
+/* Consumes one `__attribute__ (( ... ))` group into `out`. */
 static bool parse_attribute_list(Parser *p, Vec *out)
 {
     next_token(p); /* __attribute__ */
@@ -698,10 +695,7 @@ static bool parse_enumerator_body(Parser *p, Vec *constants, i64 *next_value)
             }
         }
 
-        /* C11 requires an enumerator to fit in `int`, but GCC (and C23) accept
-           values up to `unsigned int`; the enum then takes an unsigned
-           underlying type. Match that so hosted headers (e.g. DWARF/ELF
-           constants such as 0xffffffffu) compile. */
+        /* GCC/C23 allow an enumerator up to `unsigned int` (not just `int`). */
         if (value < INT32_MIN || value > 0xffffffffLL)
         {
             parse_error(p, "enumerator value out of range (must fit in int)");
@@ -783,8 +777,7 @@ static Type *parse_record_specifier(Parser *p, bool is_union, ASTNode **tag_def)
         {
             return NULL;
         }
-        /* `struct S { ... } __attribute__((packed, aligned(n)))`: apply the
-           suffix attributes to the record and re-lay it out. */
+        /* Record suffix attrs: `packed`/`aligned` re-lay the record out. */
         Vec *suffix_attrs = NULL;
         if (!parse_attributes(p, &suffix_attrs))
         {
@@ -1669,8 +1662,7 @@ static StoragePrefix parse_storage_prefix(Parser *p)
 
 static Specs parse_specs_storage(Parser *p, bool storage_ok)
 {
-    /* A GNU attribute may precede the storage class (`__attribute__((x)) static
-       int f;`); collect it before the storage prefix consumes `static`. */
+    /* A GNU attribute may precede the storage class. */
     Vec *lead_attrs = NULL;
     if (!parse_attributes(p, &lead_attrs))
     {

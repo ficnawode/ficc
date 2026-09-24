@@ -119,8 +119,7 @@ struct ASTNode
 
 #define ast_as(T, node) ((T *) (node))
 
-/* GNU `__attribute__` names ficc gives semantics to (append-only). Any other
-   spelling is recorded as ATTR_UNKNOWN and ignored (pedantic warns). */
+/* GNU attribute names with semantics; others become ATTR_UNKNOWN. */
 typedef enum
 {
     ATTR_PACKED,

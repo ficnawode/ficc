@@ -14,10 +14,8 @@ typedef enum
     FK_LONG, /* x87 80-bit long double */
 } FloatKind;
 
-/* Character/string literal element kind (§6.4.4.4, §6.4.5). The encoding
-   prefix selects the element width: none / u8 -> char (1), L -> wchar_t (4),
-   u -> char16_t (2), U -> char32_t (4). `payload.str` holds the decoded
-   elements in little-endian order, NUL-terminated by one element. */
+/* String/char literal element kind (§6.4.5); `payload.str` holds decoded
+   little-endian elements, NUL-terminated by one element. */
 typedef enum
 {
     STRK_NARROW, /* "" or u8"" */

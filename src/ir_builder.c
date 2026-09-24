@@ -1456,8 +1456,7 @@ static void va_layout(IrFunction *f, i64 *gp, i64 *fp, i64 *skip)
     for (size_t i = 0; i < n; i++)
     {
         IrParam *p = (IrParam *) vec_get(f->params, i);
-        /* A record parameter's IR type is a pointer to the caller's copy; the
-           aggregate itself is `agg_type`. */
+        /* Record params arrive as a pointer; `agg_type` is the aggregate. */
         Type *t = p->agg_type ? p->agg_type : p->type;
         if (t->kind == TYPE_LONG_DOUBLE)
         {
@@ -1466,10 +1465,7 @@ static void va_layout(IrFunction *f, i64 *gp, i64 *fp, i64 *skip)
         }
         else if (type_is_record(t))
         {
-            /* An aggregate consumes one register per eightbyte (up to two);
-               a MEMORY-classed aggregate consumes none. This is what a
-               multi-register struct parameter (e.g. `Loc`) needs: counting it
-               as a single GP register misplaces every later vararg. */
+            /* An aggregate consumes one register per eightbyte (SysV ABI). */
             SysVEightByte e = sysv_eightbyte_split(t);
             u8 g = sysv_eightbyte_register_passed(&e) ? sysv_eightbyte_gp_count(&e) : 0;
             u8 x = sysv_eightbyte_register_passed(&e) ? sysv_eightbyte_xmm_count(&e) : 0;
@@ -2688,9 +2684,7 @@ static u32 emit_global_decl(ASTVarDecl *vd, IrModule *mod, Arena *arena, StrMap 
 {
     IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
     g->name = vd->name;
-    /* Reserve the index and register the name before filling so a
-       self-referential initializer (`&g` inside g's own initializer) resolves;
-       string globals appended by fill land after it. */
+    /* Reserve the index before filling so `&g` self-references resolve. */
     u32 idx = (u32) vec_size(mod->globals);
     vec_push(mod->globals, g);
     u32 *slot = arena_alloc(arena, sizeof(u32), sizeof(u32));
@@ -3523,8 +3517,7 @@ static IrBlock *build_var_decl_stmt(FuncBuilder *ctx, ASTVarDecl *vd, IrBlock *b
            plan writes zero-fill + store, an expression init applies via memcpy. */
         u32 dst = alloc_vreg_for_var(ctx, vd->type);
         ir_emit_alloca(bb, dst, vd->type->size);
-        /* Publish the slot before the initializer: a self-reference such as
-           `struct S s = { .self = &s }` must resolve to this address. */
+        /* Publish the slot first so `&s` in the initializer resolves to it. */
         write_variable(ctx, vd, bb, ir_operand_vreg(dst));
         if (vd->plan)
         {
@@ -4093,8 +4086,7 @@ static FuncSig *toplevel_func_sig(ASTNode *decl)
     return NULL;
 }
 
-/* Emits one 8-byte pointer into .init_array/.fini_array per function carrying
-   the `constructor`/`destructor` attribute, in declaration order. */
+/* One 8-byte pointer per `constructor`/`destructor`, in declaration order. */
 static void emit_ctor_arrays(ASTProgram *prog, IrModule *mod, Arena *arena, AttrKind kind,
                              IrSection section)
 {

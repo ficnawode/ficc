@@ -1128,10 +1128,7 @@ static i64 eval_memcpy(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* Resolves the block's phi nodes for a jump from `pred`. Phis are parallel:
-   one phi may name another phi of the same block (a loop-carried cross
-   assignment, e.g. `a = b, b = a->next`), so every incoming value is read from
-   the pre-entry registers before any result is written. */
+/* Phis are parallel: read every incoming value before writing any result. */
 static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
 {
     size_t ninstr = vec_size(bb->instrs);

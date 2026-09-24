@@ -1558,6 +1558,18 @@ TEST(pp, predefined_stdc_family)
     arena_free(a);
 }
 
+TEST(pp, predefined_tinyc_identity)
+{
+    /* ficc advertises tinycc compatibility so glibc's <sys/cdefs.h> keeps
+       `__attribute__` (it defines the macro away only for compilers that
+       claim neither GNU/clang/tinycc identity). */
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "__TINYC__\n");
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "927"));
+    arena_free(a);
+}
+
 TEST(pp, predefined_usable_in_if)
 {
     Arena *a = arena_new();
