@@ -146,6 +146,13 @@ static bool set_static(CompilerConfig *cfg, const char *value)
     return true;
 }
 
+static bool set_export_dynamic(CompilerConfig *cfg, const char *value)
+{
+    (void) value;
+    cfg->link.export_dynamic = true;
+    return true;
+}
+
 static bool set_debug(CompilerConfig *cfg, const char *value)
 {
     (void) value;
@@ -295,6 +302,10 @@ static const CLIOption option_table[] = {
     {"-l", ARG_EITHER, "name", add_lib, "link against library libname"},
     {"-nostdlib", ARG_NONE, 0, set_nostdlib, "do not add the implicit startup objects or -lc"},
     {"-static", ARG_NONE, 0, set_static, "link statically (residual)"},
+    {"-rdynamic", ARG_NONE, 0, set_export_dynamic,
+     "export defined symbols for dynamic lookup (alias --export-dynamic)"},
+    {"--export-dynamic", ARG_NONE, 0, set_export_dynamic,
+     "export defined symbols for dynamic lookup"},
     {0},
 };
 

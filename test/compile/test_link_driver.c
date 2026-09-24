@@ -109,3 +109,76 @@ TEST(link_driver, hosted_printf)
     char *paths[] = {src, bin, out};
     ld_cleanup(paths, 3);
 }
+
+static int rdyn_build_and_run(bool export_dynamic)
+{
+    char plugin[128], so[128], main_c[128], bin[192];
+    ld_write(plugin, sizeof(plugin), "rdyn_plugin",
+             "extern int host_value(void);\n"
+             "int plugin_value(void) { return host_value() + 1; }\n");
+    ld_path(so, sizeof(so), "rdyn", "so");
+    ld_path(main_c, sizeof(main_c), "rdyn_main", "c");
+    ld_path(bin, sizeof(bin), "rdyn", "bin");
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "gcc -shared -fPIC -o %s %s >/dev/null 2>&1", so, plugin);
+    if (tc_run_shell(cmd) != 0)
+    {
+        return -1;
+    }
+
+    char src[512];
+    snprintf(src, sizeof(src),
+             "#include <dlfcn.h>\n"
+             "int host_value(void) { return 41; }\n"
+             "int main(void)\n"
+             "{\n"
+             "    void *h = dlopen(\"%s\", RTLD_NOW);\n"
+             "    if (!h) return 1;\n"
+             "    int (*fn)(void) = (int (*)(void)) dlsym(h, \"plugin_value\");\n"
+             "    if (!fn) return 2;\n"
+             "    return fn();\n"
+             "}\n",
+             so);
+    FILE *f = fopen(main_c, "w");
+    EXPECT_NOTNULL(f);
+    if (!f)
+    {
+        return -1;
+    }
+    fputs(src, f);
+    fclose(f);
+
+    snprintf(cmd, sizeof(cmd), "%s %s %s-ldl -o %s >/dev/null 2>&1 && %s", FICC_BIN, main_c,
+             export_dynamic ? "-rdynamic " : "", bin, bin);
+    int rc = tc_run_shell(cmd);
+
+    char *paths[] = {plugin, so, main_c, bin};
+    ld_cleanup(paths, 4);
+    return rc;
+}
+
+static bool have_gcc(void)
+{
+    return tc_run_shell("command -v gcc >/dev/null 2>&1") == 0;
+}
+
+/* The plugin's reference to host_value resolves only when the executable
+   exports its own globals. */
+TEST(link_driver, export_dynamic_plugin)
+{
+    if (!have_gcc())
+    {
+        return;
+    }
+    EXPECT_EQ(rdyn_build_and_run(true), 42);
+}
+
+TEST(link_driver, export_dynamic_required)
+{
+    if (!have_gcc())
+    {
+        return;
+    }
+    EXPECT_EQ(rdyn_build_and_run(false), 1);
+}

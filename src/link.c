@@ -325,6 +325,7 @@ LinkSection *link_find_section(const LinkObject *obj, const char *name)
 
 #define LINK_PAGE 0x1000
 #define LINK_BASE 0x400000
+#define GNU_HASH_BLOOM_SHIFT 10
 
 static u64 align_up(u64 n, u64 a)
 {
@@ -436,6 +437,7 @@ typedef struct
     u64 value;
     u64 size;
     u32 name_off;
+    GlobalSym *global; /* the definition this entry exports, NULL for imports */
 } DynSym;
 
 typedef struct
@@ -544,15 +546,19 @@ typedef struct
     bool dynamic;
     Vec *dynsyms;      /* Vec<DynSym*> — index 0 is null */
     StrMap *dyn_index; /* name -> DynSym* */
-    Vec *rela_dyn;     /* Vec<DynReloc*> */
-    Vec *rela_plt;     /* Vec<DynReloc*> */
-    Vec *needed;       /* Vec<const char*> sonames */
-    Vec *needed_off;   /* Vec<u64> offsets of sonames in .dynstr */
-    StrMap *got_map;   /* name -> GotSlot* */
-    Vec *got_slots;    /* Vec<GotSlot*> */
-    StrMap *plt_map;   /* name -> PltSlot* */
-    Vec *plt_slots;    /* Vec<PltSlot*> */
-    Vec *copies;       /* Vec<CopySlot*> */
+    u32 hash_symoffset;
+    u32 hash_nbuckets;
+    u32 hash_bloom_size;
+    u32 hash_bloom_shift;
+    Vec *rela_dyn;   /* Vec<DynReloc*> */
+    Vec *rela_plt;   /* Vec<DynReloc*> */
+    Vec *needed;     /* Vec<const char*> sonames */
+    Vec *needed_off; /* Vec<u64> offsets of sonames in .dynstr */
+    StrMap *got_map; /* name -> GotSlot* */
+    Vec *got_slots;  /* Vec<GotSlot*> */
+    StrMap *plt_map; /* name -> PltSlot* */
+    Vec *plt_slots;  /* Vec<PltSlot*> */
+    Vec *copies;     /* Vec<CopySlot*> */
     ByteBuf dynbuf[DSEC_COUNT];
     u64 dyn_addr[DSEC_COUNT];
     u64 dyn_off[DSEC_COUNT];
@@ -588,6 +594,10 @@ static void linker_init(Linker *lk, const LinkConfig *cfg, Arena *arena)
     }
     lk->dynsyms = vec_new(arena);
     lk->dyn_index = strmap_new(arena);
+    lk->hash_symoffset = 0;
+    lk->hash_nbuckets = 1;
+    lk->hash_bloom_size = 1;
+    lk->hash_bloom_shift = GNU_HASH_BLOOM_SHIFT;
     lk->rela_dyn = vec_new(arena);
     lk->rela_plt = vec_new(arena);
     lk->needed = vec_new(arena);
@@ -935,7 +945,8 @@ static DsoSym *dso_lookup(Linker *lk, const char *name)
     return NULL;
 }
 
-static u32 dynsym_add(Linker *lk, const char *name, u8 info, u16 shndx, u64 value, u64 size)
+static u32 dynsym_add(Linker *lk, const char *name, u8 info, u16 shndx, u64 value, u64 size,
+                      GlobalSym *global)
 {
     void *v = strmap_get(lk->dyn_index, name);
     if (v)
@@ -948,6 +959,7 @@ static u32 dynsym_add(Linker *lk, const char *name, u8 info, u16 shndx, u64 valu
     d->shndx = shndx;
     d->value = value;
     d->size = size;
+    d->global = global;
     vec_push(lk->dynsyms, d);
     u32 idx = (u32) (vec_size(lk->dynsyms) - 1);
     strmap_set(lk->dyn_index, name, (void *) (uintptr_t) (idx + 1));
@@ -984,7 +996,7 @@ static PltSlot *plt_slot(Linker *lk, const char *name)
     p->got_off = (3 + vec_size(lk->plt_slots)) * 8;
     p->plt_addr = 0;
     p->got_addr = 0;
-    p->dynidx = dynsym_add(lk, name, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), SHN_UNDEF, 0, 0);
+    p->dynidx = dynsym_add(lk, name, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), SHN_UNDEF, 0, 0, NULL);
     vec_push(lk->plt_slots, p);
     strmap_set(lk->plt_map, name, p);
     DynReloc *r = arena_alloc(lk->arena, sizeof(*r), sizeof(void *));
@@ -1018,10 +1030,96 @@ static CopySlot *copy_slot(Linker *lk, const char *name, u64 size, u64 align)
         bss->align = c->align;
     }
     c->addr = 0;
-    c->dynidx = dynsym_add(lk, name, ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT), SHN_UNDEF, 0, size);
+    c->dynidx =
+        dynsym_add(lk, name, ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT), SHN_UNDEF, 0, size, NULL);
     c->has_reloc = false;
     vec_push(lk->copies, c);
     return c;
+}
+
+static u32 next_pow2(u32 n)
+{
+    u32 p = 1;
+    while (p < n)
+    {
+        p <<= 1;
+    }
+    return p;
+}
+
+/* GNU hash of a symbol name (Drepper, "How To Write Shared Libraries", §5.4). */
+static u32 gnu_hash(const char *name)
+{
+    u32 h = 5381;
+    for (const u8 *p = (const u8 *) name; *p; p++)
+    {
+        h = h * 33 + *p;
+    }
+    return h;
+}
+
+static void sort_exports_by_bucket(Linker *lk, Vec *exports, u32 nbuckets)
+{
+    size_t n = vec_size(exports);
+    u32 *starts = arena_alloc(lk->arena, (size_t) nbuckets * sizeof(u32), sizeof(u32));
+    u32 *cursor = arena_alloc(lk->arena, (size_t) nbuckets * sizeof(u32), sizeof(u32));
+    GlobalSym **sorted = arena_alloc(lk->arena, n * sizeof(GlobalSym *), sizeof(void *));
+    for (u32 b = 0; b < nbuckets; b++)
+    {
+        starts[b] = 0;
+    }
+    for (size_t i = 0; i < n; i++)
+    {
+        GlobalSym *g = (GlobalSym *) vec_get(exports, i);
+        starts[gnu_hash(g->name) % nbuckets]++;
+    }
+    u32 sum = 0;
+    for (u32 b = 0; b < nbuckets; b++)
+    {
+        u32 count = starts[b];
+        starts[b] = sum;
+        cursor[b] = sum;
+        sum += count;
+    }
+    for (size_t i = 0; i < n; i++)
+    {
+        GlobalSym *g = (GlobalSym *) vec_get(exports, i);
+        sorted[cursor[gnu_hash(g->name) % nbuckets]++] = g;
+    }
+    for (size_t i = 0; i < n; i++)
+    {
+        vec_set(exports, i, sorted[i]);
+    }
+}
+
+static void export_dynamic_symbols(Linker *lk)
+{
+    if (!lk->dynamic || !lk->cfg->export_dynamic)
+    {
+        return;
+    }
+    Vec *exports = vec_new(lk->arena);
+    for (size_t i = 0; i < vec_size(lk->global_order); i++)
+    {
+        GlobalSym *g = (GlobalSym *) vec_get(lk->global_order, i);
+        if (g->is_defined)
+        {
+            vec_push(exports, g);
+        }
+    }
+    u32 count = (u32) vec_size(exports);
+    u32 nbuckets = next_pow2(count);
+    lk->hash_symoffset = (u32) vec_size(lk->dynsyms);
+    lk->hash_nbuckets = nbuckets;
+    lk->hash_bloom_size = next_pow2(count);
+    sort_exports_by_bucket(lk, exports, nbuckets);
+    for (size_t i = 0; i < vec_size(exports); i++)
+    {
+        GlobalSym *g = (GlobalSym *) vec_get(exports, i);
+        u8 bind = g->is_weak ? STB_WEAK : STB_GLOBAL;
+        u8 type = g->type ? g->type : STT_NOTYPE;
+        dynsym_add(lk, g->name, ELF64_ST_INFO(bind, type), SHN_ABS, 0, 0, g);
+    }
 }
 
 static bool is_gotpcrel(u32 type)
@@ -2552,6 +2650,7 @@ static void dynamic_scan(Linker *lk)
     nullsym->value = 0;
     nullsym->size = 0;
     nullsym->name_off = 0;
+    nullsym->global = NULL;
     vec_push(lk->dynsyms, nullsym);
 
     for (size_t oi = 0; oi < vec_size(lk->objects); oi++)
@@ -2583,7 +2682,7 @@ static void dynamic_scan(Linker *lk)
                     {
                         g->is_dynamic = true;
                         u32 idx = dynsym_add(lk, sym->name, ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE),
-                                             SHN_UNDEF, 0, 0);
+                                             SHN_UNDEF, 0, 0, NULL);
                         DynReloc *dr = arena_alloc(lk->arena, sizeof(*dr), sizeof(void *));
                         dr->offset = 0;
                         dr->sym = idx;
@@ -2642,6 +2741,82 @@ static void dynamic_scan(Linker *lk)
     }
 }
 
+typedef struct
+{
+    u32 symoffset;
+    u32 count;
+    u32 nbuckets;
+    u32 bloom_size;
+    u32 bloom_shift;
+    u64 *bloom;
+    u32 *buckets;
+    u32 *hashes;
+} GnuHash;
+
+static GnuHash gnu_hash_build(Linker *lk)
+{
+    GnuHash h;
+    h.symoffset = lk->cfg->export_dynamic ? lk->hash_symoffset : (u32) vec_size(lk->dynsyms);
+    h.count = (u32) vec_size(lk->dynsyms) - h.symoffset;
+    h.nbuckets = lk->hash_nbuckets;
+    h.bloom_size = lk->hash_bloom_size;
+    h.bloom_shift = lk->hash_bloom_shift;
+    h.bloom = arena_alloc(lk->arena, (size_t) h.bloom_size * sizeof(u64), sizeof(u64));
+    h.buckets = arena_alloc(lk->arena, (size_t) h.nbuckets * sizeof(u32), sizeof(u32));
+    h.hashes = arena_alloc(lk->arena, (size_t) h.count * sizeof(u32), sizeof(u32));
+    for (u32 i = 0; i < h.bloom_size; i++)
+    {
+        h.bloom[i] = 0;
+    }
+    for (u32 b = 0; b < h.nbuckets; b++)
+    {
+        h.buckets[b] = 0;
+    }
+    for (u32 i = 0; i < h.count; i++)
+    {
+        DynSym *d = (DynSym *) vec_get(lk->dynsyms, h.symoffset + i);
+        u32 hash = gnu_hash(d->name);
+        h.hashes[i] = hash;
+        if (h.buckets[hash % h.nbuckets] == 0)
+        {
+            h.buckets[hash % h.nbuckets] = h.symoffset + i;
+        }
+        h.bloom[(hash / 64) % h.bloom_size] |= (u64) 1 << (hash % 64);
+        h.bloom[(hash / 64) % h.bloom_size] |= (u64) 1 << ((hash >> h.bloom_shift) % 64);
+    }
+    return h;
+}
+
+static void gnu_hash_emit(Linker *lk, const GnuHash *h)
+{
+    ByteBuf *hash = &lk->dynbuf[DSEC_HASH];
+    bytebuf_init(hash, lk->arena);
+    bytebuf_append_u32(hash, h->nbuckets);
+    bytebuf_append_u32(hash, h->symoffset);
+    bytebuf_append_u32(hash, h->bloom_size);
+    bytebuf_append_u32(hash, h->bloom_shift);
+    for (u32 i = 0; i < h->bloom_size; i++)
+    {
+        bytebuf_append_u64(hash, h->bloom[i]);
+    }
+    for (u32 b = 0; b < h->nbuckets; b++)
+    {
+        bytebuf_append_u32(hash, h->buckets[b]);
+    }
+    for (u32 i = 0; i < h->count; i++)
+    {
+        u32 value = h->hashes[i];
+        bool last = i + 1 == h->count || h->hashes[i + 1] % h->nbuckets != value % h->nbuckets;
+        bytebuf_append_u32(hash, (value & ~1u) | (last ? 1u : 0u));
+    }
+}
+
+static void build_gnu_hash(Linker *lk)
+{
+    GnuHash h = gnu_hash_build(lk);
+    gnu_hash_emit(lk, &h);
+}
+
 static void dynamic_build(Linker *lk)
 {
     const char *interp = "/lib64/ld-linux-x86-64.so.2";
@@ -2668,14 +2843,7 @@ static void dynamic_build(Linker *lk)
         bytebuf_append(sym, 0);
     }
 
-    ByteBuf *hash = &lk->dynbuf[DSEC_HASH];
-    bytebuf_init(hash, lk->arena);
-    bytebuf_append_u32(hash, 1);
-    bytebuf_append_u32(hash, (u32) vec_size(lk->dynsyms));
-    bytebuf_append_u32(hash, 1);
-    bytebuf_append_u32(hash, 6);
-    bytebuf_append_u64(hash, 0);
-    bytebuf_append_u32(hash, 0);
+    build_gnu_hash(lk);
 
     ByteBuf *plt = &lk->dynbuf[DSEC_PLT];
     bytebuf_init(plt, lk->arena);
@@ -2825,6 +2993,15 @@ static void poke_u32(ByteBuf *b, u64 off, u32 val)
 
 static void finalize_dynamic(Linker *lk)
 {
+    for (size_t i = 0; i < vec_size(lk->dynsyms); i++)
+    {
+        DynSym *d = (DynSym *) vec_get(lk->dynsyms, i);
+        if (d->global)
+        {
+            d->value = d->global->addr;
+        }
+    }
+
     ByteBuf *gotb = &lk->dynbuf[DSEC_GOT];
     for (size_t i = 0; i < vec_size(lk->got_slots); i++)
     {
@@ -3259,6 +3436,7 @@ int link_run(const LinkConfig *cfg, Vec *inputs, Arena *arena)
         {
             return 1;
         }
+        export_dynamic_symbols(&lk);
         dynamic_build(&lk);
         layout_dynamic(&lk);
         finalize_globals(&lk);
@@ -3276,6 +3454,10 @@ int link_run(const LinkConfig *cfg, Vec *inputs, Arena *arena)
             return 1;
         }
         return write_dynamic(&lk) ? 0 : 1;
+    }
+    if (lk.cfg->export_dynamic)
+    {
+        link_warn("--export-dynamic has no effect on a static link");
     }
     prepare_entry(&lk);
     if (lk.nerrors)

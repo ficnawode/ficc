@@ -71,6 +71,7 @@ typedef struct
     Vec *libs;               /* Vec<const char*> — -l name, in order */
     bool nostdlib;           /* -nostdlib: no implicit startup or -lc */
     bool static_;            /* -static (residual: dynamic is the hosted default) */
+    bool export_dynamic;     /* -rdynamic: export defined globals for dlopen lookup */
 } LinkConfig;
 
 typedef struct
