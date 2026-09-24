@@ -1367,3 +1367,17 @@ TEST(float, float_h_limits)
         "}\n",
         42);
 }
+
+TEST(float, long_double_narrow_does_not_leak_x87_stack)
+{
+    /* Each `long double -> double/float` conversion must pop its x87 operand;
+       a leak overflows the 8-entry stack and yields NaN after a few steps. */
+    EXPECT_INTERP_AND_ELF("int main(void){ long double x = 1.5L; double s = 0.0; int i;"
+                          " for (i = 0; i < 100; i++) s += (double) x;"
+                          " return (int) s; }",
+                          150);
+    EXPECT_INTERP_AND_ELF("int main(void){ long double x = 1.5L; float f = 0.0f; int i;"
+                          " for (i = 0; i < 100; i++) f += (float) x;"
+                          " return (int) f; }",
+                          150);
+}

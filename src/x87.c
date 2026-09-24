@@ -7,9 +7,9 @@
 #define X87_FLDT 0xDB       /* /5: fldt m80 */
 #define X87_FSTPT 0xDB      /* /7: fstpt m80 (DB /7 — DD /7 is fnstsw m16) */
 #define X87_FLDS 0xD9       /* /0: flds m32 */
-#define X87_FSTPS 0xD9      /* /2: fstps m32 */
+#define X87_FSTPS 0xD9      /* /3: fstps m32 (store and pop) */
 #define X87_FLDL 0xDD       /* /0: fldl m64 */
-#define X87_FSTPL 0xDD      /* /2: fstpl m64 */
+#define X87_FSTPL 0xDD      /* /3: fstpl m64 (store and pop) */
 #define X87_FILD_M32 0xDB   /* /0: fild m32int */
 #define X87_FILD_M64 0xDF   /* /5: fild m64int */
 #define X87_FISTTP_M32 0xDB /* /1: fisttp m32int */
@@ -19,6 +19,7 @@
 #define X87_DIG_0 0
 #define X87_DIG_1 1
 #define X87_DIG_2 2
+#define X87_DIG_3 3
 
 /* x87 register-form opcodes (primary byte then fixed sub-opcode byte). */
 #define X87_FLDZ 0xD9EE
@@ -86,7 +87,7 @@ void x87_emit_flds(ByteBuf *buf, X86Mem m)
 
 void x87_emit_fstps(ByteBuf *buf, X86Mem m)
 {
-    x87_emit_mem(buf, X87_FSTPS, X87_DIG_2, m);
+    x87_emit_mem(buf, X87_FSTPS, X87_DIG_3, m);
 }
 
 void x87_emit_fldl(ByteBuf *buf, X86Mem m)
@@ -96,7 +97,7 @@ void x87_emit_fldl(ByteBuf *buf, X86Mem m)
 
 void x87_emit_fstpl(ByteBuf *buf, X86Mem m)
 {
-    x87_emit_mem(buf, X87_FSTPL, X87_DIG_2, m);
+    x87_emit_mem(buf, X87_FSTPL, X87_DIG_3, m);
 }
 
 void x87_emit_fild(ByteBuf *buf, u8 size, X86Mem m)
