@@ -33,7 +33,7 @@ static const OptPassId level3_passes[] = {
     OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY, OPT_PASS_CAST,      OPT_PASS_CPROP,
     OPT_PASS_PHI_SIMP,   OPT_PASS_DCE,      OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER,
     OPT_PASS_INLINE,     OPT_PASS_GVN,      OPT_PASS_LICM,      OPT_PASS_MEM_FWD,
-    OPT_PASS_REASSOC,    OPT_PASS_STRENGTH,
+    OPT_PASS_REASSOC,    OPT_PASS_STRENGTH, OPT_PASS_DSE,
 };
 
 #define PASS_COUNT(list) (sizeof(list) / sizeof((list)[0]))
@@ -77,8 +77,9 @@ static const OptPass opt_passes[] = {
     {OPT_PASS_GVN, "gvn", opt_pass_gvn},
     {OPT_PASS_LICM, "licm", opt_pass_licm},
     {OPT_PASS_MEM_FWD, "mem_fwd", opt_pass_mem_fwd},
-    {OPT_PASS_REASSOC, "reassoc", NULL},
-    {OPT_PASS_STRENGTH, "strength", NULL},
+    {OPT_PASS_REASSOC, "reassoc", opt_pass_reassoc},
+    {OPT_PASS_STRENGTH, "strength", opt_pass_strength},
+    {OPT_PASS_DSE, "dse", opt_pass_dse},
     {0},
 };
 

@@ -2187,3 +2187,156 @@ TEST(opt, inline_sret_record)
     EXPECT_EQ(ir_interp_run(m), 42);
     arena_free(a);
 }
+
+/* Phase 25 J: strength reduction, reassociation, and dead-store elimination. */
+
+static IrInstr *def_of(IrModule *m, u32 vreg)
+{
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+        size_t nblocks = vec_size(f->blocks);
+        for (size_t b = 0; b < nblocks; b++)
+        {
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+            size_t ninstr = vec_size(bb->instrs);
+            for (size_t j = 0; j < ninstr; j++)
+            {
+                IrInstr *in = (IrInstr *) vec_get(bb->instrs, j);
+                if (in->result == vreg)
+                {
+                    return in;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+static u32 add_param_vreg(Arena *a, IrModule *m, IrFunction *f, const char *name)
+{
+    u32 v = ir_alloc_vreg(m, 8, true, false);
+    IrParam *p = arena_alloc(a, sizeof(IrParam), _Alignof(IrParam));
+    p->name = name;
+    p->type = type_int();
+    p->vreg = v;
+    vec_push(f->params, p);
+    return v;
+}
+
+TEST(opt, strength_rewrites_power_of_two_multiply)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+    u32 x = ir_alloc_vreg(m, 4, true, false);
+    u32 r = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(bb, OP_MUL, x, ir_operand_imm(3), ir_operand_imm(1));
+    ir_emit_binop(bb, OP_MUL, r, ir_operand_vreg(x), ir_operand_imm(8));
+    ir_emit_ret(bb, ir_operand_vreg(r));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_TRUE(opt_pass_strength(&ctx));
+    EXPECT_EQ(def_of(m, r)->opcode, OP_SHL);
+    EXPECT_EQ(def_of(m, r)->ops[1].u.imm, 3);
+    EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+TEST(opt, strength_rewrites_unsigned_modulo_by_power_of_two)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+    u32 x = ir_alloc_vreg(m, 4, false, false);
+    u32 r = ir_alloc_vreg(m, 4, false, false);
+    ir_emit_binop(bb, OP_UDIV, x, ir_operand_imm(9), ir_operand_imm(1));
+    ir_emit_binop(bb, OP_UREM, r, ir_operand_vreg(x), ir_operand_imm(16));
+    ir_emit_ret(bb, ir_operand_vreg(r));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_TRUE(opt_pass_strength(&ctx));
+    EXPECT_EQ(def_of(m, r)->opcode, OP_AND);
+    EXPECT_EQ(def_of(m, r)->ops[1].u.imm, 15);
+    EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+TEST(opt, reassoc_combines_addends)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+    u32 base = add_param_vreg(a, m, f, "base");
+    u32 t = ir_alloc_vreg(m, 4, true, false);
+    u32 r = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(bb, OP_ADD, t, ir_operand_vreg(base), ir_operand_imm(3));
+    ir_emit_binop(bb, OP_SUB, r, ir_operand_vreg(t), ir_operand_imm(9));
+    ir_emit_ret(bb, ir_operand_vreg(r));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_TRUE(opt_pass_reassoc(&ctx));
+    EXPECT_EQ(def_of(m, r)->opcode, OP_ADD);
+    EXPECT_EQ(def_of(m, r)->ops[0].u.vreg, base);
+    EXPECT_EQ(def_of(m, r)->ops[1].u.imm, -6);
+    EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+TEST(opt, dse_drops_an_overwritten_store)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+    u32 p = add_param_vreg(a, m, f, "p");
+    ir_emit_store(bb, ir_operand_imm(1), ir_operand_vreg(p), 4, false);
+    ir_emit_store(bb, ir_operand_imm(2), ir_operand_vreg(p), 4, false);
+    ir_emit_ret(bb, ir_operand_imm(0));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_TRUE(opt_pass_dse(&ctx));
+    EXPECT_EQ(count_opcode(m, OP_STORE), 1u);
+    EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+TEST(opt, dse_keeps_a_store_a_load_may_read)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+    u32 p = add_param_vreg(a, m, f, "p");
+    u32 v = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_store(bb, ir_operand_imm(1), ir_operand_vreg(p), 4, false);
+    ir_emit_load(bb, v, ir_operand_vreg(p), false);
+    ir_emit_store(bb, ir_operand_imm(2), ir_operand_vreg(p), 4, false);
+    ir_emit_ret(bb, ir_operand_vreg(v));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_FALSE(opt_pass_dse(&ctx));
+    EXPECT_EQ(count_opcode(m, OP_STORE), 2u);
+    arena_free(a);
+}
+
+TEST(opt, o3_strength_is_distinct_from_o2)
+{
+    Arena *a1 = arena_new();
+    Arena *a2 = arena_new();
+    const char *src = "int main(void)\n"
+                      "{\n"
+                      "    int s = 0;\n"
+                      "    for (int i = 0; i < 8; i = i + 1) s = s + i * 8;\n"
+                      "    return s;\n"
+                      "}\n";
+    IrModule *m2 = tc_build_module(src, a1);
+    IrModule *m3 = tc_build_module(src, a2);
+    optimize(m2, OPT_LEVEL_2, a1);
+    optimize(m3, OPT_LEVEL_3, a2);
+    EXPECT_TRUE(m2 && m3);
+    EXPECT_TRUE(count_opcode(m2, OP_MUL) > 0);
+    EXPECT_EQ(count_opcode(m3, OP_MUL), 0u);
+    EXPECT_EQ(ir_interp_run(m2), ir_interp_run(m3));
+    arena_free(a1);
+    arena_free(a2);
+}
