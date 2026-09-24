@@ -39,7 +39,7 @@ DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_BIN) $(T
 
 FORMAT_FILES := $(shell find src include test \( -name '*.c' -o -name '*.h' \))
 
-.PHONY: all clean test test-gdb selftest dirs compile-commands format format-check
+.PHONY: all clean test test-gdb selftest selftest-filc-static dirs compile-commands format format-check
 
 all: $(FICC_BIN)
 
@@ -55,6 +55,11 @@ test: $(TEST_BIN) $(FICC_BIN)
 # Real-debugger certificate (opt-in; skips with a warning when gdb is absent).
 test-gdb: $(FICC_BIN)
 	./test/debug_gdb.sh $(abspath $(FICC_BIN))
+
+# Static-linker checkpoint: link and run the freestanding golden corpus with
+# ficc's own linker (interp == filc), and require deterministic output.
+selftest-filc-static: $(FICC_BIN)
+	./test/filc_static.sh $(abspath $(FICC_BIN))
 
 $(FICC_BIN): $(OBJ_SRC) | dirs
 	$(CC) $(LDFLAGS) $^ -o $@

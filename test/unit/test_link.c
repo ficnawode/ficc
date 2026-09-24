@@ -214,3 +214,57 @@ TEST(link, static_link_cross_tu)
     };
     EXPECT_EQ(link_and_run(srcs, 2, NULL), 21);
 }
+
+static u8 *read_file_bytes(const char *path, size_t *out_len, Arena *arena)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return NULL;
+    }
+    fseek(f, 0, SEEK_END);
+    long end = ftell(f);
+    rewind(f);
+    u8 *buf = arena_alloc(arena, (size_t) end + 1, 8);
+    size_t n = fread(buf, 1, (size_t) end, f);
+    fclose(f);
+    *out_len = n;
+    return buf;
+}
+
+TEST(link, deterministic_output)
+{
+    Arena *arena = arena_new();
+    ByteBuf *buf = serialize("static int g = 3;\nint main(void){return g * 14;}\n", arena);
+    LinkObject *obj = link_read_memory(bytebuf_data(buf), bytebuf_len(buf), "unit.o", arena);
+
+    char p1[128], p2[128];
+    link_temp_path(p1, sizeof(p1), "det1");
+    link_temp_path(p2, sizeof(p2), "det2");
+
+    for (int pass = 0; pass < 2; pass++)
+    {
+        Vec *inputs = vec_new(arena);
+        LinkInput *in = arena_alloc(arena, sizeof(*in), sizeof(void *));
+        in->kind = LINK_INPUT_OBJECT;
+        in->object = obj;
+        in->path = NULL;
+        vec_push(inputs, in);
+        LinkConfig cfg = {0};
+        cfg.output_path = pass == 0 ? p1 : p2;
+        cfg.lib_paths = vec_new(arena);
+        cfg.libs = vec_new(arena);
+        EXPECT_EQ(link_run(&cfg, inputs, arena), 0);
+    }
+
+    size_t n1 = 0, n2 = 0;
+    u8 *b1 = read_file_bytes(p1, &n1, arena);
+    u8 *b2 = read_file_bytes(p2, &n2, arena);
+    EXPECT_TRUE(b1 != NULL && b2 != NULL);
+    EXPECT_EQ(n1, n2);
+    EXPECT_TRUE(n1 > 0 && memcmp(b1, b2, n1) == 0);
+
+    unlink(p1);
+    unlink(p2);
+    arena_free(arena);
+}
