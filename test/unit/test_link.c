@@ -188,6 +188,7 @@ static int link_and_run(const char *const *srcs, size_t nsrcs, const char *expec
     cfg.output_path = bin;
     cfg.lib_paths = vec_new(arena);
     cfg.libs = vec_new(arena);
+    cfg.nostdlib = true;
     int rc = link_run(&cfg, inputs, arena);
     if (rc != 0)
     {
@@ -254,6 +255,7 @@ TEST(link, deterministic_output)
         cfg.output_path = pass == 0 ? p1 : p2;
         cfg.lib_paths = vec_new(arena);
         cfg.libs = vec_new(arena);
+        cfg.nostdlib = true;
         EXPECT_EQ(link_run(&cfg, inputs, arena), 0);
     }
 

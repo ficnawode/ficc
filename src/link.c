@@ -2,6 +2,7 @@
 #include "util/hashmap.h"
 #include "x86_link.h"
 
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -402,22 +403,148 @@ struct GlobalSym
 
 typedef struct
 {
+    const char *name;
+    u8 type, bind;
+    u64 value, size;
+    u16 shndx;
+} DsoSym;
+
+typedef struct
+{
+    const char *path;
+    const char *soname;
+    const u8 *data;
+    size_t len;
+    StrMap *exports; /* name -> DsoSym* */
+} Dso;
+
+typedef struct
+{
+    const char *name;
+    u8 info;
+    u16 shndx;
+    u64 value;
+    u64 size;
+    u32 name_off;
+} DynSym;
+
+typedef struct
+{
+    u64 offset;
+    u32 sym;
+    u32 type;
+    i64 addend;
+    void *owner;
+} DynReloc;
+
+typedef struct
+{
+    const char *name;
+    u64 off; /* offset within .got or .got.plt */
+    u64 addr;
+    bool is_dynamic; /* slot filled by ld.so via GLOB_DAT */
+} GotSlot;
+
+typedef struct
+{
+    const char *name;
+    u64 plt_off;
+    u64 got_off;
+    u64 plt_addr;
+    u64 got_addr;
+    u32 dynidx;
+} PltSlot;
+
+typedef struct
+{
+    const char *name;
+    u64 size;
+    u64 align;
+    u64 off; /* offset within .bss */
+    u64 addr;
+    u32 dynidx;
+    bool has_reloc;
+} CopySlot;
+
+#define DSEC_COUNT 12
+typedef enum
+{
+    DSEC_INTERP = 0,
+    DSEC_HASH,
+    DSEC_DYNSYM,
+    DSEC_DYNSTR,
+    DSEC_VER,
+    DSEC_VERNEED,
+    DSEC_RELA_DYN,
+    DSEC_RELA_PLT,
+    DSEC_PLT,
+    DSEC_DYNAMIC,
+    DSEC_GOT,
+    DSEC_GOT_PLT,
+} DynSecId;
+
+typedef struct
+{
+    const char *name;
+    u32 type;
+    u64 flags;
+    u64 align;
+    u64 entsize;
+    int seg;
+} DynSecDesc;
+
+static const DynSecDesc DYN_SECS[DSEC_COUNT] = {
+    {".interp", SHT_PROGBITS, SHF_ALLOC, 1, 0, 0},
+    {".gnu.hash", SHT_GNU_HASH, SHF_ALLOC, 8, 0, 0},
+    {".dynsym", SHT_DYNSYM, SHF_ALLOC, 8, sizeof(Elf64_Sym), 0},
+    {".dynstr", SHT_STRTAB, SHF_ALLOC, 1, 0, 0},
+    {".gnu.version", SHT_GNU_VERSYM, SHF_ALLOC, 2, 2, 0},
+    {".gnu.version_r", SHT_GNU_VERNEED, SHF_ALLOC, 8, 0, 0},
+    {".rela.dyn", SHT_RELA, SHF_ALLOC, 8, sizeof(Elf64_Rela), 0},
+    {".rela.plt", SHT_RELA, SHF_ALLOC, 8, sizeof(Elf64_Rela), 0},
+    {".plt", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, 16, 16, 1},
+    {".dynamic", SHT_DYNAMIC, SHF_ALLOC | SHF_WRITE, 8, sizeof(Elf64_Dyn), 3},
+    {".got", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, 8, 8, 3},
+    {".got.plt", SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, 8, 8, 3},
+};
+
+typedef struct
+{
     const LinkConfig *cfg;
     Arena *arena;
     Vec *objects; /* Vec<InputObject*> */
     OutSec out[OUT_COUNT];
     StrMap *globals;
-    Vec *global_order; /* Vec<GlobalSym*>, creation order (deterministic) */
-    Vec *archives;     /* Vec<Archive*> */
-    Vec *dsos;         /* Vec<const char*> — recognized dynamic inputs (deferred) */
-    Vec *search_dirs;  /* Vec<const char*> — -L dirs then the built-in list */
-    size_t nresolved;  /* objects below this index are already in the global table */
-    u64 seg_off[3], seg_addr[3], seg_filesz[3], seg_memsz[3];
+    Vec *global_order;    /* Vec<GlobalSym*>, creation order (deterministic) */
+    Vec *archives;        /* Vec<Archive*> */
+    Vec *dsos;            /* Vec<Dso*> */
+    Vec *search_dirs;     /* Vec<const char*> — -L dirs then the built-in list */
+    StrMap *loaded_paths; /* file inputs already added, by path */
+    size_t nresolved;     /* objects below this index are already in the global table */
+    u64 seg_off[4], seg_addr[4], seg_filesz[4], seg_memsz[4];
     u64 entry;
     bool has_start_stub;
     u64 start_off;
     u64 start_rel_off;
     u32 nerrors;
+
+    /* Dynamic output state (used only when `dynamic`). */
+    bool dynamic;
+    Vec *dynsyms;      /* Vec<DynSym*> — index 0 is null */
+    StrMap *dyn_index; /* name -> DynSym* */
+    Vec *rela_dyn;     /* Vec<DynReloc*> */
+    Vec *rela_plt;     /* Vec<DynReloc*> */
+    Vec *needed;       /* Vec<const char*> sonames */
+    Vec *needed_off;   /* Vec<u64> offsets of sonames in .dynstr */
+    StrMap *got_map;   /* name -> GotSlot* */
+    Vec *got_slots;    /* Vec<GotSlot*> */
+    StrMap *plt_map;   /* name -> PltSlot* */
+    Vec *plt_slots;    /* Vec<PltSlot*> */
+    Vec *copies;       /* Vec<CopySlot*> */
+    ByteBuf dynbuf[DSEC_COUNT];
+    u64 dyn_addr[DSEC_COUNT];
+    u64 dyn_off[DSEC_COUNT];
+    u64 got_plt_size;
 } Linker;
 
 static void linker_init(Linker *lk, const LinkConfig *cfg, Arena *arena)
@@ -430,8 +557,28 @@ static void linker_init(Linker *lk, const LinkConfig *cfg, Arena *arena)
     lk->archives = vec_new(arena);
     lk->dsos = vec_new(arena);
     lk->search_dirs = vec_new(arena);
+    lk->loaded_paths = strmap_new(arena);
     lk->nresolved = 0;
     lk->nerrors = 0;
+    lk->dynamic = false;
+    lk->dynsyms = vec_new(arena);
+    lk->dyn_index = strmap_new(arena);
+    lk->rela_dyn = vec_new(arena);
+    lk->rela_plt = vec_new(arena);
+    lk->needed = vec_new(arena);
+    lk->needed_off = vec_new(arena);
+    lk->got_map = strmap_new(arena);
+    lk->got_slots = vec_new(arena);
+    lk->plt_map = strmap_new(arena);
+    lk->plt_slots = vec_new(arena);
+    lk->copies = vec_new(arena);
+    lk->got_plt_size = 0;
+    for (int i = 0; i < DSEC_COUNT; i++)
+    {
+        bytebuf_init(&lk->dynbuf[i], arena);
+        lk->dyn_addr[i] = 0;
+        lk->dyn_off[i] = 0;
+    }
     for (int i = 0; i < OUT_COUNT; i++)
     {
         bytebuf_init(&lk->out[i].bytes, arena);
@@ -460,6 +607,10 @@ static bool name_has_prefix(const char *s, const char *base)
 static int classify_section(const LinkSection *sec)
 {
     const char *n = sec->name;
+    if (name_has_prefix(n, ".sframe"))
+    {
+        return CLASS_IGNORE;
+    }
     switch (sec->type)
     {
         case SHT_PROGBITS:
@@ -468,6 +619,8 @@ static int classify_section(const LinkSection *sec)
         case SHT_FINI_ARRAY:
         case SHT_PREINIT_ARRAY:
             break;
+        case SHT_NOTE:
+            return CLASS_IGNORE;
         default:
             if (sec->flags & SHF_ALLOC)
             {
@@ -710,9 +863,128 @@ static void resolve_globals(Linker *lk)
     allocate_commons(lk);
 }
 
+static DsoSym *dso_lookup(Linker *lk, const char *name)
+{
+    for (size_t i = 0; i < vec_size(lk->dsos); i++)
+    {
+        Dso *d = (Dso *) vec_get(lk->dsos, i);
+        DsoSym *s = (DsoSym *) strmap_get(d->exports, name);
+        if (s)
+        {
+            return s;
+        }
+    }
+    return NULL;
+}
+
+static u32 dynsym_add(Linker *lk, const char *name, u8 info, u16 shndx, u64 value, u64 size)
+{
+    void *v = strmap_get(lk->dyn_index, name);
+    if (v)
+    {
+        return (u32) (uintptr_t) v - 1;
+    }
+    DynSym *d = arena_alloc(lk->arena, sizeof(*d), sizeof(void *));
+    d->name = name;
+    d->info = info;
+    d->shndx = shndx;
+    d->value = value;
+    d->size = size;
+    vec_push(lk->dynsyms, d);
+    u32 idx = (u32) (vec_size(lk->dynsyms) - 1);
+    strmap_set(lk->dyn_index, name, (void *) (uintptr_t) (idx + 1));
+    return idx;
+}
+
+static GotSlot *got_slot(Linker *lk, const char *name)
+{
+    GotSlot *g = (GotSlot *) strmap_get(lk->got_map, name);
+    if (g)
+    {
+        return g;
+    }
+    g = arena_alloc(lk->arena, sizeof(*g), sizeof(void *));
+    g->name = name;
+    g->off = vec_size(lk->got_slots) * 8;
+    g->addr = 0;
+    g->is_dynamic = false;
+    vec_push(lk->got_slots, g);
+    strmap_set(lk->got_map, name, g);
+    return g;
+}
+
+static PltSlot *plt_slot(Linker *lk, const char *name)
+{
+    PltSlot *p = (PltSlot *) strmap_get(lk->plt_map, name);
+    if (p)
+    {
+        return p;
+    }
+    p = arena_alloc(lk->arena, sizeof(*p), sizeof(void *));
+    p->name = name;
+    p->plt_off = vec_size(lk->plt_slots) * 16;
+    p->got_off = (3 + vec_size(lk->plt_slots)) * 8;
+    p->plt_addr = 0;
+    p->got_addr = 0;
+    p->dynidx = dynsym_add(lk, name, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), SHN_UNDEF, 0, 0);
+    vec_push(lk->plt_slots, p);
+    strmap_set(lk->plt_map, name, p);
+    DynReloc *r = arena_alloc(lk->arena, sizeof(*r), sizeof(void *));
+    r->offset = 0;
+    r->sym = p->dynidx;
+    r->type = R_X86_64_JUMP_SLOT;
+    r->addend = 0;
+    vec_push(lk->rela_plt, r);
+    return p;
+}
+
+static CopySlot *copy_slot(Linker *lk, const char *name, u64 size, u64 align)
+{
+    for (size_t i = 0; i < vec_size(lk->copies); i++)
+    {
+        CopySlot *c = (CopySlot *) vec_get(lk->copies, i);
+        if (strcmp(c->name, name) == 0)
+        {
+            return c;
+        }
+    }
+    CopySlot *c = arena_alloc(lk->arena, sizeof(*c), sizeof(void *));
+    c->name = name;
+    c->size = size;
+    c->align = align ? align : 8;
+    OutSec *bss = &lk->out[OUT_BSS];
+    c->off = align_up(bss->size, c->align);
+    bss->size = c->off + size;
+    if (c->align > bss->align)
+    {
+        bss->align = c->align;
+    }
+    c->addr = 0;
+    c->dynidx = dynsym_add(lk, name, ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT), SHN_UNDEF, 0, size);
+    c->has_reloc = false;
+    vec_push(lk->copies, c);
+    return c;
+}
+
+static bool is_gotpcrel(u32 type)
+{
+    return type == R_X86_64_GOTPCREL || type == R_X86_64_GOTPCRELX ||
+           type == R_X86_64_REX_GOTPCRELX;
+}
+
 static bool synth_value(Linker *lk, const char *name, u64 *out)
 {
     OutSec *bss = &lk->out[OUT_BSS];
+    if (lk->dynamic && name_is(name, "_GLOBAL_OFFSET_TABLE_"))
+    {
+        *out = lk->dyn_addr[DSEC_GOT_PLT];
+        return true;
+    }
+    if (lk->dynamic && name_is(name, "_DYNAMIC"))
+    {
+        *out = lk->dyn_addr[DSEC_DYNAMIC];
+        return true;
+    }
     if (name_is(name, "__bss_start") || name_is(name, "_edata"))
     {
         *out = bss->addr;
@@ -756,7 +1028,7 @@ static bool synth_value(Linker *lk, const char *name, u64 *out)
     return false;
 }
 
-static bool symbol_value(Linker *lk, InputObject *io, LinkSym *sym, u64 *out)
+static bool symbol_value(Linker *lk, InputObject *io, LinkSym *sym, u32 reloc_type, u64 *out)
 {
     if (sym->bind == STB_LOCAL)
     {
@@ -773,7 +1045,7 @@ static bool symbol_value(Linker *lk, InputObject *io, LinkSym *sym, u64 *out)
         OutSec *o = &lk->out[io->sec_out[sym->shndx]];
         if (sym->type == STT_SECTION)
         {
-            *out = o->addr;
+            *out = o->addr + io->sec_off[sym->shndx];
             return true;
         }
         *out = o->addr + io->sec_off[sym->shndx] + sym->value;
@@ -785,13 +1057,34 @@ static bool symbol_value(Linker *lk, InputObject *io, LinkSym *sym, u64 *out)
         *out = g->addr;
         return true;
     }
+    if (synth_value(lk, sym->name, out))
+    {
+        return true;
+    }
+    if (lk->dynamic)
+    {
+        DsoSym *ds = dso_lookup(lk, sym->name);
+        if (ds)
+        {
+            if (reloc_type == R_X86_64_PLT32 || ds->type == STT_FUNC || ds->type == STT_GNU_IFUNC)
+            {
+                PltSlot *p = plt_slot(lk, sym->name);
+                *out = p->plt_addr;
+                return true;
+            }
+            if (ds->type == STT_OBJECT || ds->type == STT_NOTYPE)
+            {
+                CopySlot *c = copy_slot(lk, sym->name, ds->size, 8);
+                *out = c->addr;
+                return true;
+            }
+            link_error("%s: unsupported dynamic reference to '%s'", io->obj->name, sym->name);
+            return false;
+        }
+    }
     if (sym->bind == STB_WEAK)
     {
         *out = 0;
-        return true;
-    }
-    if (synth_value(lk, sym->name, out))
-    {
         return true;
     }
     link_error("%s: undefined reference to '%s'", io->obj->name, sym->name);
@@ -831,6 +1124,10 @@ static void prepare_entry(Linker *lk)
         link_error("no entry point: '_start' and 'main' are both undefined");
         lk->nerrors++;
         return;
+    }
+    if (lk->dynamic)
+    {
+        return; /* a dynamic link takes _start from crt1.o */
     }
     const LinkArch *arch = x86_link_arch();
     OutSec *text = &lk->out[OUT_TEXT];
@@ -928,13 +1225,27 @@ static bool apply_relocs(Linker *lk)
                     return false;
                 }
                 LinkSym *sym = (LinkSym *) vec_get(io->obj->symbols, r->sym);
+                u64 place = o->addr + at;
+                u8 *field = o->bytes.data + at;
+                if (lk->dynamic && is_gotpcrel(r->type))
+                {
+                    GotSlot *g = got_slot(lk, sym->name);
+                    i64 v = (i64) g->addr + r->addend - (i64) place;
+                    if (v < INT32_MIN || v > INT32_MAX)
+                    {
+                        link_error("%s: GOT relocation overflow for '%s'", io->obj->name,
+                                   sym->name);
+                        return false;
+                    }
+                    i32 v32 = (i32) v;
+                    memcpy(field, &v32, 4);
+                    continue;
+                }
                 u64 s = 0;
-                if (!symbol_value(lk, io, sym, &s))
+                if (!symbol_value(lk, io, sym, r->type, &s))
                 {
                     return false;
                 }
-                u64 place = o->addr + at;
-                u8 *field = o->bytes.data + at;
                 RelocResult rr = arch->apply_reloc(r->type, field, s, r->addend, place);
                 if (rr == RELOC_OVERFLOW)
                 {
@@ -1620,6 +1931,19 @@ static const char *resolve_library(Linker *lk, const char *name)
     return NULL;
 }
 
+static const char *find_in_dirs(Linker *lk, const char *name)
+{
+    for (size_t i = 0; i < vec_size(lk->search_dirs); i++)
+    {
+        const char *cand = path_join((const char *) vec_get(lk->search_dirs, i), name, lk->arena);
+        if (file_exists(cand))
+        {
+            return cand;
+        }
+    }
+    return NULL;
+}
+
 typedef struct
 {
     Vec *tokens; /* Vec<const char*> */
@@ -1832,8 +2156,114 @@ static const char *dir_of(const char *path, Arena *arena)
     return d;
 }
 
+static Dso *dso_read(const u8 *data, size_t len, const char *path, Arena *arena)
+{
+    if (len < sizeof(Elf64_Ehdr))
+    {
+        link_error("%s: truncated shared object", path);
+        return NULL;
+    }
+    Elf64_Ehdr eh;
+    memcpy(&eh, data, sizeof(eh));
+    if (eh.e_shnum == 0)
+    {
+        link_error("%s: shared object has no section headers", path);
+        return NULL;
+    }
+    const Elf64_Shdr *dynsym = NULL;
+    const Elf64_Shdr *dynamic = NULL;
+    for (u64 i = 0; i < eh.e_shnum; i++)
+    {
+        const Elf64_Shdr *sh = shdr_at(data, len, &eh, i);
+        if (!sh)
+        {
+            continue;
+        }
+        if (sh->sh_type == SHT_DYNSYM)
+        {
+            dynsym = sh;
+        }
+        else if (sh->sh_type == SHT_DYNAMIC)
+        {
+            dynamic = sh;
+        }
+    }
+    if (!dynsym || dynsym->sh_link >= eh.e_shnum)
+    {
+        link_error("%s: shared object has no dynamic symbol table", path);
+        return NULL;
+    }
+    const Elf64_Shdr *str = shdr_at(data, len, &eh, dynsym->sh_link);
+    if (!str || !in_range(len, str->sh_offset, str->sh_size))
+    {
+        link_error("%s: malformed dynamic string table", path);
+        return NULL;
+    }
+    const u8 *strtab = data + str->sh_offset;
+    size_t strtab_len = (size_t) str->sh_size;
+
+    Dso *d = arena_alloc(arena, sizeof(*d), sizeof(void *));
+    d->path = path;
+    d->soname = NULL;
+    d->data = data;
+    d->len = len;
+    d->exports = strmap_new(arena);
+
+    if (dynamic && dynamic->sh_link == dynsym->sh_link)
+    {
+        u64 n = dynamic->sh_size / sizeof(Elf64_Dyn);
+        for (u64 i = 0; i < n; i++)
+        {
+            const u8 *p = data + dynamic->sh_offset + i * sizeof(Elf64_Dyn);
+            Elf64_Dyn ed;
+            memcpy(&ed, p, sizeof(ed));
+            if (ed.d_tag == DT_SONAME)
+            {
+                d->soname = cstr_at(strtab, strtab_len, ed.d_un.d_val);
+            }
+            else if (ed.d_tag == DT_NULL)
+            {
+                break;
+            }
+        }
+    }
+
+    u64 entsize = dynsym->sh_entsize ? dynsym->sh_entsize : sizeof(Elf64_Sym);
+    u64 nsyms = dynsym->sh_size / entsize;
+    for (u64 s = 0; s < nsyms; s++)
+    {
+        const u8 *p = data + dynsym->sh_offset + s * entsize;
+        Elf64_Sym es;
+        memcpy(&es, p, sizeof(es));
+        u8 bind = ELF64_ST_BIND(es.st_info);
+        if (bind == STB_LOCAL || es.st_shndx == SHN_UNDEF)
+        {
+            continue;
+        }
+        const char *name = cstr_at(strtab, strtab_len, es.st_name);
+        if (!name || strmap_get(d->exports, name))
+        {
+            continue;
+        }
+        DsoSym *ds = arena_alloc(arena, sizeof(*ds), sizeof(void *));
+        ds->name = name;
+        ds->type = ELF64_ST_TYPE(es.st_info);
+        ds->bind = bind;
+        ds->value = es.st_value;
+        ds->size = es.st_size;
+        ds->shndx = es.st_shndx;
+        strmap_set(d->exports, name, ds);
+    }
+    return d;
+}
+
 static bool link_add_path(Linker *lk, const char *path)
 {
+    if (strmap_get(lk->loaded_paths, path))
+    {
+        return true;
+    }
+    strmap_set(lk->loaded_paths, path, (void *) 1);
     size_t len = 0;
     u8 *data = read_whole_file(path, &len, lk->arena);
     if (!data)
@@ -1861,8 +2291,35 @@ static bool link_add_path(Linker *lk, const char *path)
         memcpy(&eh, data, sizeof(eh));
         if (eh.e_type == ET_DYN)
         {
-            vec_push(lk->dsos, (void *) path);
-            link_warn("%s: dynamic input recognized; dynamic linking is not implemented yet", path);
+            const char *base = strrchr(path, '/');
+            base = base ? base + 1 : path;
+            if (strncmp(base, "ld-linux", 8) == 0 || strncmp(base, "ld.so", 5) == 0)
+            {
+                return true; /* the interpreter: not a NEEDED input */
+            }
+            Dso *d = dso_read(data, len, path, lk->arena);
+            if (!d)
+            {
+                return false;
+            }
+            vec_push(lk->dsos, d);
+            lk->dynamic = true;
+            if (d->soname)
+            {
+                bool seen = false;
+                for (size_t k = 0; k < vec_size(lk->needed); k++)
+                {
+                    if (strcmp((const char *) vec_get(lk->needed, k), d->soname) == 0)
+                    {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen)
+                {
+                    vec_push(lk->needed, (void *) d->soname);
+                }
+            }
             return true;
         }
         LinkObject *obj = link_read_memory(data, len, path, lk->arena);
@@ -1947,6 +2404,597 @@ static bool pull_from_archives(Linker *lk)
     return pulled;
 }
 
+static void dyn_emit(ByteBuf *b, i64 tag, u64 val)
+{
+    bytebuf_append_u64(b, (u64) tag);
+    bytebuf_append_u64(b, val);
+}
+
+static void dynamic_scan(Linker *lk)
+{
+    if (!lk->dynamic)
+    {
+        return;
+    }
+    DynSym *nullsym = arena_alloc(lk->arena, sizeof(*nullsym), sizeof(void *));
+    nullsym->name = "";
+    nullsym->info = 0;
+    nullsym->shndx = 0;
+    nullsym->value = 0;
+    nullsym->size = 0;
+    nullsym->name_off = 0;
+    vec_push(lk->dynsyms, nullsym);
+
+    for (size_t oi = 0; oi < vec_size(lk->objects); oi++)
+    {
+        InputObject *io = (InputObject *) vec_get(lk->objects, oi);
+        for (u64 si = 0; si < vec_size(io->obj->sections); si++)
+        {
+            Vec *list = (Vec *) vec_get(io->obj->relocs, si);
+            for (size_t ri = 0; ri < vec_size(list); ri++)
+            {
+                LinkReloc *r = (LinkReloc *) vec_get(list, ri);
+                LinkSym *sym = (LinkSym *) vec_get(io->obj->symbols, r->sym);
+                if (is_gotpcrel(r->type))
+                {
+                    GotSlot *g = got_slot(lk, sym->name);
+                    GlobalSym *gs =
+                        sym->bind != STB_LOCAL ? strmap_get(lk->globals, sym->name) : NULL;
+                    if (gs && gs->is_defined)
+                    {
+                        g->is_dynamic = false;
+                        continue;
+                    }
+                    DsoSym *ds = dso_lookup(lk, sym->name);
+                    if (!ds)
+                    {
+                        continue;
+                    }
+                    if (!g->is_dynamic)
+                    {
+                        g->is_dynamic = true;
+                        u32 idx = dynsym_add(lk, sym->name, ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE),
+                                             SHN_UNDEF, 0, 0);
+                        DynReloc *dr = arena_alloc(lk->arena, sizeof(*dr), sizeof(void *));
+                        dr->offset = 0;
+                        dr->sym = idx;
+                        dr->type = R_X86_64_GLOB_DAT;
+                        dr->addend = 0;
+                        dr->owner = g;
+                        vec_push(lk->rela_dyn, dr);
+                    }
+                    continue;
+                }
+                if (sym->bind == STB_LOCAL || sym->shndx != SHN_UNDEF)
+                {
+                    continue;
+                }
+                if (strmap_get(lk->globals, sym->name))
+                {
+                    continue;
+                }
+                DsoSym *ds = dso_lookup(lk, sym->name);
+                if (!ds)
+                {
+                    continue;
+                }
+                if (r->type == R_X86_64_PLT32)
+                {
+                    plt_slot(lk, sym->name);
+                }
+                else if (r->type == R_X86_64_32S || r->type == R_X86_64_32 ||
+                         r->type == R_X86_64_64 || r->type == R_X86_64_PC32 ||
+                         r->type == R_X86_64_PC64)
+                {
+                    if (ds->type == STT_OBJECT || ds->type == STT_NOTYPE)
+                    {
+                        CopySlot *c = copy_slot(lk, sym->name, ds->size, 8);
+                        if (!c->has_reloc)
+                        {
+                            c->has_reloc = true;
+                            DynReloc *dr = arena_alloc(lk->arena, sizeof(*dr), sizeof(void *));
+                            dr->offset = 0;
+                            dr->sym = c->dynidx;
+                            dr->type = R_X86_64_COPY;
+                            dr->addend = 0;
+                            dr->owner = c;
+                            vec_push(lk->rela_dyn, dr);
+                        }
+                    }
+                    else
+                    {
+                        link_error("%s: cannot reference dynamic function '%s' by address",
+                                   io->obj->name, sym->name);
+                        lk->nerrors++;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void dynamic_build(Linker *lk)
+{
+    const char *interp = "/lib64/ld-linux-x86-64.so.2";
+    bytebuf_append_bytes(&lk->dynbuf[DSEC_INTERP], (const u8 *) interp, strlen(interp) + 1);
+
+    ByteBuf *str = &lk->dynbuf[DSEC_DYNSTR];
+    strtab_init(str, lk->arena);
+    for (size_t i = 1; i < vec_size(lk->dynsyms); i++)
+    {
+        DynSym *d = (DynSym *) vec_get(lk->dynsyms, i);
+        d->name_off = strtab_add(str, d->name);
+    }
+    for (size_t i = 0; i < vec_size(lk->needed); i++)
+    {
+        const char *s = (const char *) vec_get(lk->needed, i);
+        u32 off = strtab_add(str, s);
+        vec_push(lk->needed_off, (void *) (uintptr_t) off);
+    }
+
+    ByteBuf *sym = &lk->dynbuf[DSEC_DYNSYM];
+    bytebuf_init(sym, lk->arena);
+    for (u64 i = 0; i < vec_size(lk->dynsyms) * sizeof(Elf64_Sym); i++)
+    {
+        bytebuf_append(sym, 0);
+    }
+
+    ByteBuf *hash = &lk->dynbuf[DSEC_HASH];
+    bytebuf_init(hash, lk->arena);
+    bytebuf_append_u32(hash, 1);
+    bytebuf_append_u32(hash, (u32) vec_size(lk->dynsyms));
+    bytebuf_append_u32(hash, 1);
+    bytebuf_append_u32(hash, 6);
+    bytebuf_append_u64(hash, 0);
+    bytebuf_append_u32(hash, 0);
+
+    ByteBuf *plt = &lk->dynbuf[DSEC_PLT];
+    bytebuf_init(plt, lk->arena);
+    for (u64 i = 0; i < vec_size(lk->plt_slots) * 16; i++)
+    {
+        bytebuf_append(plt, 0);
+    }
+    ByteBuf *got = &lk->dynbuf[DSEC_GOT];
+    bytebuf_init(got, lk->arena);
+    for (u64 i = 0; i < vec_size(lk->got_slots) * 8; i++)
+    {
+        bytebuf_append(got, 0);
+    }
+    lk->got_plt_size = (3 + vec_size(lk->plt_slots)) * 8;
+    ByteBuf *gotplt = &lk->dynbuf[DSEC_GOT_PLT];
+    bytebuf_init(gotplt, lk->arena);
+    for (u64 i = 0; i < lk->got_plt_size; i++)
+    {
+        bytebuf_append(gotplt, 0);
+    }
+    ByteBuf *rd = &lk->dynbuf[DSEC_RELA_DYN];
+    bytebuf_init(rd, lk->arena);
+    for (u64 i = 0; i < vec_size(lk->rela_dyn) * sizeof(Elf64_Rela); i++)
+    {
+        bytebuf_append(rd, 0);
+    }
+    ByteBuf *rp = &lk->dynbuf[DSEC_RELA_PLT];
+    bytebuf_init(rp, lk->arena);
+    for (u64 i = 0; i < vec_size(lk->rela_plt) * sizeof(Elf64_Rela); i++)
+    {
+        bytebuf_append(rp, 0);
+    }
+    u64 ndyn = 16 + vec_size(lk->needed);
+    ByteBuf *dyn = &lk->dynbuf[DSEC_DYNAMIC];
+    bytebuf_init(dyn, lk->arena);
+    for (u64 i = 0; i < ndyn * sizeof(Elf64_Dyn); i++)
+    {
+        bytebuf_append(dyn, 0);
+    }
+}
+
+static u64 place_dyn(Linker *lk, DynSecId id, u64 off)
+{
+    off = align_up(off, DYN_SECS[id].align);
+    lk->dyn_off[id] = off;
+    lk->dyn_addr[id] = LINK_BASE + off;
+    return off + bytebuf_len(&lk->dynbuf[id]);
+}
+
+static void layout_dynamic(Linker *lk)
+{
+    u64 nph = 8;
+    u64 off = sizeof(Elf64_Ehdr) + nph * sizeof(Elf64_Phdr);
+    for (int id = 0; id <= DSEC_RELA_PLT; id++)
+    {
+        off = place_dyn(lk, (DynSecId) id, off);
+    }
+    lk->seg_off[0] = 0;
+    lk->seg_addr[0] = LINK_BASE;
+    lk->seg_filesz[0] = off;
+    lk->seg_memsz[0] = off;
+
+    off = align_up(off, LINK_PAGE);
+    u64 s1 = off;
+    off = place_dyn(lk, DSEC_PLT, off);
+    place_section(lk, OUT_TEXT, &off);
+    lk->seg_off[1] = s1;
+    lk->seg_addr[1] = LINK_BASE + s1;
+    lk->seg_filesz[1] = off - s1;
+    lk->seg_memsz[1] = lk->seg_filesz[1];
+
+    off = align_up(off, LINK_PAGE);
+    u64 s2 = off;
+    place_section(lk, OUT_RODATA, &off);
+    place_section(lk, OUT_EH_FRAME, &off);
+    place_section(lk, OUT_GCC_EXCEPT, &off);
+    lk->seg_off[2] = s2;
+    lk->seg_addr[2] = LINK_BASE + s2;
+    lk->seg_filesz[2] = off - s2;
+    lk->seg_memsz[2] = lk->seg_filesz[2];
+
+    off = align_up(off, LINK_PAGE);
+    u64 s3 = off;
+    place_section(lk, OUT_INIT_ARRAY, &off);
+    place_section(lk, OUT_FINI_ARRAY, &off);
+    off = place_dyn(lk, DSEC_DYNAMIC, off);
+    off = place_dyn(lk, DSEC_GOT, off);
+    off = place_dyn(lk, DSEC_GOT_PLT, off);
+    place_section(lk, OUT_DATA, &off);
+    lk->out[OUT_BSS].addr = LINK_BASE + off;
+    lk->out[OUT_BSS].offset = off;
+    lk->seg_off[3] = s3;
+    lk->seg_addr[3] = LINK_BASE + s3;
+    lk->seg_filesz[3] = off - s3;
+    lk->seg_memsz[3] = lk->seg_filesz[3] + lk->out[OUT_BSS].size;
+}
+
+/* Dynamic executable section indices (fixed order). */
+enum
+{
+    DX_NULL = 0,
+    DX_INTERP,
+    DX_HASH,
+    DX_DYNSYM,
+    DX_DYNSTR,
+    DX_RELA_DYN,
+    DX_RELA_PLT,
+    DX_PLT,
+    DX_TEXT,
+    DX_RODATA,
+    DX_EH,
+    DX_INIT,
+    DX_FINI,
+    DX_DYNAMIC,
+    DX_GOT,
+    DX_GOT_PLT,
+    DX_DATA,
+    DX_BSS,
+    DX_SYMTAB,
+    DX_STRTAB,
+    DX_SHSTRTAB,
+    DX_NSEC
+};
+
+static void poke_u64(ByteBuf *b, u64 off, u64 val)
+{
+    memcpy(b->data + off, &val, 8);
+}
+
+static void poke_u32(ByteBuf *b, u64 off, u32 val)
+{
+    memcpy(b->data + off, &val, 4);
+}
+
+static void finalize_dynamic(Linker *lk)
+{
+    ByteBuf *gotb = &lk->dynbuf[DSEC_GOT];
+    for (size_t i = 0; i < vec_size(lk->got_slots); i++)
+    {
+        GotSlot *g = (GotSlot *) vec_get(lk->got_slots, i);
+        g->addr = lk->dyn_addr[DSEC_GOT] + g->off;
+        if (!g->is_dynamic)
+        {
+            GlobalSym *gs = (GlobalSym *) strmap_get(lk->globals, g->name);
+            if (gs && gs->is_defined)
+            {
+                poke_u64(gotb, g->off, gs->addr);
+            }
+        }
+    }
+
+    ByteBuf *gotplt = &lk->dynbuf[DSEC_GOT_PLT];
+    poke_u64(gotplt, 0, lk->dyn_addr[DSEC_DYNAMIC]);
+
+    ByteBuf *pltb = &lk->dynbuf[DSEC_PLT];
+    for (size_t i = 0; i < vec_size(lk->plt_slots); i++)
+    {
+        PltSlot *p = (PltSlot *) vec_get(lk->plt_slots, i);
+        p->plt_addr = lk->dyn_addr[DSEC_PLT] + p->plt_off;
+        p->got_addr = lk->dyn_addr[DSEC_GOT_PLT] + p->got_off;
+        u64 off = p->plt_off;
+        pltb->data[off + 0] = 0xff;
+        pltb->data[off + 1] = 0x25;
+        i64 disp = (i64) p->got_addr - (i64) (p->plt_addr + 6);
+        i32 d32 = (i32) disp;
+        memcpy(pltb->data + off + 2, &d32, 4);
+    }
+
+    for (size_t i = 0; i < vec_size(lk->copies); i++)
+    {
+        CopySlot *c = (CopySlot *) vec_get(lk->copies, i);
+        c->addr = lk->out[OUT_BSS].addr + c->off;
+        DynSym *d = (DynSym *) vec_get(lk->dynsyms, c->dynidx);
+        d->shndx = DX_BSS;
+        d->value = c->addr;
+    }
+
+    ByteBuf *rd = &lk->dynbuf[DSEC_RELA_DYN];
+    for (size_t i = 0; i < vec_size(lk->rela_dyn); i++)
+    {
+        DynReloc *r = (DynReloc *) vec_get(lk->rela_dyn, i);
+        u64 off = i * sizeof(Elf64_Rela);
+        u64 target = 0;
+        if (r->type == R_X86_64_GLOB_DAT)
+        {
+            GotSlot *g = (GotSlot *) r->owner;
+            target = g->addr;
+        }
+        else if (r->type == R_X86_64_COPY)
+        {
+            CopySlot *c = (CopySlot *) r->owner;
+            target = c->addr;
+        }
+        poke_u64(rd, off, target);
+        poke_u64(rd, off + 8, ELF64_R_INFO(r->sym, r->type));
+        poke_u64(rd, off + 16, (u64) r->addend);
+    }
+
+    ByteBuf *rp = &lk->dynbuf[DSEC_RELA_PLT];
+    for (size_t i = 0; i < vec_size(lk->plt_slots); i++)
+    {
+        PltSlot *p = (PltSlot *) vec_get(lk->plt_slots, i);
+        u64 off = i * sizeof(Elf64_Rela);
+        poke_u64(rp, off, p->got_addr);
+        poke_u64(rp, off + 8, ELF64_R_INFO(p->dynidx, R_X86_64_JUMP_SLOT));
+        poke_u64(rp, off + 16, 0);
+    }
+
+    ByteBuf *sym = &lk->dynbuf[DSEC_DYNSYM];
+    for (size_t i = 1; i < vec_size(lk->dynsyms); i++)
+    {
+        DynSym *d = (DynSym *) vec_get(lk->dynsyms, i);
+        u64 off = i * sizeof(Elf64_Sym);
+        poke_u32(sym, off, d->name_off);
+        sym->data[off + 4] = d->info;
+        sym->data[off + 5] = 0;
+        memcpy(sym->data + off + 6, &d->shndx, 2);
+        poke_u64(sym, off + 8, d->value);
+        poke_u64(sym, off + 16, d->size);
+    }
+
+    ByteBuf *dyn = &lk->dynbuf[DSEC_DYNAMIC];
+    bytebuf_init(dyn, lk->arena);
+    for (size_t i = 0; i < vec_size(lk->needed); i++)
+    {
+        u64 off = (u64) (uintptr_t) vec_get(lk->needed_off, i);
+        dyn_emit(dyn, DT_NEEDED, off);
+    }
+    dyn_emit(dyn, DT_GNU_HASH, lk->dyn_addr[DSEC_HASH]);
+    dyn_emit(dyn, DT_STRTAB, lk->dyn_addr[DSEC_DYNSTR]);
+    dyn_emit(dyn, DT_SYMTAB, lk->dyn_addr[DSEC_DYNSYM]);
+    dyn_emit(dyn, DT_STRSZ, bytebuf_len(&lk->dynbuf[DSEC_DYNSTR]));
+    dyn_emit(dyn, DT_SYMENT, sizeof(Elf64_Sym));
+    dyn_emit(dyn, DT_PLTGOT, lk->dyn_addr[DSEC_GOT_PLT]);
+    dyn_emit(dyn, DT_PLTRELSZ, bytebuf_len(&lk->dynbuf[DSEC_RELA_PLT]));
+    dyn_emit(dyn, DT_PLTREL, DT_RELA);
+    dyn_emit(dyn, DT_JMPREL, lk->dyn_addr[DSEC_RELA_PLT]);
+    dyn_emit(dyn, DT_RELA, lk->dyn_addr[DSEC_RELA_DYN]);
+    dyn_emit(dyn, DT_RELASZ, bytebuf_len(&lk->dynbuf[DSEC_RELA_DYN]));
+    dyn_emit(dyn, DT_RELAENT, sizeof(Elf64_Rela));
+    dyn_emit(dyn, DT_FLAGS, 0x8);
+    dyn_emit(dyn, DT_FLAGS_1, 0x1);
+    dyn_emit(dyn, DT_DEBUG, 0);
+    dyn_emit(dyn, DT_NULL, 0);
+}
+
+static void dyn_shdr(ByteBuf *out, u32 name, u32 type, u64 flags, u64 addr, u64 off, u64 size,
+                     u32 link, u32 info, u64 align, u64 entsize)
+{
+    bytebuf_append_u32(out, name);
+    bytebuf_append_u32(out, type);
+    bytebuf_append_u64(out, flags);
+    bytebuf_append_u64(out, addr);
+    bytebuf_append_u64(out, off);
+    bytebuf_append_u64(out, size);
+    bytebuf_append_u32(out, link);
+    bytebuf_append_u32(out, info);
+    bytebuf_append_u64(out, align);
+    bytebuf_append_u64(out, entsize);
+}
+
+static void append_at(ByteBuf *out, u64 off, ByteBuf *src)
+{
+    pad_to(out, off);
+    bytebuf_append_bytes(out, bytebuf_data(src), bytebuf_len(src));
+}
+
+static void dyn_ehdr(ByteBuf *out, u64 entry, u64 shoff)
+{
+    bytebuf_append(out, ELFMAG0);
+    bytebuf_append(out, ELFMAG1);
+    bytebuf_append(out, ELFMAG2);
+    bytebuf_append(out, ELFMAG3);
+    bytebuf_append(out, ELFCLASS64);
+    bytebuf_append(out, ELFDATA2LSB);
+    bytebuf_append(out, EV_CURRENT);
+    bytebuf_append(out, 0);
+    for (int i = 0; i < 8; i++)
+    {
+        bytebuf_append(out, 0);
+    }
+    bytebuf_append_u16(out, ET_EXEC);
+    bytebuf_append_u16(out, EM_X86_64);
+    bytebuf_append_u32(out, EV_CURRENT);
+    bytebuf_append_u64(out, entry);
+    bytebuf_append_u64(out, sizeof(Elf64_Ehdr));
+    bytebuf_append_u64(out, shoff);
+    bytebuf_append_u32(out, 0);
+    bytebuf_append_u16(out, sizeof(Elf64_Ehdr));
+    bytebuf_append_u16(out, sizeof(Elf64_Phdr));
+    bytebuf_append_u16(out, 8);
+    bytebuf_append_u16(out, sizeof(Elf64_Shdr));
+    bytebuf_append_u16(out, DX_NSEC);
+    bytebuf_append_u16(out, DX_SHSTRTAB);
+}
+
+static void dyn_phdrs(Linker *lk, ByteBuf *out)
+{
+    u64 phdr_off = sizeof(Elf64_Ehdr);
+    u64 phdr_size = 8 * sizeof(Elf64_Phdr);
+    phdr_emit(out, PT_PHDR, PF_R, phdr_off, LINK_BASE + phdr_off, phdr_size, phdr_size, 8);
+    phdr_emit(out, PT_INTERP, PF_R, lk->dyn_off[DSEC_INTERP], lk->dyn_addr[DSEC_INTERP],
+              bytebuf_len(&lk->dynbuf[DSEC_INTERP]), bytebuf_len(&lk->dynbuf[DSEC_INTERP]), 1);
+    phdr_emit(out, PT_LOAD, PF_R, lk->seg_off[0], lk->seg_addr[0], lk->seg_filesz[0],
+              lk->seg_memsz[0], LINK_PAGE);
+    phdr_emit(out, PT_LOAD, PF_R | PF_X, lk->seg_off[1], lk->seg_addr[1], lk->seg_filesz[1],
+              lk->seg_memsz[1], LINK_PAGE);
+    phdr_emit(out, PT_LOAD, PF_R, lk->seg_off[2], lk->seg_addr[2], lk->seg_filesz[2],
+              lk->seg_memsz[2], LINK_PAGE);
+    phdr_emit(out, PT_LOAD, PF_R | PF_W, lk->seg_off[3], lk->seg_addr[3], lk->seg_filesz[3],
+              lk->seg_memsz[3], LINK_PAGE);
+    phdr_emit(out, PT_DYNAMIC, PF_R | PF_W, lk->dyn_off[DSEC_DYNAMIC], lk->dyn_addr[DSEC_DYNAMIC],
+              bytebuf_len(&lk->dynbuf[DSEC_DYNAMIC]), bytebuf_len(&lk->dynbuf[DSEC_DYNAMIC]), 8);
+    phdr_emit(out, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0x10);
+}
+
+static void dyn_section_headers(Linker *lk, ByteBuf *out, u32 nm[DX_NSEC], u64 off_symtab,
+                                u64 size_symtab, u64 off_strtab, u64 size_strtab, u64 off_sh,
+                                u64 size_sh)
+{
+    dyn_shdr(out, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
+    dyn_shdr(out, nm[DX_INTERP], SHT_PROGBITS, SHF_ALLOC, lk->dyn_addr[DSEC_INTERP],
+             lk->dyn_off[DSEC_INTERP], bytebuf_len(&lk->dynbuf[DSEC_INTERP]), 0, 0, 1, 0);
+    dyn_shdr(out, nm[DX_HASH], SHT_GNU_HASH, SHF_ALLOC, lk->dyn_addr[DSEC_HASH],
+             lk->dyn_off[DSEC_HASH], bytebuf_len(&lk->dynbuf[DSEC_HASH]), 0, 0, 8, 0);
+    dyn_shdr(out, nm[DX_DYNSYM], SHT_DYNSYM, SHF_ALLOC, lk->dyn_addr[DSEC_DYNSYM],
+             lk->dyn_off[DSEC_DYNSYM], bytebuf_len(&lk->dynbuf[DSEC_DYNSYM]), DX_DYNSTR, 1, 8,
+             sizeof(Elf64_Sym));
+    dyn_shdr(out, nm[DX_DYNSTR], SHT_STRTAB, SHF_ALLOC, lk->dyn_addr[DSEC_DYNSTR],
+             lk->dyn_off[DSEC_DYNSTR], bytebuf_len(&lk->dynbuf[DSEC_DYNSTR]), 0, 0, 1, 0);
+    dyn_shdr(out, nm[DX_RELA_DYN], SHT_RELA, SHF_ALLOC, lk->dyn_addr[DSEC_RELA_DYN],
+             lk->dyn_off[DSEC_RELA_DYN], bytebuf_len(&lk->dynbuf[DSEC_RELA_DYN]), DX_DYNSYM, 0, 8,
+             sizeof(Elf64_Rela));
+    dyn_shdr(out, nm[DX_RELA_PLT], SHT_RELA, SHF_ALLOC, lk->dyn_addr[DSEC_RELA_PLT],
+             lk->dyn_off[DSEC_RELA_PLT], bytebuf_len(&lk->dynbuf[DSEC_RELA_PLT]), DX_DYNSYM, DX_PLT,
+             8, sizeof(Elf64_Rela));
+    dyn_shdr(out, nm[DX_PLT], SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, lk->dyn_addr[DSEC_PLT],
+             lk->dyn_off[DSEC_PLT], bytebuf_len(&lk->dynbuf[DSEC_PLT]), 0, 0, 16, 16);
+    dyn_shdr(out, nm[DX_TEXT], SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, lk->out[OUT_TEXT].addr,
+             lk->out[OUT_TEXT].offset, lk->out[OUT_TEXT].size, 0, 0, 16, 0);
+    dyn_shdr(out, nm[DX_RODATA], SHT_PROGBITS, SHF_ALLOC, lk->out[OUT_RODATA].addr,
+             lk->out[OUT_RODATA].offset, lk->out[OUT_RODATA].size, 0, 0, 8, 0);
+    dyn_shdr(out, nm[DX_EH], SHT_PROGBITS, SHF_ALLOC, lk->out[OUT_EH_FRAME].addr,
+             lk->out[OUT_EH_FRAME].offset, lk->out[OUT_EH_FRAME].size, 0, 0, 8, 0);
+    dyn_shdr(out, nm[DX_INIT], SHT_INIT_ARRAY, SHF_ALLOC | SHF_WRITE, lk->out[OUT_INIT_ARRAY].addr,
+             lk->out[OUT_INIT_ARRAY].offset, lk->out[OUT_INIT_ARRAY].size, 0, 0, 8, 8);
+    dyn_shdr(out, nm[DX_FINI], SHT_FINI_ARRAY, SHF_ALLOC | SHF_WRITE, lk->out[OUT_FINI_ARRAY].addr,
+             lk->out[OUT_FINI_ARRAY].offset, lk->out[OUT_FINI_ARRAY].size, 0, 0, 8, 8);
+    dyn_shdr(out, nm[DX_DYNAMIC], SHT_DYNAMIC, SHF_ALLOC | SHF_WRITE, lk->dyn_addr[DSEC_DYNAMIC],
+             lk->dyn_off[DSEC_DYNAMIC], bytebuf_len(&lk->dynbuf[DSEC_DYNAMIC]), DX_DYNSTR, 0, 8,
+             sizeof(Elf64_Dyn));
+    dyn_shdr(out, nm[DX_GOT], SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, lk->dyn_addr[DSEC_GOT],
+             lk->dyn_off[DSEC_GOT], bytebuf_len(&lk->dynbuf[DSEC_GOT]), 0, 0, 8, 8);
+    dyn_shdr(out, nm[DX_GOT_PLT], SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, lk->dyn_addr[DSEC_GOT_PLT],
+             lk->dyn_off[DSEC_GOT_PLT], bytebuf_len(&lk->dynbuf[DSEC_GOT_PLT]), 0, 0, 8, 8);
+    dyn_shdr(out, nm[DX_DATA], SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, lk->out[OUT_DATA].addr,
+             lk->out[OUT_DATA].offset, lk->out[OUT_DATA].size, 0, 0, 8, 0);
+    dyn_shdr(out, nm[DX_BSS], SHT_NOBITS, SHF_ALLOC | SHF_WRITE, lk->out[OUT_BSS].addr,
+             lk->out[OUT_BSS].offset, lk->out[OUT_BSS].size, 0, 0, 8, 0);
+    dyn_shdr(out, nm[DX_SYMTAB], SHT_SYMTAB, 0, 0, off_symtab, size_symtab, DX_STRTAB, 1, 8,
+             sizeof(Elf64_Sym));
+    dyn_shdr(out, nm[DX_STRTAB], SHT_STRTAB, 0, 0, off_strtab, size_strtab, 0, 0, 1, 0);
+    dyn_shdr(out, nm[DX_SHSTRTAB], SHT_STRTAB, 0, 0, off_sh, size_sh, 0, 0, 1, 0);
+}
+
+static bool write_dynamic(Linker *lk)
+{
+    Arena *arena = lk->arena;
+    ByteBuf sh;
+    strtab_init(&sh, arena);
+    u32 nm[DX_NSEC];
+    nm[DX_NULL] = 0;
+    nm[DX_INTERP] = strtab_add(&sh, ".interp");
+    nm[DX_HASH] = strtab_add(&sh, ".gnu.hash");
+    nm[DX_DYNSYM] = strtab_add(&sh, ".dynsym");
+    nm[DX_DYNSTR] = strtab_add(&sh, ".dynstr");
+    nm[DX_RELA_DYN] = strtab_add(&sh, ".rela.dyn");
+    nm[DX_RELA_PLT] = strtab_add(&sh, ".rela.plt");
+    nm[DX_PLT] = strtab_add(&sh, ".plt");
+    nm[DX_TEXT] = strtab_add(&sh, ".text");
+    nm[DX_RODATA] = strtab_add(&sh, ".rodata");
+    nm[DX_EH] = strtab_add(&sh, ".eh_frame");
+    nm[DX_INIT] = strtab_add(&sh, ".init_array");
+    nm[DX_FINI] = strtab_add(&sh, ".fini_array");
+    nm[DX_DYNAMIC] = strtab_add(&sh, ".dynamic");
+    nm[DX_GOT] = strtab_add(&sh, ".got");
+    nm[DX_GOT_PLT] = strtab_add(&sh, ".got.plt");
+    nm[DX_DATA] = strtab_add(&sh, ".data");
+    nm[DX_BSS] = strtab_add(&sh, ".bss");
+    nm[DX_SYMTAB] = strtab_add(&sh, ".symtab");
+    nm[DX_STRTAB] = strtab_add(&sh, ".strtab");
+    nm[DX_SHSTRTAB] = strtab_add(&sh, ".shstrtab");
+
+    ByteBuf strtab, symtab;
+    strtab_init(&strtab, arena);
+    bytebuf_init(&symtab, arena);
+    emit_symtab(lk, &symtab, &strtab);
+
+    u64 cursor = align_up(lk->seg_off[3] + lk->seg_filesz[3], 8);
+    u64 off_symtab = cursor;
+    cursor += bytebuf_len(&symtab);
+    u64 off_strtab = cursor;
+    cursor += bytebuf_len(&strtab);
+    u64 off_sh = cursor;
+    cursor += bytebuf_len(&sh);
+    u64 shoff = align_up(cursor, 8);
+
+    ByteBuf out;
+    bytebuf_init(&out, arena);
+    dyn_ehdr(&out, lk->entry, shoff);
+    dyn_phdrs(lk, &out);
+    append_at(&out, lk->dyn_off[DSEC_INTERP], &lk->dynbuf[DSEC_INTERP]);
+    append_at(&out, lk->dyn_off[DSEC_HASH], &lk->dynbuf[DSEC_HASH]);
+    append_at(&out, lk->dyn_off[DSEC_DYNSYM], &lk->dynbuf[DSEC_DYNSYM]);
+    append_at(&out, lk->dyn_off[DSEC_DYNSTR], &lk->dynbuf[DSEC_DYNSTR]);
+    append_at(&out, lk->dyn_off[DSEC_RELA_DYN], &lk->dynbuf[DSEC_RELA_DYN]);
+    append_at(&out, lk->dyn_off[DSEC_RELA_PLT], &lk->dynbuf[DSEC_RELA_PLT]);
+    append_at(&out, lk->dyn_off[DSEC_PLT], &lk->dynbuf[DSEC_PLT]);
+    append_at(&out, lk->out[OUT_TEXT].offset, &lk->out[OUT_TEXT].bytes);
+    append_at(&out, lk->out[OUT_RODATA].offset, &lk->out[OUT_RODATA].bytes);
+    append_at(&out, lk->out[OUT_EH_FRAME].offset, &lk->out[OUT_EH_FRAME].bytes);
+    append_at(&out, lk->out[OUT_GCC_EXCEPT].offset, &lk->out[OUT_GCC_EXCEPT].bytes);
+    append_at(&out, lk->out[OUT_INIT_ARRAY].offset, &lk->out[OUT_INIT_ARRAY].bytes);
+    append_at(&out, lk->out[OUT_FINI_ARRAY].offset, &lk->out[OUT_FINI_ARRAY].bytes);
+    append_at(&out, lk->dyn_off[DSEC_DYNAMIC], &lk->dynbuf[DSEC_DYNAMIC]);
+    append_at(&out, lk->dyn_off[DSEC_GOT], &lk->dynbuf[DSEC_GOT]);
+    append_at(&out, lk->dyn_off[DSEC_GOT_PLT], &lk->dynbuf[DSEC_GOT_PLT]);
+    append_at(&out, lk->out[OUT_DATA].offset, &lk->out[OUT_DATA].bytes);
+    append_at(&out, off_symtab, &symtab);
+    append_at(&out, off_strtab, &strtab);
+    append_at(&out, off_sh, &sh);
+    pad_to(&out, shoff);
+    dyn_section_headers(lk, &out, nm, off_symtab, bytebuf_len(&symtab), off_strtab,
+                        bytebuf_len(&strtab), off_sh, bytebuf_len(&sh));
+
+    const char *path = lk->cfg->output_path ? lk->cfg->output_path : "a.out";
+    FILE *f = fopen(path, "wb");
+    if (!f)
+    {
+        link_error("%s: cannot open output", path);
+        return false;
+    }
+    fwrite(bytebuf_data(&out), 1, bytebuf_len(&out), f);
+    fclose(f);
+    chmod(path, 0755);
+    return true;
+}
+
 int link_run(const LinkConfig *cfg, Vec *inputs, Arena *arena)
 {
     Linker lk;
@@ -1958,6 +3006,19 @@ int link_run(const LinkConfig *cfg, Vec *inputs, Arena *arena)
     for (const char *const *d = DEFAULT_LIB_DIRS; *d; d++)
     {
         vec_push(lk.search_dirs, (void *) *d);
+    }
+    if (!cfg->nostdlib)
+    {
+        const char *crt1 = find_in_dirs(&lk, "crt1.o");
+        if (!crt1)
+        {
+            link_error("cannot find crt1.o");
+            return 1;
+        }
+        if (!link_add_path(&lk, crt1))
+        {
+            return 1;
+        }
     }
     for (size_t i = 0; i < vec_size(inputs); i++)
     {
@@ -1983,6 +3044,14 @@ int link_run(const LinkConfig *cfg, Vec *inputs, Arena *arena)
             return 1;
         }
     }
+    if (!cfg->nostdlib)
+    {
+        const char *libc = resolve_library(&lk, "c");
+        if (!libc || !link_add_path(&lk, libc))
+        {
+            return 1;
+        }
+    }
     resolve_globals(&lk);
     if (lk.nerrors)
     {
@@ -1995,6 +3064,31 @@ int link_run(const LinkConfig *cfg, Vec *inputs, Arena *arena)
         {
             return 1;
         }
+    }
+    if (lk.dynamic)
+    {
+        dynamic_scan(&lk);
+        if (lk.nerrors)
+        {
+            return 1;
+        }
+        dynamic_build(&lk);
+        layout_dynamic(&lk);
+        finalize_globals(&lk);
+        finalize_dynamic(&lk);
+        if (!apply_relocs(&lk))
+        {
+            return 1;
+        }
+        if (!patch_entry(&lk))
+        {
+            return 1;
+        }
+        if (lk.nerrors)
+        {
+            return 1;
+        }
+        return write_dynamic(&lk) ? 0 : 1;
     }
     prepare_entry(&lk);
     if (lk.nerrors)

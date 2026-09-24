@@ -29,7 +29,7 @@ for src in "$ROOT"/test/golden/*.c; do
     fi
     exp=$((exp & 255))
     bin="$WORK/$(basename "$src" .c)"
-    if ! "$FICC_BIN" "$src" -o "$bin" >/dev/null 2>&1; then
+    if ! "$FICC_BIN" "$src" -nostdlib -o "$bin" >/dev/null 2>&1; then
         echo "selftest-filc-static: link failed for $(basename "$src")" >&2
         fail=$((fail + 1))
         continue
@@ -44,8 +44,8 @@ for src in "$ROOT"/test/golden/*.c; do
 done
 
 det="$ROOT/test/golden/smoke_return42.c"
-"$FICC_BIN" "$det" -o "$WORK/det1" >/dev/null 2>&1
-"$FICC_BIN" "$det" -o "$WORK/det2" >/dev/null 2>&1
+"$FICC_BIN" "$det" -nostdlib -o "$WORK/det1" >/dev/null 2>&1
+"$FICC_BIN" "$det" -nostdlib -o "$WORK/det2" >/dev/null 2>&1
 if ! cmp -s "$WORK/det1" "$WORK/det2"; then
     echo "selftest-filc-static: output is not deterministic" >&2
     exit 1

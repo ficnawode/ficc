@@ -79,3 +79,33 @@ TEST(link_driver, object_only_link)
     char *paths[] = {a, b, ao, bo, bin};
     ld_cleanup(paths, 5);
 }
+
+/* Hosted: the default link pulls crt1.o and -lc implicitly, producing a
+   dynamic executable that calls printf. */
+TEST(link_driver, hosted_printf)
+{
+    char src[128], bin[192], out[192];
+    ld_write(src, sizeof(src), "hosted",
+             "#include <stdio.h>\nint main(void) { printf(\"ok %d\\n\", 40 + 2); return 5; }\n");
+    ld_path(bin, sizeof(bin), "hosted", "bin");
+    ld_path(out, sizeof(out), "hosted", "out");
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "%s %s -o %s >/dev/null 2>&1 && %s > %s 2>&1", FICC_BIN, src, bin,
+             bin, out);
+    EXPECT_EQ(tc_run_shell(cmd), 5);
+
+    FILE *f = fopen(out, "rb");
+    EXPECT_NOTNULL(f);
+    if (f)
+    {
+        char line[64] = {0};
+        size_t n = fread(line, 1, sizeof(line) - 1, f);
+        fclose(f);
+        EXPECT_TRUE(n > 0);
+        EXPECT_STR_EQ(line, "ok 42\n");
+    }
+
+    char *paths[] = {src, bin, out};
+    ld_cleanup(paths, 3);
+}

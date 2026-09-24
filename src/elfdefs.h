@@ -126,6 +126,8 @@ typedef uint64_t Elf64_Off;
 #define DT_FINI_ARRAYSZ 28
 #define DT_RUNPATH 29
 #define DT_FLAGS 30
+#define DT_DEBUG 21
+#define DT_FLAGS_1 0x6ffffffb
 #define DT_GNU_HASH 0x6ffffef5
 #define DT_VERSYM 0x6ffffff0
 #define DT_RELACOUNT 0x6ffffff9
