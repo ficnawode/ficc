@@ -1248,6 +1248,12 @@ static const LowerFn lower_fns[OP_FCMP_GE + 1] = {
 
 static void lower_instr(IrInstr *in, X86LowerCtx *ctx)
 {
+    /* A rematerialized result (a static alloca or an address derived from one)
+       has no home; its uses recompute it, so the definition emits nothing. */
+    if (in->result != NO_VREG && ctx->alloc->remat[in->result])
+    {
+        return;
+    }
     LowerFn fn = lower_fns[in->opcode];
     if (!fn)
     {
@@ -1967,6 +1973,19 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
             if (in->opcode == OP_ALLOCA)
             {
                 alloc->remat_disp[in->result] = -(i32) in->frame_off;
+            }
+        }
+    }
+    for (size_t b = 0; b < vec_size(f->blocks); b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        for (size_t ii = 0; ii < vec_size(blk->instrs); ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode == OP_GEP && alloc->remat[in->result] && ir_operand_is_vreg(in->ops[0]))
+            {
+                i64 off = in->ops[1].u.imm * in->ops[2].u.imm;
+                alloc->remat_disp[in->result] = alloc->remat_disp[in->ops[0].u.vreg] + (i32) off;
             }
         }
     }

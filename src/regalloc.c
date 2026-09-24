@@ -638,6 +638,21 @@ RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const Ta
             alloc->remat[v] = 1;
         }
     }
+    /* An address formed by adding a constant to a static alloca is itself a
+       constant %rbp-relative address, so rematerialize it too. */
+    for (u32 v = 0; v < set->nvregs; v++)
+    {
+        IrInstr *d = defs[v];
+        if (!d || d->opcode != OP_GEP || !d->ops[1].is_imm || !ir_operand_is_vreg(d->ops[0]))
+        {
+            continue;
+        }
+        u32 bv = d->ops[0].u.vreg;
+        if (bv < set->nvregs && defs[bv] && defs[bv]->opcode == OP_ALLOCA)
+        {
+            alloc->remat[v] = 1;
+        }
+    }
     RegClass *vreg_cls = arena_alloc(arena, set->nvregs * sizeof(RegClass), _Alignof(RegClass));
     for (u32 v = 0; v < set->nvregs; v++)
     {

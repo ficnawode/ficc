@@ -454,6 +454,27 @@ TEST(regalloc, alloca_results_are_rematerialized)
     arena_free(a);
 }
 
+TEST(regalloc, constant_index_gep_over_alloca_is_rematerialized)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 p = ir_alloc_vreg(m, 8, true, false);
+    u32 q = ir_alloc_vreg(m, 8, true, false);
+    u32 x = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_alloca(entry, p, 32);
+    ir_emit_gep(entry, q, ir_operand_vreg(p), ir_operand_imm(2), 4);
+    ir_emit_load(entry, x, ir_operand_vreg(q), false);
+    ir_emit_ret(entry, ir_operand_vreg(x));
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    EXPECT_EQ(alloc->remat[q], 1);
+    EXPECT_EQ(alloc->phys_map[q], -1);
+    EXPECT_EQ(loc_of(alloc, ir_operand_vreg(q)).kind, LOC_REMAT);
+    arena_free(a);
+}
+
 TEST(regalloc, allocation_is_deterministic)
 {
     Arena *a1 = arena_new();
