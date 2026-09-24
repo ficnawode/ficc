@@ -100,9 +100,11 @@ enum
     ELF_EV_CURRENT = 1,
     ELF_MAGIC_LEN = 4,
     EHDR_SZ = 64,
+    EHDR_ETYPE = 16,
     EHDR_SHOFF = 40,
     EHDR_SHNUM = 60,
     EHDR_SHSTRNDX = 62,
+    ELF_ET_EXEC = 2,
     SHDR_SZ = 64,
     SHDR_NAME = 0,
     SHDR_OFFSET = 24,
@@ -384,6 +386,7 @@ void dwarf_check_load(const char *path, DwarfCheck *out, Arena *arena)
     u64 shoff = rd64(img + EHDR_SHOFF);
     u16 shnum = rd16(img + EHDR_SHNUM);
     u16 shstrndx = rd16(img + EHDR_SHSTRNDX);
+    out->linked = rd16(img + EHDR_ETYPE) == ELF_ET_EXEC;
     if (shnum == 0 || shstrndx >= shnum || shoff + (u64) shnum * SHDR_SZ > len)
     {
         dc_err(out, "bad section table");
@@ -574,22 +577,40 @@ static size_t line_extended(LineCtx *c, size_t pos)
     }
     else if (ext == LNE_set_address)
     {
-        /* The slot bytes are zero; the relocation addend carries the address. */
         size_t slot = pos + 1;
-        if (elen != 1 + ADDR_BYTES || rd64(c->p + slot) != 0)
+        if (elen != 1 + ADDR_BYTES)
         {
             return fail_pos(c->out, ".debug_line set_address slot bad");
         }
-        i64 resolved;
-        if (!reloc_at(c->out->rela_line, slot, &resolved))
+        u64 value;
+        if (c->out->linked)
         {
-            return fail_pos(c->out, ".debug_line set_address has no covering relocation");
+            /* ET_EXEC: the linker has patched the absolute address in place. */
+            value = rd64(c->p + slot);
+            if (value == 0)
+            {
+                return fail_pos(c->out, ".debug_line set_address is zero");
+            }
+        }
+        else
+        {
+            /* The slot bytes are zero; the relocation addend carries the address. */
+            if (rd64(c->p + slot) != 0)
+            {
+                return fail_pos(c->out, ".debug_line set_address slot bad");
+            }
+            i64 resolved;
+            if (!reloc_at(c->out->rela_line, slot, &resolved))
+            {
+                return fail_pos(c->out, ".debug_line set_address has no covering relocation");
+            }
+            value = (u64) resolved;
         }
         DwarfCheckSetAddr *sa = arena_alloc(c->arena, sizeof(DwarfCheckSetAddr), sizeof(void *));
         sa->slot = (u32) slot;
-        sa->value = (u64) resolved;
+        sa->value = value;
         vec_push(c->l->set_addresses, sa);
-        c->regs.addr = (u64) resolved;
+        c->regs.addr = value;
     }
     return end;
 }
@@ -1396,17 +1417,25 @@ static size_t fde_fields(DwarfCheck *out, const u8 *p, size_t content, size_t en
 {
     size_t slot = content + sizeof(u32);
     e->initial_slot = (u32) slot;
-    /* initial_location is a zero + RELA addend, like the other slots. */
-    if (rd64(p + slot) != 0)
+    if (out->linked)
     {
-        return fail_pos(out, "FDE initial_location slot is not zero");
+        /* ET_EXEC: initial_location holds the linked function address directly. */
+        e->fde_begin = rd64(p + slot);
     }
-    i64 begin;
-    if (!reloc_at(out->rela_eh, slot, &begin))
+    else
     {
-        return fail_pos(out, "FDE initial_location has no covering relocation");
+        /* initial_location is a zero + RELA addend, like the other slots. */
+        if (rd64(p + slot) != 0)
+        {
+            return fail_pos(out, "FDE initial_location slot is not zero");
+        }
+        i64 begin;
+        if (!reloc_at(out->rela_eh, slot, &begin))
+        {
+            return fail_pos(out, "FDE initial_location has no covering relocation");
+        }
+        e->fde_begin = (u64) begin;
     }
-    e->fde_begin = (u64) begin;
     e->fde_range = rd64(p + content + sizeof(u32) + sizeof(u64));
     size_t q = content + sizeof(u32) + 2 * sizeof(u64);
     if (has_z && !skip_aug_data(out, p, end, &q))

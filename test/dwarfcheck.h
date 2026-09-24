@@ -61,6 +61,7 @@ typedef struct
 {
     Arena *arena;
     const char *err; /* set on parse failure; NULL while clean */
+    bool linked;     /* ET_EXEC: address slots hold linked values, not reloc addends */
 
     /* section contents; NULL/0 when the section is absent */
     const u8 *debug_info;

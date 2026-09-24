@@ -15,7 +15,7 @@ if [ -z "$FICC_BIN" ] || [ ! -x "$FICC_BIN" ]; then
     exit 2
 fi
 
-for tool in gdb readelf gcc; do
+for tool in gdb readelf; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "test-gdb: SKIP — '$tool' not installed; the real-debugger certificate is optional" >&2
         exit 0
@@ -104,7 +104,10 @@ if [ "$LINES" != "30 36 37 38 39 40 41 46 47 48 50 51 " ]; then
     exit 1
 fi
 
-gcc -no-pie -g "$OBJ" -o "$BIN" || fail "link with gcc"
+# Link with ficc's own linker (phase 24): the -g pass-through must survive the
+# link so gdb sees relocated addresses, not object offsets. The fixture uses no
+# libc, so the freestanding -nostdlib path is the certificate's link.
+"$FICC_BIN" -nostdlib "$OBJ" -o "$BIN" || fail "filc link"
 
 # The full rich-type value surface, as gdb resolves it after stepping three
 # statements into drawn (fl->a and fl->b executed, u->i not yet).
