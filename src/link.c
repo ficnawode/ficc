@@ -532,7 +532,8 @@ typedef struct
     StrMap *loaded_paths; /* file inputs already added, by path */
     size_t nresolved;     /* objects below this index are already in the global table */
     u64 seg_off[4], seg_addr[4], seg_filesz[4], seg_memsz[4];
-    u64 file_end; /* end of the last file-backed section (non-alloc included) */
+    u64 file_end;   /* end of the last file-backed section (non-alloc included) */
+    u64 dso_handle; /* .bss offset of the synthesized __dso_handle slot */
     u64 entry;
     bool has_start_stub;
     u64 start_off;
@@ -574,6 +575,7 @@ static void linker_init(Linker *lk, const LinkConfig *cfg, Arena *arena)
     lk->dynamic = false;
     lk->entry = 0;
     lk->file_end = 0;
+    lk->dso_handle = 0;
     lk->has_start_stub = false;
     lk->start_off = 0;
     lk->start_rel_off = 0;
@@ -865,6 +867,19 @@ static void allocate_commons(Linker *lk)
     }
 }
 
+/* crtbegin normally defines __dso_handle; without it, reserve a zeroed slot
+   (glibc reads its value, so it must be a real object, not an absolute). */
+static void allocate_synth(Linker *lk)
+{
+    OutSec *bss = &lk->out[OUT_BSS];
+    lk->dso_handle = align_up(bss->size, 8);
+    bss->size = lk->dso_handle + 8;
+    if (bss->align < 8)
+    {
+        bss->align = 8;
+    }
+}
+
 static void resolve_globals(Linker *lk)
 {
     for (size_t oi = lk->nresolved; oi < vec_size(lk->objects); oi++)
@@ -1066,6 +1081,13 @@ static bool synth_value(Linker *lk, const char *name, u64 *out)
     if (name_is(name, "__executable_start") || name_is(name, "__ehdr_start"))
     {
         *out = LINK_BASE;
+        return true;
+    }
+    if (name_is(name, "__dso_handle"))
+    {
+        /* crtbegin normally defines this; without it, a zeroed slot whose
+           value NULL means "main program" to glibc's __cxa_atexit. */
+        *out = lk->out[OUT_BSS].addr + lk->dso_handle;
         return true;
     }
     return false;
@@ -2496,8 +2518,9 @@ static bool pull_from_archives(Linker *lk)
                 continue;
             }
             m->loaded = true;
-            char label[512];
-            snprintf(label, sizeof(label), "%s(%s)", ar->path, m->name);
+            size_t lab_len = strlen(ar->path) + strlen(m->name) + 4;
+            char *label = arena_alloc(lk->arena, lab_len, 1);
+            snprintf(label, lab_len, "%s(%s)", ar->path, m->name);
             LinkObject *obj =
                 link_read_memory(ar->data + m->offset + 60, m->size, label, lk->arena);
             if (!obj || !merge_object(lk, obj))
@@ -2609,9 +2632,9 @@ static void dynamic_scan(Linker *lk)
                     }
                     else
                     {
-                        link_error("%s: cannot reference dynamic function '%s' by address",
-                                   io->obj->name, sym->name);
-                        lk->nerrors++;
+                        /* A shared function taken by address resolves to its
+                           (fixed, non-PIE) PLT entry. */
+                        plt_slot(lk, sym->name);
                     }
                 }
             }
@@ -3228,6 +3251,7 @@ int link_run(const LinkConfig *cfg, Vec *inputs, Arena *arena)
         link_warn("multiple objects carry debug info; only the first compile unit's "
                   "line and location tables are linked");
     }
+    allocate_synth(&lk);
     if (lk.dynamic)
     {
         dynamic_scan(&lk);
