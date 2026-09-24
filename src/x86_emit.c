@@ -7,6 +7,11 @@ static bool fits_i8(i32 v)
     return v >= -128 && v <= 127;
 }
 
+static bool fits_i32(i64 v)
+{
+    return v >= (i64) INT32_MIN && v <= (i64) INT32_MAX;
+}
+
 static u8 encode_sib_scale(u8 scale)
 {
     switch (scale)
@@ -43,6 +48,8 @@ static void emit_rex_if(ByteBuf *buf, bool w, bool r, bool x, bool b)
         bytebuf_append(buf, rex(w, r, x, b));
     }
 }
+
+static void emit_addr_mov_imm32(ByteBuf *buf, u8 reg);
 
 /* X86Reg order is rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8-15; DWARF numbers
    are rax, rdx, rcx, rbx, rsi, rdi, rbp, rsp, r8-15 (SysV psABI §3.6.2). */
@@ -161,6 +168,13 @@ void emit_mov_scalar(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
 
     if (src.kind == XOP_IMM)
     {
+        if (width == 8 && fits_i32(src.u.imm))
+        {
+            /* C7 /0 id: sign-extending imm32, three bytes shorter than movabs. */
+            emit_addr_mov_imm32(buf, dst.u.reg);
+            bytebuf_append_u32(buf, (u32) (i32) src.u.imm);
+            return;
+        }
         emit_rex_if(buf, width == 8, false, false, dst.u.reg >= 8);
         bytebuf_append(buf, (u8) (X86_MOV_REG_IMM_BASE + (dst.u.reg & 7)));
         if (width == 2)
@@ -417,6 +431,16 @@ void emit_xor_eax_eax(ByteBuf *buf)
 {
     bytebuf_append(buf, X86_XOR_REG_RM);
     bytebuf_append(buf, modrm(3, 0, 0));
+}
+
+/* xor r32,r32 zeroes the full 64-bit register without a false dependency; it
+   clobbers EFLAGS, so callers must be past their last flag read. */
+void emit_xor_zero(ByteBuf *buf, u8 width, u8 reg)
+{
+    ASSERT(width == 4 || width == 8);
+    emit_rex_if(buf, false, reg >= 8, false, reg >= 8);
+    bytebuf_append(buf, X86_XOR_REG_RM);
+    bytebuf_append(buf, modrm(3, reg, reg));
 }
 
 /* setcc r8; only the low 3 bits of `reg` are used. */

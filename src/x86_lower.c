@@ -779,7 +779,7 @@ static void lower_ret(IrInstr *in, X86LowerCtx *ctx)
     }
     else
     {
-        emit_mov(ctx->buf, W_DWORD, xop_reg(R_EAX), xop_imm(0));
+        emit_xor_zero(ctx->buf, W_DWORD, R_EAX);
     }
     x86_frame_restore_callee(ctx->buf, ctx->frame);
     bytebuf_append(ctx->buf, X86_LEAVE);

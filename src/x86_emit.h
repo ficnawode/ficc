@@ -322,6 +322,7 @@ void emit_imul_imm(ByteBuf *buf, u8 width, u8 reg, i64 imm);
 
 void emit_test_reg(ByteBuf *buf, u8 width, u8 reg);
 void emit_xor_eax_eax(ByteBuf *buf);
+void emit_xor_zero(ByteBuf *buf, u8 width, u8 reg);
 void emit_setcc_reg(ByteBuf *buf, u8 cc, u8 reg);
 void emit_setcc(ByteBuf *buf, u8 cc);
 void emit_movzbl_al_eax(ByteBuf *buf);
