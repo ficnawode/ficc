@@ -284,6 +284,27 @@ static AttrKind attribute_kind(const char *name, u64 *align, bool *has_align)
     return ATTR_UNKNOWN;
 }
 
+/* An attribute name is an identifier; GNU spelling aliases such as `__const__`
+   and `__noreturn__` lex as keywords but still carry their spelling. */
+static bool attribute_name_token(Token *t)
+{
+    switch (t->kind)
+    {
+        case TOK_IDENT:
+        case TOK_KW_CONST:
+        case TOK_KW_VOLATILE:
+        case TOK_KW_RESTRICT:
+        case TOK_KW_INLINE:
+        case TOK_KW_NORETURN:
+        case TOK_KW_SIGNED:
+        case TOK_KW_REGISTER:
+        case TOK_KW_AUTO:
+            return true;
+        default:
+            return false;
+    }
+}
+
 /* Consumes one `__attribute__ (( name[(args)] , ... ))` group, appending an
    `Attr` per name to `out`. Arguments other than `aligned(n)` are parsed and
    discarded. */
@@ -306,7 +327,7 @@ static bool parse_attribute_list(Parser *p, Vec *out)
     while (peek_token(p)->kind != TOK_RPAREN && peek_token(p)->kind != TOK_EOF)
     {
         Token *name = peek_token(p);
-        if (name->kind != TOK_IDENT)
+        if (!attribute_name_token(name))
         {
             parse_error(p, "expected attribute name");
             return false;
@@ -677,7 +698,11 @@ static bool parse_enumerator_body(Parser *p, Vec *constants, i64 *next_value)
             }
         }
 
-        if (value < INT32_MIN || value > INT32_MAX)
+        /* C11 requires an enumerator to fit in `int`, but GCC (and C23) accept
+           values up to `unsigned int`; the enum then takes an unsigned
+           underlying type. Match that so hosted headers (e.g. DWARF/ELF
+           constants such as 0xffffffffu) compile. */
+        if (value < INT32_MIN || value > 0xffffffffLL)
         {
             parse_error(p, "enumerator value out of range (must fit in int)");
             return false;

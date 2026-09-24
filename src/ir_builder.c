@@ -1,4 +1,5 @@
 #include "ir_builder.h"
+#include "abi.h"
 #include "util/assert.h"
 #include "util/hashmap.h"
 #include <stdarg.h>
@@ -1455,12 +1456,35 @@ static void va_layout(IrFunction *f, i64 *gp, i64 *fp, i64 *skip)
     for (size_t i = 0; i < n; i++)
     {
         IrParam *p = (IrParam *) vec_get(f->params, i);
-        if (p->type->kind == TYPE_LONG_DOUBLE)
+        /* A record parameter's IR type is a pointer to the caller's copy; the
+           aggregate itself is `agg_type`. */
+        Type *t = p->agg_type ? p->agg_type : p->type;
+        if (t->kind == TYPE_LONG_DOUBLE)
         {
             overflow_bytes = (overflow_bytes + VA_LD_ALIGN - 1) & ~(VA_LD_ALIGN - 1);
             overflow_bytes += VA_LD_SLOT;
         }
-        else if (type_is_fp(p->type))
+        else if (type_is_record(t))
+        {
+            /* An aggregate consumes one register per eightbyte (up to two);
+               a MEMORY-classed aggregate consumes none. This is what a
+               multi-register struct parameter (e.g. `Loc`) needs: counting it
+               as a single GP register misplaces every later vararg. */
+            SysVEightByte e = sysv_eightbyte_split(t);
+            u8 g = sysv_eightbyte_register_passed(&e) ? sysv_eightbyte_gp_count(&e) : 0;
+            u8 x = sysv_eightbyte_register_passed(&e) ? sysv_eightbyte_xmm_count(&e) : 0;
+            if (gp_used + g <= VA_NGP && fp_used + x <= VA_NXMM)
+            {
+                gp_used += g;
+                fp_used += x;
+            }
+            else
+            {
+                overflow_bytes = (overflow_bytes + VA_SCALAR_SLOT - 1) & ~(VA_SCALAR_SLOT - 1);
+                overflow_bytes += (i64) ((t->size + VA_SCALAR_SLOT - 1) & ~(VA_SCALAR_SLOT - 1));
+            }
+        }
+        else if (type_is_fp(t))
         {
             if (fp_used < VA_NXMM)
             {

@@ -35,11 +35,17 @@ TEST_BIN := $(BIN_DIR)/test_runner
 # test/compile/test_driver.c runs the real ficc binary through tc_run_shell.
 TEST_CFLAGS := $(CFLAGS) -DFICC_BIN=\"$(abspath $(FICC_BIN))\"
 
-DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_BIN) $(TEST_BIN)))
+FICC_TEST_OBJ_DIR := $(BUILD_DIR)/obj-test-ficc
+FICC_TEST_SRC_OBJS := $(patsubst src/%.c,$(FICC_TEST_OBJ_DIR)/src/%.o,$(filter-out src/driver.c,$(SRC_ALL)))
+FICC_TEST_TEST_OBJS := $(patsubst test/%.c,$(FICC_TEST_OBJ_DIR)/test/%.o,$(SRC_TEST))
+FICC_TEST_BIN := $(BIN_DIR)/test_runner_ficc
+
+DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_TEST_SRC_OBJS) \
+                $(FICC_TEST_TEST_OBJS) $(FICC_BIN) $(TEST_BIN)))
 
 FORMAT_FILES := $(shell find src include test \( -name '*.c' -o -name '*.h' \))
 
-.PHONY: all clean test test-gdb selftest dirs compile-commands format format-check git-sweep git-smoke
+.PHONY: all clean test test-ficc test-gdb selftest dirs compile-commands format format-check git-sweep git-smoke
 
 GIT ?= ../git
 
@@ -53,6 +59,25 @@ format-check:
 
 test: $(TEST_BIN) $(FICC_BIN)
 	$(TEST_BIN)
+
+# Phase 23 E: compile the test suite with ficc itself (the harness uses
+# __attribute__((constructor))) and link the objects with the host gcc.
+FICC_TEST_FLAGS := -O0 -nostdinc -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu \
+                   -isystem $(abspath include) -I src -I test \
+                   -DFICC_BUILTIN_INCLUDE=\"$(abspath include)\" \
+                   -DFICC_BIN=\"$(abspath $(FICC_BIN))\"
+
+$(FICC_TEST_OBJ_DIR)/src/%.o: src/%.c | dirs
+	$(FICC_BIN) $(FICC_TEST_FLAGS) -c $< -o $@
+
+$(FICC_TEST_OBJ_DIR)/test/%.o: test/%.c | dirs
+	$(FICC_BIN) $(FICC_TEST_FLAGS) -c $< -o $@
+
+$(FICC_TEST_BIN): $(FICC_TEST_SRC_OBJS) $(FICC_TEST_TEST_OBJS) | dirs
+	$(CC) -no-pie $(LDFLAGS) $^ -o $@
+
+test-ficc: $(FICC_BIN) $(FICC_TEST_BIN)
+	$(FICC_TEST_BIN)
 
 # Real-debugger certificate (opt-in; skips with a warning when gdb is absent).
 test-gdb: $(FICC_BIN)

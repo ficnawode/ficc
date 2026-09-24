@@ -791,7 +791,13 @@ TEST(records, negative_enum_duplicate_const)
 
 TEST(records, negative_enum_value_range)
 {
-    EXPECT_BUILD_FAIL("enum { A = 2147483648 };\n"
+    /* GCC (and C23) allow enumerators up to `unsigned int`; beyond that is
+       still an error. */
+    EXPECT_BUILD_SUCCEED("enum { A = 4294967295u };\n"
+                         "int main(void) {\n"
+                         "    return 0;\n"
+                         "}\n");
+    EXPECT_BUILD_FAIL("enum { A = 4294967296 };\n"
                       "int main(void) {\n"
                       "    return 0;\n"
                       "}\n");
