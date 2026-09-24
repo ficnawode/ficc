@@ -1327,7 +1327,10 @@ static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
         {
             if (sl.kind == LOC_REG)
             {
-                emit_sse_op_reg(ctx->buf, mf, X86_SSE_MOV, dl.reg, sl.reg);
+                if (sl.reg != dl.reg)
+                {
+                    emit_sse_op_reg(ctx->buf, mf, X86_SSE_MOV, dl.reg, sl.reg);
+                }
             }
             else
             {
@@ -1362,7 +1365,10 @@ static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
     {
         if (sl.kind == LOC_REG)
         {
-            emit_mov(ctx->buf, dw, xop_reg(dl.reg), xop_reg(sl.reg));
+            if (sl.reg != dl.reg)
+            {
+                emit_mov(ctx->buf, dw, xop_reg(dl.reg), xop_reg(sl.reg));
+            }
         }
         else
         {

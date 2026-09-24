@@ -95,6 +95,27 @@ static IrModule *build_pressure(Arena *a)
     return m;
 }
 
+/* body defines v and hands it to a merge-block phi; v dies at the copy. */
+static IrModule *build_phi_chain(Arena *a, u32 *v, u32 *p)
+{
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    IrBlock *body = ir_func_add_block(f, "body");
+    IrBlock *merge = ir_func_add_block(f, "merge");
+    *v = ir_alloc_vreg(m, 8, true, false);
+    *p = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_br(entry, body->label);
+    vec_push(body->preds, entry);
+    ir_emit_binop(body, OP_ADD, *v, ir_operand_imm(1), ir_operand_imm(2));
+    ir_emit_br(body, merge->label);
+    vec_push(merge->preds, body);
+    IrInstr *phi = ir_emit_phi_at_start(merge, *p, 1);
+    ir_phi_add_entry(phi, ir_operand_vreg(*v), body);
+    ir_emit_ret(merge, ir_operand_vreg(*p));
+    return m;
+}
+
 static u32 count_spilled(const RegAllocation *alloc, const LiveIntervals *set)
 {
     u32 spilled = 0;
@@ -368,6 +389,20 @@ TEST(regalloc, parameters_avoid_argument_lanes)
     LiveIntervals set = liveinterval_compute(f, m, a);
     RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
     EXPECT_FALSE(is_arg_lane((u8) alloc->phys_map[p]));
+    arena_free(a);
+}
+
+TEST(regalloc, phi_result_coalesces_with_a_dying_predecessor_operand)
+{
+    Arena *a = arena_new();
+    u32 v, p;
+    IrModule *m = build_phi_chain(a, &v, &p);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    /* v dies at the edge copy, so the phi copy is a self-move: p reuses v. */
+    EXPECT_TRUE(alloc->phys_map[v] >= 0);
+    EXPECT_EQ(alloc->phys_map[p], alloc->phys_map[v]);
     arena_free(a);
 }
 

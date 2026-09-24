@@ -223,9 +223,34 @@ static bool bank_allows(const RegBank *bank, u8 reg)
     return true;
 }
 
+/* The register of a predecessor operand that a PHI copy can share with its
+   result. The first already-allocated operand of the same class wins; the
+   active-set check in pick_register rejects a hint whose source is still live
+   past the result's start, so only a source that dies at the copy is reused. */
+static int phi_coalesce_hint(const IrInstr *phi, RegClass cls, const RegClass *vreg_cls,
+                             const int *phys_map)
+{
+    for (u32 e = 0; e < phi->extra.phi.nentries; e++)
+    {
+        IrOperand v = phi->extra.phi.entries[e].val;
+        if (!ir_operand_is_vreg(v))
+        {
+            continue;
+        }
+        u32 s = v.u.vreg;
+        if (vreg_cls[s] == cls && phys_map[s] >= 0)
+        {
+            return phys_map[s];
+        }
+    }
+    return -1;
+}
+
 /* The two-address form of these ops writes its result over `ops[0]`; the result
-   can share that operand's register when the operand dies at the instruction. */
-static int coalesce_hint(const IrInstr *def, const int *phys_map)
+   can share that operand's register when the operand dies at the instruction.
+   A PHI result likewise shares a predecessor operand's register. */
+static int coalesce_hint(const IrInstr *def, const int *phys_map, RegClass cls,
+                         const RegClass *vreg_cls)
 {
     if (!def)
     {
@@ -256,6 +281,8 @@ static int coalesce_hint(const IrInstr *def, const int *phys_map)
                 return phys_map[def->ops[0].u.vreg];
             }
             return -1;
+        case OP_PHI:
+            return phi_coalesce_hint(def, cls, vreg_cls, phys_map);
         default:
             return -1;
     }
@@ -454,7 +481,7 @@ static int pick_eviction(const RegBank *bank, const ActiveInterval *active, u32 
 static void linear_scan_class(RegAllocation *alloc, const LiveInterval **order, u32 nintervals,
                               const RegBank *bank, const u32 *calls, u32 ncall, const bool *call_op,
                               u16 arg_avoid, const ClobberPos *clob, u32 nclob, IrInstr **defs,
-                              Arena *arena)
+                              const RegClass *vreg_cls, Arena *arena)
 {
     ActiveInterval *active = arena_alloc(
         arena, (nintervals ? nintervals : 1) * sizeof(ActiveInterval), _Alignof(ActiveInterval));
@@ -483,7 +510,7 @@ static void linear_scan_class(RegAllocation *alloc, const LiveInterval **order, 
         {
             avoid |= clobber_avoid(clob, nclob, iv->start, iv->end);
         }
-        int hint = coalesce_hint(defs[iv->vreg], alloc->phys_map);
+        int hint = coalesce_hint(defs[iv->vreg], alloc->phys_map, iv->cls, vreg_cls);
         int reg = pick_register(bank, active, nactive, crossing, avoid, hint, iv->start);
         if (reg < 0)
         {
@@ -520,14 +547,23 @@ RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const Ta
     const LiveInterval **order = sorted_intervals(set, arena);
     bool *call_op = mark_arg_reg_vregs(f, set->nvregs, arena);
     IrInstr **defs = collect_defs(f, set->nvregs, arena);
+    RegClass *vreg_cls = arena_alloc(arena, set->nvregs * sizeof(RegClass), _Alignof(RegClass));
+    for (u32 v = 0; v < set->nvregs; v++)
+    {
+        vreg_cls[v] = RC_NONE;
+    }
+    for (u32 i = 0; i < set->n; i++)
+    {
+        vreg_cls[set->ivs[i].vreg] = set->ivs[i].cls;
+    }
     u32 nclob = 0;
     ClobberPos *clob = collect_clobbers(f, &set->pos, target, &nclob, arena);
     u16 gpr_avoid = call_arg_avoid_mask(&target->gpr, target->gp_args, target->ngp);
     u16 xmm_avoid = call_arg_avoid_mask(&target->xmm, target->fp_args, target->nfp);
     linear_scan_class(alloc, order, set->n, &target->gpr, calls, ncall, call_op, gpr_avoid, clob,
-                      nclob, defs, arena);
+                      nclob, defs, vreg_cls, arena);
     linear_scan_class(alloc, order, set->n, &target->xmm, calls, ncall, call_op, xmm_avoid, clob,
-                      nclob, defs, arena);
+                      nclob, defs, vreg_cls, arena);
     u8 saved_mask = 0;
     for (u32 v = 0; v < set->nvregs; v++)
     {
