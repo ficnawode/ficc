@@ -406,6 +406,33 @@ TEST(regalloc, phi_result_coalesces_with_a_dying_predecessor_operand)
     arena_free(a);
 }
 
+TEST(regalloc, scalar_gp_arguments_ride_their_lanes)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 x = ir_alloc_vreg(m, 8, true, false);
+    u32 y = ir_alloc_vreg(m, 8, true, false);
+    u32 res = ir_alloc_vreg(m, 8, true, false);
+    u32 sum = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ADD, x, ir_operand_imm(1), ir_operand_imm(2));
+    ir_emit_binop(entry, OP_ADD, y, ir_operand_imm(3), ir_operand_imm(4));
+    IrOperand args[2] = {ir_operand_vreg(x), ir_operand_vreg(y)};
+    IrInstr *call = ir_emit_call(entry, res, "foo", 2, args);
+    Type *types[2] = {type_int(), type_int()};
+    ir_call_set_types(call, types, type_int());
+    ir_emit_binop(entry, OP_ADD, sum, ir_operand_vreg(res), ir_operand_imm(0));
+    ir_emit_ret(entry, ir_operand_vreg(sum));
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    /* A record-free call's scalar GP arguments are born in the lane they pass
+       in, so lowering emits no argument moves. */
+    EXPECT_EQ(alloc->phys_map[x], R_EDI);
+    EXPECT_EQ(alloc->phys_map[y], R_ESI);
+    arena_free(a);
+}
+
 TEST(regalloc, allocation_is_deterministic)
 {
     Arena *a1 = arena_new();

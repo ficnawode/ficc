@@ -227,6 +227,136 @@ static void emit_reg_arg(X86LowerCtx *ctx, IrOperand op, const SysvArgPlan *p)
     x86_lower_force_to_reg(ctx, op, ctx->target->gp_args[p->chunks[0].reg]);
 }
 
+typedef enum
+{
+    GP_ARG_REG,  /* source is a vreg already in a register */
+    GP_ARG_MEM,  /* source is a spilled vreg */
+    GP_ARG_PURE, /* immediate, global, or function address */
+} GpArgKind;
+
+typedef struct
+{
+    IrOperand op;
+    u8 dst;
+    u8 width;
+    GpArgKind kind;
+    u8 src_reg;
+    i32 disp;
+    bool done;
+} GpArgMove;
+
+static GpArgMove resolve_gp_arg(X86LowerCtx *ctx, IrOperand op, u8 dst, u8 width)
+{
+    GpArgMove m = {.op = op, .dst = dst, .width = width, .done = false};
+    if (op.is_imm || op.is_global || op.is_func)
+    {
+        m.kind = GP_ARG_PURE;
+        return m;
+    }
+    RegLoc l = loc_of(ctx->alloc, op);
+    if (l.kind == LOC_REG)
+    {
+        m.kind = GP_ARG_REG;
+        m.src_reg = l.reg;
+    }
+    else
+    {
+        m.kind = GP_ARG_MEM;
+        m.disp = l.disp;
+    }
+    return m;
+}
+
+static void emit_gp_arg_move(X86LowerCtx *ctx, const GpArgMove *m)
+{
+    if (m->kind == GP_ARG_PURE)
+    {
+        x86_lower_force_to_reg(ctx, m->op, m->dst);
+    }
+    else if (m->kind == GP_ARG_MEM)
+    {
+        emit_mov(ctx->buf, m->width, xop_reg(m->dst), xop_mem(x86_lower_rbp_mem(m->disp)));
+    }
+    else if (m->src_reg != m->dst)
+    {
+        emit_mov(ctx->buf, m->width, xop_reg(m->dst), xop_reg(m->src_reg));
+    }
+}
+
+/* A destination read by another pending move must wait; when every remaining
+   move is blocked the cycle is broken through %rax (reserved, never a lane). */
+static bool gp_arg_move_ready(const GpArgMove *moves, u32 n, u32 i)
+{
+    for (u32 j = 0; j < n; j++)
+    {
+        if (j != i && !moves[j].done && moves[j].kind == GP_ARG_REG &&
+            moves[j].src_reg == moves[i].dst)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void break_gp_arg_cycle(X86LowerCtx *ctx, GpArgMove *moves, u32 n)
+{
+    u32 c = 0;
+    while (moves[c].done || moves[c].kind != GP_ARG_REG)
+    {
+        c++;
+    }
+    emit_mov(ctx->buf, moves[c].width, xop_reg(R_EAX), xop_reg(moves[c].src_reg));
+    u8 saved = moves[c].src_reg;
+    for (u32 i = 0; i < n; i++)
+    {
+        if (!moves[i].done && moves[i].kind == GP_ARG_REG && moves[i].src_reg == saved)
+        {
+            moves[i].src_reg = R_EAX;
+        }
+    }
+}
+
+/* Place scalar GP arguments as a parallel copy: an argument may already ride
+   its own lane (collect_arg_prefs), and the ones that do not must be moved
+   without clobbering a sibling that is still to be read. */
+static void emit_gp_args_parallel(X86LowerCtx *ctx, IrInstr *in, const SysvArgPlan *plans,
+                                  u32 nargs)
+{
+    GpArgMove *moves =
+        arena_alloc(ctx->arena, (nargs ? nargs : 1) * sizeof(GpArgMove), _Alignof(GpArgMove));
+    u32 n = 0;
+    for (u32 i = 0; i < nargs; i++)
+    {
+        if (plans[i].on_stack || plans[i].is_record || type_is_fp(plans[i].type))
+        {
+            continue;
+        }
+        IrOperand op = in->extra.call.args[i];
+        u8 width = x86_lower_operand_width(ctx, op);
+        moves[n++] = resolve_gp_arg(ctx, op, ctx->target->gp_args[plans[i].chunks[0].reg], width);
+    }
+    u32 remaining = n;
+    while (remaining > 0)
+    {
+        bool progress = false;
+        for (u32 i = 0; i < n; i++)
+        {
+            if (moves[i].done || !gp_arg_move_ready(moves, n, i))
+            {
+                continue;
+            }
+            emit_gp_arg_move(ctx, &moves[i]);
+            moves[i].done = true;
+            remaining--;
+            progress = true;
+        }
+        if (!progress)
+        {
+            break_gp_arg_cycle(ctx, moves, n);
+        }
+    }
+}
+
 static void store_raw_result(X86LowerCtx *ctx, IrInstr *in, u8 reg, bool is_fp)
 {
     RegLoc rl = x86_lower_result_loc(ctx, in);
@@ -308,13 +438,17 @@ void x86_sysv_lower_call(IrInstr *in, X86LowerCtx *ctx)
             emit_stack_arg(ctx, in->extra.call.args[i], &plans[i]);
         }
     }
+    /* FP and record arguments never share a register file with the scalar GP
+       arguments, so they go in first; the GP moves are then scheduled as a
+       parallel copy so a value already in its lane needs no move. */
     for (u32 i = 0; i < nargs; i++)
     {
-        if (!plans[i].on_stack)
+        if (!plans[i].on_stack && (plans[i].is_record || type_is_fp(plans[i].type)))
         {
             emit_reg_arg(ctx, in->extra.call.args[i], &plans[i]);
         }
     }
+    emit_gp_args_parallel(ctx, in, plans, nargs);
 
     if (in->extra.call.is_variadic)
     {

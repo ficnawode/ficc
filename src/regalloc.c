@@ -403,10 +403,32 @@ static u16 call_arg_avoid_mask(const RegBank *bank, const u8 *args, u8 nargs)
     return mask;
 }
 
+/* A call whose arguments include a by-value record: the record's stack copy
+   runs through rep movsb, clobbering %rsi/%rdi/%rcx, so every argument of such
+   a call must keep off the argument lanes. Unknown types stay conservative. */
+static bool call_has_record_arg(const IrInstr *in)
+{
+    if (!in->extra.call.arg_types)
+    {
+        return true;
+    }
+    for (u32 a = 0; a < in->extra.call.nargs; a++)
+    {
+        Type *t = in->extra.call.arg_types[a];
+        if (t && type_is_record(t))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Mark every vreg whose value arrives in (caller side) or is loaded from
    (callee side) an ABI argument register. Such a vreg must not itself be
    allocated to an argument register, or one argument's move would clobber
-   another's incoming value. */
+   another's incoming value. A scalar GP argument of a record-free call is the
+   exception: lowering schedules those moves as a parallel copy, so the value
+   may ride its own argument lane (see collect_arg_prefs). */
 static bool *mark_arg_reg_vregs(IrFunction *f, u32 nvregs, Arena *arena)
 {
     bool *op = arena_alloc(arena, nvregs * sizeof(bool), sizeof(bool));
@@ -439,16 +461,65 @@ static bool *mark_arg_reg_vregs(IrFunction *f, u32 nvregs, Arena *arena)
             {
                 op[in->extra.call.callee.u.vreg] = true;
             }
+            bool conservative = call_has_record_arg(in);
             for (u32 a = 0; a < in->extra.call.nargs; a++)
             {
-                if (ir_operand_is_vreg(in->extra.call.args[a]))
+                IrOperand arg = in->extra.call.args[a];
+                if (!ir_operand_is_vreg(arg))
                 {
-                    op[in->extra.call.args[a].u.vreg] = true;
+                    continue;
+                }
+                Type *t = in->extra.call.arg_types ? in->extra.call.arg_types[a] : NULL;
+                if (conservative || (t && type_is_fp(t)))
+                {
+                    op[arg.u.vreg] = true;
                 }
             }
         }
     }
     return op;
+}
+
+/* Preferred physical lane per vreg: a scalar GP argument of a record-free call
+   is born in the lane it will be passed in, so its argument move is a no-op.
+   Returns -1 for every other value. */
+static int *collect_arg_prefs(IrFunction *f, u32 nvregs, const TargetDesc *target, Arena *arena)
+{
+    int *pref = arena_alloc(arena, nvregs * sizeof(int), sizeof(int));
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        pref[v] = -1;
+    }
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode != OP_CALL || call_has_record_arg(in))
+            {
+                continue;
+            }
+            u32 gpi = 0;
+            for (u32 a = 0; a < in->extra.call.nargs; a++)
+            {
+                Type *t = in->extra.call.arg_types ? in->extra.call.arg_types[a] : NULL;
+                if (t && type_is_fp(t))
+                {
+                    continue; /* rides an XMM lane, not a GP one */
+                }
+                IrOperand arg = in->extra.call.args[a];
+                if (ir_operand_is_vreg(arg) && gpi < target->ngp)
+                {
+                    pref[arg.u.vreg] = target->gp_args[gpi];
+                }
+                gpi++;
+            }
+        }
+    }
+    return pref;
 }
 
 /* When no register is free, a shorter-lived interval can take the register of
@@ -481,7 +552,7 @@ static int pick_eviction(const RegBank *bank, const ActiveInterval *active, u32 
 static void linear_scan_class(RegAllocation *alloc, const LiveInterval **order, u32 nintervals,
                               const RegBank *bank, const u32 *calls, u32 ncall, const bool *call_op,
                               u16 arg_avoid, const ClobberPos *clob, u32 nclob, IrInstr **defs,
-                              const RegClass *vreg_cls, Arena *arena)
+                              const RegClass *vreg_cls, const int *pref, Arena *arena)
 {
     ActiveInterval *active = arena_alloc(
         arena, (nintervals ? nintervals : 1) * sizeof(ActiveInterval), _Alignof(ActiveInterval));
@@ -511,6 +582,10 @@ static void linear_scan_class(RegAllocation *alloc, const LiveInterval **order, 
             avoid |= clobber_avoid(clob, nclob, iv->start, iv->end);
         }
         int hint = coalesce_hint(defs[iv->vreg], alloc->phys_map, iv->cls, vreg_cls);
+        if (hint < 0)
+        {
+            hint = pref[iv->vreg];
+        }
         int reg = pick_register(bank, active, nactive, crossing, avoid, hint, iv->start);
         if (reg < 0)
         {
@@ -558,12 +633,13 @@ RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const Ta
     }
     u32 nclob = 0;
     ClobberPos *clob = collect_clobbers(f, &set->pos, target, &nclob, arena);
+    int *pref = collect_arg_prefs(f, set->nvregs, target, arena);
     u16 gpr_avoid = call_arg_avoid_mask(&target->gpr, target->gp_args, target->ngp);
     u16 xmm_avoid = call_arg_avoid_mask(&target->xmm, target->fp_args, target->nfp);
     linear_scan_class(alloc, order, set->n, &target->gpr, calls, ncall, call_op, gpr_avoid, clob,
-                      nclob, defs, vreg_cls, arena);
+                      nclob, defs, vreg_cls, pref, arena);
     linear_scan_class(alloc, order, set->n, &target->xmm, calls, ncall, call_op, xmm_avoid, clob,
-                      nclob, defs, vreg_cls, arena);
+                      nclob, defs, vreg_cls, pref, arena);
     u8 saved_mask = 0;
     for (u32 v = 0; v < set->nvregs; v++)
     {
