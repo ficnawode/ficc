@@ -427,6 +427,7 @@ typedef struct
     const u8 *data;
     size_t len;
     StrMap *exports; /* name -> DsoSym* */
+    Vec *syms;       /* Vec<DsoSym*>, dynsym order (for alias lookup) */
 } Dso;
 
 typedef struct
@@ -437,6 +438,7 @@ typedef struct
     u64 value;
     u64 size;
     u32 name_off;
+    bool is_defined;   /* exported (COPY relocation or -rdynamic), hashed */
     GlobalSym *global; /* the definition this entry exports, NULL for imports */
 } DynSym;
 
@@ -931,6 +933,26 @@ static void resolve_globals(Linker *lk)
     allocate_commons(lk);
 }
 
+/* glibc exports weak aliases of strong data (environ vs __environ, same
+   address). A COPY relocation must name the strong symbol, as GNU ld does, or
+   ld.so never populates the executable's copy. */
+static DsoSym *dso_strong_alias(Dso *d, DsoSym *s)
+{
+    if (s->bind != STB_WEAK)
+    {
+        return s;
+    }
+    for (size_t i = 0; i < vec_size(d->syms); i++)
+    {
+        DsoSym *o = (DsoSym *) vec_get(d->syms, i);
+        if (o->bind == STB_GLOBAL && o->value == s->value && o->type == s->type)
+        {
+            return o;
+        }
+    }
+    return s;
+}
+
 static DsoSym *dso_lookup(Linker *lk, const char *name)
 {
     for (size_t i = 0; i < vec_size(lk->dsos); i++)
@@ -939,7 +961,7 @@ static DsoSym *dso_lookup(Linker *lk, const char *name)
         DsoSym *s = (DsoSym *) strmap_get(d->exports, name);
         if (s)
         {
-            return s;
+            return dso_strong_alias(d, s);
         }
     }
     return NULL;
@@ -959,6 +981,7 @@ static u32 dynsym_add(Linker *lk, const char *name, u8 info, u16 shndx, u64 valu
     d->shndx = shndx;
     d->value = value;
     d->size = size;
+    d->is_defined = global != NULL;
     d->global = global;
     vec_push(lk->dynsyms, d);
     u32 idx = (u32) (vec_size(lk->dynsyms) - 1);
@@ -1032,6 +1055,9 @@ static CopySlot *copy_slot(Linker *lk, const char *name, u64 size, u64 align)
     c->addr = 0;
     c->dynidx =
         dynsym_add(lk, name, ELF64_ST_INFO(STB_GLOBAL, STT_OBJECT), SHN_UNDEF, 0, size, NULL);
+    DynSym *cd = (DynSym *) vec_get(lk->dynsyms, c->dynidx);
+    cd->is_defined = true;
+    cd->size = size;
     c->has_reloc = false;
     vec_push(lk->copies, c);
     return c;
@@ -1237,7 +1263,7 @@ static bool symbol_value(Linker *lk, InputObject *io, LinkSym *sym, u32 reloc_ty
             }
             if (ds->type == STT_OBJECT || ds->type == STT_NOTYPE)
             {
-                CopySlot *c = copy_slot(lk, sym->name, ds->size, 8);
+                CopySlot *c = copy_slot(lk, ds->name, ds->size, 8);
                 *out = c->addr;
                 return true;
             }
@@ -2434,6 +2460,7 @@ static Dso *dso_read(const u8 *data, size_t len, const char *path, Arena *arena)
     d->data = data;
     d->len = len;
     d->exports = strmap_new(arena);
+    d->syms = vec_new(arena);
 
     if (dynamic && dynamic->sh_link == dynsym->sh_link)
     {
@@ -2479,6 +2506,7 @@ static Dso *dso_read(const u8 *data, size_t len, const char *path, Arena *arena)
         ds->size = es.st_size;
         ds->shndx = es.st_shndx;
         strmap_set(d->exports, name, ds);
+        vec_push(d->syms, ds);
     }
     return d;
 }
@@ -2716,7 +2744,7 @@ static void dynamic_scan(Linker *lk)
                 {
                     if (ds->type == STT_OBJECT || ds->type == STT_NOTYPE)
                     {
-                        CopySlot *c = copy_slot(lk, sym->name, ds->size, 8);
+                        CopySlot *c = copy_slot(lk, ds->name, ds->size, 8);
                         if (!c->has_reloc)
                         {
                             c->has_reloc = true;
@@ -2756,7 +2784,7 @@ typedef struct
 static GnuHash gnu_hash_build(Linker *lk)
 {
     GnuHash h;
-    h.symoffset = lk->cfg->export_dynamic ? lk->hash_symoffset : (u32) vec_size(lk->dynsyms);
+    h.symoffset = lk->hash_symoffset;
     h.count = (u32) vec_size(lk->dynsyms) - h.symoffset;
     h.nbuckets = lk->hash_nbuckets;
     h.bloom_size = lk->hash_bloom_size;
@@ -2817,8 +2845,107 @@ static void build_gnu_hash(Linker *lk)
     gnu_hash_emit(lk, &h);
 }
 
+/* .gnu.hash hashes only defined exports, which must sit contiguously at the
+   end of .dynsym and be bucket-sorted. Reorder the table accordingly and
+   remap every symbol index a relocation or slot holds. */
+typedef struct
+{
+    DynSym *d;
+    u32 old;
+} DefSym;
+
+static void order_dynsyms(Linker *lk)
+{
+    size_t n = vec_size(lk->dynsyms);
+    u32 *remap = arena_alloc(lk->arena, n * sizeof(u32), sizeof(u32));
+    Vec *ordered = vec_new(lk->arena);
+    vec_push(ordered, vec_get(lk->dynsyms, 0));
+    remap[0] = 0;
+
+    u32 ndef = 0;
+    for (size_t i = 1; i < n; i++)
+    {
+        DynSym *d = (DynSym *) vec_get(lk->dynsyms, i);
+        if (d->is_defined)
+        {
+            ndef++;
+            continue;
+        }
+        remap[i] = (u32) vec_size(ordered);
+        vec_push(ordered, d);
+    }
+    u32 first = (u32) vec_size(ordered);
+    u32 nbuckets = next_pow2(ndef);
+
+    DefSym *defs = arena_alloc(lk->arena, (ndef ? ndef : 1) * sizeof(DefSym), sizeof(void *));
+    DefSym *sorted = arena_alloc(lk->arena, (ndef ? ndef : 1) * sizeof(DefSym), sizeof(void *));
+    u32 *starts = arena_alloc(lk->arena, nbuckets * sizeof(u32), sizeof(u32));
+    u32 *cursor = arena_alloc(lk->arena, nbuckets * sizeof(u32), sizeof(u32));
+    for (u32 b = 0; b < nbuckets; b++)
+    {
+        starts[b] = 0;
+    }
+    u32 k = 0;
+    for (size_t i = 1; i < n; i++)
+    {
+        DynSym *d = (DynSym *) vec_get(lk->dynsyms, i);
+        if (d->is_defined)
+        {
+            defs[k].d = d;
+            defs[k].old = (u32) i;
+            starts[gnu_hash(d->name) % nbuckets]++;
+            k++;
+        }
+    }
+    u32 sum = 0;
+    for (u32 b = 0; b < nbuckets; b++)
+    {
+        u32 c = starts[b];
+        starts[b] = sum;
+        cursor[b] = sum;
+        sum += c;
+    }
+    for (u32 i = 0; i < ndef; i++)
+    {
+        u32 b = gnu_hash(defs[i].d->name) % nbuckets;
+        sorted[cursor[b]++] = defs[i];
+    }
+    for (u32 i = 0; i < ndef; i++)
+    {
+        remap[sorted[i].old] = first + i;
+        vec_push(ordered, sorted[i].d);
+    }
+
+    for (size_t i = 0; i < vec_size(lk->rela_dyn); i++)
+    {
+        DynReloc *r = (DynReloc *) vec_get(lk->rela_dyn, i);
+        r->sym = remap[r->sym];
+    }
+    for (size_t i = 0; i < vec_size(lk->rela_plt); i++)
+    {
+        DynReloc *r = (DynReloc *) vec_get(lk->rela_plt, i);
+        r->sym = remap[r->sym];
+    }
+    for (size_t i = 0; i < vec_size(lk->plt_slots); i++)
+    {
+        PltSlot *p = (PltSlot *) vec_get(lk->plt_slots, i);
+        p->dynidx = remap[p->dynidx];
+    }
+    for (size_t i = 0; i < vec_size(lk->copies); i++)
+    {
+        CopySlot *c = (CopySlot *) vec_get(lk->copies, i);
+        c->dynidx = remap[c->dynidx];
+    }
+
+    lk->dynsyms = ordered;
+    lk->hash_symoffset = first;
+    lk->hash_nbuckets = nbuckets;
+    lk->hash_bloom_size = nbuckets;
+}
+
 static void dynamic_build(Linker *lk)
 {
+    order_dynsyms(lk);
     const char *interp = "/lib64/ld-linux-x86-64.so.2";
     bytebuf_append_bytes(&lk->dynbuf[DSEC_INTERP], (const u8 *) interp, strlen(interp) + 1);
 
