@@ -75,9 +75,15 @@ typedef uint64_t Elf64_Off;
 #define STT_TLS 6
 #define STT_GNU_IFUNC 10
 
+#define STV_DEFAULT 0
+#define STV_INTERNAL 1
+#define STV_HIDDEN 2
+#define STV_PROTECTED 3
+
 #define ELF64_ST_INFO(bind, type) (((bind) << 4) + ((type) & 0xf))
 #define ELF64_ST_BIND(info) ((info) >> 4)
 #define ELF64_ST_TYPE(info) ((info) & 0xf)
+#define ELF64_ST_VISIBILITY(other) ((other) & 0x3)
 
 #define SHN_UNDEF 0
 #define SHN_LORESERVE 0xff00
@@ -135,6 +141,14 @@ typedef uint64_t Elf64_Off;
 #define DT_VERDEFNUM 0x6ffffffd
 #define DT_VERNEED 0x6ffffffe
 #define DT_VERNEEDNUM 0x6fffffff
+
+/* Symbol versioning (.gnu.version / .gnu.version_r). */
+#define VER_NDX_LOCAL 0
+#define VER_NDX_GLOBAL 1
+#define VERSYM_HIDDEN 0x8000
+#define VERSYM_VERSION 0x7fff
+#define VER_FLG_BASE 0x1
+#define VER_FLG_WEAK 0x2
 
 /* x86-64 relocation types. */
 #define R_X86_64_NONE 0
@@ -236,6 +250,45 @@ struct Elf64_Dyn
         Elf64_Xword d_val;
         Elf64_Addr d_ptr;
     } d_un;
+};
+
+typedef struct Elf64_Verneed Elf64_Verneed;
+struct Elf64_Verneed
+{
+    Elf64_Half vn_version;
+    Elf64_Half vn_cnt;
+    Elf64_Word vn_file;
+    Elf64_Word vn_aux;
+    Elf64_Word vn_next;
+};
+
+typedef struct Elf64_Vernaux Elf64_Vernaux;
+struct Elf64_Vernaux
+{
+    Elf64_Word vna_hash;
+    Elf64_Half vna_flags;
+    Elf64_Half vna_other;
+    Elf64_Word vna_name;
+    Elf64_Word vna_next;
+};
+
+typedef struct Elf64_Verdef Elf64_Verdef;
+struct Elf64_Verdef
+{
+    Elf64_Half vd_version;
+    Elf64_Half vd_flags;
+    Elf64_Half vd_ndx;
+    Elf64_Half vd_cnt;
+    Elf64_Word vd_hash;
+    Elf64_Word vd_aux;
+    Elf64_Word vd_next;
+};
+
+typedef struct Elf64_Verdaux Elf64_Verdaux;
+struct Elf64_Verdaux
+{
+    Elf64_Word vda_name;
+    Elf64_Word vda_next;
 };
 
 #endif

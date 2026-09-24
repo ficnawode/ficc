@@ -418,6 +418,9 @@ typedef struct
     u8 type, bind;
     u64 value, size;
     u16 shndx;
+    u16 verndx;          /* version index in the DSO's .gnu.version */
+    const char *vername; /* version name, NULL when unversioned */
+    bool verhidden;      /* VERSYM_HIDDEN: a non-default compatibility symbol */
 } DsoSym;
 
 typedef struct
@@ -430,6 +433,8 @@ typedef struct
     Vec *syms;       /* Vec<DsoSym*>, dynsym order (for alias lookup) */
 } Dso;
 
+typedef struct VerAux VerAux;
+
 typedef struct
 {
     const char *name;
@@ -438,8 +443,11 @@ typedef struct
     u64 value;
     u64 size;
     u32 name_off;
-    bool is_defined;   /* exported (COPY relocation or -rdynamic), hashed */
-    GlobalSym *global; /* the definition this entry exports, NULL for imports */
+    bool is_defined;     /* exported (COPY relocation or -rdynamic), hashed */
+    GlobalSym *global;   /* the definition this entry exports, NULL for imports */
+    const char *vername; /* required version name, NULL when unversioned */
+    const char *verfile; /* soname of the DSO that provides the version */
+    VerAux *veraux;      /* resolved vernaux once versions are built */
 } DynSym;
 
 typedef struct
@@ -561,6 +569,8 @@ typedef struct
     StrMap *plt_map; /* name -> PltSlot* */
     Vec *plt_slots;  /* Vec<PltSlot*> */
     Vec *copies;     /* Vec<CopySlot*> */
+    Vec *vergroups;  /* Vec<VerGroup*>, needed versions grouped by DSO */
+    u32 nverneeds;
     ByteBuf dynbuf[DSEC_COUNT];
     u64 dyn_addr[DSEC_COUNT];
     u64 dyn_off[DSEC_COUNT];
@@ -609,6 +619,8 @@ static void linker_init(Linker *lk, const LinkConfig *cfg, Arena *arena)
     lk->plt_map = strmap_new(arena);
     lk->plt_slots = vec_new(arena);
     lk->copies = vec_new(arena);
+    lk->vergroups = vec_new(arena);
+    lk->nverneeds = 0;
     lk->got_plt_size = 0;
     for (int i = 0; i < DSEC_COUNT; i++)
     {
@@ -953,7 +965,9 @@ static DsoSym *dso_strong_alias(Dso *d, DsoSym *s)
     return s;
 }
 
-static DsoSym *dso_lookup(Linker *lk, const char *name)
+/* Exact-name lookup, without the weak->strong alias retarget below. Version
+   requirements must use the symbol actually named, not its alias. */
+static DsoSym *dso_lookup_exact(Linker *lk, const char *name, Dso **owner)
 {
     for (size_t i = 0; i < vec_size(lk->dsos); i++)
     {
@@ -961,10 +975,34 @@ static DsoSym *dso_lookup(Linker *lk, const char *name)
         DsoSym *s = (DsoSym *) strmap_get(d->exports, name);
         if (s)
         {
-            return dso_strong_alias(d, s);
+            if (owner)
+            {
+                *owner = d;
+            }
+            return s;
         }
     }
     return NULL;
+}
+
+static DsoSym *dso_lookup_in(Linker *lk, const char *name, Dso **owner)
+{
+    Dso *d = NULL;
+    DsoSym *s = dso_lookup_exact(lk, name, &d);
+    if (s)
+    {
+        if (owner)
+        {
+            *owner = d;
+        }
+        return dso_strong_alias(d, s);
+    }
+    return NULL;
+}
+
+static DsoSym *dso_lookup(Linker *lk, const char *name)
+{
+    return dso_lookup_in(lk, name, NULL);
 }
 
 static u32 dynsym_add(Linker *lk, const char *name, u8 info, u16 shndx, u64 value, u64 size,
@@ -983,6 +1021,19 @@ static u32 dynsym_add(Linker *lk, const char *name, u8 info, u16 shndx, u64 valu
     d->size = size;
     d->is_defined = global != NULL;
     d->global = global;
+    d->vername = NULL;
+    d->verfile = NULL;
+    d->veraux = NULL;
+    if (!global)
+    {
+        Dso *owner = NULL;
+        DsoSym *ds = dso_lookup_exact(lk, name, &owner);
+        if (ds && ds->vername && owner && owner->soname)
+        {
+            d->vername = ds->vername;
+            d->verfile = owner->soname;
+        }
+    }
     vec_push(lk->dynsyms, d);
     u32 idx = (u32) (vec_size(lk->dynsyms) - 1);
     strmap_set(lk->dyn_index, name, (void *) (uintptr_t) (idx + 1));
@@ -2424,6 +2475,8 @@ static Dso *dso_read(const u8 *data, size_t len, const char *path, Arena *arena)
     }
     const Elf64_Shdr *dynsym = NULL;
     const Elf64_Shdr *dynamic = NULL;
+    const Elf64_Shdr *versym = NULL;
+    const Elf64_Shdr *verdef = NULL;
     for (u64 i = 0; i < eh.e_shnum; i++)
     {
         const Elf64_Shdr *sh = shdr_at(data, len, &eh, i);
@@ -2438,6 +2491,14 @@ static Dso *dso_read(const u8 *data, size_t len, const char *path, Arena *arena)
         else if (sh->sh_type == SHT_DYNAMIC)
         {
             dynamic = sh;
+        }
+        else if (sh->sh_type == SHT_GNU_VERSYM)
+        {
+            versym = sh;
+        }
+        else if (sh->sh_type == SHT_GNU_VERDEF)
+        {
+            verdef = sh;
         }
     }
     if (!dynsym || dynsym->sh_link >= eh.e_shnum)
@@ -2483,6 +2544,35 @@ static Dso *dso_read(const u8 *data, size_t len, const char *path, Arena *arena)
 
     u64 entsize = dynsym->sh_entsize ? dynsym->sh_entsize : sizeof(Elf64_Sym);
     u64 nsyms = dynsym->sh_size / entsize;
+
+    /* Map a version index to its name via .gnu.version_d. */
+    const char **vermap = arena_alloc(arena, (nsyms + 1) * sizeof(char *), sizeof(void *));
+    for (u64 i = 0; i <= nsyms; i++)
+    {
+        vermap[i] = NULL;
+    }
+    if (verdef && in_range(len, verdef->sh_offset, verdef->sh_size))
+    {
+        u64 pos = 0;
+        while (pos + sizeof(Elf64_Verdef) <= verdef->sh_size)
+        {
+            Elf64_Verdef vd;
+            memcpy(&vd, data + verdef->sh_offset + pos, sizeof(vd));
+            u16 ndx = vd.vd_ndx & VERSYM_VERSION;
+            if (ndx < nsyms + 1 && vd.vd_aux + sizeof(Elf64_Verdaux) <= verdef->sh_size - pos)
+            {
+                Elf64_Verdaux vda;
+                memcpy(&vda, data + verdef->sh_offset + pos + vd.vd_aux, sizeof(vda));
+                vermap[ndx] = cstr_at(strtab, strtab_len, vda.vda_name);
+            }
+            if (vd.vd_next == 0)
+            {
+                break;
+            }
+            pos += vd.vd_next;
+        }
+    }
+
     for (u64 s = 0; s < nsyms; s++)
     {
         const u8 *p = data + dynsym->sh_offset + s * entsize;
@@ -2493,9 +2583,35 @@ static Dso *dso_read(const u8 *data, size_t len, const char *path, Arena *arena)
         {
             continue;
         }
-        const char *name = cstr_at(strtab, strtab_len, es.st_name);
-        if (!name || strmap_get(d->exports, name))
+        u16 vraw = VER_NDX_GLOBAL;
+        if (versym && in_range(len, versym->sh_offset + s * 2, 2))
         {
+            memcpy(&vraw, data + versym->sh_offset + s * 2, 2);
+        }
+        u16 vndx = vraw & VERSYM_VERSION;
+        bool vhidden = (vraw & VERSYM_HIDDEN) != 0;
+        const char *vname = (vndx >= 2 && vndx < nsyms + 1) ? vermap[vndx] : NULL;
+        const char *name = cstr_at(strtab, strtab_len, es.st_name);
+        if (!name)
+        {
+            continue;
+        }
+        DsoSym *prev = (DsoSym *) strmap_get(d->exports, name);
+        if (prev)
+        {
+            /* A name can appear more than once under different versions; the
+               default (VERSYM_HIDDEN clear) definition is the one to bind. */
+            if (prev->verhidden && !vhidden)
+            {
+                prev->type = ELF64_ST_TYPE(es.st_info);
+                prev->bind = bind;
+                prev->value = es.st_value;
+                prev->size = es.st_size;
+                prev->shndx = es.st_shndx;
+                prev->verndx = vndx;
+                prev->vername = vname;
+                prev->verhidden = false;
+            }
             continue;
         }
         DsoSym *ds = arena_alloc(arena, sizeof(*ds), sizeof(void *));
@@ -2505,6 +2621,9 @@ static Dso *dso_read(const u8 *data, size_t len, const char *path, Arena *arena)
         ds->value = es.st_value;
         ds->size = es.st_size;
         ds->shndx = es.st_shndx;
+        ds->verndx = vndx;
+        ds->vername = vname;
+        ds->verhidden = vhidden;
         strmap_set(d->exports, name, ds);
         vec_push(d->syms, ds);
     }
@@ -2679,6 +2798,10 @@ static void dynamic_scan(Linker *lk)
     nullsym->size = 0;
     nullsym->name_off = 0;
     nullsym->global = NULL;
+    nullsym->is_defined = false;
+    nullsym->vername = NULL;
+    nullsym->verfile = NULL;
+    nullsym->veraux = NULL;
     vec_push(lk->dynsyms, nullsym);
 
     for (size_t oi = 0; oi < vec_size(lk->objects); oi++)
@@ -2943,6 +3066,150 @@ static void order_dynsyms(Linker *lk)
     lk->hash_bloom_size = nbuckets;
 }
 
+/* Symbol versioning. An imported symbol that a DSO exports under a version
+   gets a versym index; needed versions are grouped per providing DSO in
+   .gnu.version_r. A vernaux's index is its position in the concatenated aux
+   array, starting at 2 (0 = local, 1 = global). */
+struct VerAux
+{
+    const char *name;
+    u16 ndx;
+    u32 name_off;
+};
+
+typedef struct
+{
+    const char *file;
+    u32 file_off;
+    Vec *auxs; /* Vec<VerAux*> */
+} VerGroup;
+
+/* SysV (DT_HASH) hash, also used for version names. */
+static u32 elf_hash(const char *name)
+{
+    u32 h = 0;
+    for (const u8 *p = (const u8 *) name; *p; p++)
+    {
+        h = (h << 4) + *p;
+        u32 g = h & 0xf0000000u;
+        if (g)
+        {
+            h ^= g >> 24;
+        }
+        h &= ~g;
+    }
+    return h;
+}
+
+static VerGroup *ver_group(Linker *lk, const char *file)
+{
+    for (size_t i = 0; i < vec_size(lk->vergroups); i++)
+    {
+        VerGroup *g = (VerGroup *) vec_get(lk->vergroups, i);
+        if (strcmp(g->file, file) == 0)
+        {
+            return g;
+        }
+    }
+    VerGroup *g = arena_alloc(lk->arena, sizeof(*g), sizeof(void *));
+    g->file = file;
+    g->file_off = 0;
+    g->auxs = vec_new(lk->arena);
+    vec_push(lk->vergroups, g);
+    return g;
+}
+
+static VerAux *ver_aux(Linker *lk, VerGroup *g, const char *name)
+{
+    for (size_t i = 0; i < vec_size(g->auxs); i++)
+    {
+        VerAux *a = (VerAux *) vec_get(g->auxs, i);
+        if (strcmp(a->name, name) == 0)
+        {
+            return a;
+        }
+    }
+    VerAux *a = arena_alloc(lk->arena, sizeof(*a), sizeof(void *));
+    a->name = name;
+    a->ndx = 0;
+    a->name_off = 0;
+    vec_push(g->auxs, a);
+    return a;
+}
+
+static void build_versions(Linker *lk)
+{
+    ByteBuf *ver = &lk->dynbuf[DSEC_VER];
+    ByteBuf *vn = &lk->dynbuf[DSEC_VERNEED];
+    bytebuf_init(ver, lk->arena);
+    bytebuf_init(vn, lk->arena);
+
+    for (size_t i = 1; i < vec_size(lk->dynsyms); i++)
+    {
+        DynSym *d = (DynSym *) vec_get(lk->dynsyms, i);
+        if (!d->vername || !d->verfile)
+        {
+            continue;
+        }
+        d->veraux = ver_aux(lk, ver_group(lk, d->verfile), d->vername);
+    }
+
+    u16 ndx = 2;
+    for (size_t i = 0; i < vec_size(lk->vergroups); i++)
+    {
+        VerGroup *g = (VerGroup *) vec_get(lk->vergroups, i);
+        for (size_t j = 0; j < vec_size(g->auxs); j++)
+        {
+            VerAux *a = (VerAux *) vec_get(g->auxs, j);
+            a->ndx = ndx++;
+        }
+    }
+
+    for (size_t i = 0; i < vec_size(lk->dynsyms); i++)
+    {
+        DynSym *d = (DynSym *) vec_get(lk->dynsyms, i);
+        u16 v = (i == 0) ? VER_NDX_LOCAL : VER_NDX_GLOBAL;
+        if (d->veraux)
+        {
+            v = d->veraux->ndx;
+        }
+        bytebuf_append_u16(ver, v);
+    }
+
+    ByteBuf *str = &lk->dynbuf[DSEC_DYNSTR];
+    for (size_t i = 0; i < vec_size(lk->vergroups); i++)
+    {
+        VerGroup *g = (VerGroup *) vec_get(lk->vergroups, i);
+        u32 cnt = (u32) vec_size(g->auxs);
+        g->file_off = strtab_add(str, g->file);
+        Elf64_Verneed vh;
+        vh.vn_version = 1;
+        vh.vn_cnt = (Elf64_Half) cnt;
+        vh.vn_file = g->file_off;
+        vh.vn_aux = sizeof(Elf64_Verneed);
+        vh.vn_next = (i + 1 == vec_size(lk->vergroups))
+                         ? 0
+                         : (Elf64_Word) (sizeof(Elf64_Verneed) + (u64) cnt * sizeof(Elf64_Vernaux));
+        bytebuf_append_bytes(vn, (const u8 *) &vh, sizeof(vh));
+        for (size_t j = 0; j < vec_size(g->auxs); j++)
+        {
+            VerAux *a = (VerAux *) vec_get(g->auxs, j);
+            if (a->name_off == 0)
+            {
+                a->name_off = strtab_add(str, a->name);
+            }
+            Elf64_Vernaux va;
+            va.vna_hash = elf_hash(a->name);
+            va.vna_flags = 0;
+            va.vna_other = a->ndx;
+            va.vna_name = a->name_off;
+            va.vna_next = (j + 1 == vec_size(g->auxs)) ? 0 : (Elf64_Word) sizeof(Elf64_Vernaux);
+            bytebuf_append_bytes(vn, (const u8 *) &va, sizeof(va));
+        }
+    }
+    lk->nverneeds = (u32) vec_size(lk->vergroups);
+}
+
 static void dynamic_build(Linker *lk)
 {
     order_dynsyms(lk);
@@ -3003,7 +3270,19 @@ static void dynamic_build(Linker *lk)
     {
         bytebuf_append(rp, 0);
     }
+    build_versions(lk);
+
+    /* Keep this in step with finalize_dynamic: layout_dynamic sizes the
+       .dynamic slot from the placeholder emitted here. */
     u64 ndyn = 16 + vec_size(lk->needed);
+    if (vec_size(lk->dynsyms) > 1)
+    {
+        ndyn++;
+    }
+    if (lk->nverneeds > 0)
+    {
+        ndyn += 2;
+    }
     ByteBuf *dyn = &lk->dynbuf[DSEC_DYNAMIC];
     bytebuf_init(dyn, lk->arena);
     for (u64 i = 0; i < ndyn * sizeof(Elf64_Dyn); i++)
@@ -3084,6 +3363,8 @@ enum
     DX_HASH,
     DX_DYNSYM,
     DX_DYNSTR,
+    DX_VER,
+    DX_VERNEED,
     DX_RELA_DYN,
     DX_RELA_PLT,
     DX_PLT,
@@ -3236,6 +3517,15 @@ static void finalize_dynamic(Linker *lk)
     dyn_emit(dyn, DT_FLAGS, 0x8);
     dyn_emit(dyn, DT_FLAGS_1, 0x1);
     dyn_emit(dyn, DT_DEBUG, 0);
+    if (vec_size(lk->dynsyms) > 1)
+    {
+        dyn_emit(dyn, DT_VERSYM, lk->dyn_addr[DSEC_VER]);
+    }
+    if (lk->nverneeds > 0)
+    {
+        dyn_emit(dyn, DT_VERNEED, lk->dyn_addr[DSEC_VERNEED]);
+        dyn_emit(dyn, DT_VERNEEDNUM, lk->nverneeds);
+    }
     dyn_emit(dyn, DT_NULL, 0);
 }
 
@@ -3323,6 +3613,11 @@ static void dyn_section_headers(Linker *lk, ByteBuf *out, u32 nm[DX_NSEC], u64 o
              sizeof(Elf64_Sym));
     dyn_shdr(out, nm[DX_DYNSTR], SHT_STRTAB, SHF_ALLOC, lk->dyn_addr[DSEC_DYNSTR],
              lk->dyn_off[DSEC_DYNSTR], bytebuf_len(&lk->dynbuf[DSEC_DYNSTR]), 0, 0, 1, 0);
+    dyn_shdr(out, nm[DX_VER], SHT_GNU_VERSYM, SHF_ALLOC, lk->dyn_addr[DSEC_VER],
+             lk->dyn_off[DSEC_VER], bytebuf_len(&lk->dynbuf[DSEC_VER]), DX_DYNSYM, 0, 2, 2);
+    dyn_shdr(out, nm[DX_VERNEED], SHT_GNU_VERNEED, SHF_ALLOC, lk->dyn_addr[DSEC_VERNEED],
+             lk->dyn_off[DSEC_VERNEED], bytebuf_len(&lk->dynbuf[DSEC_VERNEED]), DX_DYNSTR,
+             lk->nverneeds, 8, 0);
     dyn_shdr(out, nm[DX_RELA_DYN], SHT_RELA, SHF_ALLOC, lk->dyn_addr[DSEC_RELA_DYN],
              lk->dyn_off[DSEC_RELA_DYN], bytebuf_len(&lk->dynbuf[DSEC_RELA_DYN]), DX_DYNSYM, 0, 8,
              sizeof(Elf64_Rela));
@@ -3398,6 +3693,8 @@ static bool write_dynamic(Linker *lk)
     nm[DX_HASH] = strtab_add(&sh, ".gnu.hash");
     nm[DX_DYNSYM] = strtab_add(&sh, ".dynsym");
     nm[DX_DYNSTR] = strtab_add(&sh, ".dynstr");
+    nm[DX_VER] = strtab_add(&sh, ".gnu.version");
+    nm[DX_VERNEED] = strtab_add(&sh, ".gnu.version_r");
     nm[DX_RELA_DYN] = strtab_add(&sh, ".rela.dyn");
     nm[DX_RELA_PLT] = strtab_add(&sh, ".rela.plt");
     nm[DX_PLT] = strtab_add(&sh, ".plt");
@@ -3442,6 +3739,8 @@ static bool write_dynamic(Linker *lk)
     append_at(&out, lk->dyn_off[DSEC_HASH], &lk->dynbuf[DSEC_HASH]);
     append_at(&out, lk->dyn_off[DSEC_DYNSYM], &lk->dynbuf[DSEC_DYNSYM]);
     append_at(&out, lk->dyn_off[DSEC_DYNSTR], &lk->dynbuf[DSEC_DYNSTR]);
+    append_at(&out, lk->dyn_off[DSEC_VER], &lk->dynbuf[DSEC_VER]);
+    append_at(&out, lk->dyn_off[DSEC_VERNEED], &lk->dynbuf[DSEC_VERNEED]);
     append_at(&out, lk->dyn_off[DSEC_RELA_DYN], &lk->dynbuf[DSEC_RELA_DYN]);
     append_at(&out, lk->dyn_off[DSEC_RELA_PLT], &lk->dynbuf[DSEC_RELA_PLT]);
     append_at(&out, lk->dyn_off[DSEC_PLT], &lk->dynbuf[DSEC_PLT]);
