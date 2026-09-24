@@ -1,0 +1,6 @@
+# Phase 25 codegen-quality baseline: HEAD a4d71ca, before subphases B-D.
+# `make bench` (with LUA_DIR=<lua tree>) re-measures and prints the delta.
+self.text 1442606
+self.data 7391
+self.rodata 49013
+self.bin 1530384

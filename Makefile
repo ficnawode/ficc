@@ -39,7 +39,7 @@ DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_BIN) $(T
 
 FORMAT_FILES := $(shell find src include test \( -name '*.c' -o -name '*.h' \))
 
-.PHONY: all clean test test-gdb selftest golden-static dirs compile-commands format format-check
+.PHONY: all clean test test-gdb selftest golden-static bench dirs compile-commands format format-check
 
 all: $(FICC_BIN)
 
@@ -62,6 +62,12 @@ test-gdb: $(FICC_BIN)
 # linker is in doubt.
 golden-static: $(FICC_BIN)
 	./test/golden_static.sh $(abspath $(FICC_BIN))
+
+# Opt-in codegen-quality measurement (never run by `make test`): self-compile
+# size plus, when LUA_DIR is set, the Lua interpreter's `.text` and CPU time.
+# Compares against bench/baseline.txt.
+bench: $(FICC_BIN)
+	./bench/run.sh $(abspath $(FICC_BIN)) $(abspath src)
 
 $(FICC_BIN): $(OBJ_SRC) | dirs
 	$(CC) $(LDFLAGS) $^ -o $@
