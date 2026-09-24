@@ -3137,13 +3137,8 @@ static VerAux *ver_aux(Linker *lk, VerGroup *g, const char *name)
     return a;
 }
 
-static void build_versions(Linker *lk)
+static void versions_link(Linker *lk)
 {
-    ByteBuf *ver = &lk->dynbuf[DSEC_VER];
-    ByteBuf *vn = &lk->dynbuf[DSEC_VERNEED];
-    bytebuf_init(ver, lk->arena);
-    bytebuf_init(vn, lk->arena);
-
     for (size_t i = 1; i < vec_size(lk->dynsyms); i++)
     {
         DynSym *d = (DynSym *) vec_get(lk->dynsyms, i);
@@ -3164,6 +3159,15 @@ static void build_versions(Linker *lk)
             a->ndx = ndx++;
         }
     }
+}
+
+static void versions_emit(Linker *lk)
+{
+    ByteBuf *ver = &lk->dynbuf[DSEC_VER];
+    ByteBuf *vn = &lk->dynbuf[DSEC_VERNEED];
+    ByteBuf *str = &lk->dynbuf[DSEC_DYNSTR];
+    bytebuf_init(ver, lk->arena);
+    bytebuf_init(vn, lk->arena);
 
     for (size_t i = 0; i < vec_size(lk->dynsyms); i++)
     {
@@ -3176,7 +3180,6 @@ static void build_versions(Linker *lk)
         bytebuf_append_u16(ver, v);
     }
 
-    ByteBuf *str = &lk->dynbuf[DSEC_DYNSTR];
     for (size_t i = 0; i < vec_size(lk->vergroups); i++)
     {
         VerGroup *g = (VerGroup *) vec_get(lk->vergroups, i);
@@ -3270,7 +3273,8 @@ static void dynamic_build(Linker *lk)
     {
         bytebuf_append(rp, 0);
     }
-    build_versions(lk);
+    versions_link(lk);
+    versions_emit(lk);
 
     /* Keep this in step with finalize_dynamic: layout_dynamic sizes the
        .dynamic slot from the placeholder emitted here. */

@@ -233,6 +233,19 @@ static u8 *read_file_bytes(const char *path, size_t *out_len, Arena *arena)
     return buf;
 }
 
+static bool bytes_contain(const u8 *buf, size_t len, const char *needle)
+{
+    size_t n = strlen(needle);
+    for (size_t i = 0; i + n <= len; i++)
+    {
+        if (memcmp(buf + i, needle, n) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 TEST(link, deterministic_output)
 {
     Arena *arena = arena_new();
@@ -268,5 +281,45 @@ TEST(link, deterministic_output)
 
     unlink(p1);
     unlink(p2);
+    arena_free(arena);
+}
+
+/* A versioned import must bind to the DSO's default definition. memcpy's
+   compat symbol is memcpy@GLIBC_2.2.5; the default is memcpy@GLIBC_2.14, so
+   the linked .dynstr has to name the latter. */
+TEST(link, versioned_import_default)
+{
+    Arena *arena = arena_new();
+    const char *src = "extern void *memcpy(void *, const void *, unsigned long);\n"
+                      "int main(void)\n"
+                      "{\n"
+                      "    char a[8], b[8];\n"
+                      "    memcpy(a, b, 8);\n"
+                      "    return 42;\n"
+                      "}\n";
+    ByteBuf *buf = serialize(src, arena);
+    LinkObject *obj = link_read_memory(bytebuf_data(buf), bytebuf_len(buf), "unit.o", arena);
+    LinkInput *in = arena_alloc(arena, sizeof(*in), sizeof(void *));
+    in->kind = LINK_INPUT_OBJECT;
+    in->object = obj;
+    in->path = NULL;
+    Vec *inputs = vec_new(arena);
+    vec_push(inputs, in);
+
+    char bin[128];
+    link_temp_path(bin, sizeof(bin), "ver");
+    LinkConfig cfg = {0};
+    cfg.output_path = bin;
+    cfg.lib_paths = vec_new(arena);
+    cfg.libs = vec_new(arena);
+    EXPECT_EQ(link_run(&cfg, inputs, arena), 0);
+
+    size_t n = 0;
+    u8 *bytes = read_file_bytes(bin, &n, arena);
+    EXPECT_TRUE(bytes != NULL);
+    EXPECT_TRUE(bytes_contain(bytes, n, "GLIBC_2.14"));
+    EXPECT_EQ(tc_run_shell(bin), 42);
+
+    unlink(bin);
     arena_free(arena);
 }
