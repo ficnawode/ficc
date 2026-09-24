@@ -12,6 +12,66 @@ typedef struct
     u8 reg;
 } ActiveInterval;
 
+typedef struct
+{
+    u32 pos;
+    u16 mask;
+} ClobberPos;
+
+static ClobberPos *collect_clobbers(IrFunction *f, const IrPositions *pos, const TargetDesc *target,
+                                    u32 *out_n, Arena *arena)
+{
+    size_t nblocks = vec_size(f->blocks);
+    u32 count = 0;
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            if (target->instr_clobbers(target, (IrInstr *) vec_get(blk->instrs, ii)))
+            {
+                count++;
+            }
+        }
+    }
+    ClobberPos *out =
+        arena_alloc(arena, (count ? count : 1) * sizeof(ClobberPos), _Alignof(ClobberPos));
+    u32 n = 0;
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            u16 mask = target->instr_clobbers(target, (IrInstr *) vec_get(blk->instrs, ii));
+            if (mask)
+            {
+                out[n].pos = pos->block_base[b] + (u32) 2 * (u32) ii;
+                out[n].mask = mask;
+                n++;
+            }
+        }
+    }
+    *out_n = n;
+    return out;
+}
+
+/* GPR ids only: the mask is not meaningful for the XMM bank, whose ids share
+   the same numbers. */
+static u16 clobber_avoid(const ClobberPos *clob, u32 nclob, u32 start, u32 end)
+{
+    u16 avoid = 0;
+    for (u32 c = 0; c < nclob; c++)
+    {
+        if (start <= clob[c].pos && clob[c].pos <= end)
+        {
+            avoid |= clob[c].mask;
+        }
+    }
+    return avoid;
+}
+
 static RegAllocation *alloc_new(const LiveIntervals *set, Arena *arena)
 {
     RegAllocation *alloc = arena_alloc(arena, sizeof(RegAllocation), _Alignof(RegAllocation));
@@ -178,7 +238,7 @@ static bool crosses_call(const u32 *calls, u32 ncall, u32 start, u32 end)
 }
 
 static int pick_register(const RegBank *bank, const ActiveInterval *active, u32 nactive,
-                         bool crossing)
+                         bool crossing, u16 avoid)
 {
     bool used[16] = {false};
     for (u32 a = 0; a < nactive; a++)
@@ -188,7 +248,7 @@ static int pick_register(const RegBank *bank, const ActiveInterval *active, u32 
     for (u8 i = 0; i < bank->num_regs; i++)
     {
         u8 reg = bank->names[i];
-        if (used[reg] || !bank_allows(bank, reg))
+        if (used[reg] || !bank_allows(bank, reg) || (avoid & (u16) (1u << reg)))
         {
             continue;
         }
@@ -201,9 +261,73 @@ static int pick_register(const RegBank *bank, const ActiveInterval *active, u32 
     return -1;
 }
 
+/* Registers a call's argument setup writes that the allocator may otherwise
+   hand out. A call operand must avoid them: another argument's move could
+   otherwise clobber it before it is read. */
+static u16 call_arg_avoid_mask(const RegBank *bank, const u8 *args, u8 nargs)
+{
+    u16 mask = 0;
+    for (u8 i = 0; i < nargs; i++)
+    {
+        if (bank_allows(bank, args[i]))
+        {
+            mask |= (u16) (1u << args[i]);
+        }
+    }
+    return mask;
+}
+
+/* Mark every vreg whose value arrives in (caller side) or is loaded from
+   (callee side) an ABI argument register. Such a vreg must not itself be
+   allocated to an argument register, or one argument's move would clobber
+   another's incoming value. */
+static bool *mark_arg_reg_vregs(IrFunction *f, u32 nvregs, Arena *arena)
+{
+    bool *op = arena_alloc(arena, nvregs * sizeof(bool), sizeof(bool));
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        op[v] = false;
+    }
+    size_t nparams = vec_size(f->params);
+    for (size_t i = 0; i < nparams; i++)
+    {
+        u32 pv = ((IrParam *) vec_get(f->params, i))->vreg;
+        if (pv != NO_VREG)
+        {
+            op[pv] = true;
+        }
+    }
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode != OP_CALL)
+            {
+                continue;
+            }
+            if (in->extra.call.is_indirect && ir_operand_is_vreg(in->extra.call.callee))
+            {
+                op[in->extra.call.callee.u.vreg] = true;
+            }
+            for (u32 a = 0; a < in->extra.call.nargs; a++)
+            {
+                if (ir_operand_is_vreg(in->extra.call.args[a]))
+                {
+                    op[in->extra.call.args[a].u.vreg] = true;
+                }
+            }
+        }
+    }
+    return op;
+}
+
 static void linear_scan_class(RegAllocation *alloc, const LiveInterval **order, u32 nintervals,
-                              const RegBank *bank, const u32 *calls, u32 ncall, u8 *saved_mask,
-                              Arena *arena)
+                              const RegBank *bank, const u32 *calls, u32 ncall, const bool *call_op,
+                              u16 arg_avoid, const ClobberPos *clob, u32 nclob, Arena *arena)
 {
     ActiveInterval *active = arena_alloc(
         arena, (nintervals ? nintervals : 1) * sizeof(ActiveInterval), _Alignof(ActiveInterval));
@@ -227,17 +351,17 @@ static void linear_scan_class(RegAllocation *alloc, const LiveInterval **order, 
             }
         }
         bool crossing = crosses_call(calls, ncall, iv->start, iv->end);
-        int reg = pick_register(bank, active, nactive, crossing);
+        u16 avoid = call_op[iv->vreg] ? arg_avoid : 0;
+        if (bank->cls == RC_GPR)
+        {
+            avoid |= clobber_avoid(clob, nclob, iv->start, iv->end);
+        }
+        int reg = pick_register(bank, active, nactive, crossing, avoid);
         if (reg < 0)
         {
             continue;
         }
         alloc->phys_map[iv->vreg] = reg;
-        int callee = bank_callee_index(bank, (u8) reg);
-        if (callee >= 0)
-        {
-            *saved_mask |= (u8) (1u << callee);
-        }
         active[nactive].iv = iv;
         active[nactive].reg = (u8) reg;
         nactive++;
@@ -256,9 +380,25 @@ RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const Ta
     alloc->call_sites = call_site_vec(calls, ncall, arena);
 
     const LiveInterval **order = sorted_intervals(set, arena);
+    bool *call_op = mark_arg_reg_vregs(f, set->nvregs, arena);
+    u32 nclob = 0;
+    ClobberPos *clob = collect_clobbers(f, &set->pos, target, &nclob, arena);
+    u16 gpr_avoid = call_arg_avoid_mask(&target->gpr, target->gp_args, target->ngp);
+    u16 xmm_avoid = call_arg_avoid_mask(&target->xmm, target->fp_args, target->nfp);
+    linear_scan_class(alloc, order, set->n, &target->gpr, calls, ncall, call_op, gpr_avoid, clob,
+                      nclob, arena);
+    linear_scan_class(alloc, order, set->n, &target->xmm, calls, ncall, call_op, xmm_avoid, clob,
+                      nclob, arena);
     u8 saved_mask = 0;
-    linear_scan_class(alloc, order, set->n, &target->gpr, calls, ncall, &saved_mask, arena);
-    linear_scan_class(alloc, order, set->n, &target->xmm, calls, ncall, &saved_mask, arena);
+    for (u32 v = 0; v < set->nvregs; v++)
+    {
+        int reg = alloc->phys_map[v];
+        int callee = reg >= 0 ? bank_callee_index(&target->gpr, (u8) reg) : -1;
+        if (callee >= 0)
+        {
+            saved_mask |= (u8) (1u << callee);
+        }
+    }
     alloc->saved_mask = saved_mask;
     alloc->frame_size = pack_spills(alloc, set, target, arena);
     return alloc;

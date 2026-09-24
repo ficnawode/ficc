@@ -148,6 +148,34 @@ TEST(x86_emit, mem_operand_extended_bases)
     arena_free(a);
 }
 
+TEST(x86_emit, shift_immediate_forms)
+{
+    Arena *a = arena_new();
+    ByteBuf b;
+
+    bytebuf_init(&b, a);
+    emit_shift_imm(&b, 8, R_EAX, 4, 3);
+    expect_bytes(&b, (const u8[]) {0x48, 0xc1, 0xe0, 0x03}, 4);
+
+    bytebuf_init(&b, a);
+    emit_shift_imm(&b, 8, R_R11, 4, 1);
+    expect_bytes(&b, (const u8[]) {0x49, 0xc1, 0xe3, 0x01}, 4);
+
+    bytebuf_init(&b, a);
+    emit_shift_imm(&b, 4, R_EAX, 5, 2);
+    expect_bytes(&b, (const u8[]) {0xc1, 0xe8, 0x02}, 3);
+
+    bytebuf_init(&b, a);
+    emit_shift_imm(&b, 1, R_EAX, 4, 1);
+    expect_bytes(&b, (const u8[]) {0xc0, 0xe0, 0x01}, 3);
+
+    bytebuf_init(&b, a);
+    emit_shift_imm(&b, 1, 4, 4, 1); /* spl needs a REX prefix */
+    expect_bytes(&b, (const u8[]) {0x40, 0xc0, 0xe4, 0x01}, 4);
+
+    arena_free(a);
+}
+
 TEST(x86_emit, reg_reg_extends_both_operands)
 {
     Arena *a = arena_new();

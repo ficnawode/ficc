@@ -209,8 +209,17 @@ static void lower_binary(IrInstr *in, X86LowerCtx *ctx)
     RegLoc rl = result_loc(ctx, in);
     u8 dst = rl.kind == LOC_REG ? rl.reg : R_EAX;
     force_to_reg(ctx, in->ops[0], dst);
-    X86Operand rhs = resolve_rhs(ctx, in->ops[1], w, R_ECX);
-    emit_binop_rhs(ctx->buf, w, s, dst, rhs);
+    X86Operand rhs = resolve_rhs(ctx, in->ops[1], w, R_R11);
+    bool unit = rhs.kind == XOP_IMM && (rhs.u.imm == 1 || rhs.u.imm == -1);
+    if (unit && (in->opcode == OP_ADD || in->opcode == OP_SUB))
+    {
+        bool dec = in->opcode == OP_ADD ? rhs.u.imm == -1 : rhs.u.imm == 1;
+        emit_inc_dec(ctx->buf, w, dst, dec);
+    }
+    else
+    {
+        emit_binop_rhs(ctx->buf, w, s, dst, rhs);
+    }
     if (rl.kind == LOC_MEM)
     {
         emit_mov(ctx->buf, w, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
@@ -236,8 +245,15 @@ static void lower_shift(IrInstr *in, X86LowerCtx *ctx)
     RegLoc rl = result_loc(ctx, in);
     u8 dst = rl.kind == LOC_REG ? rl.reg : R_EAX;
     force_to_reg(ctx, in->ops[0], dst);
-    force_to_reg(ctx, in->ops[1], R_ECX);
-    emit_shift_cl(ctx->buf, w, dst, shift_digit[in->opcode]);
+    if (in->ops[1].is_imm)
+    {
+        emit_shift_imm(ctx->buf, w, dst, shift_digit[in->opcode], (u8) in->ops[1].u.imm);
+    }
+    else
+    {
+        force_to_reg(ctx, in->ops[1], R_ECX);
+        emit_shift_cl(ctx->buf, w, dst, shift_digit[in->opcode]);
+    }
     if (rl.kind == LOC_MEM)
     {
         emit_mov(ctx->buf, w, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
@@ -504,19 +520,19 @@ static void emit_load_2pow63(ByteBuf *buf, bool is_f32)
 {
     if (is_f32)
     {
-        emit_mov(buf, W_DWORD, xop_reg(R_ECX), xop_imm(F32_BITS_2POW63));
-        emit_movd_to_xmm(buf, R_XMM1, R_ECX, false);
+        emit_mov(buf, W_DWORD, xop_reg(R_R11), xop_imm(F32_BITS_2POW63));
+        emit_movd_to_xmm(buf, R_XMM1, R_R11, false);
     }
     else
     {
-        emit_mov(buf, W_QWORD, xop_reg(R_ECX), xop_imm(F64_BITS_2POW63));
-        emit_movd_to_xmm(buf, R_XMM1, R_ECX, true);
+        emit_mov(buf, W_QWORD, xop_reg(R_R11), xop_imm(F64_BITS_2POW63));
+        emit_movd_to_xmm(buf, R_XMM1, R_R11, true);
     }
 }
 
 static void emit_bit_imm(ByteBuf *buf, u8 digit, u8 dst_reg, u8 imm)
 {
-    bytebuf_append(buf, X86_REX_W);
+    bytebuf_append(buf, rex(true, false, false, dst_reg >= 8));
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_BIT_BASE);
     bytebuf_append(buf, modrm(3, digit, dst_reg));
@@ -531,9 +547,9 @@ static void emit_itof_u64_xmm(X86LowerCtx *ctx, u8 mf, bool is_f32)
     emit_cvtsi2fp(b, mf, R_XMM0, R_EAX);
     size_t jmp_field = emit_jmp_pending(b);
     size_t big_off = bytebuf_len(b);
-    emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_reg(R_EAX));
-    emit_bit_imm(b, X86_XOP_BTR, R_ECX, BIT_63);
-    emit_cvtsi2fp(b, mf, R_XMM0, R_ECX);
+    emit_mov(b, W_QWORD, xop_reg(R_R11), xop_reg(R_EAX));
+    emit_bit_imm(b, X86_XOP_BTR, R_R11, BIT_63);
+    emit_cvtsi2fp(b, mf, R_XMM0, R_R11);
     emit_load_2pow63(b, is_f32);
     emit_sse_add(b, mf, R_XMM0, R_XMM1);
     patch_rel32(b, js_field, big_off);
@@ -666,14 +682,14 @@ static void lower_fneg(IrInstr *in, X86LowerCtx *ctx)
     fp_operand_to_xmm(ctx, in->ops[0], w, dst);
     if (w == W_DWORD)
     {
-        emit_mov(ctx->buf, W_DWORD, xop_reg(R_ECX), xop_imm(F32_SIGN_BIT));
-        emit_movd_to_xmm(ctx->buf, R_XMM1, R_ECX, false);
+        emit_mov(ctx->buf, W_DWORD, xop_reg(R_R11), xop_imm(F32_SIGN_BIT));
+        emit_movd_to_xmm(ctx->buf, R_XMM1, R_R11, false);
         emit_sse_xor(ctx->buf, 0, dst, R_XMM1);
     }
     else
     {
-        emit_mov(ctx->buf, W_QWORD, xop_reg(R_ECX), xop_imm((i64) F64_SIGN_BIT));
-        emit_movd_to_xmm(ctx->buf, R_XMM1, R_ECX, true);
+        emit_mov(ctx->buf, W_QWORD, xop_reg(R_R11), xop_imm((i64) F64_SIGN_BIT));
+        emit_movd_to_xmm(ctx->buf, R_XMM1, R_R11, true);
         emit_sse_xor(ctx->buf, X86_SSE_66, dst, R_XMM1);
     }
     if (rl.kind == LOC_MEM)
@@ -735,8 +751,8 @@ static void lower_fcmp(IrInstr *in, X86LowerCtx *ctx)
     if (spec->join)
     {
         u8 pf_cc = spec->join == OP_AND ? CC_NP : CC_P;
-        emit_setcc_reg(b, pf_cc, R_EDX);
-        emit_binop_rhs(b, W_BYTE, &arith_specs[spec->join], R_EAX, xop_reg(R_EDX));
+        emit_setcc_reg(b, pf_cc, R_R11);
+        emit_binop_rhs(b, W_BYTE, &arith_specs[spec->join], R_EAX, xop_reg(R_R11));
     }
     emit_movzbl_al_eax(b);
     store_reg_result(ctx, in, rw, R_EAX);
@@ -1124,8 +1140,8 @@ static void emit_switch_chain(X86LowerCtx *ctx, IrSwitchCase *cases, u32 n,
         }
         else
         {
-            emit_mov(ctx->buf, W_QWORD, xop_reg(R_ECX), xop_imm(cases[i].val));
-            emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX);
+            emit_mov(ctx->buf, W_QWORD, xop_reg(R_R11), xop_imm(cases[i].val));
+            emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_R11);
         }
         emit_jcc(ctx->buf, CC_E, cases[i].label, ctx->block_patches, ctx->arena);
     }

@@ -51,6 +51,10 @@ struct TargetDesc
     u8 nclobbered_call;
     /* Whether operand `opnd` of an IR op must sit in a specific register. */
     bool (*needs_reg)(const TargetDesc *, IrOpcode op, u8 width, bool is_fp, int opnd);
+    /* Physical registers `in` implicitly clobbers beyond its encoded operands
+       (e.g. %cl for a shift, %rdx for a divide); a bitmask over phys ids.  A
+       value live across such an instruction must avoid those registers. */
+    u16 (*instr_clobbers)(const TargetDesc *, const IrInstr *in);
 };
 
 const TargetDesc *x86_64_target(void);

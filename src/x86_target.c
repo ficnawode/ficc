@@ -47,6 +47,42 @@ static bool x86_needs_reg(const TargetDesc *t, IrOpcode op, u8 width, bool is_fp
     }
 }
 
+/* Registers lowering writes that are not named by the operand encoding.  A
+   value live across one of these instructions cannot ride the clobbered
+   register; the allocator keeps it out. */
+static u16 x86_instr_clobbers(const TargetDesc *t, const IrInstr *in)
+{
+    (void) t;
+    u16 mask = 0;
+    switch (in->opcode)
+    {
+        case OP_SHL:
+        case OP_LSHR:
+        case OP_ASHR:
+            if (!in->ops[1].is_imm)
+            {
+                mask |= (u16) (1u << R_ECX);
+            }
+            break;
+        case OP_SDIV:
+        case OP_SREM:
+        case OP_UDIV:
+        case OP_UREM:
+            mask |= (u16) (1u << R_EDX);
+            break;
+        case OP_MEMCPY:
+            mask |= (u16) (1u << R_ESI) | (u16) (1u << R_EDI) | (u16) (1u << R_ECX);
+            break;
+        case OP_VA_START:
+        case OP_VA_ARG:
+            mask |= (u16) (1u << R_ECX) | (u16) (1u << R_EDX);
+            break;
+        default:
+            break;
+    }
+    return mask;
+}
+
 static const TargetDesc x86_64_desc = {
     .name = "x86-64",
     .gpr = {.cls = RC_GPR,
@@ -57,16 +93,16 @@ static const TargetDesc x86_64_desc = {
             .ncallee_saved = 6,
             .align = 8,
             .memory_only = false,
-            .fixed = {R_ESP, R_EBP, R_EAX, R_ECX, R_EDX, R_ESI, R_EDI, R_R8, R_R9, R_R10, R_R11},
-            .nfixed = 11},
+            .fixed = {R_ESP, R_EBP, R_EAX, R_R11},
+            .nfixed = 4},
     .xmm = {.cls = RC_XMM,
             .num_regs = 16,
             .names = {R_XMM0, R_XMM1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
             .ncallee_saved = 0,
             .align = 8,
             .memory_only = false,
-            .fixed = {R_XMM0, R_XMM1, 2, 3, 4, 5, 6, 7},
-            .nfixed = 8},
+            .fixed = {R_XMM0, R_XMM1},
+            .nfixed = 2},
     .x87 = {.cls = RC_X87, .memory_only = true, .align = 16},
     .word_width = 8,
     .frame_align = 16,
@@ -79,6 +115,7 @@ static const TargetDesc x86_64_desc = {
     .clobbered_call = clobbered_call,
     .nclobbered_call = 9,
     .needs_reg = x86_needs_reg,
+    .instr_clobbers = x86_instr_clobbers,
 };
 
 const TargetDesc *x86_64_target(void)

@@ -396,10 +396,10 @@ void x86_sysv_lower_va_arg(IrInstr *in, X86LowerCtx *ctx)
 
     size_t ovf_arm = bytebuf_len(b);
     emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_mem(x86_mem_rax(VA_FIELD_OVF)));
-    emit_mov(b, W_QWORD, xop_reg(R_R8), xop_reg(R_ECX));
+    emit_mov(b, W_QWORD, xop_reg(R_R11), xop_reg(R_ECX));
     emit_binop_rhs(b, W_QWORD, &arith_specs[OP_ADD], R_ECX, xop_imm(W_QWORD));
     emit_mov(b, W_QWORD, xop_mem(x86_mem_rax(VA_FIELD_OVF)), xop_reg(R_ECX));
-    emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_reg(R_R8));
+    emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_reg(R_R11));
 
     size_t done = bytebuf_len(b);
     patch_rel32(b, jge_field, ovf_arm);

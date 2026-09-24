@@ -266,11 +266,11 @@ static void emit_binop_byte(ByteBuf *buf, const ArithSpec *s, u8 dst_reg, X86Ope
         bytebuf_append_i8(buf, (i8) rhs.u.imm);
         return;
     }
-    /* Byte ops use `op r8, r/m8` (mem opcode − 1); a memory RHS is loaded to %cl first. */
+    /* Byte ops use `op r8, r/m8` (mem opcode − 1); a memory RHS is loaded to %r11b first. */
     if (rhs.kind == XOP_MEM)
     {
-        emit_mov_byte(buf, xop_reg(R_ECX), rhs);
-        rhs = xop_reg(R_ECX);
+        emit_mov_byte(buf, xop_reg(R_R11), rhs);
+        rhs = xop_reg(R_R11);
     }
     if (dst_reg >= 4 || rhs.u.reg >= 4)
     {
@@ -367,6 +367,27 @@ void emit_shift_cl(ByteBuf *buf, u8 width, u8 reg, u8 digit)
     emit_rex_if(buf, width == 8, false, false, reg >= 8);
     bytebuf_append(buf, SHIFT_OPCODE(width));
     bytebuf_append(buf, modrm(3, digit, reg));
+}
+
+/* Constant-count shift (C0/C1 /digit ib): no %cl, so it never touches the count register. */
+void emit_shift_imm(ByteBuf *buf, u8 width, u8 reg, u8 digit, u8 imm)
+{
+    if (width == 1)
+    {
+        if (reg >= 4)
+        {
+            bytebuf_append(buf, rex(false, false, false, reg >= 8));
+        }
+        bytebuf_append(buf, X86_SHIFT_RM8_IMM);
+        bytebuf_append(buf, modrm(3, digit, reg));
+        bytebuf_append_i8(buf, (i8) imm);
+        return;
+    }
+    emit_os16(buf, width);
+    emit_rex_if(buf, width == 8, false, false, reg >= 8);
+    bytebuf_append(buf, X86_SHIFT_RM32_IMM);
+    bytebuf_append(buf, modrm(3, digit, reg));
+    bytebuf_append_i8(buf, (i8) imm);
 }
 
 void emit_cdq(ByteBuf *buf, u8 width, bool is_unsigned)

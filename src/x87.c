@@ -263,7 +263,7 @@ static void emit_fstp_st0(X86LowerCtx *ctx)
 
 static void emit_bit_imm(ByteBuf *buf, u8 digit, u8 dst_reg, u8 imm)
 {
-    bytebuf_append(buf, X86_REX_W);
+    bytebuf_append(buf, rex(true, false, false, dst_reg >= 8));
     bytebuf_append(buf, X86_TWO_BYTE_ESC);
     bytebuf_append(buf, X86_BIT_BASE);
     bytebuf_append(buf, modrm(3, digit, dst_reg));
@@ -352,9 +352,9 @@ static void emit_itof_u64_x87(X86LowerCtx *ctx, X86Mem dst)
     size_t small_done = emit_jmp_pending(b);
 
     size_t big_off = bytebuf_len(b);
-    emit_mov(b, W_QWORD, xop_reg(R_ECX), xop_reg(R_EAX));
-    emit_bit_imm(b, X86_XOP_BTR, R_ECX, BIT_63);
-    emit_mov(b, W_QWORD, xop_mem(dst), xop_reg(R_ECX));
+    emit_mov(b, W_QWORD, xop_reg(R_R11), xop_reg(R_EAX));
+    emit_bit_imm(b, X86_XOP_BTR, R_R11, BIT_63);
+    emit_mov(b, W_QWORD, xop_mem(dst), xop_reg(R_R11));
     emit_fild(ctx, W_QWORD, dst);
     emit_load_2pow63_ld(ctx);
     emit_faddp(ctx);
@@ -618,8 +618,8 @@ void x87_lower_fcmp(IrInstr *in, X86LowerCtx *ctx)
     if (spec->join)
     {
         u8 pf_cc = spec->join == OP_AND ? CC_NP : CC_P;
-        emit_setcc_reg(b, pf_cc, R_EDX);
-        emit_binop_rhs(b, W_BYTE, &arith_specs[spec->join], R_EAX, xop_reg(R_EDX));
+        emit_setcc_reg(b, pf_cc, R_R11);
+        emit_binop_rhs(b, W_BYTE, &arith_specs[spec->join], R_EAX, xop_reg(R_R11));
     }
     emit_movzbl_al_eax(b);
     x86_lower_store_reg_result(ctx, in, rw, R_EAX);

@@ -21,9 +21,61 @@ TEST(target, x86_64_reg_bank_shape)
     EXPECT_EQ(t->xmm.names[7], 7);
     EXPECT_EQ(t->xmm.names[8], 8);
     EXPECT_EQ(t->xmm.names[15], 15);
-    EXPECT_EQ(t->xmm.nfixed, 8); /* xmm0-7 are the ABI argument lanes, never allocated */
+    EXPECT_EQ(t->xmm.nfixed, 2); /* xmm0/1 are lowering scratch; xmm2-15 allocate */
     EXPECT_EQ(t->x87.cls, RC_X87);
     EXPECT_TRUE(t->x87.memory_only);
+}
+
+TEST(target, x86_64_caller_saved_gprs_allocate)
+{
+    const TargetDesc *t = x86_64_target();
+    /* Every caller-saved GPR except %rax (scratch/return) and %r11 (call
+       scratch) is allocatable now that lowering clobbers them explicitly. */
+    const u8 allocatable[7] = {R_ECX, R_EDX, R_ESI, R_EDI, R_R8, R_R9, R_R10};
+    for (u8 i = 0; i < 7; i++)
+    {
+        bool fixed = false;
+        for (u8 f = 0; f < t->gpr.nfixed; f++)
+        {
+            if (t->gpr.fixed[f] == allocatable[i])
+            {
+                fixed = true;
+            }
+        }
+        EXPECT_FALSE(fixed);
+    }
+    bool rax_fixed = false;
+    bool r11_fixed = false;
+    for (u8 f = 0; f < t->gpr.nfixed; f++)
+    {
+        if (t->gpr.fixed[f] == R_EAX)
+        {
+            rax_fixed = true;
+        }
+        if (t->gpr.fixed[f] == R_R11)
+        {
+            r11_fixed = true;
+        }
+    }
+    EXPECT_TRUE(rax_fixed); /* %rax is the division/return scratch */
+    EXPECT_TRUE(r11_fixed); /* %r11 stays the record/indirect-call scratch */
+}
+
+TEST(target, x86_64_implicit_clobbers)
+{
+    const TargetDesc *t = x86_64_target();
+    IrInstr in = {0};
+    in.opcode = OP_SDIV;
+    EXPECT_EQ(t->instr_clobbers(t, &in), (u16) (1u << R_EDX));
+    in.opcode = OP_SHL;
+    in.ops[1].is_imm = true;
+    EXPECT_EQ(t->instr_clobbers(t, &in), 0); /* a constant count uses no %cl */
+    in.ops[1].is_imm = false;
+    EXPECT_EQ(t->instr_clobbers(t, &in), (u16) (1u << R_ECX));
+    in.opcode = OP_MEMCPY;
+    EXPECT_EQ(t->instr_clobbers(t, &in), (u16) ((1u << R_ESI) | (1u << R_EDI) | (1u << R_ECX)));
+    in.opcode = OP_ADD;
+    EXPECT_EQ(t->instr_clobbers(t, &in), 0);
 }
 
 TEST(target, x86_64_abi_arg_registers)
