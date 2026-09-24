@@ -408,6 +408,10 @@ typedef struct
     OutSec out[OUT_COUNT];
     StrMap *globals;
     Vec *global_order; /* Vec<GlobalSym*>, creation order (deterministic) */
+    Vec *archives;     /* Vec<Archive*> */
+    Vec *dsos;         /* Vec<const char*> — recognized dynamic inputs (deferred) */
+    Vec *search_dirs;  /* Vec<const char*> — -L dirs then the built-in list */
+    size_t nresolved;  /* objects below this index are already in the global table */
     u64 seg_off[3], seg_addr[3], seg_filesz[3], seg_memsz[3];
     u64 entry;
     bool has_start_stub;
@@ -423,6 +427,10 @@ static void linker_init(Linker *lk, const LinkConfig *cfg, Arena *arena)
     lk->objects = vec_new(arena);
     lk->globals = strmap_new(arena);
     lk->global_order = vec_new(arena);
+    lk->archives = vec_new(arena);
+    lk->dsos = vec_new(arena);
+    lk->search_dirs = vec_new(arena);
+    lk->nresolved = 0;
     lk->nerrors = 0;
     for (int i = 0; i < OUT_COUNT; i++)
     {
@@ -663,7 +671,7 @@ static void allocate_commons(Linker *lk)
 
 static void resolve_globals(Linker *lk)
 {
-    for (size_t oi = 0; oi < vec_size(lk->objects); oi++)
+    for (size_t oi = lk->nresolved; oi < vec_size(lk->objects); oi++)
     {
         InputObject *io = (InputObject *) vec_get(lk->objects, oi);
         u64 nsyms = vec_size(io->obj->symbols);
@@ -698,6 +706,7 @@ static void resolve_globals(Linker *lk)
             define_global(lk, s->name, s, out_id, io->sec_off[s->shndx] + s->value, false);
         }
     }
+    lk->nresolved = vec_size(lk->objects);
     allocate_commons(lk);
 }
 
@@ -1334,21 +1343,642 @@ static bool write_executable(Linker *lk)
     return true;
 }
 
+static const char *const DEFAULT_LIB_DIRS[] = {
+    "/usr/lib/x86_64-linux-gnu",
+    "/usr/lib64",
+    "/usr/lib",
+    "/lib/x86_64-linux-gnu",
+    "/lib64",
+    "/lib",
+    NULL,
+};
+
+typedef struct
+{
+    const char *name;
+    u64 offset; /* archive file offset of the member header */
+    u64 size;   /* member data size */
+    bool loaded;
+} ArchiveMember;
+
+typedef struct
+{
+    const char *path;
+    const u8 *data;
+    size_t len;
+    Vec *members;  /* Vec<ArchiveMember*> */
+    StrMap *index; /* symbol name -> ArchiveMember* (first definition wins) */
+} Archive;
+
+static u32 be32(const u8 *p)
+{
+    return ((u32) p[0] << 24) | ((u32) p[1] << 16) | ((u32) p[2] << 8) | (u32) p[3];
+}
+
+static u64 be64(const u8 *p)
+{
+    u64 hi = be32(p);
+    u64 lo = be32(p + 4);
+    return (hi << 32) | lo;
+}
+
+static u64 parse_dec(const u8 *p, size_t n)
+{
+    u64 v = 0;
+    for (size_t i = 0; i < n; i++)
+    {
+        if (p[i] < '0' || p[i] > '9')
+        {
+            break;
+        }
+        v = v * 10 + (u64) (p[i] - '0');
+    }
+    return v;
+}
+
+static bool is_elf(const u8 *data, size_t len)
+{
+    return len >= 4 && data[0] == ELFMAG0 && data[1] == ELFMAG1 && data[2] == ELFMAG2 &&
+           data[3] == ELFMAG3;
+}
+
+static bool is_archive(const u8 *data, size_t len)
+{
+    return len >= 8 && memcmp(data, "!<arch>\n", 8) == 0;
+}
+
+static ArchiveMember *archive_member_at(Archive *ar, u64 offset)
+{
+    for (size_t i = 0; i < vec_size(ar->members); i++)
+    {
+        ArchiveMember *m = (ArchiveMember *) vec_get(ar->members, i);
+        if (m->offset == offset)
+        {
+            return m;
+        }
+    }
+    return NULL;
+}
+
+static const char *archive_member_name(const u8 *header, const u8 *longnames, size_t longlen,
+                                       Arena *arena)
+{
+    char raw[17];
+    memcpy(raw, header, 16);
+    raw[16] = '\0';
+    for (int i = 15; i >= 0 && raw[i] == ' '; i--)
+    {
+        raw[i] = '\0';
+    }
+    if (raw[0] == '/' && raw[1] >= '0' && raw[1] <= '9' && longnames)
+    {
+        u64 off = parse_dec((const u8 *) raw + 1, strlen(raw) - 1);
+        if (off >= longlen)
+        {
+            return NULL;
+        }
+        const char *name = (const char *) (longnames + off);
+        size_t n = 0;
+        while (off + n < longlen && name[n] != '\n' && name[n] != '/' && name[n] != '\0')
+        {
+            n++;
+        }
+        char *copy = arena_alloc(arena, n + 1, 1);
+        memcpy(copy, name, n);
+        copy[n] = '\0';
+        return copy;
+    }
+    size_t n = strlen(raw);
+    if (n > 0 && raw[n - 1] == '/')
+    {
+        raw[n - 1] = '\0';
+    }
+    char *copy = arena_alloc(arena, strlen(raw) + 1, 1);
+    strcpy(copy, raw);
+    return copy;
+}
+
+static void archive_read_index(Archive *ar, const u8 *idx, size_t len, bool is64, Arena *arena)
+{
+    if (len < 4)
+    {
+        return;
+    }
+    u64 count = is64 ? (len >= 8 ? be64(idx) : 0) : be32(idx);
+    size_t base = is64 ? 8 : 4;
+    size_t esz = is64 ? 8 : 4;
+    if (count > (len - base) / esz)
+    {
+        return;
+    }
+    const u8 *names = idx + base + count * esz;
+    const u8 *end = idx + len;
+    for (u64 i = 0; i < count; i++)
+    {
+        u64 off = is64 ? be64(idx + base + i * 8) : be32(idx + base + i * 4);
+        if (names >= end)
+        {
+            break;
+        }
+        const char *sym = (const char *) names;
+        while (names < end && *names != '\0')
+        {
+            names++;
+        }
+        names++;
+        ArchiveMember *m = archive_member_at(ar, off);
+        if (m && !strmap_get(ar->index, sym))
+        {
+            strmap_set(ar->index, sym, m);
+        }
+    }
+    (void) arena;
+}
+
+static Archive *archive_parse(const u8 *data, size_t len, const char *path, Arena *arena)
+{
+    Archive *ar = arena_alloc(arena, sizeof(*ar), sizeof(void *));
+    ar->path = path;
+    ar->data = data;
+    ar->len = len;
+    ar->members = vec_new(arena);
+    ar->index = strmap_new(arena);
+
+    const u8 *longnames = NULL;
+    size_t longlen = 0;
+    const u8 *symidx = NULL;
+    size_t symlen = 0;
+    bool sym64 = false;
+    u64 off = 8;
+    while (off + 60 <= len)
+    {
+        const u8 *h = data + off;
+        if (h[58] != '`' || h[59] != '\n')
+        {
+            link_error("%s: malformed archive member header", path);
+            return NULL;
+        }
+        u64 msize = parse_dec(h + 48, 10);
+        if (off + 60 + msize > len)
+        {
+            link_error("%s: archive member extends past end of file", path);
+            return NULL;
+        }
+        char raw[17];
+        memcpy(raw, h, 16);
+        raw[16] = '\0';
+        if (strncmp(raw, "//", 2) == 0 && raw[2] == ' ')
+        {
+            longnames = h + 60;
+            longlen = msize;
+        }
+        else if (strncmp(raw, "/SYM64/", 7) == 0)
+        {
+            symidx = h + 60;
+            symlen = msize;
+            sym64 = true;
+        }
+        else if (raw[0] == '/' && raw[1] == ' ')
+        {
+            symidx = h + 60;
+            symlen = msize;
+            sym64 = false;
+        }
+        else
+        {
+            ArchiveMember *m = arena_alloc(arena, sizeof(*m), sizeof(void *));
+            m->name = archive_member_name(h, longnames, longlen, arena);
+            m->offset = off;
+            m->size = msize;
+            m->loaded = false;
+            if (!m->name)
+            {
+                link_error("%s: bad archive member name", path);
+                return NULL;
+            }
+            vec_push(ar->members, m);
+        }
+        off += 60 + msize;
+        if (msize & 1)
+        {
+            off++;
+        }
+    }
+    if (symidx)
+    {
+        archive_read_index(ar, symidx, symlen, sym64, arena);
+    }
+    return ar;
+}
+
+static ArchiveMember *archive_find(Archive *ar, const char *name)
+{
+    return (ArchiveMember *) strmap_get(ar->index, name);
+}
+
+static bool link_add_path(Linker *lk, const char *path);
+
+static bool file_exists(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+    {
+        return false;
+    }
+    fclose(f);
+    return true;
+}
+
+static const char *path_join(const char *dir, const char *name, Arena *arena)
+{
+    size_t n = strlen(dir) + 1 + strlen(name) + 1;
+    char *p = arena_alloc(arena, n, 1);
+    snprintf(p, n, "%s/%s", dir, name);
+    return p;
+}
+
+static const char *resolve_library(Linker *lk, const char *name)
+{
+    char fname[256];
+    for (size_t i = 0; i < vec_size(lk->search_dirs); i++)
+    {
+        const char *dir = (const char *) vec_get(lk->search_dirs, i);
+        snprintf(fname, sizeof(fname), "lib%s.so", name);
+        const char *cand = path_join(dir, fname, lk->arena);
+        if (file_exists(cand))
+        {
+            return cand;
+        }
+        snprintf(fname, sizeof(fname), "lib%s.a", name);
+        cand = path_join(dir, fname, lk->arena);
+        if (file_exists(cand))
+        {
+            return cand;
+        }
+    }
+    link_error("cannot find -l%s", name);
+    return NULL;
+}
+
+typedef struct
+{
+    Vec *tokens; /* Vec<const char*> */
+    size_t i;
+} ScriptScan;
+
+static const char *script_peek(ScriptScan *s)
+{
+    if (s->i >= vec_size(s->tokens))
+    {
+        return NULL;
+    }
+    return (const char *) vec_get(s->tokens, s->i);
+}
+
+static void script_tokenize(const u8 *data, size_t len, Vec *tokens, Arena *arena)
+{
+    size_t i = 0;
+    while (i < len)
+    {
+        if (data[i] == '/' && i + 1 < len && data[i + 1] == '*')
+        {
+            i += 2;
+            while (i + 1 < len && !(data[i] == '*' && data[i + 1] == '/'))
+            {
+                i++;
+            }
+            i += 2;
+            continue;
+        }
+        if (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r')
+        {
+            i++;
+            continue;
+        }
+        if (data[i] == '(' || data[i] == ')' || data[i] == ',')
+        {
+            char *tok = arena_alloc(arena, 2, 1);
+            tok[0] = (char) data[i];
+            tok[1] = '\0';
+            vec_push(tokens, tok);
+            i++;
+            continue;
+        }
+        size_t start = i;
+        while (i < len && data[i] != ' ' && data[i] != '\t' && data[i] != '\n' && data[i] != '\r' &&
+               data[i] != '(' && data[i] != ')' && data[i] != ',')
+        {
+            i++;
+        }
+        size_t n = i - start;
+        char *tok = arena_alloc(arena, n + 1, 1);
+        memcpy(tok, data + start, n);
+        tok[n] = '\0';
+        vec_push(tokens, tok);
+    }
+}
+
+static bool script_directive(const char *word)
+{
+    if (!(word[0] >= 'A' && word[0] <= 'Z'))
+    {
+        return false;
+    }
+    for (const char *p = word; *p; p++)
+    {
+        if (!((*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void script_skip_parens(ScriptScan *s)
+{
+    if (script_peek(s) && strcmp(script_peek(s), "(") == 0)
+    {
+        s->i++;
+    }
+    int depth = 1;
+    while (depth > 0)
+    {
+        const char *t = script_peek(s);
+        if (!t)
+        {
+            return;
+        }
+        if (strcmp(t, "(") == 0)
+        {
+            depth++;
+        }
+        else if (strcmp(t, ")") == 0)
+        {
+            depth--;
+        }
+        s->i++;
+    }
+}
+
+static bool script_parse_list(Linker *lk, ScriptScan *s, const char *base_dir, int depth);
+
+static bool script_add_file(Linker *lk, const char *word, const char *base_dir)
+{
+    if (word[0] == '/')
+    {
+        return link_add_path(lk, word);
+    }
+    if (base_dir)
+    {
+        const char *cand = path_join(base_dir, word, lk->arena);
+        if (file_exists(cand))
+        {
+            return link_add_path(lk, cand);
+        }
+    }
+    for (size_t i = 0; i < vec_size(lk->search_dirs); i++)
+    {
+        const char *cand = path_join((const char *) vec_get(lk->search_dirs, i), word, lk->arena);
+        if (file_exists(cand))
+        {
+            return link_add_path(lk, cand);
+        }
+    }
+    link_error("ld script: cannot find '%s'", word);
+    return false;
+}
+
+static bool script_parse_list(Linker *lk, ScriptScan *s, const char *base_dir, int depth)
+{
+    if (depth > 16)
+    {
+        link_error("ld script nesting too deep");
+        return false;
+    }
+    while (s->i < vec_size(s->tokens))
+    {
+        const char *t = script_peek(s);
+        if (strcmp(t, ")") == 0)
+        {
+            s->i++;
+            return true;
+        }
+        if (strcmp(t, "(") == 0 || strcmp(t, ",") == 0)
+        {
+            s->i++;
+            continue;
+        }
+        if (script_directive(t))
+        {
+            const char *dir = t;
+            s->i++;
+            if (strcmp(dir, "OUTPUT_FORMAT") == 0 || strcmp(dir, "OUTPUT_ARCH") == 0 ||
+                strcmp(dir, "TARGET") == 0 || strcmp(dir, "ENTRY") == 0)
+            {
+                script_skip_parens(s);
+            }
+            else if (strcmp(dir, "SEARCH_DIR") == 0)
+            {
+                s->i++;
+                const char *d = script_peek(s);
+                if (d)
+                {
+                    vec_push(lk->search_dirs, (void *) d);
+                    s->i++;
+                }
+                script_skip_parens(s);
+            }
+            else if (strcmp(dir, "GROUP") == 0 || strcmp(dir, "INPUT") == 0 ||
+                     strcmp(dir, "AS_NEEDED") == 0)
+            {
+                if (script_peek(s) && strcmp(script_peek(s), "(") == 0)
+                {
+                    s->i++;
+                }
+                if (!script_parse_list(lk, s, base_dir, depth + 1))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                link_error("ld script: unsupported directive '%s'", dir);
+                return false;
+            }
+        }
+        else
+        {
+            s->i++;
+            if (!script_add_file(lk, t, base_dir))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static const char *dir_of(const char *path, Arena *arena)
+{
+    const char *slash = strrchr(path, '/');
+    if (!slash)
+    {
+        return NULL;
+    }
+    size_t n = (size_t) (slash - path);
+    char *d = arena_alloc(arena, n + 1, 1);
+    memcpy(d, path, n);
+    d[n] = '\0';
+    return d;
+}
+
+static bool link_add_path(Linker *lk, const char *path)
+{
+    size_t len = 0;
+    u8 *data = read_whole_file(path, &len, lk->arena);
+    if (!data)
+    {
+        return false;
+    }
+    if (is_archive(data, len))
+    {
+        Archive *ar = archive_parse(data, len, path, lk->arena);
+        if (!ar)
+        {
+            return false;
+        }
+        vec_push(lk->archives, ar);
+        return true;
+    }
+    if (is_elf(data, len))
+    {
+        if (len < sizeof(Elf64_Ehdr))
+        {
+            link_error("%s: truncated ELF file", path);
+            return false;
+        }
+        Elf64_Ehdr eh;
+        memcpy(&eh, data, sizeof(eh));
+        if (eh.e_type == ET_DYN)
+        {
+            vec_push(lk->dsos, (void *) path);
+            link_warn("%s: dynamic input recognized; dynamic linking is not implemented yet", path);
+            return true;
+        }
+        LinkObject *obj = link_read_memory(data, len, path, lk->arena);
+        if (!obj)
+        {
+            return false;
+        }
+        return merge_object(lk, obj);
+    }
+    ScriptScan s = {.tokens = vec_new(lk->arena), .i = 0};
+    script_tokenize(data, len, s.tokens, lk->arena);
+    if (vec_size(s.tokens) == 0)
+    {
+        link_error("%s: unrecognized input format", path);
+        return false;
+    }
+    return script_parse_list(lk, &s, dir_of(path, lk->arena), 0);
+}
+
+static void collect_undefined(Linker *lk, Vec *out)
+{
+    for (size_t oi = 0; oi < vec_size(lk->objects); oi++)
+    {
+        InputObject *io = (InputObject *) vec_get(lk->objects, oi);
+        for (u64 si = 0; si < vec_size(io->obj->sections); si++)
+        {
+            Vec *list = (Vec *) vec_get(io->obj->relocs, si);
+            for (size_t ri = 0; ri < vec_size(list); ri++)
+            {
+                LinkReloc *r = (LinkReloc *) vec_get(list, ri);
+                LinkSym *sym = (LinkSym *) vec_get(io->obj->symbols, r->sym);
+                if (sym->bind == STB_LOCAL || sym->shndx != SHN_UNDEF)
+                {
+                    continue;
+                }
+                if (strmap_get(lk->globals, sym->name))
+                {
+                    continue;
+                }
+                vec_push(out, (void *) sym->name);
+            }
+        }
+    }
+}
+
+static bool pull_from_archives(Linker *lk)
+{
+    if (vec_size(lk->archives) == 0)
+    {
+        return false;
+    }
+    Vec *undef = vec_new(lk->arena);
+    collect_undefined(lk, undef);
+    bool pulled = false;
+    for (size_t ai = 0; ai < vec_size(lk->archives); ai++)
+    {
+        Archive *ar = (Archive *) vec_get(lk->archives, ai);
+        for (size_t ui = 0; ui < vec_size(undef); ui++)
+        {
+            const char *name = (const char *) vec_get(undef, ui);
+            if (strmap_get(lk->globals, name))
+            {
+                continue;
+            }
+            ArchiveMember *m = archive_find(ar, name);
+            if (!m || m->loaded)
+            {
+                continue;
+            }
+            m->loaded = true;
+            char label[512];
+            snprintf(label, sizeof(label), "%s(%s)", ar->path, m->name);
+            LinkObject *obj =
+                link_read_memory(ar->data + m->offset + 60, m->size, label, lk->arena);
+            if (!obj || !merge_object(lk, obj))
+            {
+                return false;
+            }
+            pulled = true;
+        }
+    }
+    return pulled;
+}
+
 int link_run(const LinkConfig *cfg, Vec *inputs, Arena *arena)
 {
-    if (vec_size(cfg->libs) > 0)
-    {
-        link_error("library inputs (-l) are not supported yet");
-        return 1;
-    }
     Linker lk;
     linker_init(&lk, cfg, arena);
+    for (size_t i = 0; i < vec_size(cfg->lib_paths); i++)
+    {
+        vec_push(lk.search_dirs, vec_get(cfg->lib_paths, i));
+    }
+    for (const char *const *d = DEFAULT_LIB_DIRS; *d; d++)
+    {
+        vec_push(lk.search_dirs, (void *) *d);
+    }
     for (size_t i = 0; i < vec_size(inputs); i++)
     {
         LinkInput *in = (LinkInput *) vec_get(inputs, i);
-        LinkObject *obj =
-            in->kind == LINK_INPUT_OBJECT ? in->object : link_read_object(in->path, arena);
-        if (!obj || !merge_object(&lk, obj))
+        if (in->kind == LINK_INPUT_OBJECT)
+        {
+            if (!merge_object(&lk, in->object))
+            {
+                return 1;
+            }
+        }
+        else if (!link_add_path(&lk, in->path))
+        {
+            return 1;
+        }
+    }
+    for (size_t i = 0; i < vec_size(cfg->libs); i++)
+    {
+        const char *name = (const char *) vec_get(cfg->libs, i);
+        const char *path = resolve_library(&lk, name);
+        if (!path || !link_add_path(&lk, path))
         {
             return 1;
         }
@@ -1357,6 +1987,14 @@ int link_run(const LinkConfig *cfg, Vec *inputs, Arena *arena)
     if (lk.nerrors)
     {
         return 1;
+    }
+    while (pull_from_archives(&lk))
+    {
+        resolve_globals(&lk);
+        if (lk.nerrors)
+        {
+            return 1;
+        }
     }
     prepare_entry(&lk);
     if (lk.nerrors)
