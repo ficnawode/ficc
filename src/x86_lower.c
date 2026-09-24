@@ -911,28 +911,27 @@ static u8 load_int_operand(X86LowerCtx *ctx, IrOperand op, bool *is_signed)
 /* Tables only when the case range is small (≤ JT_MAX_RANGE); sparse switches use a chain. */
 #define JT_MAX_RANGE 256
 
-/* Bounds-check %rax to [min,max], subtract min, jump through the full-range table. */
+/* Bounds-check %eax to [min,max], subtract min, jump through the full-range table.
+   The check is unsigned: after `sub min`, the in-range values are 0..range and
+   everything else wraps above it, so one `ja` catches both sides. */
 static void emit_switch_table(X86LowerCtx *ctx, IrSwitchCase *cases, u32 n, i64 min, i64 max,
                               const char *default_label)
 {
-    u8 below_cc = min < 0 ? CC_L : CC_B;
-    u8 above_cc = min < 0 ? CC_G : CC_A;
     u64 range = (u64) max - (u64) min;
 
-    emit_mov(ctx->buf, W_QWORD, xop_reg(R_ECX), xop_imm(min));
-    emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_ECX);
-    emit_jcc(ctx->buf, below_cc, default_label, ctx->block_patches, ctx->arena);
-    emit_mov(ctx->buf, W_QWORD, xop_reg(R_EDX), xop_imm(max));
-    emit_reg_reg(ctx->buf, cmp_spec.mem, R_EAX, R_EDX);
-    emit_jcc(ctx->buf, above_cc, default_label, ctx->block_patches, ctx->arena);
-    emit_reg_reg(ctx->buf, arith_specs[OP_SUB].mem, R_EAX, R_ECX);
+    if (min != 0)
+    {
+        emit_binop_rhs(ctx->buf, W_DWORD, &arith_specs[OP_SUB], R_EAX, xop_imm(min));
+    }
+    emit_binop_rhs(ctx->buf, W_DWORD, &cmp_spec, R_EAX, xop_imm((i64) range));
+    emit_jcc(ctx->buf, CC_A, default_label, ctx->block_patches, ctx->arena);
 
-    emit_lea(ctx->buf, R_EDX, (X86Mem) {.base = NO_REG, .index = NO_REG, .scale = 1, .disp = 0});
+    emit_lea(ctx->buf, R_R11, (X86Mem) {.base = NO_REG, .index = NO_REG, .scale = 1, .disp = 0});
     size_t disp_field_off = bytebuf_len(ctx->buf) - 4;
 
-    emit_mov(ctx->buf, W_QWORD, xop_reg(R_EAX),
-             xop_mem((X86Mem) {.base = R_EDX, .index = R_EAX, .scale = 8, .disp = 0}));
-    emit_reg_reg(ctx->buf, arith_specs[OP_ADD].mem, R_EAX, R_EDX);
+    emit_movsx(ctx->buf, W_DWORD, W_QWORD, R_EAX,
+               xop_mem((X86Mem) {.base = R_R11, .index = R_EAX, .scale = 4, .disp = 0}));
+    emit_reg_reg(ctx->buf, arith_specs[OP_ADD].mem, R_EAX, R_R11);
     emit_jmp_reg(ctx->buf, R_EAX);
 
     size_t nentries = (size_t) range + 1;
@@ -981,7 +980,7 @@ static void lower_switch(IrInstr *in, X86LowerCtx *ctx)
     const char *default_label = in->extra.sw.default_label;
 
     bool is_signed;
-    (void) load_int_operand(ctx, in->ops[0], &is_signed);
+    u8 cw = load_int_operand(ctx, in->ops[0], &is_signed);
 
     if (n >= 2)
     {
@@ -992,7 +991,7 @@ static void lower_switch(IrInstr *in, X86LowerCtx *ctx)
             max = MAX(cases[i].val, max);
         }
         u64 range = (u64) max - (u64) min;
-        if (range <= JT_MAX_RANGE)
+        if (cw <= W_DWORD && range <= JT_MAX_RANGE && fits_i32(min) && fits_i32(max))
         {
             emit_switch_table(ctx, cases, n, min, max, default_label);
             return;
@@ -1562,7 +1561,7 @@ static void emit_switch_tables(X86LowerCtx *ctx)
     {
         return;
     }
-    bytebuf_align(ctx->buf, W_QWORD);
+    bytebuf_align(ctx->buf, W_DWORD);
     for (size_t t = 0; t < nst; t++)
     {
         LowerSwitchTable *rec = (LowerSwitchTable *) vec_get(ctx->switch_tables, t);
@@ -1570,7 +1569,7 @@ static void emit_switch_tables(X86LowerCtx *ctx)
         for (u32 i = 0; i < rec->nentries; i++)
         {
             size_t ti = block_index_of_label(ctx, rec->targets[i]);
-            bytebuf_append_u64(ctx->buf, (u64) ((i64) ctx->block_offsets[ti] - (i64) table_off));
+            bytebuf_append_i32(ctx->buf, (i32) ((i64) ctx->block_offsets[ti] - (i64) table_off));
         }
         patch_rel32(ctx->buf, rec->disp_field_off, table_off);
     }
