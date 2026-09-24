@@ -4037,6 +4037,68 @@ static bool is_toplevel_declaration(ASTNode *decl)
     }
 }
 
+/* True when `spec` carries the given GNU attribute. */
+static bool spec_has_attr(const FuncSpecs *spec, AttrKind kind)
+{
+    if (!spec->attrs)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < vec_size(spec->attrs); i++)
+    {
+        Attr *a = (Attr *) vec_get(spec->attrs, i);
+        if (a->kind == kind)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The signature of a top-level function definition or declaration. */
+static FuncSig *toplevel_func_sig(ASTNode *decl)
+{
+    if (decl->kind == AST_FUNC_DEF)
+    {
+        return &ast_as(ASTFuncDef, decl)->sig;
+    }
+    if (decl->kind == AST_FUNC_DECL)
+    {
+        return &ast_as(ASTFuncDecl, decl)->sig;
+    }
+    return NULL;
+}
+
+/* Emits one 8-byte pointer into .init_array/.fini_array per function carrying
+   the `constructor`/`destructor` attribute, in declaration order. */
+static void emit_ctor_arrays(ASTProgram *prog, IrModule *mod, Arena *arena, AttrKind kind,
+                             IrSection section)
+{
+    size_t ndecls = vec_size(prog->decls);
+    for (size_t i = 0; i < ndecls; i++)
+    {
+        ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
+        FuncSig *sig = toplevel_func_sig(decl);
+        if (!sig || !spec_has_attr(&sig->spec, kind))
+        {
+            continue;
+        }
+        u32 idx = (u32) vec_size(mod->globals);
+        IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
+        g->name = anon_name(
+            arena, section == IR_SECTION_INIT_ARRAY ? "__init_array" : "__fini_array", idx);
+        g->type = type_array(type_ptr(type_void()), 1);
+        g->init_data = encode_const_bytes(arena, 0, 8);
+        g->init_len = 8;
+        g->align = 8;
+        g->section = section;
+        g->linkage = IR_LINK_LOCAL;
+        g->relocs = NULL;
+        ir_global_add_func_reloc(g, 0, sig->name, arena);
+        vec_push(mod->globals, g);
+    }
+}
+
 IrModule *ir_build_module(ASTNode *ast, const IRConfig *cfg, Arena *arena)
 {
     (void) cfg;
@@ -4073,5 +4135,8 @@ IrModule *ir_build_module(ASTNode *ast, const IRConfig *cfg, Arena *arena)
             return NULL;
         }
     }
+
+    emit_ctor_arrays(prog, mod, arena, ATTR_CONSTRUCTOR, IR_SECTION_INIT_ARRAY);
+    emit_ctor_arrays(prog, mod, arena, ATTR_DESTRUCTOR, IR_SECTION_FINI_ARRAY);
     return mod;
 }

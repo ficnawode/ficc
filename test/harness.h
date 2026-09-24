@@ -3,6 +3,14 @@
 #include <stdio.h>
 #include <string.h>
 
+/* glibc's <sys/cdefs.h> defines `__attribute__(x)` away for compilers that do
+   not claim GCC/clang/tinycc. ficc understands `__attribute__` directly, so
+   drop that macro and let the parser see the real tokens. gcc/clang have no
+   macro here and are unaffected. */
+#ifdef __attribute__
+#undef __attribute__
+#endif
+
 typedef struct TestCase
 {
     const char *suite;

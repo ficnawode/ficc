@@ -80,7 +80,8 @@ static u64 append_global(ByteBuf *buf, IrGlobal *g)
     return off;
 }
 
-u64 *codegen_global_offsets(CodegenModule *cm, ByteBuf *rodata, ByteBuf *data, Arena *arena)
+u64 *codegen_global_offsets(CodegenModule *cm, ByteBuf *rodata, ByteBuf *data, ByteBuf *init_array,
+                            ByteBuf *fini_array, Arena *arena)
 {
     size_t nglobals = cm->globals ? vec_size(cm->globals) : 0;
     u64 *global_off = arena_alloc(arena, (nglobals ? nglobals : 1) * sizeof(u64), sizeof(u64));
@@ -95,6 +96,12 @@ u64 *codegen_global_offsets(CodegenModule *cm, ByteBuf *rodata, ByteBuf *data, A
                 break;
             case IR_SECTION_DATA:
                 global_off[i] = append_global(data, g);
+                break;
+            case IR_SECTION_INIT_ARRAY:
+                global_off[i] = append_global(init_array, g);
+                break;
+            case IR_SECTION_FINI_ARRAY:
+                global_off[i] = append_global(fini_array, g);
                 break;
             case IR_SECTION_BSS:
                 global_off[i] = align_up(bss_size, g->align);

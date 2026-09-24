@@ -119,11 +119,30 @@ struct ASTNode
 
 #define ast_as(T, node) ((T *) (node))
 
+/* GNU `__attribute__` names ficc gives semantics to (append-only). Any other
+   spelling is recorded as ATTR_UNKNOWN and ignored (pedantic warns). */
+typedef enum
+{
+    ATTR_PACKED,
+    ATTR_ALIGNED,
+    ATTR_CONSTRUCTOR,
+    ATTR_DESTRUCTOR,
+    ATTR_UNKNOWN,
+} AttrKind;
+
+typedef struct
+{
+    AttrKind kind;
+    u64 align;        /* ATTR_ALIGNED: requested alignment, 0 = target default */
+    const char *name; /* ATTR_UNKNOWN: the spelling as written */
+} Attr;
+
 /* Function declaration specifiers (C11 §6.7.4); one field per new specifier. */
 typedef struct
 {
     StorageClass storage;
     bool is_inline;
+    Vec *attrs; /* Vec<Attr*> — GNU attributes seen around the declarator */
 } FuncSpecs;
 
 /* Signature shared by a function definition (`{...}`) and a prototype (`;`). */
@@ -214,6 +233,7 @@ struct ASTVarDecl
     struct InitPlan *plan; /* aggregate/string flattening plan (filled by semantic) or NULL */
     u32 alignas;           /* requested _Alignas alignment, 0 = natural */
     u32 bit_width;         /* bit-field width in bits; 0 = ordinary member (§6.7.2.1) */
+    Vec *attrs;            /* Vec<Attr*> — GNU attributes on this declarator */
 };
 
 /* An init-declarator list `int a = 1, b = 2;` sharing one declaration-specifier sequence (C11
@@ -439,6 +459,7 @@ struct ASTStructDecl
     const char *tag;
     bool is_union;
     Vec *fields; /* Vec<ASTVarDecl*> */
+    Vec *attrs;  /* Vec<Attr*> — GNU attributes on the record definition */
 };
 
 typedef struct EnumConstant

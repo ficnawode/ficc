@@ -59,9 +59,10 @@ struct RecordField
 {
     const char *name; /* field name, compared by content (not interned) */
     Type *type;
-    u32 offset;     /* byte offset of the member (bit-field: of its storage unit) */
-    i32 bit_offset; /* bit-field: bit position within the storage unit, else -1 */
-    i32 bit_width;  /* bit-field width, else -1 */
+    u32 offset;         /* byte offset of the member (bit-field: of its storage unit) */
+    i32 bit_offset;     /* bit-field: bit position within the storage unit, else -1 */
+    i32 bit_width;      /* bit-field width, else -1 */
+    u32 align_override; /* explicit `_Alignas`/`aligned` member alignment, 0 = natural */
 };
 
 struct Type
@@ -92,6 +93,8 @@ struct Type
             const char *tag; /* NULL only for anonymous (out of scope) */
             Vec *fields;     /* Vec<RecordField*> */
             bool complete;
+            bool packed;        /* `__attribute__((packed))`: members align 1 */
+            u32 align_override; /* `__attribute__((aligned(n)))` on the record, 0 = natural */
             Vec *qual_variants; /* Vec<Type*>: const variants of this record,
                                    kept in sync by type_record_complete */
         } record;               /* TYPE_STRUCT / TYPE_UNION */

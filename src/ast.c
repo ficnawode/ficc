@@ -106,6 +106,7 @@ ASTNode *ast_var_decl(Type *type, const char *name, ASTNode *init, StorageClass 
     n->plan = NULL;
     n->alignas = 0;
     n->bit_width = 0;
+    n->attrs = NULL;
     return &n->base;
 }
 
@@ -348,6 +349,7 @@ ASTNode *ast_struct_decl(const char *tag, bool is_union, Vec *fields, Loc loc, A
     n->tag = tag;
     n->is_union = is_union;
     n->fields = fields;
+    n->attrs = NULL;
     return &n->base;
 }
 

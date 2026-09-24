@@ -13,6 +13,7 @@ static RecordField *field(Arena *a, const char *name, Type *t)
     rf->offset = 0;
     rf->bit_offset = -1;
     rf->bit_width = -1;
+    rf->align_override = 0;
     return rf;
 }
 

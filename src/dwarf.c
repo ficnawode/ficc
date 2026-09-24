@@ -1088,10 +1088,13 @@ void dwarf_build(CodegenModule *cm, const char *compile_unit, const char *comp_d
     size_t nglobals = cm->globals ? vec_size(cm->globals) : 0;
     if (nglobals)
     {
-        ByteBuf scratch_ro, scratch_data;
+        ByteBuf scratch_ro, scratch_data, scratch_init, scratch_fini;
         bytebuf_init(&scratch_ro, arena);
         bytebuf_init(&scratch_data, arena);
-        u64 *global_off = codegen_global_offsets(cm, &scratch_ro, &scratch_data, arena);
+        bytebuf_init(&scratch_init, arena);
+        bytebuf_init(&scratch_fini, arena);
+        u64 *global_off = codegen_global_offsets(cm, &scratch_ro, &scratch_data, &scratch_init,
+                                                 &scratch_fini, arena);
         for (size_t i = 0; i < nglobals; i++)
         {
             global_emit(&c, (IrGlobal *) vec_get(cm->globals, i), global_off[i]);

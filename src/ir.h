@@ -220,6 +220,8 @@ typedef enum
     IR_SECTION_DATA,
     IR_SECTION_RODATA,
     IR_SECTION_BSS,
+    IR_SECTION_INIT_ARRAY, /* .init_array: 8-byte pointers run before main */
+    IR_SECTION_FINI_ARRAY, /* .fini_array: run at exit */
 } IrSection;
 
 /* ELF-ish linkage: strings/statics are local, file-scope vars global, extern vars undefined. */

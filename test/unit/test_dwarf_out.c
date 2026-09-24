@@ -299,10 +299,12 @@ TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
 
     /* Globals: defined ones carry DW_OP_addr, externs none, names match. */
     size_t nglobals = vec_size(cm->globals);
-    ByteBuf ro, da;
+    ByteBuf ro, da, ia, fa;
     bytebuf_init(&ro, a);
     bytebuf_init(&da, a);
-    u64 *g_off = codegen_global_offsets(cm, &ro, &da, a);
+    bytebuf_init(&ia, a);
+    bytebuf_init(&fa, a);
+    u64 *g_off = codegen_global_offsets(cm, &ro, &da, &ia, &fa, a);
     for (size_t i = 0; i < nglobals; i++)
     {
         IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);

@@ -612,6 +612,7 @@ Type *type_va_list(void)
     gp->offset = 0;
     gp->bit_offset = -1;
     gp->bit_width = -1;
+    gp->align_override = 0;
     vec_push(fields, gp);
     RecordField *fp = arena_alloc(type_arena, sizeof(RecordField), sizeof(void *));
     fp->name = "fp_offset";
@@ -619,6 +620,7 @@ Type *type_va_list(void)
     fp->offset = 0;
     fp->bit_offset = -1;
     fp->bit_width = -1;
+    fp->align_override = 0;
     vec_push(fields, fp);
     RecordField *ovf = arena_alloc(type_arena, sizeof(RecordField), sizeof(void *));
     ovf->name = "overflow_arg_area";
@@ -626,6 +628,7 @@ Type *type_va_list(void)
     ovf->offset = 0;
     ovf->bit_offset = -1;
     ovf->bit_width = -1;
+    ovf->align_override = 0;
     vec_push(fields, ovf);
     RecordField *regs = arena_alloc(type_arena, sizeof(RecordField), sizeof(void *));
     regs->name = "reg_save_area";
@@ -633,6 +636,7 @@ Type *type_va_list(void)
     regs->offset = 0;
     regs->bit_offset = -1;
     regs->bit_width = -1;
+    regs->align_override = 0;
     vec_push(fields, regs);
     type_record_complete(rec, fields);
     the_va_list = type_array(rec, 1);
@@ -786,6 +790,8 @@ Type *type_record(TypeKind kind, const char *tag)
     t->record.tag = tag_intern(tag);
     t->record.fields = NULL;
     t->record.complete = false;
+    t->record.packed = false;
+    t->record.align_override = 0;
     t->record.qual_variants = NULL;
     strmap_set(tag_table, t->record.tag, t);
     return t;
@@ -810,6 +816,8 @@ Type *type_record_anon(TypeKind kind)
     t->record.tag = NULL;
     t->record.fields = NULL;
     t->record.complete = false;
+    t->record.packed = false;
+    t->record.align_override = 0;
     t->record.qual_variants = NULL;
     return t;
 }
@@ -850,14 +858,18 @@ void type_record_relayout(Type *t)
         for (size_t i = 0; i < n; i++)
         {
             RecordField *f = (RecordField *) vec_get(fields, i);
-            if (f->type->align > max_align)
+            /* `packed` drops a member's natural alignment to 1; an explicit
+               `_Alignas`/`aligned` override wins. */
+            u32 fa =
+                f->align_override ? f->align_override : (t->record.packed ? 1 : f->type->align);
+            if (fa > max_align)
             {
-                max_align = f->type->align;
+                max_align = fa;
             }
             if (f->bit_width < 0)
             {
                 cursor = (cursor + 7) / 8 * 8;
-                u32 offset = align_up((u32) (cursor / 8), f->type->align);
+                u32 offset = align_up((u32) (cursor / 8), fa);
                 f->offset = offset;
                 /* A flexible array member (§6.7.2.1p18) is the last member and
                    contributes no bytes; sizeof stops at its aligned offset. */
@@ -882,6 +894,10 @@ void type_record_relayout(Type *t)
                 cursor = unit_start + bit_in_unit + f->bit_width;
             }
         }
+        if (t->record.align_override > max_align)
+        {
+            max_align = t->record.align_override;
+        }
         t->align = max_align;
         t->size = align_up((u32) ((cursor + 7) / 8), max_align);
     }
@@ -901,10 +917,16 @@ void type_record_relayout(Type *t)
             {
                 max_size = (u32) f->type->size;
             }
-            if (f->type->align > max_align)
+            u32 fa =
+                f->align_override ? f->align_override : (t->record.packed ? 1 : f->type->align);
+            if (fa > max_align)
             {
-                max_align = f->type->align;
+                max_align = fa;
             }
+        }
+        if (t->record.align_override > max_align)
+        {
+            max_align = t->record.align_override;
         }
         t->align = max_align;
         t->size = align_up(max_size, max_align);

@@ -64,7 +64,9 @@ struct CodegenModule
 
 CodegenModule *codegen_ir_to_machine(IrModule *ir, const CodegenConfig *cfg, Arena *arena);
 
-/* Per-global .rodata/.data/.bss offsets; shared by elf.c and dwarf.c layout. */
-u64 *codegen_global_offsets(CodegenModule *cm, ByteBuf *rodata, ByteBuf *data, Arena *arena);
+/* Per-global .rodata/.data/.bss/.init_array/.fini_array offsets; shared by
+   elf.c and dwarf.c layout. */
+u64 *codegen_global_offsets(CodegenModule *cm, ByteBuf *rodata, ByteBuf *data, ByteBuf *init_array,
+                            ByteBuf *fini_array, Arena *arena);
 
 #endif

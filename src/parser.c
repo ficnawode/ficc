@@ -41,6 +41,7 @@ typedef struct Declarator
     /* Parameters captured when the outermost suffix folded the signature. */
     Vec *func_params;
     bool func_variadic;
+    Vec *attrs; /* Vec<Attr*> — GNU attributes on this declarator */
 } Declarator;
 
 typedef struct Specs
@@ -50,6 +51,7 @@ typedef struct Specs
     u32 alignas;
     ASTNode *tag_def;
     bool is_inline; /* the `inline` function specifier was seen (C11 §6.7.4) */
+    Vec *attrs;     /* Vec<Attr*> — GNU attributes before the type */
 } Specs;
 
 static Token *peek_token(Parser *p)
@@ -78,6 +80,21 @@ static void parse_error(Parser *p, const char *fmt, ...)
 {
     Token *t = peek_token(p);
     fprintf(stderr, "%s:%u:%u: [parse] error: ", t->loc.file, t->loc.line, t->loc.col);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fprintf(stderr, "\n");
+}
+
+/* A pedantic-only diagnostic; silent by default (GNU attribute tolerance). */
+static void parse_warning(Parser *p, Loc loc, const char *fmt, ...)
+{
+    if (!p->cfg.pedantic)
+    {
+        return;
+    }
+    fprintf(stderr, "%s:%u:%u: [parse] warning: ", loc.file, loc.line, loc.col);
     va_list args;
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
@@ -243,38 +260,180 @@ static bool is_attribute_name(Token *t)
                                     strcmp(t->payload.str, "__attribute") == 0);
 }
 
-static void skip_attribute(Parser *p)
+/* Classifies one attribute name; `align` is filled for `aligned(n)`. */
+static AttrKind attribute_kind(const char *name, u64 *align, bool *has_align)
 {
-    if (!is_attribute_name(peek_token(p)))
+    *has_align = false;
+    *align = 0;
+    if (strcmp(name, "packed") == 0 || strcmp(name, "__packed__") == 0)
     {
-        return;
+        return ATTR_PACKED;
+    }
+    if (strcmp(name, "aligned") == 0 || strcmp(name, "__aligned__") == 0)
+    {
+        return ATTR_ALIGNED;
+    }
+    if (strcmp(name, "constructor") == 0 || strcmp(name, "__constructor__") == 0)
+    {
+        return ATTR_CONSTRUCTOR;
+    }
+    if (strcmp(name, "destructor") == 0 || strcmp(name, "__destructor__") == 0)
+    {
+        return ATTR_DESTRUCTOR;
+    }
+    return ATTR_UNKNOWN;
+}
+
+/* Consumes one `__attribute__ (( name[(args)] , ... ))` group, appending an
+   `Attr` per name to `out`. Arguments other than `aligned(n)` are parsed and
+   discarded. */
+static bool parse_attribute_list(Parser *p, Vec *out)
+{
+    next_token(p); /* __attribute__ */
+    if (peek_token(p)->kind != TOK_LPAREN)
+    {
+        parse_error(p, "expected '(' after __attribute__");
+        return false;
     }
     next_token(p);
     if (peek_token(p)->kind != TOK_LPAREN)
     {
-        return;
+        parse_error(p, "expected '((' after __attribute__");
+        return false;
     }
-    i32 depth = 0;
-    do
+    next_token(p);
+
+    while (peek_token(p)->kind != TOK_RPAREN && peek_token(p)->kind != TOK_EOF)
     {
-        TokenKind k = peek_token(p)->kind;
-        if (k == TOK_LPAREN)
+        Token *name = peek_token(p);
+        if (name->kind != TOK_IDENT)
         {
-            depth++;
-        }
-        else if (k == TOK_RPAREN)
-        {
-            depth--;
+            parse_error(p, "expected attribute name");
+            return false;
         }
         next_token(p);
-    } while (depth > 0 && peek_token(p)->kind != TOK_EOF);
+        u64 align = 0;
+        bool has_align = false;
+        AttrKind kind = attribute_kind(name->payload.str, &align, &has_align);
+        if (kind == ATTR_UNKNOWN)
+        {
+            parse_warning(p, name->loc, "attribute '%s' ignored", name->payload.str);
+        }
+        if (peek_token(p)->kind == TOK_LPAREN)
+        {
+            next_token(p);
+            if (kind == ATTR_ALIGNED && peek_token(p)->kind == TOK_INT_LIT)
+            {
+                align = (u64) peek_token(p)->payload.int_val;
+                has_align = true;
+                next_token(p);
+            }
+            i32 depth = 1;
+            while (depth > 0 && peek_token(p)->kind != TOK_EOF)
+            {
+                if (peek_token(p)->kind == TOK_LPAREN)
+                {
+                    depth++;
+                }
+                else if (peek_token(p)->kind == TOK_RPAREN)
+                {
+                    depth--;
+                }
+                next_token(p);
+            }
+        }
+        Attr *a = arena_alloc(p->arena, sizeof(Attr), _Alignof(Attr));
+        a->kind = kind;
+        a->align = has_align ? align : 0;
+        a->name = name->payload.str;
+        vec_push(out, a);
+
+        if (peek_token(p)->kind == TOK_COMMA)
+        {
+            next_token(p);
+            continue;
+        }
+        break;
+    }
+    if (!expect_token(p, TOK_RPAREN, "')'") || !expect_token(p, TOK_RPAREN, "')'"))
+    {
+        return false;
+    }
+    return true;
 }
 
-static void skip_attributes(Parser *p)
+/* Parses every `__attribute__` group at the current position into `*slot`. */
+static bool parse_attributes(Parser *p, Vec **slot)
 {
     while (is_attribute_name(peek_token(p)))
     {
-        skip_attribute(p);
+        if (!*slot)
+        {
+            *slot = vec_new(p->arena);
+        }
+        if (!parse_attribute_list(p, *slot))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool attrs_has_packed(Vec *attrs)
+{
+    if (!attrs)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < vec_size(attrs); i++)
+    {
+        if (((Attr *) vec_get(attrs, i))->kind == ATTR_PACKED)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The largest `aligned(n)` request (bare `aligned` → 16), or 0. */
+static u32 attrs_requested_align(Vec *attrs)
+{
+    u32 align = 0;
+    if (!attrs)
+    {
+        return 0;
+    }
+    for (size_t i = 0; i < vec_size(attrs); i++)
+    {
+        Attr *a = (Attr *) vec_get(attrs, i);
+        if (a->kind != ATTR_ALIGNED)
+        {
+            continue;
+        }
+        u32 v = a->align ? (u32) a->align : 16;
+        if (v > align)
+        {
+            align = v;
+        }
+    }
+    return align;
+}
+
+/* Appends `src` (may be NULL) onto `*dst` (created on demand). */
+static void merge_attrs(Vec **dst, Vec *src)
+{
+    if (!src)
+    {
+        return;
+    }
+    if (!*dst)
+    {
+        *dst = src;
+        return;
+    }
+    for (size_t i = 0; i < vec_size(src); i++)
+    {
+        vec_push(*dst, vec_get(src, i));
     }
 }
 
@@ -293,6 +452,7 @@ static ASTNode *parse_member_decl(Parser *p, Type *base, u32 alignas, Token *sta
         bool unnamed = peek_token(p)->kind == TOK_COLON;
         if (unnamed)
         {
+            d = (Declarator) {0};
             d.type = base;
             d.name = NULL;
         }
@@ -333,8 +493,15 @@ static ASTNode *parse_member_decl(Parser *p, Type *base, u32 alignas, Token *sta
             return NULL;
         }
         ASTNode *decl = ast_var_decl(d.type, d.name, NULL, SC_NONE, start->loc, p->arena);
-        ast_as(ASTVarDecl, decl)->alignas = alignas;
-        ast_as(ASTVarDecl, decl)->bit_width = bit_width;
+        ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
+        vd->alignas = alignas;
+        vd->bit_width = bit_width;
+        merge_attrs(&vd->attrs, d.attrs);
+        u32 aattr = attrs_requested_align(vd->attrs);
+        if (aattr > vd->alignas)
+        {
+            vd->alignas = aattr;
+        }
         vec_push(decls, decl);
         if (peek_token(p)->kind != TOK_COMMA)
         {
@@ -367,6 +534,13 @@ static void collect_member_fields(Arena *arena, Vec *record_fields, ASTNode *mem
         rf->offset = 0;
         rf->bit_offset = -1;
         rf->bit_width = vd->bit_width > 0 ? (i32) vd->bit_width : -1;
+        u32 align = attrs_has_packed(vd->attrs) ? 1 : vd->alignas;
+        u32 aattr = attrs_requested_align(vd->attrs);
+        if (aattr > align)
+        {
+            align = aattr;
+        }
+        rf->align_override = align;
         vec_push(record_fields, rf);
     }
 }
@@ -583,6 +757,26 @@ static Type *parse_record_specifier(Parser *p, bool is_union, ASTNode **tag_def)
         if (!fields)
         {
             return NULL;
+        }
+        /* `struct S { ... } __attribute__((packed, aligned(n)))`: apply the
+           suffix attributes to the record and re-lay it out. */
+        Vec *suffix_attrs = NULL;
+        if (!parse_attributes(p, &suffix_attrs))
+        {
+            return NULL;
+        }
+        if (suffix_attrs)
+        {
+            if (attrs_has_packed(suffix_attrs))
+            {
+                ty->record.packed = true;
+            }
+            u32 a = attrs_requested_align(suffix_attrs);
+            if (a > ty->record.align_override)
+            {
+                ty->record.align_override = a;
+            }
+            type_record_relayout(ty);
         }
         if (tag)
         {
@@ -891,7 +1085,10 @@ static Type *apply_quals(Type *t, u8 quals)
 static Specs parse_decl_specifiers(Parser *p)
 {
     Specs s = {0};
-    skip_attributes(p);
+    if (!parse_attributes(p, &s.attrs))
+    {
+        return s;
+    }
     for (;;)
     {
         TokenKind k = peek_token(p)->kind;
@@ -983,7 +1180,10 @@ static Specs parse_decl_specifiers(Parser *p)
     {
         s.type = apply_quals(s.type, trail_quals);
     }
-    skip_attributes(p);
+    if (!parse_attributes(p, &s.attrs))
+    {
+        return s;
+    }
     return s;
 }
 
@@ -1146,8 +1346,12 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
     out->array_dims = 0;
     out->func_params = NULL;
     out->func_variadic = false;
+    out->attrs = NULL;
 
-    skip_attributes(p);
+    if (!parse_attributes(p, &out->attrs))
+    {
+        return false;
+    }
     enum
     {
         MAX_PTR_LAYERS = 64,
@@ -1214,8 +1418,7 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
             return false;
         }
     }
-    skip_attributes(p);
-    return true;
+    return parse_attributes(p, &out->attrs);
 }
 
 static bool parse_declarator(Parser *p, Type *base, Declarator *out)
@@ -1251,7 +1454,10 @@ static ASTNode *parse_param(Parser *p)
     }
 
     ASTNode *decl = ast_var_decl(type_decay(d.type), d.name, NULL, SC_NONE, start->loc, p->arena);
-    ast_as(ASTVarDecl, decl)->alignas = s.alignas;
+    ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
+    vd->alignas = s.alignas;
+    merge_attrs(&vd->attrs, s.attrs);
+    merge_attrs(&vd->attrs, d.attrs);
     return decl;
 }
 
@@ -1438,6 +1644,14 @@ static StoragePrefix parse_storage_prefix(Parser *p)
 
 static Specs parse_specs_storage(Parser *p, bool storage_ok)
 {
+    /* A GNU attribute may precede the storage class (`__attribute__((x)) static
+       int f;`); collect it before the storage prefix consumes `static`. */
+    Vec *lead_attrs = NULL;
+    if (!parse_attributes(p, &lead_attrs))
+    {
+        return (Specs) {0};
+    }
+
     u8 lead = 0;
     StorageClass storage = SC_NONE;
     if (storage_ok)
@@ -1448,6 +1662,7 @@ static Specs parse_specs_storage(Parser *p, bool storage_ok)
     }
 
     Specs s = parse_decl_specifiers(p);
+    merge_attrs(&s.attrs, lead_attrs);
     s.type = apply_quals(s.type, lead);
     s.storage = storage;
     return s;
@@ -1530,6 +1745,13 @@ static bool push_declarator(Parser *p, Specs s, Declarator d, Loc start, Vec *de
     ASTNode *decl = ast_var_decl(d.type, d.name, NULL, s.storage, start, p->arena);
     ASTVarDecl *vd = ast_as(ASTVarDecl, decl);
     vd->alignas = s.alignas;
+    merge_attrs(&vd->attrs, s.attrs);
+    merge_attrs(&vd->attrs, d.attrs);
+    u32 aattr = attrs_requested_align(vd->attrs);
+    if (aattr > vd->alignas)
+    {
+        vd->alignas = aattr;
+    }
     if (peek_token(p)->kind == TOK_ASSIGN)
     {
         next_token(p);
@@ -1645,6 +1867,8 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
     }
     StorageClass storage = s.storage == SC_STATIC ? SC_STATIC : SC_NONE;
     FuncSpecs fs = {.storage = storage, .is_inline = s.is_inline};
+    merge_attrs(&fs.attrs, s.attrs);
+    merge_attrs(&fs.attrs, d.attrs);
     if (!check_not_enumerator(p, d.name))
     {
         return NULL;
@@ -1666,7 +1890,10 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
     {
         return NULL;
     }
-    skip_attributes(p);
+    if (!parse_attributes(p, &fs.attrs))
+    {
+        return NULL;
+    }
 
     if (peek_token(p)->kind == TOK_SEMI)
     {
@@ -1707,6 +1934,8 @@ static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start
     }
     StorageClass storage = s.storage == SC_STATIC ? SC_STATIC : SC_NONE;
     FuncSpecs fs = {.storage = storage, .is_inline = s.is_inline};
+    merge_attrs(&fs.attrs, s.attrs);
+    merge_attrs(&fs.attrs, d.attrs);
     if (!check_not_enumerator(p, d.name))
     {
         return NULL;
@@ -1715,7 +1944,10 @@ static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start
     {
         return NULL;
     }
-    skip_attributes(p);
+    if (!parse_attributes(p, &fs.attrs))
+    {
+        return NULL;
+    }
     bool is_definition = peek_token(p)->kind == TOK_LBRACE;
 
     Vec *params;
