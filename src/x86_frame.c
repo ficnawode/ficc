@@ -62,6 +62,34 @@ static u32 stage_total_bytes(const SysvArgPlan *plans, size_t n, bool debug)
     return total;
 }
 
+/* Static alloca: every OP_ALLOCA reserves a fixed frame slot, so its address
+   is a cheap %rbp-relative lea that lowering recomputes instead of spilling.
+   Slots are placed below `base`; returns the bytes they consume. */
+static u32 plan_allocas(IrFunction *f, u32 base)
+{
+    u32 cum = 0;
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode != OP_ALLOCA)
+            {
+                continue;
+            }
+            u32 size = (u32) in->ops[0].u.imm;
+            u32 align = size >= STACK_ALIGN ? STACK_ALIGN : 8;
+            cum = align_up(cum, align);
+            in->frame_off = base + cum + size;
+            cum += align_up(size, align);
+        }
+    }
+    return cum;
+}
+
 static void collect_saved(RegAllocation *alloc, const TargetDesc *target, LinearFrame *out)
 {
     out->nsaved = 0;
@@ -109,6 +137,7 @@ void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *targe
         out->save_area_off = align_up(locals_end, STACK_ALIGN) + va_bytes;
         locals_end = out->save_area_off;
     }
+    locals_end += plan_allocas(f, locals_end);
     out->frame_size = align_up(locals_end, STACK_ALIGN);
 
     /* The pushes below %rbp total 8*nsaved; an odd count leaves %rsp 8 mod 16

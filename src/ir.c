@@ -124,6 +124,7 @@ static IrInstr *instr_new(IrBlock *bb, IrOpcode opcode, u32 result, u8 nops)
     ins->result = result;
     ins->line = bb->func->cur_line;
     ins->nops = nops;
+    ins->frame_off = 0;
     vec_push(bb->instrs, ins);
     return ins;
 }

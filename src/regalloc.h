@@ -16,6 +16,8 @@ typedef struct
     Vec *call_sites; /* Vec<u32*> — instruction positions of every OP_CALL */
     u8 saved_mask;   /* bit i set when target->gpr.callee_saved[i] is used */
     u32 frame_size;  /* packed spill bytes below %rbp */
+    u8 *remat;       /* vreg → 1 when the value is recomputed at each use, not stored */
+    i32 *remat_disp; /* vreg → [rbp+disp] the recomputed address loads from (remat only) */
 } RegAllocation;
 
 /* All-spilled allocation: every vreg rides its own packed spill slot, matching
@@ -34,9 +36,10 @@ typedef struct
 {
     enum
     {
-        LOC_REG, /* in physical register `reg`, class `cls` */
-        LOC_MEM, /* at [rbp + disp] */
-        LOC_IMM, /* a constant */
+        LOC_REG,   /* in physical register `reg`, class `cls` */
+        LOC_MEM,   /* at [rbp + disp] */
+        LOC_IMM,   /* a constant */
+        LOC_REMAT, /* recompute: an address at [rbp + disp] */
     } kind;
     RegClass cls;
     u8 reg;

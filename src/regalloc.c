@@ -89,6 +89,15 @@ static RegAllocation *alloc_new(const LiveIntervals *set, Arena *arena)
     alloc->phys_map = phys_map;
     alloc->slot_map = slot_map;
     alloc->saved_mask = 0;
+    u8 *remat = arena_alloc(arena, set->nvregs * sizeof(u8), sizeof(u8));
+    i32 *remat_disp = arena_alloc(arena, set->nvregs * sizeof(i32), sizeof(i32));
+    for (u32 v = 0; v < set->nvregs; v++)
+    {
+        remat[v] = 0;
+        remat_disp[v] = 0;
+    }
+    alloc->remat = remat;
+    alloc->remat_disp = remat_disp;
     return alloc;
 }
 
@@ -148,7 +157,7 @@ static u32 pack_spills(const RegAllocation *alloc, const LiveIntervals *set,
     for (u32 i = 0; i < set->n; i++)
     {
         const LiveInterval *iv = &set->ivs[i];
-        if (alloc->phys_map[iv->vreg] >= 0)
+        if (alloc->phys_map[iv->vreg] >= 0 || alloc->remat[iv->vreg])
         {
             continue;
         }
@@ -560,7 +569,7 @@ static void linear_scan_class(RegAllocation *alloc, const LiveInterval **order, 
     for (u32 k = 0; k < nintervals; k++)
     {
         const LiveInterval *iv = order[k];
-        if (iv->cls != bank->cls)
+        if (iv->cls != bank->cls || alloc->remat[iv->vreg])
         {
             continue;
         }
@@ -622,6 +631,13 @@ RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const Ta
     const LiveInterval **order = sorted_intervals(set, arena);
     bool *call_op = mark_arg_reg_vregs(f, set->nvregs, arena);
     IrInstr **defs = collect_defs(f, set->nvregs, arena);
+    for (u32 v = 0; v < set->nvregs; v++)
+    {
+        if (defs[v] && defs[v]->opcode == OP_ALLOCA)
+        {
+            alloc->remat[v] = 1;
+        }
+    }
     RegClass *vreg_cls = arena_alloc(arena, set->nvregs * sizeof(RegClass), _Alignof(RegClass));
     for (u32 v = 0; v < set->nvregs; v++)
     {
@@ -696,6 +712,13 @@ RegLoc loc_of(const RegAllocation *alloc, IrOperand op)
     {
         loc.kind = LOC_REG;
         loc.reg = (u8) phys;
+        return loc;
+    }
+    if (alloc->remat[op.u.vreg])
+    {
+        loc.kind = LOC_REMAT;
+        loc.cls = RC_GPR;
+        loc.disp = alloc->remat_disp[op.u.vreg];
         return loc;
     }
     loc.kind = LOC_MEM;

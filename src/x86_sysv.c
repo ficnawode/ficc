@@ -259,6 +259,10 @@ static GpArgMove resolve_gp_arg(X86LowerCtx *ctx, IrOperand op, u8 dst, u8 width
         m.kind = GP_ARG_REG;
         m.src_reg = l.reg;
     }
+    else if (l.kind == LOC_REMAT)
+    {
+        m.kind = GP_ARG_PURE; /* recomputed from %rbp; touches no argument lane */
+    }
     else
     {
         m.kind = GP_ARG_MEM;

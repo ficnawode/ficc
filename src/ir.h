@@ -175,6 +175,7 @@ struct IrInstr
         IrVaStartPayload va_start;
         IrMemPayload mem;
     } extra;
+    u32 frame_off; /* OP_ALLOCA: frame displacement of the result, set by the frame planner */
 };
 
 typedef struct IrFunction IrFunction;

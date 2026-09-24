@@ -48,11 +48,6 @@ typedef struct
 /* Sentinel for a position slot whose byte offset has not been recorded yet. */
 #define POS_UNSET UINT32_MAX
 
-static u32 align_up(u32 n, u32 a)
-{
-    return (n + a - 1) / a * a;
-}
-
 static u8 vreg_width(X86LowerCtx *ctx, u32 vreg)
 {
     return ctx->mod->widths[vreg];
@@ -121,6 +116,11 @@ static void force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
         }
         return;
     }
+    if (l.kind == LOC_REMAT)
+    {
+        emit_lea(b, reg, rbp_mem(l.disp));
+        return;
+    }
     emit_mov(b, w, xop_reg(reg), xop_mem(rbp_mem(l.disp)));
 }
 
@@ -145,6 +145,11 @@ static X86Operand resolve(X86LowerCtx *ctx, IrOperand op, u8 scratch)
     if (l.kind == LOC_REG)
     {
         return xop_reg(l.reg);
+    }
+    if (l.kind == LOC_REMAT)
+    {
+        emit_lea(ctx->buf, scratch, rbp_mem(l.disp));
+        return xop_reg(scratch);
     }
     return xop_mem(rbp_mem(l.disp));
 }
@@ -358,7 +363,7 @@ static void emit_icmp_cmp(X86LowerCtx *ctx, IrOperand lhs, IrOperand rhs)
         {
             emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg, xop_reg(rl.reg));
         }
-        else if (w1 == w)
+        else if (w1 == w && rl.kind == LOC_MEM)
         {
             emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg, xop_mem(rbp_mem(rl.disp)));
         }
@@ -874,15 +879,10 @@ static void lower_gep(IrInstr *in, X86LowerCtx *ctx)
 
 static void lower_alloca(IrInstr *in, X86LowerCtx *ctx)
 {
-    u32 aligned = align_up((u32) in->ops[0].u.imm, STACK_ALIGN);
-    emit_binop_rhs(ctx->buf, W_QWORD, &arith_specs[OP_SUB], R_ESP, xop_imm(aligned));
-    RegLoc rl = result_loc(ctx, in);
-    if (rl.kind == LOC_MEM)
-    {
-        emit_mov(ctx->buf, W_QWORD, xop_mem(rbp_mem(rl.disp)), xop_reg(R_ESP));
-        return;
-    }
-    emit_mov(ctx->buf, W_QWORD, xop_reg(rl.reg), xop_reg(R_ESP));
+    /* The frame planner reserves a static slot and the result is recomputed at
+       each use (LOC_REMAT), so the definition emits nothing. */
+    (void) in;
+    (void) ctx;
 }
 
 static bool operand_in_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
@@ -1361,6 +1361,12 @@ static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
         return;
     }
     RegLoc sl = loc_of(ctx->alloc, src);
+    if (sl.kind == LOC_REMAT)
+    {
+        force_to_reg(ctx, src, R_EAX);
+        store_reg_to_loc(ctx, dl, dw, R_EAX);
+        return;
+    }
     if (dl.kind == LOC_REG)
     {
         if (sl.kind == LOC_REG)
@@ -1428,6 +1434,12 @@ static void emit_scratch_store(X86LowerCtx *ctx, IrOperand src)
     {
         ASSERT(sl.kind == LOC_REG);
         emit_sse_store(ctx->buf, MF_OF(w), sm, sl.reg);
+        return;
+    }
+    if (sl.kind == LOC_REMAT)
+    {
+        force_to_reg(ctx, src, R_EAX);
+        emit_mov(ctx->buf, w, xop_mem(sm), xop_reg(R_EAX));
         return;
     }
     if (sl.kind == LOC_REG)
@@ -1946,6 +1958,18 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     alloc->frame_size += 16;
     LinearFrame frame = {0};
     x86_frame_plan(alloc, f, target, debug, &frame);
+    for (size_t b = 0; b < vec_size(f->blocks); b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        for (size_t ii = 0; ii < vec_size(blk->instrs); ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode == OP_ALLOCA)
+            {
+                alloc->remat_disp[in->result] = -(i32) in->frame_off;
+            }
+        }
+    }
     /* Reserved slot sits below every real spill slot. */
     i32 scratch_disp = -(i32) (frame.saved_bytes + alloc->frame_size);
 
