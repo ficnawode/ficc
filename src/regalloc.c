@@ -617,12 +617,37 @@ static void linear_scan_class(RegAllocation *alloc, const LiveInterval **order, 
     }
 }
 
+/* %rbp without the frame-pointer reservation: it joins the allocatable
+   callee-saved bank. */
+static RegBank bank_with_rbp_allocatable(const RegBank *bank, u8 frame_reg)
+{
+    RegBank out = *bank;
+    u8 n = 0;
+    for (u8 i = 0; i < out.nfixed; i++)
+    {
+        if (out.fixed[i] != frame_reg)
+        {
+            out.fixed[n++] = out.fixed[i];
+        }
+    }
+    out.nfixed = n;
+    return out;
+}
+
 /* Linear scan in interval-start order: assign the lowest free register, else
    spill.  Reserved registers (implicit operands and scratch) are never handed
    out, so a fixed-encoding instruction's operands can be coerced in place. */
 RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const TargetDesc *target,
                                Arena *arena)
 {
+    return regalloc_linear_ex(f, set, target, arena, false);
+}
+
+RegAllocation *regalloc_linear_ex(IrFunction *f, const LiveIntervals *set, const TargetDesc *target,
+                                  Arena *arena, bool allow_rbp)
+{
+    RegBank gpr =
+        allow_rbp ? bank_with_rbp_allocatable(&target->gpr, target->frame_reg) : target->gpr;
     RegAllocation *alloc = alloc_new(set, arena);
     u32 ncall = 0;
     u32 *calls = collect_call_positions(f, &set->pos, &ncall, arena);
@@ -665,17 +690,17 @@ RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const Ta
     u32 nclob = 0;
     ClobberPos *clob = collect_clobbers(f, &set->pos, target, &nclob, arena);
     int *pref = collect_arg_prefs(f, set->nvregs, target, arena);
-    u16 gpr_avoid = call_arg_avoid_mask(&target->gpr, target->gp_args, target->ngp);
+    u16 gpr_avoid = call_arg_avoid_mask(&gpr, target->gp_args, target->ngp);
     u16 xmm_avoid = call_arg_avoid_mask(&target->xmm, target->fp_args, target->nfp);
-    linear_scan_class(alloc, order, set->n, &target->gpr, calls, ncall, call_op, gpr_avoid, clob,
-                      nclob, defs, vreg_cls, pref, arena);
+    linear_scan_class(alloc, order, set->n, &gpr, calls, ncall, call_op, gpr_avoid, clob, nclob,
+                      defs, vreg_cls, pref, arena);
     linear_scan_class(alloc, order, set->n, &target->xmm, calls, ncall, call_op, xmm_avoid, clob,
                       nclob, defs, vreg_cls, pref, arena);
     u8 saved_mask = 0;
     for (u32 v = 0; v < set->nvregs; v++)
     {
         int reg = alloc->phys_map[v];
-        int callee = reg >= 0 ? bank_callee_index(&target->gpr, (u8) reg) : -1;
+        int callee = reg >= 0 ? bank_callee_index(&gpr, (u8) reg) : -1;
         if (callee >= 0)
         {
             saved_mask |= (u8) (1u << callee);

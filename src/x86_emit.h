@@ -89,6 +89,7 @@ typedef enum
     X86_BIT_BASE = 0xBA,   /* 0F BA /digit ib: bt/bts/btr on r/m64 */
 
     X86_PUSH_R_BASE = 0x50,
+    X86_POP_R_BASE = 0x58,
     X86_PUSH_RBP = 0x55,
     X86_LEAVE = 0xC9,
     X86_RET = 0xC3,
@@ -363,7 +364,7 @@ void emit_movzx(ByteBuf *buf, u8 src_width, u8 dst_width, u8 dst_reg, X86Operand
 void emit_movsx(ByteBuf *buf, u8 src_width, u8 dst_width, u8 dst_reg, X86Operand src);
 void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src);
 void emit_push_reg(ByteBuf *buf, u8 reg);
-
+void emit_pop_reg(ByteBuf *buf, u8 reg);
 void emit_global_addr_to(ByteBuf *buf, u8 reg, u32 global_idx, Vec *patches, Arena *arena);
 void emit_global_addr(ByteBuf *buf, u32 global_idx, Vec *patches, Arena *arena);
 void emit_func_addr_to(ByteBuf *buf, u8 reg, const char *name, Vec *patches, Arena *arena);

@@ -41,6 +41,8 @@ struct X86LowerCtx
     bool debug;             /* record line boundaries for DWARF */
     int fpu_depth;          /* x87 stack depth; every lowering leaves it at 0 */
     i32 scratch_disp;       /* [rbp+disp] 16-byte slot used to break phi-copy cycles */
+    bool shared_epilogue;   /* multiple returns jump to one epilogue instead of repeating it */
+    Vec *epilogue_jumps;    /* Vec<u32*> — rel32 fields of the `ret`s that jump to it */
 };
 
 u8 x86_lower_vreg_width(X86LowerCtx *ctx, u32 vreg);

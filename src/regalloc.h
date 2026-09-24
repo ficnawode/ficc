@@ -29,6 +29,11 @@ RegAllocation *regalloc_all_spilled(IrFunction *f, const LiveIntervals *set, Are
 RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const TargetDesc *target,
                                Arena *arena);
 
+/* As regalloc_linear, but %rbp joins the allocatable bank (the caller omits the
+   frame pointer, so it is no longer the frame base). */
+RegAllocation *regalloc_linear_ex(IrFunction *f, const LiveIntervals *set, const TargetDesc *target,
+                                  Arena *arena, bool allow_rbp);
+
 typedef struct CodegenCtx CodegenCtx;
 
 /* Where an operand currently lives while lowering an instruction. */

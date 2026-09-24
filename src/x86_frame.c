@@ -103,13 +103,76 @@ static void collect_saved(RegAllocation *alloc, const TargetDesc *target, Linear
     out->saved_bytes = align_up((u32) out->nsaved * 8, STACK_ALIGN);
 }
 
+static bool function_makes_calls(IrFunction *f)
+{
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            if (((IrInstr *) vec_get(blk->instrs, ii))->opcode == OP_CALL)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* Whether the frame pointer may be dropped: no debug frame, no variadic save
+   area, no alloca/phi scratch, and every parameter arriving in a register.
+   The allocator must additionally spill nothing (checked by the caller). */
+bool x86_frame_can_omit_fp(IrFunction *f, bool debug)
+{
+    if (debug || f->is_variadic)
+    {
+        return false;
+    }
+    const SysvArgPlan *plans = plan_params(f, f->arena);
+    size_t nparams = vec_size(f->params);
+    for (size_t i = 0; i < nparams; i++)
+    {
+        if (plans[i].on_stack || plans[i].is_record)
+        {
+            return false;
+        }
+    }
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrOpcode op = ((IrInstr *) vec_get(blk->instrs, ii))->opcode;
+            if (op == OP_ALLOCA || op == OP_PHI)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *target, bool debug,
-                    LinearFrame *out)
+                    bool omit_fp, LinearFrame *out)
 {
     size_t nparams = vec_size(f->params);
     const SysvArgPlan *plans = plan_params(f, f->arena);
 
+    out->omit_fp = omit_fp;
     collect_saved(alloc, target, out);
+    if (omit_fp)
+    {
+        /* No slots to place: the frame is only what call alignment needs. */
+        out->saved_bytes = (u32) out->nsaved * 8;
+        out->frame_size = (function_makes_calls(f) && (out->nsaved % 2 == 0)) ? 8 : 0;
+        out->stage_base = 0;
+        out->save_area_off = 0;
+        return;
+    }
     for (u32 v = 0; v < alloc->nvregs; v++)
     {
         if (alloc->phys_map[v] < 0)
@@ -388,15 +451,26 @@ void x86_frame_emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, const R
 {
     const TargetDesc *target = x86_64_target();
     size_t before = bytebuf_len(buf);
-    bytebuf_append(buf, X86_PUSH_RBP);
-    frame->off_push = (u32) (bytebuf_len(buf) - before);
-    emit_mov(buf, W_QWORD, xop_reg(R_EBP), xop_reg(R_ESP));
-    frame->off_mov = (u32) (bytebuf_len(buf) - before);
+    if (!frame->omit_fp)
+    {
+        bytebuf_append(buf, X86_PUSH_RBP);
+        frame->off_push = (u32) (bytebuf_len(buf) - before);
+        emit_mov(buf, W_QWORD, xop_reg(R_EBP), xop_reg(R_ESP));
+        frame->off_mov = (u32) (bytebuf_len(buf) - before);
+    }
+    else
+    {
+        frame->off_push = 0;
+        frame->off_mov = 0;
+    }
     for (u8 i = 0; i < frame->nsaved; i++)
     {
         emit_push_reg(buf, frame->saved_regs[i]);
     }
-    emit_binop_rhs(buf, W_QWORD, &arith_specs[OP_SUB], R_ESP, xop_imm(frame->frame_size));
+    if (frame->frame_size > 0)
+    {
+        emit_binop_rhs(buf, W_QWORD, &arith_specs[OP_SUB], R_ESP, xop_imm(frame->frame_size));
+    }
     frame->off_sub = (u32) (bytebuf_len(buf) - before);
     spill_variadic_regs(buf, f, target, frame);
     if (vec_size(f->params) > 0)
@@ -409,6 +483,18 @@ void x86_frame_emit_prologue(ByteBuf *buf, IrFunction *f, IrModule *mod, const R
 
 void x86_frame_restore_callee(ByteBuf *buf, const LinearFrame *frame)
 {
+    if (frame->omit_fp)
+    {
+        if (frame->frame_size > 0)
+        {
+            emit_binop_rhs(buf, W_QWORD, &arith_specs[OP_ADD], R_ESP, xop_imm(frame->frame_size));
+        }
+        for (u8 i = frame->nsaved; i > 0; i--)
+        {
+            emit_pop_reg(buf, frame->saved_regs[i - 1]);
+        }
+        return;
+    }
     for (u8 i = 0; i < frame->nsaved; i++)
     {
         emit_mov(buf, W_QWORD, xop_reg(frame->saved_regs[i]),

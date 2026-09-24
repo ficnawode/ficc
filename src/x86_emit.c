@@ -853,3 +853,13 @@ void emit_push_reg(ByteBuf *buf, u8 reg)
     }
     bytebuf_append(buf, (u8) (X86_PUSH_R_BASE + (reg & 7)));
 }
+
+/* pop r64 (58+rd). */
+void emit_pop_reg(ByteBuf *buf, u8 reg)
+{
+    if (reg >= 8)
+    {
+        bytebuf_append(buf, X86_REX_B);
+    }
+    bytebuf_append(buf, (u8) (X86_POP_R_BASE + (reg & 7)));
+}

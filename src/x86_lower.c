@@ -950,9 +950,37 @@ static void lower_ret(IrInstr *in, X86LowerCtx *ctx)
     {
         emit_xor_zero(ctx->buf, W_DWORD, R_EAX);
     }
+    if (ctx->shared_epilogue)
+    {
+        u32 *field = arena_alloc(ctx->arena, sizeof(u32), sizeof(u32));
+        *field = (u32) emit_jmp_pending(ctx->buf);
+        vec_push(ctx->epilogue_jumps, field);
+        return;
+    }
     x86_frame_restore_callee(ctx->buf, ctx->frame);
-    bytebuf_append(ctx->buf, X86_LEAVE);
+    if (!ctx->frame->omit_fp)
+    {
+        bytebuf_append(ctx->buf, X86_LEAVE);
+    }
     bytebuf_append(ctx->buf, X86_RET);
+}
+
+/* Emit the one epilogue shared by every `ret`; each `ret` jumped here. */
+static void emit_shared_epilogue(X86LowerCtx *ctx)
+{
+    size_t epilogue = bytebuf_len(ctx->buf);
+    x86_frame_restore_callee(ctx->buf, ctx->frame);
+    if (!ctx->frame->omit_fp)
+    {
+        bytebuf_append(ctx->buf, X86_LEAVE);
+    }
+    bytebuf_append(ctx->buf, X86_RET);
+    size_t n = vec_size(ctx->epilogue_jumps);
+    for (size_t i = 0; i < n; i++)
+    {
+        u32 field = *(u32 *) vec_get(ctx->epilogue_jumps, i);
+        patch_rel32(ctx->buf, field, epilogue);
+    }
 }
 
 static void lower_unreachable(IrInstr *in, X86LowerCtx *ctx)
@@ -1947,6 +1975,23 @@ static void count_vreg_uses(IrFunction *f, u32 nvregs, u32 *counts)
     }
 }
 
+static u32 count_opcode(IrFunction *f, IrOpcode op)
+{
+    u32 n = 0;
+    for (size_t b = 0; b < vec_size(f->blocks); b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        for (size_t ii = 0; ii < vec_size(blk->instrs); ii++)
+        {
+            if (((IrInstr *) vec_get(blk->instrs, ii))->opcode == op)
+            {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
 static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *arena, bool debug)
 {
     ByteBuf *buf = arena_alloc(arena, sizeof(ByteBuf), sizeof(void *));
@@ -1960,10 +2005,24 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     const TargetDesc *target = x86_64_target();
     LiveIntervals set = liveinterval_compute(f, mod, arena);
     RegAllocation *alloc = regalloc_linear(f, &set, target, arena);
+    bool omit_fp = false;
+    if (x86_frame_can_omit_fp(f, debug) && alloc->frame_size == 0)
+    {
+        /* Nothing spills, so %rbp is free to join the register bank. */
+        RegAllocation *lean = regalloc_linear_ex(f, &set, target, arena, true);
+        if (lean->frame_size == 0)
+        {
+            alloc = lean;
+            omit_fp = true;
+        }
+    }
     /* Reserve a 16-byte slot for breaking phi-copy cycles (parallel moves). */
-    alloc->frame_size += 16;
+    if (!omit_fp)
+    {
+        alloc->frame_size += 16;
+    }
     LinearFrame frame = {0};
-    x86_frame_plan(alloc, f, target, debug, &frame);
+    x86_frame_plan(alloc, f, target, debug, omit_fp, &frame);
     for (size_t b = 0; b < vec_size(f->blocks); b++)
     {
         IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
@@ -2032,6 +2091,8 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         .lines = lines,
         .debug = debug,
         .scratch_disp = scratch_disp,
+        .shared_epilogue = count_opcode(f, OP_RET) > 1,
+        .epilogue_jumps = vec_new(arena),
     };
 
     x86_frame_emit_prologue(buf, f, mod, alloc, &frame, debug);
@@ -2047,6 +2108,10 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         emit_block_linear((IrBlock *) vec_get(f->blocks, bi), bi, &ctx);
     }
     emit_switch_tables(&ctx);
+    if (ctx.shared_epilogue)
+    {
+        emit_shared_epilogue(&ctx);
+    }
     resolve_block_patches(&ctx);
 
     fill_unset_positions(position_offsets, 0, set.pos.npositions, (u32) bytebuf_len(buf));

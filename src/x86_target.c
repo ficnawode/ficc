@@ -116,6 +116,7 @@ static const TargetDesc x86_64_desc = {
     .nclobbered_call = 9,
     .needs_reg = x86_needs_reg,
     .instr_clobbers = x86_instr_clobbers,
+    .frame_reg = R_EBP,
 };
 
 const TargetDesc *x86_64_target(void)

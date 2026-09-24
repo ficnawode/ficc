@@ -55,6 +55,7 @@ struct TargetDesc
        (e.g. %cl for a shift, %rdx for a divide); a bitmask over phys ids.  A
        value live across such an instruction must avoid those registers. */
     u16 (*instr_clobbers)(const TargetDesc *, const IrInstr *in);
+    u8 frame_reg; /* the frame pointer, reservable from allocation (append-only) */
 };
 
 const TargetDesc *x86_64_target(void);
