@@ -5,6 +5,7 @@
 #include "ir_builder.h"
 #include "ir_interp.h"
 #include "lexer.h"
+#include "link.h"
 #include "opt.h"
 #include "parser.h"
 #include "pp.h"
@@ -88,7 +89,8 @@ static Pp *pp_from_config(const CompilerConfig *cfg)
     return pp;
 }
 
-static int run_pipeline(const CompilerConfig *cfg, const char *input, Arena *arena, char *src)
+static int run_pipeline(const CompilerConfig *cfg, const char *input, Arena *arena, char *src,
+                        ByteBuf **serialized)
 {
     type_reset();
 
@@ -201,19 +203,9 @@ static int run_pipeline(const CompilerConfig *cfg, const char *input, Arena *are
         printf("interp: %lld\n", (long long) result);
     }
 
-    if (cfg->emit_obj)
+    if (cfg->emit_obj || serialized)
     {
         CodegenModule *cm = codegen_ir_to_machine(mod, &cfg->codegen, arena);
-        char outpath[256];
-        if (cfg->output_path)
-        {
-            strncpy(outpath, cfg->output_path, sizeof(outpath) - 1);
-            outpath[sizeof(outpath) - 1] = '\0';
-        }
-        else
-        {
-            replace_ext(input, outpath, sizeof(outpath), ".o");
-        }
         DwarfOutput *dwarf = NULL;
         if (cfg->codegen.debug)
         {
@@ -226,10 +218,89 @@ static int run_pipeline(const CompilerConfig *cfg, const char *input, Arena *are
             }
             dwarf_build(cm, input, cwd, dwarf, arena);
         }
-        elf_write(cm, outpath, dwarf);
+        if (serialized)
+        {
+            *serialized = elf_serialize(cm, dwarf, arena);
+        }
+        else
+        {
+            char outpath[256];
+            if (cfg->output_path)
+            {
+                strncpy(outpath, cfg->output_path, sizeof(outpath) - 1);
+                outpath[sizeof(outpath) - 1] = '\0';
+            }
+            else
+            {
+                replace_ext(input, outpath, sizeof(outpath), ".o");
+            }
+            elf_write(cm, outpath, dwarf);
+        }
     }
 
     return 0;
+}
+
+static bool is_c_source(const char *path)
+{
+    if (strcmp(path, "-") == 0)
+    {
+        return true;
+    }
+    size_t n = strlen(path);
+    return n >= 2 && strcmp(path + n - 2, ".c") == 0;
+}
+
+static bool is_link_mode(const CompilerConfig *cfg)
+{
+    if (cfg->emit_obj || cfg->emit_pp || cfg->dump_pp || cfg->dump_tokens || cfg->dump_ast ||
+        cfg->dump_ir || cfg->run_interp)
+    {
+        return false;
+    }
+    return true;
+}
+
+static int run_link(const CompilerConfig *cfg, Arena *arena)
+{
+    Vec *inputs = vec_new(arena);
+    for (size_t i = 0; i < vec_size(cfg->inputs); i++)
+    {
+        const char *input = (const char *) vec_get(cfg->inputs, i);
+        LinkInput *li = arena_alloc(arena, sizeof(*li), sizeof(void *));
+        if (is_c_source(input))
+        {
+            char *src = strcmp(input, "-") == 0 ? read_stream(stdin, "stdin", arena)
+                                                : read_file(input, arena);
+            if (!src)
+            {
+                return 1;
+            }
+            ByteBuf *buf = NULL;
+            if (run_pipeline(cfg, input, arena, src, &buf) != 0)
+            {
+                return 1;
+            }
+            LinkObject *obj = link_read_memory(bytebuf_data(buf), bytebuf_len(buf), input, arena);
+            if (!obj)
+            {
+                return 1;
+            }
+            li->kind = LINK_INPUT_OBJECT;
+            li->object = obj;
+            li->path = NULL;
+        }
+        else
+        {
+            li->kind = LINK_INPUT_FILE;
+            li->object = NULL;
+            li->path = input;
+        }
+        vec_push(inputs, li);
+    }
+    LinkConfig lc = cfg->link;
+    lc.output_path = cfg->output_path;
+    return link_run(&lc, inputs, arena);
 }
 
 int main(int argc, char **argv)
@@ -249,24 +320,31 @@ int main(int argc, char **argv)
     }
 
     int rc = 0;
-    for (size_t i = 0; i < vec_size(cfg->inputs) && rc == 0; i++)
+    if (is_link_mode(cfg))
     {
-        const char *input = (const char *) vec_get(cfg->inputs, i);
-        char *src;
-        if (strcmp(input, "-") == 0)
+        rc = run_link(cfg, arena);
+    }
+    else
+    {
+        for (size_t i = 0; i < vec_size(cfg->inputs) && rc == 0; i++)
         {
-            src = read_stream(stdin, "stdin", arena);
+            const char *input = (const char *) vec_get(cfg->inputs, i);
+            char *src;
+            if (strcmp(input, "-") == 0)
+            {
+                src = read_stream(stdin, "stdin", arena);
+            }
+            else
+            {
+                src = read_file(input, arena);
+            }
+            if (!src)
+            {
+                rc = 1;
+                break;
+            }
+            rc = run_pipeline(cfg, input, arena, src, NULL);
         }
-        else
-        {
-            src = read_file(input, arena);
-        }
-        if (!src)
-        {
-            rc = 1;
-            break;
-        }
-        rc = run_pipeline(cfg, input, arena, src);
     }
 
     arena_free(arena);

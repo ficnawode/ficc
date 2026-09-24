@@ -182,6 +182,33 @@ int tc_run_elf(const char *src)
     return tc_run_elf_cfg(src);
 }
 
+/* Compile and link `src` with the real ficc binary (its own linker), then run
+   the result; returns the exit status. */
+int tc_link_filc(const char *src)
+{
+    char cpath[256], bin[256];
+    tc_temp_path(cpath, sizeof(cpath), "link.c");
+    tc_temp_path(bin, sizeof(bin), "link.bin");
+
+    FILE *f = fopen(cpath, "w");
+    if (!f)
+    {
+        fprintf(stderr, "  [testdriver] cannot write %s\n", cpath);
+        test_fail();
+        return -1;
+    }
+    fputs(src, f);
+    fclose(f);
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "%s %s -o %s >/dev/null 2>&1 && %s", FICC_BIN, cpath, bin, bin);
+    int rc = tc_run_shell(cmd);
+
+    char *paths[] = {cpath, bin};
+    tc_temp_cleanup(paths, 2);
+    return rc;
+}
+
 int tc_run_elf_with_extra_tu(const char *src, const char *extra_src)
 {
     Arena *arena = arena_new();

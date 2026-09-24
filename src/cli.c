@@ -112,6 +112,40 @@ static bool set_emit_obj(CompilerConfig *cfg, const char *value)
     return true;
 }
 
+static bool add_lib_path(CompilerConfig *cfg, const char *value)
+{
+    if (value[0] == '\0')
+    {
+        return false;
+    }
+    vec_push(cfg->link.lib_paths, (void *) value);
+    return true;
+}
+
+static bool add_lib(CompilerConfig *cfg, const char *value)
+{
+    if (value[0] == '\0')
+    {
+        return false;
+    }
+    vec_push(cfg->link.libs, (void *) value);
+    return true;
+}
+
+static bool set_nostdlib(CompilerConfig *cfg, const char *value)
+{
+    (void) value;
+    cfg->link.nostdlib = true;
+    return true;
+}
+
+static bool set_static(CompilerConfig *cfg, const char *value)
+{
+    (void) value;
+    cfg->link.static_ = true;
+    return true;
+}
+
 static bool set_debug(CompilerConfig *cfg, const char *value)
 {
     (void) value;
@@ -256,7 +290,11 @@ static const CLIOption option_table[] = {
     {"-D", ARG_EITHER, "name[=val]", add_define, "define a macro"},
     {"-U", ARG_EITHER, "name", add_undef, "undefine a macro"},
     {"-include", ARG_EITHER, "file", add_include_file, "include a file before the main input"},
-    {"-o", ARG_EITHER, "file", set_output_path, "write the object to file (single input)"},
+    {"-o", ARG_EITHER, "file", set_output_path, "write the output to file"},
+    {"-L", ARG_EITHER, "dir", add_lib_path, "add a directory to the library search path"},
+    {"-l", ARG_EITHER, "name", add_lib, "link against library libname"},
+    {"-nostdlib", ARG_NONE, 0, set_nostdlib, "do not add the implicit startup objects or -lc"},
+    {"-static", ARG_NONE, 0, set_static, "link statically (residual)"},
     {0},
 };
 
@@ -457,9 +495,9 @@ CompilerConfig *cli_parse(int argc, char **argv, Arena *arena)
         cli_usage(cfg);
         return NULL;
     }
-    if (cfg->output_path && vec_size(cfg->inputs) != 1)
+    if (cfg->output_path && cfg->emit_obj && vec_size(cfg->inputs) != 1)
     {
-        err(cfg, "-o requires exactly one input");
+        err(cfg, "-o with -c requires exactly one input");
         cli_usage(cfg);
         return NULL;
     }

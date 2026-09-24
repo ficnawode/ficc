@@ -260,11 +260,42 @@ TEST(cli, output_last_wins)
     arena_free(a);
 }
 
-TEST(cli, output_multi_input_rejected)
+TEST(cli, output_multi_input_allowed)
 {
     Arena *a = arena_new();
-    char *argv[] = {"ficc", "-o", "out.o", "a.c", "b.c"};
+    char *argv[] = {"ficc", "-o", "out", "a.c", "b.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    if (cfg)
+    {
+        EXPECT_STR_EQ(cfg->output_path, "out");
+        EXPECT_EQ(vec_size(cfg->inputs), 2);
+    }
+    arena_free(a);
+}
+
+TEST(cli, output_multi_input_rejected_with_c)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-c", "-o", "out.o", "a.c", "b.c"};
     EXPECT_NULL(cli_parse(ARRAY_LEN(argv), argv, a));
+    arena_free(a);
+}
+
+TEST(cli, link_lib_flags)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-L", "libdir", "-lm", "-nostdlib", "a.c", "-o", "out"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    if (cfg)
+    {
+        EXPECT_EQ(vec_size(cfg->link.lib_paths), 1);
+        EXPECT_STR_EQ((const char *) vec_get(cfg->link.lib_paths, 0), "libdir");
+        EXPECT_EQ(vec_size(cfg->link.libs), 1);
+        EXPECT_STR_EQ((const char *) vec_get(cfg->link.libs, 0), "m");
+        EXPECT_TRUE(cfg->link.nostdlib);
+    }
     arena_free(a);
 }
 

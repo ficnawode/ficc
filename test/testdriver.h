@@ -21,6 +21,9 @@ i64 tc_run_interp(const char *src);
 
 int tc_run_elf(const char *src);
 
+/* Compile and link with the real ficc binary's own linker, then run. */
+int tc_link_filc(const char *src);
+
 /* Like tc_run_elf, but links the ficc-compiled unit against an extra
    translation unit, written from `extra_src` and compiled by the host gcc.
    Used for extern-linkage tests where the referenced symbols live in a
@@ -76,6 +79,31 @@ int tc_run_shell(const char *cmd);
         if (tc_run_elf((src)) != (expected))                                                       \
         {                                                                                          \
             fprintf(stderr, "  EXPECT_INTERP_AND_ELF (elf) failed at %s:%d\n", __FILE__,           \
+                    __LINE__);                                                                     \
+            test_fail();                                                                           \
+        }                                                                                          \
+    } while (0)
+
+/* Three-way oracle: the interpreter, the gcc-linked ELF, and the ficc-linked
+   ELF must agree on the exit value. */
+#define EXPECT_INTERP_AND_ELF_FILC(src, expected)                                                  \
+    do                                                                                             \
+    {                                                                                              \
+        if (tc_run_interp((src)) != (expected))                                                    \
+        {                                                                                          \
+            fprintf(stderr, "  EXPECT_INTERP_AND_ELF_FILC (interp) failed at %s:%d\n", __FILE__,   \
+                    __LINE__);                                                                     \
+            test_fail();                                                                           \
+        }                                                                                          \
+        if (tc_run_elf((src)) != (expected))                                                       \
+        {                                                                                          \
+            fprintf(stderr, "  EXPECT_INTERP_AND_ELF_FILC (elf) failed at %s:%d\n", __FILE__,      \
+                    __LINE__);                                                                     \
+            test_fail();                                                                           \
+        }                                                                                          \
+        if (tc_link_filc((src)) != (expected))                                                     \
+        {                                                                                          \
+            fprintf(stderr, "  EXPECT_INTERP_AND_ELF_FILC (filc) failed at %s:%d\n", __FILE__,     \
                     __LINE__);                                                                     \
             test_fail();                                                                           \
         }                                                                                          \

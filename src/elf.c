@@ -775,12 +775,12 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
                   8, 0);
         shdr_emit(out, shname_rela_eh_frame, SHT_RELA, SHF_INFO_LINK, off_rela_eh_frame,
                   rela_eh_frame_size, SEC_SYMTAB, SEC_EH_FRAME, 8, sizeof(Elf64_Rela));
-        shdr_emit(out, shname_debug_info, SHT_PROGBITS, 0, off_debug_info, debug_info_size, 0, 0,
-                  1, 0);
-        shdr_emit(out, shname_debug_line, SHT_PROGBITS, 0, off_debug_line, debug_line_size, 0, 0,
-                  1, 0);
-        shdr_emit(out, shname_debug_abbrev, SHT_PROGBITS, 0, off_debug_abbrev, debug_abbrev_size,
-                  0, 0, 1, 0);
+        shdr_emit(out, shname_debug_info, SHT_PROGBITS, 0, off_debug_info, debug_info_size, 0, 0, 1,
+                  0);
+        shdr_emit(out, shname_debug_line, SHT_PROGBITS, 0, off_debug_line, debug_line_size, 0, 0, 1,
+                  0);
+        shdr_emit(out, shname_debug_abbrev, SHT_PROGBITS, 0, off_debug_abbrev, debug_abbrev_size, 0,
+                  0, 1, 0);
         shdr_emit(out, shname_debug_str, SHT_PROGBITS, 0, off_debug_str, debug_str_size, 0, 0, 1,
                   0);
         shdr_emit(out, shname_debug_loc, SHT_PROGBITS, 0, off_debug_loc, debug_loc_size, 0, 0, 1,

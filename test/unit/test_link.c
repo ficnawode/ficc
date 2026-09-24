@@ -6,6 +6,8 @@
 #include "link.h"
 #include "util/bytebuf.h"
 
+#include <unistd.h>
+
 static ByteBuf *serialize(const char *src, Arena *arena)
 {
     IrModule *mod = tc_build_module(src, arena);
@@ -156,4 +158,59 @@ TEST(link, reader_rejects_bad_machine)
     LinkObject *obj = link_read_memory(copy, bytebuf_len(buf), "bad.o", arena);
     EXPECT_TRUE(obj == NULL);
     arena_free(arena);
+}
+
+static unsigned int link_seq;
+
+static void link_temp_path(char *buf, size_t n, const char *suffix)
+{
+    snprintf(buf, n, "/tmp/ficc_link_%06u_%s", link_seq++, suffix);
+}
+
+static int link_and_run(const char *const *srcs, size_t nsrcs, const char *expected_unused)
+{
+    (void) expected_unused;
+    Arena *arena = arena_new();
+    Vec *inputs = vec_new(arena);
+    for (size_t i = 0; i < nsrcs; i++)
+    {
+        ByteBuf *buf = serialize(srcs[i], arena);
+        LinkObject *obj = link_read_memory(bytebuf_data(buf), bytebuf_len(buf), "unit.o", arena);
+        LinkInput *in = arena_alloc(arena, sizeof(*in), sizeof(void *));
+        in->kind = LINK_INPUT_OBJECT;
+        in->object = obj;
+        in->path = NULL;
+        vec_push(inputs, in);
+    }
+    char bin[128];
+    link_temp_path(bin, sizeof(bin), "bin");
+    LinkConfig cfg = {0};
+    cfg.output_path = bin;
+    cfg.lib_paths = vec_new(arena);
+    cfg.libs = vec_new(arena);
+    int rc = link_run(&cfg, inputs, arena);
+    if (rc != 0)
+    {
+        arena_free(arena);
+        return -1;
+    }
+    int exit_code = tc_run_shell(bin);
+    unlink(bin);
+    arena_free(arena);
+    return exit_code;
+}
+
+TEST(link, static_link_runs)
+{
+    const char *src = "int main(void){return 42;}\n";
+    EXPECT_EQ(link_and_run(&src, 1, NULL), 42);
+}
+
+TEST(link, static_link_cross_tu)
+{
+    const char *srcs[2] = {
+        "extern int triple(int);\nint main(void){return triple(7);}\n",
+        "int triple(int x){return x * 3;}\n",
+    };
+    EXPECT_EQ(link_and_run(srcs, 2, NULL), 21);
 }
