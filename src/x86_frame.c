@@ -432,7 +432,7 @@ static void load_param_homes(ByteBuf *buf, IrFunction *f, IrModule *mod, const R
     {
         IrParam *p = (IrParam *) vec_get(f->params, i);
         const SysvArgPlan *plan = &plans[i];
-        RegLoc home = loc_of(alloc, ir_operand_vreg(p->vreg));
+        RegLoc home = loc_at(alloc, ir_operand_vreg(p->vreg), 0);
         u32 at = param_stage_next(plan, debug, &off);
         if (plan->is_record)
         {

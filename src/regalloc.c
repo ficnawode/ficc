@@ -18,6 +18,32 @@ typedef struct
     u16 mask;
 } ClobberPos;
 
+static const LiveInterval *interval_of(const RegAllocation *alloc, u32 vreg)
+{
+    u32 lo = 0;
+    u32 hi = alloc->n;
+    while (lo < hi)
+    {
+        u32 mid = lo + (hi - lo) / 2;
+        u32 mv = alloc->ivs[mid].vreg;
+        if (mv == vreg)
+        {
+            return &alloc->ivs[mid];
+        }
+        if (mv < vreg)
+        {
+            lo = mid + 1;
+        }
+        else
+        {
+            hi = mid;
+        }
+    }
+    return NULL;
+}
+
+static int bank_callee_index(const RegBank *bank, u8 reg);
+
 static ClobberPos *collect_clobbers(IrFunction *f, const IrPositions *pos, const TargetDesc *target,
                                     u32 *out_n, Arena *arena)
 {
@@ -171,6 +197,69 @@ static u32 pack_spills(const RegAllocation *alloc, const LiveIntervals *set,
     return spill_pack_slots(target, ranges, n, alloc->slot_map, arena);
 }
 
+/* One whole-range segment per live vreg, derived from the whole-range
+   allocation; splitting later replaces this with several segments. */
+static void build_segments(RegAllocation *alloc, const LiveIntervals *set, Arena *arena)
+{
+    RegSegment *segs =
+        arena_alloc(arena, (set->n ? set->n : 1) * sizeof(RegSegment), _Alignof(RegSegment));
+    u32 *begin = arena_alloc(arena, (set->nvregs + 1) * sizeof(u32), sizeof(u32));
+    u32 si = 0;
+    size_t ii = 0;
+    for (u32 v = 0; v < set->nvregs; v++)
+    {
+        begin[v] = si;
+        if (ii >= set->n || set->ivs[ii].vreg != v)
+        {
+            continue;
+        }
+        const LiveInterval *iv = &set->ivs[ii];
+        segs[si].start = iv->start;
+        segs[si].end = iv->end;
+        segs[si].reg = 0;
+        if (alloc->remat[v])
+        {
+            segs[si].kind = SEG_REMAT;
+        }
+        else if (alloc->phys_map[v] >= 0)
+        {
+            segs[si].kind = SEG_REG;
+            segs[si].reg = (u8) alloc->phys_map[v];
+        }
+        else
+        {
+            segs[si].kind = SEG_MEM;
+        }
+        si++;
+        ii++;
+    }
+    begin[set->nvregs] = si;
+    alloc->segments = segs;
+    alloc->seg_begin = begin;
+    alloc->nsegments = si;
+    alloc->call_gaps = vec_new(arena);
+}
+
+/* Every callee-saved register any segment rides must be preserved by the
+   prologue, whether or not the whole value stayed in one register. */
+static u8 saved_mask_of(const RegAllocation *alloc, const RegBank *bank)
+{
+    u8 mask = 0;
+    for (u32 s = 0; s < alloc->nsegments; s++)
+    {
+        if (alloc->segments[s].kind != SEG_REG)
+        {
+            continue;
+        }
+        int idx = bank_callee_index(bank, alloc->segments[s].reg);
+        if (idx >= 0)
+        {
+            mask |= (u8) (1u << idx);
+        }
+    }
+    return mask;
+}
+
 RegAllocation *regalloc_all_spilled(IrFunction *f, const LiveIntervals *set, Arena *arena)
 {
     RegAllocation *alloc = alloc_new(set, arena);
@@ -178,6 +267,7 @@ RegAllocation *regalloc_all_spilled(IrFunction *f, const LiveIntervals *set, Are
     u32 *calls = collect_call_positions(f, &set->pos, &ncall, arena);
     alloc->call_sites = call_site_vec(calls, ncall, arena);
     alloc->frame_size = pack_spills(alloc, set, x86_64_target(), arena);
+    build_segments(alloc, set, arena);
     return alloc;
 }
 
@@ -696,46 +786,25 @@ RegAllocation *regalloc_linear_ex(IrFunction *f, const LiveIntervals *set, const
                       defs, vreg_cls, pref, arena);
     linear_scan_class(alloc, order, set->n, &target->xmm, calls, ncall, call_op, xmm_avoid, clob,
                       nclob, defs, vreg_cls, pref, arena);
-    u8 saved_mask = 0;
-    for (u32 v = 0; v < set->nvregs; v++)
-    {
-        int reg = alloc->phys_map[v];
-        int callee = reg >= 0 ? bank_callee_index(&gpr, (u8) reg) : -1;
-        if (callee >= 0)
-        {
-            saved_mask |= (u8) (1u << callee);
-        }
-    }
-    alloc->saved_mask = saved_mask;
+    build_segments(alloc, set, arena);
+    alloc->saved_mask = saved_mask_of(alloc, &gpr);
     alloc->frame_size = pack_spills(alloc, set, target, arena);
     return alloc;
 }
 
-static const LiveInterval *interval_of(const RegAllocation *alloc, u32 vreg)
+static const RegSegment *find_segment(const RegAllocation *alloc, u32 vreg, u32 pos)
 {
-    u32 lo = 0;
-    u32 hi = alloc->n;
-    while (lo < hi)
+    for (u32 s = alloc->seg_begin[vreg]; s < alloc->seg_begin[vreg + 1]; s++)
     {
-        u32 mid = lo + (hi - lo) / 2;
-        u32 mv = alloc->ivs[mid].vreg;
-        if (mv == vreg)
+        if (pos >= alloc->segments[s].start && pos <= alloc->segments[s].end)
         {
-            return &alloc->ivs[mid];
-        }
-        if (mv < vreg)
-        {
-            lo = mid + 1;
-        }
-        else
-        {
-            hi = mid;
+            return &alloc->segments[s];
         }
     }
     return NULL;
 }
 
-RegLoc loc_of(const RegAllocation *alloc, IrOperand op)
+RegLoc loc_at(const RegAllocation *alloc, IrOperand op, u32 pos)
 {
     RegLoc loc = {0};
     if (op.is_imm)
@@ -747,21 +816,24 @@ RegLoc loc_of(const RegAllocation *alloc, IrOperand op)
     ASSERT(op.u.vreg < alloc->nvregs && "operand vreg within the module's table");
     const LiveInterval *iv = interval_of(alloc, op.u.vreg);
     loc.cls = iv ? iv->cls : RC_GPR;
-    int phys = alloc->phys_map[op.u.vreg];
-    if (phys >= 0)
+    const RegSegment *seg = find_segment(alloc, op.u.vreg, pos);
+    ASSERT(seg && "a live vreg's position resolves to a segment");
+    switch (seg->kind)
     {
-        loc.kind = LOC_REG;
-        loc.reg = (u8) phys;
-        return loc;
+        case SEG_REG:
+            loc.kind = LOC_REG;
+            loc.reg = seg->reg;
+            return loc;
+        case SEG_MEM:
+            loc.kind = LOC_MEM;
+            loc.disp = -(i32) alloc->slot_map[op.u.vreg];
+            return loc;
+        case SEG_REMAT:
+            loc.kind = LOC_REMAT;
+            loc.cls = RC_GPR;
+            loc.disp = alloc->remat_disp[op.u.vreg];
+            return loc;
     }
-    if (alloc->remat[op.u.vreg])
-    {
-        loc.kind = LOC_REMAT;
-        loc.cls = RC_GPR;
-        loc.disp = alloc->remat_disp[op.u.vreg];
-        return loc;
-    }
-    loc.kind = LOC_MEM;
-    loc.disp = -(i32) alloc->slot_map[op.u.vreg];
+    ASSERT(false && "unknown segment kind");
     return loc;
 }

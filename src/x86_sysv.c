@@ -132,7 +132,7 @@ u32 sysv_param_stage_bytes(const SysvArgPlan *plan)
 
 static void emit_fp_to_xmm(X86LowerCtx *ctx, IrOperand op, u8 width, u8 xmm)
 {
-    RegLoc l = loc_of(ctx->alloc, op);
+    RegLoc l = x86_lower_operand_loc(ctx, op);
     if (l.kind == LOC_REG)
     {
         if (l.reg != xmm)
@@ -182,7 +182,7 @@ static void emit_stack_arg(X86LowerCtx *ctx, IrOperand op, const SysvArgPlan *p)
     }
     if (p->is_x87_stack)
     {
-        RegLoc l = loc_of(ctx->alloc, op);
+        RegLoc l = x86_lower_operand_loc(ctx, op);
         ASSERT(l.kind == LOC_MEM && "x87 values are memory-only");
         emit_mov16(ctx->buf, x86_lower_rbp_mem(l.disp), dst);
         return;
@@ -253,7 +253,7 @@ static GpArgMove resolve_gp_arg(X86LowerCtx *ctx, IrOperand op, u8 dst, u8 width
         m.kind = GP_ARG_PURE;
         return m;
     }
-    RegLoc l = loc_of(ctx->alloc, op);
+    RegLoc l = x86_lower_operand_loc(ctx, op);
     if (l.kind == LOC_REG)
     {
         m.kind = GP_ARG_REG;

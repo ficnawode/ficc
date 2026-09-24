@@ -35,6 +35,7 @@ struct X86LowerCtx
     StrMap *label_to_index;
     const IrPositions *pos; /* position numbering; position_offsets maps to bytes */
     u32 *position_offsets;
+    u32 cur_pos;            /* the position of the instruction being lowered */
     u32 *use_count;         /* operand-reference count per vreg (brcond fold) */
     const char *next_label; /* label of the block emitted next (fallthrough) */
     Vec *lines;             /* Vec<LineEntry*> when recording -g line rows, else NULL */
@@ -47,6 +48,7 @@ struct X86LowerCtx
 
 u8 x86_lower_vreg_width(X86LowerCtx *ctx, u32 vreg);
 u8 x86_lower_operand_width(X86LowerCtx *ctx, IrOperand op);
+RegLoc x86_lower_operand_loc(X86LowerCtx *ctx, IrOperand op);
 X86Mem x86_lower_rbp_mem(i32 disp);
 void x86_lower_force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg);
 RegLoc x86_lower_result_loc(X86LowerCtx *ctx, IrInstr *in);

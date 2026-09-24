@@ -298,7 +298,7 @@ static void emit_load_2pow63_ld(X86LowerCtx *ctx)
 static X86Mem ld_operand_mem(X86LowerCtx *ctx, IrOperand op)
 {
     ASSERT(ir_operand_is_vreg(op) && "long double operands are vregs");
-    RegLoc l = loc_of(ctx->alloc, op);
+    RegLoc l = x86_lower_operand_loc(ctx, op);
     ASSERT(l.kind == LOC_MEM && "x87 values are memory-only");
     return x86_lower_rbp_mem(l.disp);
 }
@@ -452,7 +452,7 @@ static void fp_operand_to_xmm(X86LowerCtx *ctx, IrOperand op, u8 w, u8 xmm)
         emit_movd_to_xmm(b, xmm, R_EAX, w != W_DWORD);
         return;
     }
-    RegLoc l = loc_of(ctx->alloc, op);
+    RegLoc l = x86_lower_operand_loc(ctx, op);
     if (l.kind == LOC_REG)
     {
         if (l.reg != xmm)
@@ -511,7 +511,7 @@ void x87_lower_fconv(IrInstr *in, X86LowerCtx *ctx)
         }
         else
         {
-            RegLoc sl = loc_of(ctx->alloc, src);
+            RegLoc sl = x86_lower_operand_loc(ctx, src);
             if (sl.kind == LOC_REG)
             {
                 emit_scratch_reserve(ctx->buf);
@@ -532,7 +532,7 @@ void x87_lower_fconv(IrInstr *in, X86LowerCtx *ctx)
             emit_fldl(ctx, src_mem);
         }
         emit_fstpt(ctx, ld_result_mem(ctx, in));
-        if (src.is_imm || loc_of(ctx->alloc, src).kind == LOC_REG)
+        if (src.is_imm || x86_lower_operand_loc(ctx, src).kind == LOC_REG)
         {
             emit_scratch_release(ctx->buf);
         }

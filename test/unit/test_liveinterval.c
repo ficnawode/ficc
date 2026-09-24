@@ -199,16 +199,16 @@ TEST(liveinterval, disjoint_ranges_reuse_the_slot)
     arena_free(a);
 }
 
-TEST(liveinterval, loc_of_resolves_vregs_and_immediates)
+TEST(liveinterval, loc_at_resolves_vregs_and_immediates)
 {
     Arena *a = arena_new();
     IrModule *m = build_linear(a);
     LiveIntervals set = liveinterval_compute((IrFunction *) vec_get(m->funcs, 0), m, a);
     RegAllocation *alloc = regalloc_all_spilled((IrFunction *) vec_get(m->funcs, 0), &set, a);
-    RegLoc lx = loc_of(alloc, ir_operand_vreg(0));
+    RegLoc lx = loc_at(alloc, ir_operand_vreg(0), 0);
     EXPECT_EQ(lx.kind, LOC_MEM);
     EXPECT_EQ(lx.disp, -8);
-    RegLoc li = loc_of(alloc, ir_operand_imm(5));
+    RegLoc li = loc_at(alloc, ir_operand_imm(5), 0);
     EXPECT_EQ(li.kind, LOC_IMM);
     arena_free(a);
 }

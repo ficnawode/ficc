@@ -175,7 +175,7 @@ TEST(regalloc, assigns_lowest_free_and_reuses_disjoint_registers)
     arena_free(a);
 }
 
-TEST(regalloc, loc_of_reports_registers_and_slots)
+TEST(regalloc, loc_at_reports_registers_and_slots)
 {
     Arena *a = arena_new();
     u32 x, y, z;
@@ -183,10 +183,10 @@ TEST(regalloc, loc_of_reports_registers_and_slots)
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     LiveIntervals set = liveinterval_compute(f, m, a);
     RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
-    RegLoc lx = loc_of(alloc, ir_operand_vreg(x));
+    RegLoc lx = loc_at(alloc, ir_operand_vreg(x), 0);
     EXPECT_EQ(lx.kind, LOC_REG);
     EXPECT_EQ(lx.reg, R_ECX);
-    RegLoc li = loc_of(alloc, ir_operand_imm(7));
+    RegLoc li = loc_at(alloc, ir_operand_imm(7), 0);
     EXPECT_EQ(li.kind, LOC_IMM);
     arena_free(a);
 }
@@ -450,7 +450,7 @@ TEST(regalloc, alloca_results_are_rematerialized)
        given a register or a spill slot; lowering recomputes it at each use. */
     EXPECT_EQ(alloc->remat[p], 1);
     EXPECT_EQ(alloc->phys_map[p], -1);
-    EXPECT_EQ(loc_of(alloc, ir_operand_vreg(p)).kind, LOC_REMAT);
+    EXPECT_EQ(loc_at(alloc, ir_operand_vreg(p), 0).kind, LOC_REMAT);
     arena_free(a);
 }
 
@@ -471,7 +471,7 @@ TEST(regalloc, constant_index_gep_over_alloca_is_rematerialized)
     RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
     EXPECT_EQ(alloc->remat[q], 1);
     EXPECT_EQ(alloc->phys_map[q], -1);
-    EXPECT_EQ(loc_of(alloc, ir_operand_vreg(q)).kind, LOC_REMAT);
+    EXPECT_EQ(loc_at(alloc, ir_operand_vreg(q), 2).kind, LOC_REMAT);
     arena_free(a);
 }
 

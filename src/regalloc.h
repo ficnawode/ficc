@@ -5,6 +5,30 @@
 #include "util/types.h"
 #include "util/vec.h"
 
+/* One contiguous run of positions sharing a location. */
+typedef enum
+{
+    SEG_REG,   /* in physical register `reg` */
+    SEG_MEM,   /* at [rbp - slot_map[vreg]] */
+    SEG_REMAT, /* recomputed from [rbp + remat_disp[vreg]] */
+} SegKind;
+
+typedef struct
+{
+    u32 start; /* first position, inclusive */
+    u32 end;   /* last position, inclusive */
+    u8 kind;   /* SegKind */
+    u8 reg;    /* SEG_REG: physical register id */
+} RegSegment;
+
+/* A vreg whose location changes across the call at `pos`: the pre-segment
+   holds [., pos-1], the post-segment [pos, .]. */
+typedef struct
+{
+    u32 pos;
+    u32 vreg;
+} CallGap;
+
 /* Pure data: the allocator's output, consumed by lowering and frame building. */
 typedef struct
 {
@@ -18,6 +42,11 @@ typedef struct
     u32 frame_size;  /* packed spill bytes below %rbp */
     u8 *remat;       /* vreg → 1 when the value is recomputed at each use, not stored */
     i32 *remat_disp; /* vreg → [rbp+disp] the recomputed address loads from (remat only) */
+
+    RegSegment *segments; /* flat, ordered by (vreg, start) */
+    u32 *seg_begin;       /* CSR rows, length nvregs+1 */
+    u32 nsegments;
+    Vec *call_gaps; /* Vec<CallGap*> — vregs split at a call, sorted by (pos, vreg) */
 } RegAllocation;
 
 /* All-spilled allocation: every vreg rides its own packed spill slot, matching
@@ -34,8 +63,6 @@ RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const Ta
 RegAllocation *regalloc_linear_ex(IrFunction *f, const LiveIntervals *set, const TargetDesc *target,
                                   Arena *arena, bool allow_rbp);
 
-typedef struct CodegenCtx CodegenCtx;
-
 /* Where an operand currently lives while lowering an instruction. */
 typedef struct
 {
@@ -51,12 +78,8 @@ typedef struct
     i32 disp;
 } RegLoc;
 
-/* Resolve a vreg/immediate operand against the allocation; globals and
-   function addresses are emitted by lowering, never resolved here. */
-RegLoc loc_of(const RegAllocation *alloc, IrOperand op);
-
-/* Force `src` into physical register `reg` of class `to`, emitting a mov (or a
-   register-to-register copy / immediate load) when it is not already there. */
-RegLoc coerce(const RegAllocation *alloc, CodegenCtx *ctx, RegLoc src, RegClass to, u8 reg);
+/* Resolve a vreg/immediate operand at position `pos` against the allocation;
+   globals and function addresses are emitted by lowering, never resolved here. */
+RegLoc loc_at(const RegAllocation *alloc, IrOperand op, u32 pos);
 
 #endif
