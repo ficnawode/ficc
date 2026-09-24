@@ -39,7 +39,7 @@ DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_BIN) $(T
 
 FORMAT_FILES := $(shell find src include test \( -name '*.c' -o -name '*.h' \))
 
-.PHONY: all clean test test-gdb selftest selftest-filc selftest-filc-static dirs compile-commands format format-check
+.PHONY: all clean test test-gdb selftest golden-static dirs compile-commands format format-check
 
 all: $(FICC_BIN)
 
@@ -56,10 +56,12 @@ test: $(TEST_BIN) $(FICC_BIN)
 test-gdb: $(FICC_BIN)
 	./test/debug_gdb.sh $(abspath $(FICC_BIN))
 
-# Static-linker checkpoint: link and run the freestanding golden corpus with
-# ficc's own linker (interp == filc), and require deterministic output.
-selftest-filc-static: $(FICC_BIN)
-	./test/filc_static.sh $(abspath $(FICC_BIN))
+# Opt-in static-linkage certificate (not part of `make test && make selftest`):
+# link and run the freestanding golden corpus with ficc's own linker
+# (interp == filc) and require deterministic output. Run it when the static
+# linker is in doubt.
+golden-static: $(FICC_BIN)
+	./test/golden_static.sh $(abspath $(FICC_BIN))
 
 $(FICC_BIN): $(OBJ_SRC) | dirs
 	$(CC) $(LDFLAGS) $^ -o $@
@@ -102,9 +104,9 @@ compile-commands:
 # Both stages compile at -O1 so the bootstrap also exercises the optimizer; a
 # self-host miscompile changes the generated code between stage 1 and stage 2.
 #
-# We still cd into the staging dir so __FILE__-derived strings match across stages, and
-# still force -no-pie on the final links because ficc objects carry R_X86_64_32S data
-# relocations; both vanish when an internal linker replaces the external ld step.
+# We still cd into the staging dir so __FILE__-derived strings match across
+# stages. The stage links use ficc's own linker, so the bootstrap no longer
+# depends on an external ld.
 SELF_DIR  := $(BUILD_DIR)/selftest
 SELF_SRC  := $(SELF_DIR)/src
 SELF_OBJ1 := $(SELF_DIR)/obj/stage1
@@ -134,13 +136,19 @@ define self-compile-loop
 	done
 endef
 
+# --- Self-compilation / bootstrap check (phase 18; filc-linked since phase 24) ---
+#
+# stage 0 (gcc-built ficc) compiles src -> stage1 objects; ficc's own linker
+# links them -> ficc1. ficc1 then compiles AND links stage2 -> ficc2. Assert the
+# two object trees are byte-identical (the bootstrap contract) and that the
+# filc-linked compilers run.
 selftest: $(FICC_BIN) $(SELF_DIR)/.staged
 	@echo "== selftest stage 1: compile with $(notdir $(FICC_BIN)) =="
 	$(call self-compile-loop,$(abspath $(FICC_BIN)),$(abspath $(SELF_OBJ1)))
-	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ1)/*.o $(SELF_OBJ1)/util/*.o $(SELF_OBJ1)/optpasses/*.o -o $(FICC1_BIN)
-	@echo "== selftest stage 2: rebuild with ficc1 =="
+	@$(abspath $(FICC_BIN)) $(SELF_OBJ1)/*.o $(SELF_OBJ1)/util/*.o $(SELF_OBJ1)/optpasses/*.o -o $(FICC1_BIN)
+	@echo "== selftest stage 2: ficc1 compiles and links itself =="
 	$(call self-compile-loop,$(abspath $(FICC1_BIN)),$(abspath $(SELF_OBJ2)))
-	@$(CC) -no-pie $(LDFLAGS) $(SELF_OBJ2)/*.o $(SELF_OBJ2)/util/*.o $(SELF_OBJ2)/optpasses/*.o -o $(FICC2_BIN)
+	@$(abspath $(FICC1_BIN)) $(SELF_OBJ2)/*.o $(SELF_OBJ2)/util/*.o $(SELF_OBJ2)/optpasses/*.o -o $(FICC2_BIN)
 	@if diff -r --brief $(SELF_OBJ1) $(SELF_OBJ2); then \
 		echo "selftest: OK — stage1 and stage2 object trees are byte-identical"; \
 	else \
@@ -148,26 +156,5 @@ selftest: $(FICC_BIN) $(SELF_DIR)/.staged
 		diff -r $(SELF_OBJ1) $(SELF_OBJ2); \
 		exit 1; \
 	fi
-
-# --- Self-compilation with ficc's OWN linker (phase 24 J) ---
-#
-# stage 0 (gcc-built ficc) compiles src -> stage1 objects; the in-tree linker
-# links them -> ficc1. ficc1 then compiles AND links stage2 -> ficc2. Assert the
-# two object trees are byte-identical (the bootstrap contract) and that the
-# filc-linked compilers run.
-selftest-filc: $(FICC_BIN) $(SELF_DIR)/.staged
-	@echo "== selftest-filc stage 1: compile with $(notdir $(FICC_BIN)) =="
-	$(call self-compile-loop,$(abspath $(FICC_BIN)),$(abspath $(SELF_OBJ1)))
-	@$(abspath $(FICC_BIN)) $(SELF_OBJ1)/*.o $(SELF_OBJ1)/util/*.o $(SELF_OBJ1)/optpasses/*.o -o $(FICC1_BIN)
-	@echo "== selftest-filc stage 2: ficc1 compiles and links itself =="
-	$(call self-compile-loop,$(abspath $(FICC1_BIN)),$(abspath $(SELF_OBJ2)))
-	@$(abspath $(FICC1_BIN)) $(SELF_OBJ2)/*.o $(SELF_OBJ2)/util/*.o $(SELF_OBJ2)/optpasses/*.o -o $(FICC2_BIN)
-	@if diff -r --brief $(SELF_OBJ1) $(SELF_OBJ2); then \
-		echo "selftest-filc: OK — stage1 and stage2 object trees are byte-identical"; \
-	else \
-		echo "selftest-filc: FAIL — bootstrap objects differ"; \
-		diff -r $(SELF_OBJ1) $(SELF_OBJ2); \
-		exit 1; \
-	fi
 	@$(FICC1_BIN) --help >/dev/null && $(FICC2_BIN) --help >/dev/null && \
-		echo "selftest-filc: OK — filc-linked ficc1 and ficc2 run"
+		echo "selftest: OK — filc-linked ficc1 and ficc2 run"
