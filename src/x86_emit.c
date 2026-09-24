@@ -839,6 +839,10 @@ void emit_func_addr_to(ByteBuf *buf, u8 reg, const char *name, Vec *patches, Are
 
 void emit_lea(ByteBuf *buf, u8 dst_reg, X86Mem src)
 {
+    if (src.base == dst_reg && src.index == NO_REG && src.disp == 0)
+    {
+        return; /* lea reg, [reg] computes the register unchanged */
+    }
     bytebuf_append(buf, rex_mem(true, dst_reg >= 8, src));
     bytebuf_append(buf, X86_LEA);
     emit_mem_operand(buf, dst_reg, src);

@@ -176,6 +176,19 @@ TEST(x86_emit, shift_immediate_forms)
     arena_free(a);
 }
 
+TEST(x86_emit, lea_of_the_same_register_is_elided)
+{
+    Arena *a = arena_new();
+    ByteBuf b;
+    bytebuf_init(&b, a);
+    emit_lea(&b, R_ECX, (X86Mem) {.base = R_ECX, .index = NO_REG, .scale = 1, .disp = 0});
+    expect_bytes(&b, (const u8[]) {0}, 0);
+    bytebuf_init(&b, a);
+    emit_lea(&b, R_ECX, (X86Mem) {.base = R_ECX, .index = NO_REG, .scale = 1, .disp = 8});
+    expect_bytes(&b, (const u8[]) {0x48, 0x8d, 0x49, 0x08}, 4);
+    arena_free(a);
+}
+
 TEST(x86_emit, reg_reg_extends_both_operands)
 {
     Arena *a = arena_new();

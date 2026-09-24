@@ -1975,6 +1975,90 @@ static void count_vreg_uses(IrFunction *f, u32 nvregs, u32 *counts)
     }
 }
 
+static void rewrite_operand(IrOperand *op, const IrOperand *repl, const bool *has)
+{
+    if (ir_operand_is_vreg(*op) && has[op->u.vreg])
+    {
+        *op = repl[op->u.vreg];
+    }
+}
+
+/* Fold `gep base, idx, stride` with a zero byte offset into `base`: the value
+   flows directly, so no address instruction is emitted and a parameter's live
+   range reaches the real use. Runs before liveness. */
+static void canonicalize_identity_geps(IrFunction *f, u32 nvregs, Arena *arena)
+{
+    u32 n = nvregs ? nvregs : 1;
+    IrOperand *repl = arena_alloc(arena, n * sizeof(IrOperand), _Alignof(IrOperand));
+    bool *has = arena_alloc(arena, n * sizeof(bool), sizeof(bool));
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        has[v] = false;
+    }
+    for (size_t b = 0; b < vec_size(f->blocks); b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        for (size_t ii = 0; ii < vec_size(blk->instrs); ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode != OP_GEP || in->result == NO_VREG || !in->ops[1].is_imm ||
+                !in->ops[2].is_imm || in->ops[1].u.imm * in->ops[2].u.imm != 0)
+            {
+                continue;
+            }
+            repl[in->result] = in->ops[0];
+            has[in->result] = true;
+        }
+    }
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (u32 v = 0; v < nvregs; v++)
+        {
+            if (has[v] && ir_operand_is_vreg(repl[v]) && has[repl[v].u.vreg])
+            {
+                repl[v] = repl[repl[v].u.vreg];
+                changed = true;
+            }
+        }
+    }
+    for (size_t b = 0; b < vec_size(f->blocks); b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        Vec *keep = vec_new(arena);
+        for (size_t ii = 0; ii < vec_size(blk->instrs); ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode == OP_GEP && in->result != NO_VREG && has[in->result])
+            {
+                continue; /* the identity definition, now unused */
+            }
+            for (u8 oi = 0; oi < in->nops; oi++)
+            {
+                rewrite_operand(&in->ops[oi], repl, has);
+            }
+            if (in->opcode == OP_CALL)
+            {
+                rewrite_operand(&in->extra.call.callee, repl, has);
+                for (u32 a = 0; a < in->extra.call.nargs; a++)
+                {
+                    rewrite_operand(&in->extra.call.args[a], repl, has);
+                }
+            }
+            else if (in->opcode == OP_PHI)
+            {
+                for (u32 e = 0; e < in->extra.phi.nentries; e++)
+                {
+                    rewrite_operand(&in->extra.phi.entries[e].val, repl, has);
+                }
+            }
+            vec_push(keep, in);
+        }
+        blk->instrs = keep;
+    }
+}
+
 static u32 count_opcode(IrFunction *f, IrOpcode op)
 {
     u32 n = 0;
@@ -2003,6 +2087,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     Vec *lines = debug ? vec_new(arena) : NULL;
 
     const TargetDesc *target = x86_64_target();
+    canonicalize_identity_geps(f, mod->next_vreg, arena);
     LiveIntervals set = liveinterval_compute(f, mod, arena);
     RegAllocation *alloc = regalloc_linear(f, &set, target, arena);
     bool omit_fp = false;
