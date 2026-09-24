@@ -1,109 +1,8 @@
 #include "elf.h"
+#include "elfdefs.h"
 #include "util/bytebuf.h"
 #include <stdio.h>
 #include <string.h>
-
-/* ELF64 format definitions. */
-typedef uint8_t Elf64_Byte;
-typedef uint16_t Elf64_Half;
-typedef uint32_t Elf64_Word;
-typedef int32_t Elf64_Sword;
-typedef uint64_t Elf64_Xword;
-typedef int64_t Elf64_Sxword;
-typedef uint64_t Elf64_Addr;
-typedef uint64_t Elf64_Off;
-
-#define EI_NIDENT 16
-
-#define ELFMAG0 0x7f
-#define ELFMAG1 'E'
-#define ELFMAG2 'L'
-#define ELFMAG3 'F'
-#define ELFCLASS64 2
-#define ELFDATA2LSB 1
-#define EV_CURRENT 1
-#define ET_REL 1
-#define EM_X86_64 62
-
-#define SHT_NULL 0
-#define SHT_PROGBITS 1
-#define SHT_SYMTAB 2
-#define SHT_STRTAB 3
-#define SHT_RELA 4
-#define SHT_NOBITS 8
-#define SHT_INIT_ARRAY 14
-#define SHT_FINI_ARRAY 15
-
-#define SHF_ALLOC 0x2
-#define SHF_EXECINSTR 0x4
-#define SHF_INFO_LINK 0x40
-#define SHF_WRITE 0x1
-
-#define STB_LOCAL 0
-#define STB_GLOBAL 1
-#define STT_NOTYPE 0
-#define STT_FUNC 2
-#define STT_SECTION 3
-#define ELF64_ST_INFO(bind, type) (((bind) << 4) + ((type) & 0xf))
-
-#define SHN_UNDEF 0
-
-#define R_X86_64_32S 11
-#define R_X86_64_64 1
-#define R_X86_64_PLT32 4
-
-typedef struct Elf64_Ehdr Elf64_Ehdr;
-struct Elf64_Ehdr
-{
-    unsigned char e_ident[EI_NIDENT];
-    Elf64_Half e_type;
-    Elf64_Half e_machine;
-    Elf64_Word e_version;
-    Elf64_Addr e_entry;
-    Elf64_Off e_phoff;
-    Elf64_Off e_shoff;
-    Elf64_Word e_flags;
-    Elf64_Half e_ehsize;
-    Elf64_Half e_phentsize;
-    Elf64_Half e_phnum;
-    Elf64_Half e_shentsize;
-    Elf64_Half e_shnum;
-    Elf64_Half e_shstrndx;
-};
-
-typedef struct Elf64_Shdr Elf64_Shdr;
-struct Elf64_Shdr
-{
-    Elf64_Word sh_name;
-    Elf64_Word sh_type;
-    Elf64_Xword sh_flags;
-    Elf64_Addr sh_addr;
-    Elf64_Off sh_offset;
-    Elf64_Xword sh_size;
-    Elf64_Word sh_link;
-    Elf64_Word sh_info;
-    Elf64_Xword sh_addralign;
-    Elf64_Xword sh_entsize;
-};
-
-typedef struct Elf64_Sym Elf64_Sym;
-struct Elf64_Sym
-{
-    Elf64_Word st_name;
-    unsigned char st_info;
-    unsigned char st_other;
-    Elf64_Half st_shndx;
-    Elf64_Addr st_value;
-    Elf64_Xword st_size;
-};
-
-typedef struct Elf64_Rela Elf64_Rela;
-struct Elf64_Rela
-{
-    Elf64_Addr r_offset;
-    Elf64_Xword r_info;
-    Elf64_Sxword r_addend;
-};
 
 /* String table builder. */
 /* A string table is a byte buffer whose first byte is NUL and whose only
@@ -341,17 +240,8 @@ static u32 func_sym_index(CodegenModule *cm, const char *name, Vec *extern_syms,
     return 0;
 }
 
-void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
+ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena)
 {
-    FILE *f = fopen(path, "wb");
-    if (!f)
-    {
-        perror(path);
-        return;
-    }
-
-    Arena *arena = arena_new();
-
     ByteBuf shstrtab;
     strtab_init(&shstrtab, arena);
     u32 shname_text = strtab_add(&shstrtab, ".text");
@@ -752,156 +642,170 @@ void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
     }
     size_t off_shdr = (off + 7) & ~7;
 
-    ByteBuf out;
-    bytebuf_init(&out, arena);
-    bytebuf_append(&out, ELFMAG0);
-    bytebuf_append(&out, ELFMAG1);
-    bytebuf_append(&out, ELFMAG2);
-    bytebuf_append(&out, ELFMAG3);
-    bytebuf_append(&out, ELFCLASS64);
-    bytebuf_append(&out, ELFDATA2LSB);
-    bytebuf_append(&out, EV_CURRENT);
-    bytebuf_append(&out, 0);
+    ByteBuf *out = arena_alloc(arena, sizeof(*out), sizeof(void *));
+    bytebuf_init(out, arena);
+    bytebuf_append(out, ELFMAG0);
+    bytebuf_append(out, ELFMAG1);
+    bytebuf_append(out, ELFMAG2);
+    bytebuf_append(out, ELFMAG3);
+    bytebuf_append(out, ELFCLASS64);
+    bytebuf_append(out, ELFDATA2LSB);
+    bytebuf_append(out, EV_CURRENT);
+    bytebuf_append(out, 0);
     for (int i = 0; i < 8; i++)
     {
-        bytebuf_append(&out, 0);
+        bytebuf_append(out, 0);
     }
-    bytebuf_append_u16(&out, ET_REL);
-    bytebuf_append_u16(&out, EM_X86_64);
-    bytebuf_append_u32(&out, EV_CURRENT);
-    bytebuf_append_u64(&out, 0);
-    bytebuf_append_u64(&out, 0);
-    bytebuf_append_u64(&out, off_shdr);
-    bytebuf_append_u32(&out, 0);
-    bytebuf_append_u16(&out, sizeof(Elf64_Ehdr));
-    bytebuf_append_u16(&out, 0);
-    bytebuf_append_u16(&out, 0);
-    bytebuf_append_u16(&out, sizeof(Elf64_Shdr));
-    bytebuf_append_u16(&out, nsections);
-    bytebuf_append_u16(&out, SEC_SHSTRTAB);
+    bytebuf_append_u16(out, ET_REL);
+    bytebuf_append_u16(out, EM_X86_64);
+    bytebuf_append_u32(out, EV_CURRENT);
+    bytebuf_append_u64(out, 0);
+    bytebuf_append_u64(out, 0);
+    bytebuf_append_u64(out, off_shdr);
+    bytebuf_append_u32(out, 0);
+    bytebuf_append_u16(out, sizeof(Elf64_Ehdr));
+    bytebuf_append_u16(out, 0);
+    bytebuf_append_u16(out, 0);
+    bytebuf_append_u16(out, sizeof(Elf64_Shdr));
+    bytebuf_append_u16(out, nsections);
+    bytebuf_append_u16(out, SEC_SHSTRTAB);
 
     /* Section content */
-    bytebuf_append_bytes(&out, bytebuf_data(&text), bytebuf_len(&text));
-    bytebuf_append_bytes(&out, bytebuf_data(&rodata), bytebuf_len(&rodata));
-    while ((size_t) bytebuf_len(&out) < off_data)
+    bytebuf_append_bytes(out, bytebuf_data(&text), bytebuf_len(&text));
+    bytebuf_append_bytes(out, bytebuf_data(&rodata), bytebuf_len(&rodata));
+    while ((size_t) bytebuf_len(out) < off_data)
     {
-        bytebuf_append(&out, 0);
+        bytebuf_append(out, 0);
     }
-    bytebuf_append_bytes(&out, bytebuf_data(&data), bytebuf_len(&data));
-    while ((size_t) bytebuf_len(&out) < off_symtab)
+    bytebuf_append_bytes(out, bytebuf_data(&data), bytebuf_len(&data));
+    while ((size_t) bytebuf_len(out) < off_symtab)
     {
-        bytebuf_append(&out, 0);
+        bytebuf_append(out, 0);
     }
-    bytebuf_append_bytes(&out, bytebuf_data(&symtab), bytebuf_len(&symtab));
-    bytebuf_append_bytes(&out, bytebuf_data(&strtab), bytebuf_len(&strtab));
-    bytebuf_append_bytes(&out, bytebuf_data(&shstrtab), bytebuf_len(&shstrtab));
-    bytebuf_append_bytes(&out, bytebuf_data(&rela_text), bytebuf_len(&rela_text));
-    bytebuf_append_bytes(&out, bytebuf_data(&rela_data), bytebuf_len(&rela_data));
-    bytebuf_append_bytes(&out, bytebuf_data(&rela_rodata), bytebuf_len(&rela_rodata));
-    while ((size_t) bytebuf_len(&out) < off_init_array)
+    bytebuf_append_bytes(out, bytebuf_data(&symtab), bytebuf_len(&symtab));
+    bytebuf_append_bytes(out, bytebuf_data(&strtab), bytebuf_len(&strtab));
+    bytebuf_append_bytes(out, bytebuf_data(&shstrtab), bytebuf_len(&shstrtab));
+    bytebuf_append_bytes(out, bytebuf_data(&rela_text), bytebuf_len(&rela_text));
+    bytebuf_append_bytes(out, bytebuf_data(&rela_data), bytebuf_len(&rela_data));
+    bytebuf_append_bytes(out, bytebuf_data(&rela_rodata), bytebuf_len(&rela_rodata));
+    while ((size_t) bytebuf_len(out) < off_init_array)
     {
-        bytebuf_append(&out, 0);
+        bytebuf_append(out, 0);
     }
-    bytebuf_append_bytes(&out, bytebuf_data(&init_array), bytebuf_len(&init_array));
-    bytebuf_append_bytes(&out, bytebuf_data(&rela_init_array), bytebuf_len(&rela_init_array));
-    while ((size_t) bytebuf_len(&out) < off_fini_array)
+    bytebuf_append_bytes(out, bytebuf_data(&init_array), bytebuf_len(&init_array));
+    bytebuf_append_bytes(out, bytebuf_data(&rela_init_array), bytebuf_len(&rela_init_array));
+    while ((size_t) bytebuf_len(out) < off_fini_array)
     {
-        bytebuf_append(&out, 0);
+        bytebuf_append(out, 0);
     }
-    bytebuf_append_bytes(&out, bytebuf_data(&fini_array), bytebuf_len(&fini_array));
-    bytebuf_append_bytes(&out, bytebuf_data(&rela_fini_array), bytebuf_len(&rela_fini_array));
+    bytebuf_append_bytes(out, bytebuf_data(&fini_array), bytebuf_len(&fini_array));
+    bytebuf_append_bytes(out, bytebuf_data(&rela_fini_array), bytebuf_len(&rela_fini_array));
     if (dwarf)
     {
         /* .eh_frame plus its RELA against the .text section symbol. */
-        while ((size_t) bytebuf_len(&out) < off_eh_frame)
+        while ((size_t) bytebuf_len(out) < off_eh_frame)
         {
-            bytebuf_append(&out, 0);
+            bytebuf_append(out, 0);
         }
-        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->cfi->eh_frame),
+        bytebuf_append_bytes(out, bytebuf_data(&dwarf->cfi->eh_frame),
                              bytebuf_len(&dwarf->cfi->eh_frame));
         for (size_t i = 0; i < vec_size(dwarf->cfi->relocs); i++)
         {
             CfiReloc *rel = (CfiReloc *) vec_get(dwarf->cfi->relocs, i);
-            rela_emit(&out, rel->offset, TEXT_SECTION_SYM, R_X86_64_64, rel->addend);
+            rela_emit(out, rel->offset, TEXT_SECTION_SYM, R_X86_64_64, rel->addend);
         }
-        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_info),
+        bytebuf_append_bytes(out, bytebuf_data(&dwarf->debug_info),
                              bytebuf_len(&dwarf->debug_info));
-        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_line),
+        bytebuf_append_bytes(out, bytebuf_data(&dwarf->debug_line),
                              bytebuf_len(&dwarf->debug_line));
-        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_abbrev),
+        bytebuf_append_bytes(out, bytebuf_data(&dwarf->debug_abbrev),
                              bytebuf_len(&dwarf->debug_abbrev));
-        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_str), bytebuf_len(&dwarf->debug_str));
-        bytebuf_append_bytes(&out, bytebuf_data(&dwarf->debug_loc), bytebuf_len(&dwarf->debug_loc));
-        while ((size_t) bytebuf_len(&out) < off_rela_debug_info)
+        bytebuf_append_bytes(out, bytebuf_data(&dwarf->debug_str), bytebuf_len(&dwarf->debug_str));
+        bytebuf_append_bytes(out, bytebuf_data(&dwarf->debug_loc), bytebuf_len(&dwarf->debug_loc));
+        while ((size_t) bytebuf_len(out) < off_rela_debug_info)
         {
-            bytebuf_append(&out, 0);
+            bytebuf_append(out, 0);
         }
         for (size_t i = 0; i < vec_size(dwarf->rela_info); i++)
         {
             DwarfReloc *rel = (DwarfReloc *) vec_get(dwarf->rela_info, i);
-            rela_emit(&out, rel->offset, rel->sym, R_X86_64_64, rel->addend);
+            rela_emit(out, rel->offset, rel->sym, R_X86_64_64, rel->addend);
         }
         for (size_t i = 0; i < vec_size(dwarf->rela_line); i++)
         {
             DwarfReloc *rel = (DwarfReloc *) vec_get(dwarf->rela_line, i);
-            rela_emit(&out, rel->offset, rel->sym, R_X86_64_64, rel->addend);
+            rela_emit(out, rel->offset, rel->sym, R_X86_64_64, rel->addend);
         }
     }
-    while ((size_t) bytebuf_len(&out) < off_shdr)
+    while ((size_t) bytebuf_len(out) < off_shdr)
     {
-        bytebuf_append(&out, 0);
+        bytebuf_append(out, 0);
     }
 
-    shdr_emit(&out, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0);
-    shdr_emit(&out, shname_text, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, off_text,
+    shdr_emit(out, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0);
+    shdr_emit(out, shname_text, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, off_text,
               bytebuf_len(&text), 0, 0, 1, 0);
-    shdr_emit(&out, shname_rodata, SHT_PROGBITS, SHF_ALLOC, off_rodata, bytebuf_len(&rodata), 0, 0,
+    shdr_emit(out, shname_rodata, SHT_PROGBITS, SHF_ALLOC, off_rodata, bytebuf_len(&rodata), 0, 0,
               8, 0);
-    shdr_emit(&out, shname_data, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, off_data, bytebuf_len(&data),
+    shdr_emit(out, shname_data, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, off_data, bytebuf_len(&data),
               0, 0, 8, 0);
-    shdr_emit(&out, shname_bss, SHT_NOBITS, SHF_ALLOC | SHF_WRITE, off_bss, bss_size, 0, 0, 8, 0);
-    shdr_emit(&out, shname_symtab, SHT_SYMTAB, 0, off_symtab, bytebuf_len(&symtab), SEC_STRTAB,
+    shdr_emit(out, shname_bss, SHT_NOBITS, SHF_ALLOC | SHF_WRITE, off_bss, bss_size, 0, 0, 8, 0);
+    shdr_emit(out, shname_symtab, SHT_SYMTAB, 0, off_symtab, bytebuf_len(&symtab), SEC_STRTAB,
               layout.first_global, 8, sizeof(Elf64_Sym));
-    shdr_emit(&out, shname_strtab, SHT_STRTAB, 0, off_strtab, bytebuf_len(&strtab), 0, 0, 1, 0);
-    shdr_emit(&out, shname_shstrtab, SHT_STRTAB, 0, off_shstrtab, bytebuf_len(&shstrtab), 0, 0, 1,
+    shdr_emit(out, shname_strtab, SHT_STRTAB, 0, off_strtab, bytebuf_len(&strtab), 0, 0, 1, 0);
+    shdr_emit(out, shname_shstrtab, SHT_STRTAB, 0, off_shstrtab, bytebuf_len(&shstrtab), 0, 0, 1,
               0);
-    shdr_emit(&out, shname_rela_text, SHT_RELA, SHF_INFO_LINK, off_rela_text,
+    shdr_emit(out, shname_rela_text, SHT_RELA, SHF_INFO_LINK, off_rela_text,
               bytebuf_len(&rela_text), SEC_SYMTAB, SEC_TEXT, 8, sizeof(Elf64_Rela));
-    shdr_emit(&out, shname_rela_data, SHT_RELA, SHF_INFO_LINK, off_rela_data,
+    shdr_emit(out, shname_rela_data, SHT_RELA, SHF_INFO_LINK, off_rela_data,
               bytebuf_len(&rela_data), SEC_SYMTAB, SEC_DATA, 8, sizeof(Elf64_Rela));
-    shdr_emit(&out, shname_rela_rodata, SHT_RELA, SHF_INFO_LINK, off_rela_rodata,
+    shdr_emit(out, shname_rela_rodata, SHT_RELA, SHF_INFO_LINK, off_rela_rodata,
               bytebuf_len(&rela_rodata), SEC_SYMTAB, SEC_RODATA, 8, sizeof(Elf64_Rela));
-    shdr_emit(&out, shname_init_array, SHT_INIT_ARRAY, SHF_ALLOC | SHF_WRITE, off_init_array,
+    shdr_emit(out, shname_init_array, SHT_INIT_ARRAY, SHF_ALLOC | SHF_WRITE, off_init_array,
               bytebuf_len(&init_array), 0, 0, 8, 8);
-    shdr_emit(&out, shname_rela_init_array, SHT_RELA, SHF_INFO_LINK, off_rela_init_array,
+    shdr_emit(out, shname_rela_init_array, SHT_RELA, SHF_INFO_LINK, off_rela_init_array,
               bytebuf_len(&rela_init_array), SEC_SYMTAB, SEC_INIT_ARRAY, 8, sizeof(Elf64_Rela));
-    shdr_emit(&out, shname_fini_array, SHT_FINI_ARRAY, SHF_ALLOC | SHF_WRITE, off_fini_array,
+    shdr_emit(out, shname_fini_array, SHT_FINI_ARRAY, SHF_ALLOC | SHF_WRITE, off_fini_array,
               bytebuf_len(&fini_array), 0, 0, 8, 8);
-    shdr_emit(&out, shname_rela_fini_array, SHT_RELA, SHF_INFO_LINK, off_rela_fini_array,
+    shdr_emit(out, shname_rela_fini_array, SHT_RELA, SHF_INFO_LINK, off_rela_fini_array,
               bytebuf_len(&rela_fini_array), SEC_SYMTAB, SEC_FINI_ARRAY, 8, sizeof(Elf64_Rela));
     if (dwarf)
     {
-        shdr_emit(&out, shname_eh_frame, SHT_PROGBITS, SHF_ALLOC, off_eh_frame, eh_frame_size, 0, 0,
+        shdr_emit(out, shname_eh_frame, SHT_PROGBITS, SHF_ALLOC, off_eh_frame, eh_frame_size, 0, 0,
                   8, 0);
-        shdr_emit(&out, shname_rela_eh_frame, SHT_RELA, SHF_INFO_LINK, off_rela_eh_frame,
+        shdr_emit(out, shname_rela_eh_frame, SHT_RELA, SHF_INFO_LINK, off_rela_eh_frame,
                   rela_eh_frame_size, SEC_SYMTAB, SEC_EH_FRAME, 8, sizeof(Elf64_Rela));
-        shdr_emit(&out, shname_debug_info, SHT_PROGBITS, 0, off_debug_info, debug_info_size, 0, 0,
+        shdr_emit(out, shname_debug_info, SHT_PROGBITS, 0, off_debug_info, debug_info_size, 0, 0,
                   1, 0);
-        shdr_emit(&out, shname_debug_line, SHT_PROGBITS, 0, off_debug_line, debug_line_size, 0, 0,
+        shdr_emit(out, shname_debug_line, SHT_PROGBITS, 0, off_debug_line, debug_line_size, 0, 0,
                   1, 0);
-        shdr_emit(&out, shname_debug_abbrev, SHT_PROGBITS, 0, off_debug_abbrev, debug_abbrev_size,
+        shdr_emit(out, shname_debug_abbrev, SHT_PROGBITS, 0, off_debug_abbrev, debug_abbrev_size,
                   0, 0, 1, 0);
-        shdr_emit(&out, shname_debug_str, SHT_PROGBITS, 0, off_debug_str, debug_str_size, 0, 0, 1,
+        shdr_emit(out, shname_debug_str, SHT_PROGBITS, 0, off_debug_str, debug_str_size, 0, 0, 1,
                   0);
-        shdr_emit(&out, shname_debug_loc, SHT_PROGBITS, 0, off_debug_loc, debug_loc_size, 0, 0, 1,
+        shdr_emit(out, shname_debug_loc, SHT_PROGBITS, 0, off_debug_loc, debug_loc_size, 0, 0, 1,
                   0);
-        shdr_emit(&out, shname_rela_debug_info, SHT_RELA, SHF_INFO_LINK, off_rela_debug_info,
+        shdr_emit(out, shname_rela_debug_info, SHT_RELA, SHF_INFO_LINK, off_rela_debug_info,
                   rela_debug_info_size, SEC_SYMTAB, SEC_DEBUG_INFO, 8, sizeof(Elf64_Rela));
-        shdr_emit(&out, shname_rela_debug_line, SHT_RELA, SHF_INFO_LINK, off_rela_debug_line,
+        shdr_emit(out, shname_rela_debug_line, SHT_RELA, SHF_INFO_LINK, off_rela_debug_line,
                   rela_debug_line_size, SEC_SYMTAB, SEC_DEBUG_LINE, 8, sizeof(Elf64_Rela));
     }
 
-    fwrite(bytebuf_data(&out), 1, bytebuf_len(&out), f);
+    return out;
+}
+
+void elf_write(CodegenModule *cm, const char *path, const DwarfOutput *dwarf)
+{
+    Arena *arena = arena_new();
+    ByteBuf *out = elf_serialize(cm, dwarf, arena);
+    FILE *f = fopen(path, "wb");
+    if (!f)
+    {
+        perror(path);
+        arena_free(arena);
+        return;
+    }
+    fwrite(bytebuf_data(out), 1, bytebuf_len(out), f);
     fclose(f);
     arena_free(arena);
 }

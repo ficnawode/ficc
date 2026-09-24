@@ -30,6 +30,8 @@ static void cli_config_init(CompilerConfig *cfg, Arena *arena, const char *exe_p
     cfg->pp.include_paths = vec_new(arena);
     cfg->pp.system_include_paths = vec_new(arena);
     cfg->pp.cmds = vec_new(arena);
+    cfg->link.lib_paths = vec_new(arena);
+    cfg->link.libs = vec_new(arena);
 }
 
 static bool add_input(CompilerConfig *cfg, const char *path)

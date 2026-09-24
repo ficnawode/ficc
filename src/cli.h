@@ -62,6 +62,17 @@ typedef struct
     bool debug; /* -g: emit DWARF debug info + .eh_frame CFI in the object */
 } CodegenConfig;
 
+/* The link step's configuration. Append-only; the linker reads it through
+   `link_run` and never sees the driver's own flags. */
+typedef struct
+{
+    const char *output_path; /* -o FILE, or NULL for the default a.out */
+    Vec *lib_paths;          /* Vec<const char*> — -L dir, in order */
+    Vec *libs;               /* Vec<const char*> — -l name, in order */
+    bool nostdlib;           /* -nostdlib: no implicit startup or -lc */
+    bool static_;            /* -static (residual: dynamic is the hosted default) */
+} LinkConfig;
+
 typedef struct
 {
     Arena *arena;            /* owns all string lifetimes for the parse */
@@ -86,6 +97,7 @@ typedef struct
     IRConfig ir;
     OptLevel opt; /* the -O level the optimizer runs at */
     CodegenConfig codegen;
+    LinkConfig link; /* the link step's config (drives link_run) */
 } CompilerConfig;
 
 CompilerConfig *cli_parse(int argc, char **argv, Arena *arena);
