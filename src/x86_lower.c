@@ -186,6 +186,22 @@ static X86Mem pointer_in_rax(X86LowerCtx *ctx, IrOperand ptr)
     return x86_mem_rax(0);
 }
 
+/* A pointer already in a register is used as the base directly; a
+   spilled/immediate/global pointer is materialized in `scratch` first. */
+static X86Mem mem_operand_for_ptr(X86LowerCtx *ctx, IrOperand ptr, u8 scratch)
+{
+    if (!ptr.is_imm && !ptr.is_global && !ptr.is_func)
+    {
+        RegLoc l = loc_of(ctx->alloc, ptr);
+        if (l.kind == LOC_REG)
+        {
+            return (X86Mem) {.base = l.reg, .index = NO_REG, .scale = 1, .disp = 0};
+        }
+    }
+    force_to_reg(ctx, ptr, scratch);
+    return (X86Mem) {.base = scratch, .index = NO_REG, .scale = 1, .disp = 0};
+}
+
 static void lower_binary(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
@@ -234,17 +250,22 @@ static void lower_div(IrInstr *in, X86LowerCtx *ctx)
     bool is_unsigned = in->opcode == OP_UDIV || in->opcode == OP_UREM;
     force_to_reg(ctx, in->ops[0], R_EAX);
     emit_cdq(ctx->buf, w, is_unsigned);
-    force_to_reg(ctx, in->ops[1], R_ECX);
+    force_to_reg(ctx, in->ops[1], R_R11);
     if (is_unsigned)
     {
-        emit_div(ctx->buf, w, R_ECX);
+        emit_div(ctx->buf, w, R_R11);
     }
     else
     {
-        emit_idiv(ctx->buf, w, R_ECX);
+        emit_idiv(ctx->buf, w, R_R11);
     }
     u8 src = (in->opcode == OP_SREM || in->opcode == OP_UREM) ? R_EDX : R_EAX;
     store_reg_result(ctx, in, w, src);
+}
+
+static bool operand_extend_needed(u8 width, u8 result_width)
+{
+    return width < result_width && width < 4;
 }
 
 /* Compare `lhs` and `rhs` into EFLAGS, shared by lower_icmp and the brcond fold. */
@@ -254,34 +275,103 @@ static void emit_icmp_cmp(X86LowerCtx *ctx, IrOperand lhs, IrOperand rhs)
     u8 w1 = operand_width(ctx, rhs);
     u8 w = MAX(w0, w1);
 
-    force_to_reg(ctx, lhs, R_EAX);
-    if (!lhs.is_imm && w0 < w && w0 < 4)
+    if (rhs.is_imm && rhs.u.imm == 0)
     {
-        emit_movzx(ctx->buf, w0, w, R_EAX, xop_reg(R_EAX));
-    }
-    if (rhs.is_imm && w == 8 && !fits_i32(rhs.u.imm))
-    {
-        force_to_reg(ctx, rhs, R_ECX);
-        emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, xop_reg(R_ECX));
+        if (!lhs.is_imm && !lhs.is_global && !lhs.is_func && !operand_extend_needed(w0, w))
+        {
+            RegLoc ll = loc_of(ctx->alloc, lhs);
+            if (ll.kind == LOC_REG)
+            {
+                emit_test_reg(ctx->buf, w, ll.reg);
+                return;
+            }
+        }
+        force_to_reg(ctx, lhs, R_EAX);
+        if (!lhs.is_imm && operand_extend_needed(w0, w))
+        {
+            emit_movzx(ctx->buf, w0, w, R_EAX, xop_reg(R_EAX));
+        }
+        emit_test_reg(ctx->buf, w, R_EAX);
         return;
     }
+
+    bool lhs_ext = !lhs.is_imm && operand_extend_needed(w0, w);
+    u8 lreg = R_EAX;
+    if (!lhs.is_imm && !lhs.is_global && !lhs.is_func)
+    {
+        RegLoc ll = loc_of(ctx->alloc, lhs);
+        if (!lhs_ext && ll.kind == LOC_REG)
+        {
+            lreg = ll.reg;
+        }
+        else
+        {
+            force_to_reg(ctx, lhs, R_EAX);
+            if (lhs_ext)
+            {
+                emit_movzx(ctx->buf, w0, w, R_EAX, xop_reg(R_EAX));
+            }
+        }
+    }
+    else
+    {
+        force_to_reg(ctx, lhs, R_EAX);
+    }
+
     if (rhs.is_imm)
     {
-        emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, xop_imm(rhs.u.imm));
+        if (w == 8 && !fits_i32(rhs.u.imm))
+        {
+            force_to_reg(ctx, rhs, R_R11);
+            emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg, xop_reg(R_R11));
+            return;
+        }
+        emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg, xop_imm(rhs.u.imm));
         return;
     }
-    force_to_reg(ctx, rhs, R_ECX);
-    if (w1 < w && w1 < 4)
+    if (rhs.is_global || rhs.is_func)
     {
-        emit_movzx(ctx->buf, w1, w, R_ECX, xop_reg(R_ECX));
+        force_to_reg(ctx, rhs, R_R11);
+        emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg, xop_reg(R_R11));
+        return;
     }
-    emit_binop_rhs(ctx->buf, w, &cmp_spec, R_EAX, xop_reg(R_ECX));
+    RegLoc rl = loc_of(ctx->alloc, rhs);
+    if (!operand_extend_needed(w1, w))
+    {
+        if (rl.kind == LOC_REG)
+        {
+            emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg, xop_reg(rl.reg));
+        }
+        else if (w1 == w)
+        {
+            emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg, xop_mem(rbp_mem(rl.disp)));
+        }
+        else
+        {
+            force_to_reg(ctx, rhs, R_R11);
+            emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg, xop_reg(R_R11));
+        }
+        return;
+    }
+    emit_movzx(ctx->buf, w1, w, R_R11,
+               rl.kind == LOC_REG ? xop_reg(rl.reg) : xop_mem(rbp_mem(rl.disp)));
+    emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg, xop_reg(R_R11));
 }
 
 static void lower_icmp(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 rw = vreg_width(ctx, in->result);
+    RegLoc rl = result_loc(ctx, in);
     emit_icmp_cmp(ctx, in->ops[0], in->ops[1]);
+    if (rl.kind == LOC_REG)
+    {
+        emit_setcc_reg(ctx->buf, icmp_cc[in->opcode], rl.reg);
+        if (rw != W_BYTE)
+        {
+            emit_movzx(ctx->buf, W_BYTE, rw, rl.reg, xop_reg(rl.reg));
+        }
+        return;
+    }
     emit_setcc(ctx->buf, icmp_cc[in->opcode]);
     emit_movzbl_al_eax(ctx->buf);
     store_reg_result(ctx, in, rw, R_EAX);
@@ -290,6 +380,12 @@ static void lower_icmp(IrInstr *in, X86LowerCtx *ctx)
 static void lower_trunc(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
+    RegLoc rl = result_loc(ctx, in);
+    if (rl.kind == LOC_REG)
+    {
+        force_to_reg(ctx, in->ops[0], rl.reg);
+        return;
+    }
     force_to_reg(ctx, in->ops[0], R_EAX);
     store_reg_result(ctx, in, w, R_EAX);
 }
@@ -324,28 +420,37 @@ static void lower_zext(IrInstr *in, X86LowerCtx *ctx)
         }
         return;
     }
-    force_to_reg(ctx, in->ops[0], R_EAX);
+    u8 dst = rl.kind == LOC_REG ? rl.reg : R_EAX;
+    force_to_reg(ctx, in->ops[0], dst);
     if (!in->ops[0].is_imm)
     {
         u8 sw = vreg_width(ctx, in->ops[0].u.vreg);
         if (sw < 4)
         {
-            emit_movzx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
+            emit_movzx(ctx->buf, sw, dw, dst, xop_reg(dst));
         }
     }
-    store_reg_result(ctx, in, dw, R_EAX);
+    if (rl.kind == LOC_MEM)
+    {
+        emit_mov(ctx->buf, dw, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
+    }
 }
 
 static void lower_sext(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 dw = vreg_width(ctx, in->result);
-    force_to_reg(ctx, in->ops[0], R_EAX);
+    RegLoc rl = result_loc(ctx, in);
+    u8 dst = rl.kind == LOC_REG ? rl.reg : R_EAX;
+    force_to_reg(ctx, in->ops[0], dst);
     if (!in->ops[0].is_imm)
     {
         u8 sw = vreg_width(ctx, in->ops[0].u.vreg);
-        emit_movsx(ctx->buf, sw, dw, R_EAX, xop_reg(R_EAX));
+        emit_movsx(ctx->buf, sw, dw, dst, xop_reg(dst));
     }
-    store_reg_result(ctx, in, dw, R_EAX);
+    if (rl.kind == LOC_MEM)
+    {
+        emit_mov(ctx->buf, dw, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
+    }
 }
 
 static bool operand_is_fp_vreg(X86LowerCtx *ctx, IrOperand op)
@@ -640,7 +745,7 @@ static void lower_fcmp(IrInstr *in, X86LowerCtx *ctx)
 static void lower_load(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
-    X86Mem addr = pointer_in_rax(ctx, in->ops[0]);
+    X86Mem addr = mem_operand_for_ptr(ctx, in->ops[0], R_R11);
     RegLoc rl = result_loc(ctx, in);
     if (w == W_LD)
     {
@@ -665,8 +770,9 @@ static void lower_load(IrInstr *in, X86LowerCtx *ctx)
         emit_mov(ctx->buf, w, xop_reg(rl.reg), xop_mem(addr));
         return;
     }
-    emit_mov(ctx->buf, w, xop_reg(R_ECX), xop_mem(addr));
-    emit_mov(ctx->buf, w, xop_mem(rbp_mem(rl.disp)), xop_reg(R_ECX));
+    u8 tmp = addr.base == R_R11 ? R_EAX : R_R11;
+    emit_mov(ctx->buf, w, xop_reg(tmp), xop_mem(addr));
+    emit_mov(ctx->buf, w, xop_mem(rbp_mem(rl.disp)), xop_reg(tmp));
 }
 
 static void lower_store(IrInstr *in, X86LowerCtx *ctx)
@@ -679,13 +785,13 @@ static void lower_store(IrInstr *in, X86LowerCtx *ctx)
         {
             ASSERT(val.u.imm == 0 && "nonzero immediate in a width-16 store");
             emit_sse_xor(ctx->buf, 0, R_XMM0, R_XMM0);
-            X86Mem addr0 = pointer_in_rax(ctx, in->ops[1]);
+            X86Mem addr0 = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
             emit_mov16_store(ctx->buf, addr0);
             return;
         }
         RegLoc sl = loc_of(ctx->alloc, val);
         ASSERT(sl.kind == LOC_MEM && "x87 values are memory-only");
-        X86Mem addr = pointer_in_rax(ctx, in->ops[1]);
+        X86Mem addr = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
         emit_mov16(ctx->buf, rbp_mem(sl.disp), addr);
         return;
     }
@@ -693,7 +799,7 @@ static void lower_store(IrInstr *in, X86LowerCtx *ctx)
     {
         u8 mf = MF_OF(w);
         RegLoc sl = loc_of(ctx->alloc, val);
-        X86Mem addr = pointer_in_rax(ctx, in->ops[1]);
+        X86Mem addr = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
         if (sl.kind == LOC_REG)
         {
             emit_sse_store(ctx->buf, mf, addr, sl.reg);
@@ -703,52 +809,99 @@ static void lower_store(IrInstr *in, X86LowerCtx *ctx)
         emit_sse_store(ctx->buf, mf, addr, R_XMM0);
         return;
     }
-    force_to_reg(ctx, val, R_ECX);
-    X86Mem addr = pointer_in_rax(ctx, in->ops[1]);
-    emit_mov(ctx->buf, (u8) w, xop_mem(addr), xop_reg(R_ECX));
+    X86Mem addr = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
+    if (!val.is_imm && !val.is_global && !val.is_func)
+    {
+        RegLoc sl = loc_of(ctx->alloc, val);
+        if (sl.kind == LOC_REG)
+        {
+            emit_mov(ctx->buf, (u8) w, xop_mem(addr), xop_reg(sl.reg));
+            return;
+        }
+    }
+    u8 tmp = addr.base == R_R11 ? R_EAX : R_R11;
+    force_to_reg(ctx, val, tmp);
+    emit_mov(ctx->buf, (u8) w, xop_mem(addr), xop_reg(tmp));
 }
 
 static void lower_gep(IrInstr *in, X86LowerCtx *ctx)
 {
     i64 stride = in->ops[2].u.imm;
+    RegLoc rl = result_loc(ctx, in);
+    u8 dst = rl.kind == LOC_REG ? rl.reg : R_EAX;
+    force_to_reg(ctx, in->ops[0], dst);
     if (in->ops[1].is_imm && in->ops[1].u.imm == 1)
     {
-        X86Mem base = pointer_in_rax(ctx, in->ops[0]);
-        X86Mem m = {.base = base.base, .index = NO_REG, .scale = 1, .disp = (i32) stride};
-        emit_lea(ctx->buf, R_EDX, m);
-        store_reg_result(ctx, in, W_QWORD, R_EDX);
-        return;
-    }
-    X86Mem base = pointer_in_rax(ctx, in->ops[0]);
-    force_to_reg(ctx, in->ops[1], R_ECX);
-    if (stride == 1 || stride == 2 || stride == 4 || stride == 8)
-    {
-        X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = (u8) stride, .disp = 0};
-        emit_lea(ctx->buf, R_EDX, scaled);
+        X86Mem m = {.base = dst, .index = NO_REG, .scale = 1, .disp = (i32) stride};
+        emit_lea(ctx->buf, dst, m);
     }
     else
     {
-        emit_imul_imm(ctx->buf, W_QWORD, R_ECX, stride);
-        X86Mem scaled = {.base = base.base, .index = R_ECX, .scale = 1, .disp = 0};
-        emit_lea(ctx->buf, R_EDX, scaled);
+        force_to_reg(ctx, in->ops[1], R_R11);
+        if (stride == 1 || stride == 2 || stride == 4 || stride == 8)
+        {
+            X86Mem scaled = {.base = dst, .index = R_R11, .scale = (u8) stride, .disp = 0};
+            emit_lea(ctx->buf, dst, scaled);
+        }
+        else
+        {
+            emit_imul_imm(ctx->buf, W_QWORD, R_R11, stride);
+            X86Mem scaled = {.base = dst, .index = R_R11, .scale = 1, .disp = 0};
+            emit_lea(ctx->buf, dst, scaled);
+        }
     }
-    store_reg_result(ctx, in, W_QWORD, R_EDX);
+    if (rl.kind == LOC_MEM)
+    {
+        emit_mov(ctx->buf, W_QWORD, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
+    }
 }
 
 static void lower_alloca(IrInstr *in, X86LowerCtx *ctx)
 {
     u32 aligned = align_up((u32) in->ops[0].u.imm, STACK_ALIGN);
     emit_binop_rhs(ctx->buf, W_QWORD, &arith_specs[OP_SUB], R_ESP, xop_imm(aligned));
-    emit_mov(ctx->buf, W_QWORD, xop_reg(R_ECX), xop_reg(R_ESP));
-    store_reg_result(ctx, in, W_QWORD, R_ECX);
+    RegLoc rl = result_loc(ctx, in);
+    if (rl.kind == LOC_MEM)
+    {
+        emit_mov(ctx->buf, W_QWORD, xop_mem(rbp_mem(rl.disp)), xop_reg(R_ESP));
+        return;
+    }
+    emit_mov(ctx->buf, W_QWORD, xop_reg(rl.reg), xop_reg(R_ESP));
 }
 
+static bool operand_in_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
+{
+    if (op.is_imm || op.is_global || op.is_func)
+    {
+        return false;
+    }
+    RegLoc l = loc_of(ctx->alloc, op);
+    return l.kind == LOC_REG && l.reg == reg;
+}
+
+/* rdi <- dst, rsi <- src, then rep movsb.  The two moves are ordered so a
+   source still living in %rdi or %rsi is read before its register is
+   overwritten (the pathological swap goes through %rax). */
 static void lower_memcpy(IrInstr *in, X86LowerCtx *ctx)
 {
-    (void) pointer_in_rax(ctx, in->ops[0]);
-    emit_mov(ctx->buf, W_QWORD, xop_reg(R_EDI), xop_reg(R_EAX));
-    (void) pointer_in_rax(ctx, in->ops[1]);
-    emit_mov(ctx->buf, W_QWORD, xop_reg(R_ESI), xop_reg(R_EAX));
+    IrOperand dst = in->ops[0];
+    IrOperand src = in->ops[1];
+    if (operand_in_reg(ctx, dst, R_ESI) && operand_in_reg(ctx, src, R_EDI))
+    {
+        force_to_reg(ctx, src, R_EAX);
+        force_to_reg(ctx, dst, R_EDI);
+        emit_mov(ctx->buf, W_QWORD, xop_reg(R_ESI), xop_reg(R_EAX));
+    }
+    else if (operand_in_reg(ctx, dst, R_ESI))
+    {
+        force_to_reg(ctx, dst, R_EDI);
+        force_to_reg(ctx, src, R_ESI);
+    }
+    else
+    {
+        force_to_reg(ctx, src, R_ESI);
+        force_to_reg(ctx, dst, R_EDI);
+    }
     emit_mov(ctx->buf, W_QWORD, xop_reg(R_ECX), xop_imm(in->ops[2].u.imm));
     bytebuf_append(ctx->buf, X86_REP);
     bytebuf_append(ctx->buf, X86_MOVSB);
@@ -852,6 +1005,15 @@ static void emit_cond_branch(X86LowerCtx *ctx, u8 cc, const char *true_label,
 static void lower_brcond_test(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 cw = operand_width(ctx, in->ops[0]);
+    if (!in->ops[0].is_imm && !in->ops[0].is_global && !in->ops[0].is_func)
+    {
+        RegLoc l = loc_of(ctx->alloc, in->ops[0]);
+        if (l.kind == LOC_REG)
+        {
+            emit_test_reg(ctx->buf, cw, l.reg);
+            return;
+        }
+    }
     force_to_reg(ctx, in->ops[0], R_EAX);
     emit_test_reg(ctx->buf, cw, R_EAX);
 }

@@ -74,3 +74,96 @@ TEST(x86_emit, xor_zero_forms)
 
     arena_free(a);
 }
+
+TEST(x86_emit, inc_dec_forms)
+{
+    Arena *a = arena_new();
+    ByteBuf b;
+
+    bytebuf_init(&b, a);
+    emit_inc_dec(&b, 8, R_EAX, false);
+    expect_bytes(&b, (const u8[]) {0x48, 0xff, 0xc0}, 3);
+
+    bytebuf_init(&b, a);
+    emit_inc_dec(&b, 4, R_R14, false);
+    expect_bytes(&b, (const u8[]) {0x41, 0xff, 0xc6}, 3);
+
+    bytebuf_init(&b, a);
+    emit_inc_dec(&b, 8, R_EAX, true);
+    expect_bytes(&b, (const u8[]) {0x48, 0xff, 0xc8}, 3);
+
+    bytebuf_init(&b, a);
+    emit_inc_dec(&b, 1, 4, false);
+    expect_bytes(&b, (const u8[]) {0x40, 0xfe, 0xc4}, 3);
+
+    arena_free(a);
+}
+
+TEST(x86_emit, test_zero_uses_test)
+{
+    Arena *a = arena_new();
+    ByteBuf b;
+
+    bytebuf_init(&b, a);
+    emit_test_reg(&b, 8, R_EAX);
+    expect_bytes(&b, (const u8[]) {0x48, 0x85, 0xc0}, 3);
+
+    bytebuf_init(&b, a);
+    emit_test_reg(&b, 4, R_EAX);
+    expect_bytes(&b, (const u8[]) {0x85, 0xc0}, 2);
+
+    bytebuf_init(&b, a);
+    emit_test_reg(&b, 8, R_R12);
+    expect_bytes(&b, (const u8[]) {0x4d, 0x85, 0xe4}, 3);
+
+    bytebuf_init(&b, a);
+    emit_test_reg(&b, 1, R_EDI);
+    expect_bytes(&b, (const u8[]) {0x40, 0x84, 0xff}, 3);
+
+    arena_free(a);
+}
+
+TEST(x86_emit, mem_operand_extended_bases)
+{
+    Arena *a = arena_new();
+    ByteBuf b;
+
+    /* %r12 has rm field 4, so it always needs a SIB byte. */
+    bytebuf_init(&b, a);
+    emit_mov(&b, 4, xop_reg(R_EAX),
+             xop_mem((X86Mem) {.base = R_R12, .index = NO_REG, .scale = 1, .disp = 0}));
+    expect_bytes(&b, (const u8[]) {0x41, 0x8b, 0x04, 0x24}, 4);
+
+    /* %r13 has base field 5, so disp=0 must use mod=1 with a zero disp8. */
+    bytebuf_init(&b, a);
+    emit_mov(&b, 4, xop_reg(R_EAX),
+             xop_mem((X86Mem) {.base = R_R13, .index = NO_REG, .scale = 1, .disp = 0}));
+    expect_bytes(&b, (const u8[]) {0x41, 0x8b, 0x45, 0x00}, 4);
+
+    bytebuf_init(&b, a);
+    emit_mov(&b, 4, xop_reg(R_EAX),
+             xop_mem((X86Mem) {.base = R_R12, .index = R_ECX, .scale = 4, .disp = 0}));
+    expect_bytes(&b, (const u8[]) {0x41, 0x8b, 0x04, 0x8c}, 4);
+
+    arena_free(a);
+}
+
+TEST(x86_emit, reg_reg_extends_both_operands)
+{
+    Arena *a = arena_new();
+    ByteBuf b;
+
+    bytebuf_init(&b, a);
+    emit_reg_reg(&b, 0x03, R_EAX, R_EAX);
+    expect_bytes(&b, (const u8[]) {0x48, 0x03, 0xc0}, 3);
+
+    bytebuf_init(&b, a);
+    emit_reg_reg(&b, 0x03, R_EAX, R_R11);
+    expect_bytes(&b, (const u8[]) {0x49, 0x03, 0xc3}, 3);
+
+    bytebuf_init(&b, a);
+    emit_reg_reg(&b, 0x03, R_R12, R_EAX);
+    expect_bytes(&b, (const u8[]) {0x4c, 0x03, 0xe0}, 3);
+
+    arena_free(a);
+}

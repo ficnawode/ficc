@@ -118,8 +118,13 @@ typedef enum
     X86_GROUP3_RM8 = 0xF6,
     X86_GROUP3_RM32 = 0xF7,
 
+    X86_INC_DEC_RM8 = 0xFE,
+    X86_INC_DEC_RM32 = 0xFF,
+
     X86_SHIFT_RM8_CL = 0xD2,
     X86_SHIFT_RM32_CL = 0xD3,
+    X86_SHIFT_RM8_IMM = 0xC0,
+    X86_SHIFT_RM32_IMM = 0xC1,
 
     X86_CBW_CWDE_CDQE = 0x98,
     X86_CWD_CDQ_CQO = 0x99,
@@ -314,7 +319,9 @@ void emit_reg_reg(ByteBuf *buf, u8 opcode, u8 dst_reg, u8 src_reg);
 void emit_binop_rhs(ByteBuf *buf, u8 width, const ArithSpec *s, u8 dst_reg, X86Operand rhs);
 
 void emit_unary(ByteBuf *buf, u8 width, u8 reg, u8 digit);
+void emit_inc_dec(ByteBuf *buf, u8 width, u8 reg, bool dec);
 void emit_shift_cl(ByteBuf *buf, u8 width, u8 reg, u8 digit);
+void emit_shift_imm(ByteBuf *buf, u8 width, u8 reg, u8 digit, u8 imm);
 void emit_cdq(ByteBuf *buf, u8 width, bool is_unsigned);
 void emit_idiv(ByteBuf *buf, u8 width, u8 reg);
 void emit_div(ByteBuf *buf, u8 width, u8 reg);

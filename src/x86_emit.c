@@ -90,9 +90,12 @@ void emit_mem_operand(ByteBuf *buf, u8 reg, X86Mem m)
         return;
     }
 
-    bool need_sib = m.index != NO_REG || m.base == R_ESP;
+    /* rm = 4 (rsp/r12) always requires a SIB byte; otherwise rm names the base register. */
+    bool need_sib = m.index != NO_REG || (m.base & 7) == 4;
     u8 mod;
-    if (m.disp == 0 && (need_sib || m.base != R_EBP))
+    /* mod=0 means no displacement, except when the base field is 5 (%rbp/%r13),
+       where it instead means a disp32 with no base register. */
+    if (m.disp == 0 && (m.base & 7) != 5)
     {
         mod = 0;
     }
@@ -105,7 +108,6 @@ void emit_mem_operand(ByteBuf *buf, u8 reg, X86Mem m)
         mod = 2;
     }
 
-    /* rm = 4 (rsp) always requires a SIB byte; otherwise rm names the base register. */
     u8 rm = need_sib ? 4 : m.base;
     bytebuf_append(buf, modrm(mod, reg, rm));
     if (need_sib)
@@ -241,10 +243,10 @@ const u8 icmp_cc[OP_ICMP_SGE + 1] = {
     [OP_ICMP_SGT] = CC_G, [OP_ICMP_SGE] = CC_GE,
 };
 
-/* REX.W reg,reg form; operand regs must be < 8. */
+/* REX.W reg,reg form (REX.R/REX.B extend either operand). */
 void emit_reg_reg(ByteBuf *buf, u8 opcode, u8 dst_reg, u8 src_reg)
 {
-    bytebuf_append(buf, X86_REX_W);
+    bytebuf_append(buf, rex(true, dst_reg >= 8, false, src_reg >= 8));
     bytebuf_append(buf, opcode);
     bytebuf_append(buf, modrm(3, dst_reg, src_reg));
 }
@@ -339,6 +341,26 @@ void emit_unary(ByteBuf *buf, u8 width, u8 reg, u8 digit)
     bytebuf_append(buf, modrm(3, digit, reg));
 }
 
+void emit_inc_dec(ByteBuf *buf, u8 width, u8 reg, bool dec)
+{
+    bool byte = width == 1;
+    emit_os16(buf, width);
+    if (byte)
+    {
+        /* A byte reg 4-7 is spl/bpl/sil/dil only under a REX prefix (REX.X/B clear). */
+        if (reg >= 4)
+        {
+            bytebuf_append(buf, rex(false, false, false, reg >= 8));
+        }
+    }
+    else
+    {
+        emit_rex_if(buf, width == 8, false, false, reg >= 8);
+    }
+    bytebuf_append(buf, byte ? X86_INC_DEC_RM8 : X86_INC_DEC_RM32);
+    bytebuf_append(buf, modrm(3, dec ? 1 : 0, reg));
+}
+
 void emit_shift_cl(ByteBuf *buf, u8 width, u8 reg, u8 digit)
 {
     emit_os16(buf, width);
@@ -415,16 +437,16 @@ void emit_test_reg(ByteBuf *buf, u8 width, u8 reg)
     {
         if (reg >= 4)
         {
-            bytebuf_append(buf, rex(false, false, false, reg >= 8));
+            bytebuf_append(buf, rex(false, reg >= 8, false, reg >= 8));
         }
         bytebuf_append(buf, X86_TEST_RM8_REG8);
-        bytebuf_append(buf, modrm(3, 0, reg));
+        bytebuf_append(buf, modrm(3, reg, reg));
         return;
     }
     emit_os16(buf, width);
-    emit_rex_if(buf, width == 8, false, false, reg >= 8);
+    emit_rex_if(buf, width == 8, reg >= 8, false, reg >= 8);
     bytebuf_append(buf, X86_TEST_REG_RM);
-    bytebuf_append(buf, modrm(3, 0, reg));
+    bytebuf_append(buf, modrm(3, reg, reg));
 }
 
 void emit_xor_eax_eax(ByteBuf *buf)
