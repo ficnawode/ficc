@@ -144,10 +144,11 @@ TEST(regalloc, assigns_lowest_free_and_reuses_disjoint_registers)
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     LiveIntervals set = liveinterval_compute(f, m, a);
     RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    /* The def-use chain coalesces: each value reuses the register of the operand
+       that dies at its definition, so x, y, z all ride the lowest register. */
     EXPECT_EQ(alloc->phys_map[x], R_ECX);
+    EXPECT_EQ(alloc->phys_map[y], R_ECX);
     EXPECT_EQ(alloc->phys_map[z], R_ECX);
-    EXPECT_TRUE(alloc->phys_map[y] >= 0);
-    EXPECT_TRUE(alloc->phys_map[y] != R_ECX);
     EXPECT_EQ(alloc->frame_size, 0);
     EXPECT_EQ(alloc->saved_mask, 0); /* only caller-saved registers were used */
     arena_free(a);

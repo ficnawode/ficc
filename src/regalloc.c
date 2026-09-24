@@ -223,6 +223,68 @@ static bool bank_allows(const RegBank *bank, u8 reg)
     return true;
 }
 
+/* The two-address form of these ops writes its result over `ops[0]`; the result
+   can share that operand's register when the operand dies at the instruction. */
+static int coalesce_hint(const IrInstr *def, const int *phys_map)
+{
+    if (!def)
+    {
+        return -1;
+    }
+    switch (def->opcode)
+    {
+        case OP_ADD:
+        case OP_SUB:
+        case OP_MUL:
+        case OP_AND:
+        case OP_OR:
+        case OP_XOR:
+        case OP_SHL:
+        case OP_LSHR:
+        case OP_ASHR:
+        case OP_NEG:
+        case OP_NOT:
+        case OP_FADD:
+        case OP_FSUB:
+        case OP_FMUL:
+        case OP_FDIV:
+        case OP_FNEG:
+        case OP_GEP:
+        case OP_LOAD:
+            if (def->nops > 0 && ir_operand_is_vreg(def->ops[0]))
+            {
+                return phys_map[def->ops[0].u.vreg];
+            }
+            return -1;
+        default:
+            return -1;
+    }
+}
+
+static IrInstr **collect_defs(IrFunction *f, u32 nvregs, Arena *arena)
+{
+    IrInstr **defs = arena_alloc(arena, (nvregs ? nvregs : 1) * sizeof(IrInstr *), sizeof(void *));
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        defs[v] = NULL;
+    }
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->result != NO_VREG)
+            {
+                defs[in->result] = in;
+            }
+        }
+    }
+    return defs;
+}
+
 /* A value live at a call must ride a callee-saved register or a slot. The start
    bound is inclusive: an entry parameter (position 0) survives an entry call. */
 static bool crosses_call(const u32 *calls, u32 ncall, u32 start, u32 end)
@@ -238,25 +300,62 @@ static bool crosses_call(const u32 *calls, u32 ncall, u32 start, u32 end)
 }
 
 static int pick_register(const RegBank *bank, const ActiveInterval *active, u32 nactive,
-                         bool crossing, u16 avoid)
+                         bool crossing, u16 avoid, int hint, u32 start)
 {
+    /* A coalescing hint may reuse a register still held by an interval that dies
+       exactly here (end == start); any interval that lives past `start` blocks it. */
+    if (hint >= 0 && bank_allows(bank, (u8) hint) && !(avoid & (u16) (1u << hint)) &&
+        (!crossing || bank_callee_index(bank, (u8) hint) >= 0))
+    {
+        bool blocked = false;
+        for (u32 a = 0; a < nactive; a++)
+        {
+            if (active[a].reg == (u8) hint && active[a].iv->end > start)
+            {
+                blocked = true;
+                break;
+            }
+        }
+        if (!blocked)
+        {
+            return hint;
+        }
+    }
+
     bool used[16] = {false};
     for (u32 a = 0; a < nactive; a++)
     {
         used[active[a].reg] = true;
     }
-    for (u8 i = 0; i < bank->num_regs; i++)
+    /* A non-crossing value prefers a caller-saved register (no prologue save);
+       only fall back to a callee-saved one when the caller-saved bank is full. */
+    for (u8 pass = 0; pass < 2; pass++)
     {
-        u8 reg = bank->names[i];
-        if (used[reg] || !bank_allows(bank, reg) || (avoid & (u16) (1u << reg)))
+        for (u8 i = 0; i < bank->num_regs; i++)
         {
-            continue;
+            u8 reg = bank->names[i];
+            if (used[reg] || !bank_allows(bank, reg) || (avoid & (u16) (1u << reg)))
+            {
+                continue;
+            }
+            bool callee = bank_callee_index(bank, reg) >= 0;
+            if (crossing)
+            {
+                if (!callee)
+                {
+                    continue;
+                }
+            }
+            else if ((pass == 0) == callee)
+            {
+                continue; /* pass 0 takes caller-saved, pass 1 callee-saved */
+            }
+            return reg;
         }
-        if (crossing && bank_callee_index(bank, reg) < 0)
+        if (crossing)
         {
-            continue;
+            break; /* no second pass */
         }
-        return reg;
     }
     return -1;
 }
@@ -325,9 +424,37 @@ static bool *mark_arg_reg_vregs(IrFunction *f, u32 nvregs, Arena *arena)
     return op;
 }
 
+/* When no register is free, a shorter-lived interval can take the register of
+   the active interval that ends farthest. Returns the index to evict, or -1. */
+static int pick_eviction(const RegBank *bank, const ActiveInterval *active, u32 nactive,
+                         bool crossing, u16 avoid, u32 iv_end)
+{
+    int best = -1;
+    u32 best_end = iv_end;
+    for (u32 a = 0; a < nactive; a++)
+    {
+        u8 reg = active[a].reg;
+        if (avoid & (u16) (1u << reg))
+        {
+            continue;
+        }
+        if (crossing && bank_callee_index(bank, reg) < 0)
+        {
+            continue;
+        }
+        if (active[a].iv->end > best_end)
+        {
+            best_end = active[a].iv->end;
+            best = (int) a;
+        }
+    }
+    return best;
+}
+
 static void linear_scan_class(RegAllocation *alloc, const LiveInterval **order, u32 nintervals,
                               const RegBank *bank, const u32 *calls, u32 ncall, const bool *call_op,
-                              u16 arg_avoid, const ClobberPos *clob, u32 nclob, Arena *arena)
+                              u16 arg_avoid, const ClobberPos *clob, u32 nclob, IrInstr **defs,
+                              Arena *arena)
 {
     ActiveInterval *active = arena_alloc(
         arena, (nintervals ? nintervals : 1) * sizeof(ActiveInterval), _Alignof(ActiveInterval));
@@ -356,7 +483,18 @@ static void linear_scan_class(RegAllocation *alloc, const LiveInterval **order, 
         {
             avoid |= clobber_avoid(clob, nclob, iv->start, iv->end);
         }
-        int reg = pick_register(bank, active, nactive, crossing, avoid);
+        int hint = coalesce_hint(defs[iv->vreg], alloc->phys_map);
+        int reg = pick_register(bank, active, nactive, crossing, avoid, hint, iv->start);
+        if (reg < 0)
+        {
+            int ev = pick_eviction(bank, active, nactive, crossing, avoid, iv->end);
+            if (ev >= 0)
+            {
+                reg = active[ev].reg;
+                alloc->phys_map[active[ev].iv->vreg] = -1;
+                active[ev] = active[--nactive];
+            }
+        }
         if (reg < 0)
         {
             continue;
@@ -381,14 +519,15 @@ RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const Ta
 
     const LiveInterval **order = sorted_intervals(set, arena);
     bool *call_op = mark_arg_reg_vregs(f, set->nvregs, arena);
+    IrInstr **defs = collect_defs(f, set->nvregs, arena);
     u32 nclob = 0;
     ClobberPos *clob = collect_clobbers(f, &set->pos, target, &nclob, arena);
     u16 gpr_avoid = call_arg_avoid_mask(&target->gpr, target->gp_args, target->ngp);
     u16 xmm_avoid = call_arg_avoid_mask(&target->xmm, target->fp_args, target->nfp);
     linear_scan_class(alloc, order, set->n, &target->gpr, calls, ncall, call_op, gpr_avoid, clob,
-                      nclob, arena);
+                      nclob, defs, arena);
     linear_scan_class(alloc, order, set->n, &target->xmm, calls, ncall, call_op, xmm_avoid, clob,
-                      nclob, arena);
+                      nclob, defs, arena);
     u8 saved_mask = 0;
     for (u32 v = 0; v < set->nvregs; v++)
     {
