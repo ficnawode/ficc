@@ -49,6 +49,7 @@ struct X86LowerCtx
     u32 cur_pos;                /* the position of the instruction being lowered */
     u32 *use_count;             /* operand-reference count per vreg (brcond fold) */
     GepFold *gep_folds;         /* vreg → folded-GEP recipe, GEP_FOLD_NONE when none */
+    bool *zero_extended;        /* vreg value provably has its upper 32 bits zero */
     const char *next_label;     /* label of the block emitted next (fallthrough) */
     Vec *lines;                 /* Vec<LineEntry*> when recording -g line rows, else NULL */
     bool debug;                 /* record line boundaries for DWARF */

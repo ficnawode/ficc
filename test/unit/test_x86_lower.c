@@ -91,6 +91,39 @@ TEST(x86_lower, caller_saved_call_gap_stores_before_and_reloads_after)
     arena_free(a);
 }
 
+/* A 32-bit `mov r,r` (no REX.W) is the redundant self-move a zext emits to
+   clear the upper half. */
+static bool has_32bit_self_move(ByteBuf *b)
+{
+    const u8 *code = bytebuf_data(b);
+    size_t n = bytebuf_len(b);
+    for (size_t i = 0; i + 1 < n; i++)
+    {
+        if (code[i] != 0x89 || (i > 0 && code[i - 1] >= 0x48 && code[i - 1] <= 0x4F))
+        {
+            continue;
+        }
+        u8 modrm = code[i + 1];
+        if ((modrm & 0xC0) == 0xC0 && ((modrm >> 3) & 7) == (modrm & 7))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+TEST(x86_lower, zero_extended_source_skips_the_zext_self_move)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("unsigned long w(unsigned x) { return x + 1u; }\n", a);
+    EXPECT_NOTNULL(m);
+    CodegenModule *cm = codegen_ir_to_machine(m, NULL, a);
+    EXPECT_NOTNULL(cm);
+    ByteBuf *bytes = ((CodegenFunc *) vec_get(cm->funcs, 0))->bytes;
+    EXPECT_FALSE(has_32bit_self_move(bytes));
+    arena_free(a);
+}
+
 /* A rel32 `jmp` whose displacement is zero targets the next instruction. */
 static size_t count_jmps_to_next(ByteBuf *b)
 {

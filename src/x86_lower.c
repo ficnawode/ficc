@@ -557,6 +557,10 @@ static void lower_extend_int(X86LowerCtx *ctx, IrOperand op, u8 dw, u8 dst, bool
         force_to_reg(ctx, op, dst);
         return;
     }
+    if (!is_signed && l.kind == LOC_REG && l.reg == dst && ctx->zero_extended[op.u.vreg])
+    {
+        return;
+    }
     if (l.kind == LOC_REG || l.kind == LOC_MEM)
     {
         X86Operand src = l.kind == LOC_REG ? xop_reg(l.reg) : xop_mem(rbp_mem(l.disp));
@@ -2682,6 +2686,33 @@ static u32 count_opcode(IrFunction *f, IrOpcode op)
     return n;
 }
 
+/* Ops whose 32-bit x86 lowering writes a 32-bit destination, which the ISA
+   zero-extends to 64 bits.  OP_ADD..OP_NOT are the integer arithmetic ops. */
+static bool zero_extends_to_64(IrOpcode op)
+{
+    return (op >= OP_ADD && op <= OP_NOT) || is_icmp(op) || op == OP_LOAD || op == OP_ZEXT ||
+           op == OP_SEXT;
+}
+
+static bool *analyze_zero_extended(IrFunction *f, const u8 *widths, u32 nvregs, Arena *arena)
+{
+    bool *known = arena_alloc(arena, (nvregs ? nvregs : 1) * sizeof(bool), sizeof(bool));
+    memset(known, 0, (nvregs ? nvregs : 1) * sizeof(bool));
+    for (size_t b = 0; b < vec_size(f->blocks); b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        for (size_t ii = 0; ii < vec_size(blk->instrs); ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->result != NO_VREG && widths[in->result] == 4 && zero_extends_to_64(in->opcode))
+            {
+                known[in->result] = true;
+            }
+        }
+    }
+    return known;
+}
+
 static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *arena, bool debug)
 {
     ByteBuf *buf = arena_alloc(arena, sizeof(ByteBuf), sizeof(void *));
@@ -2793,6 +2824,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         .epilogue_jumps = vec_new(arena),
     };
     analyze_gep_folds(&ctx, use_count, arena);
+    ctx.zero_extended = analyze_zero_extended(f, mod->widths, mod->next_vreg, arena);
 
     x86_frame_emit_prologue(buf, f, mod, alloc, &frame, debug);
     u32 off_params = (u32) bytebuf_len(buf);
