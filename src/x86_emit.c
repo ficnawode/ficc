@@ -49,6 +49,13 @@ static void emit_rex_if(ByteBuf *buf, bool w, bool r, bool x, bool b)
     }
 }
 
+/* Byte registers 0-3 (al/cl/dl/bl) encode without REX; 4-7 need a bare REX to
+   name spl/bpl/sil/dil rather than ah/ch/dh/bh, and 8-15 need its REX bits. */
+static bool byte_reg_needs_rex(u8 reg)
+{
+    return reg >= 4;
+}
+
 static void emit_addr_mov_imm32(ByteBuf *buf, u8 reg);
 
 /* X86Reg order is rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8-15; DWARF numbers
@@ -140,7 +147,10 @@ void emit_mov_byte(ByteBuf *buf, X86Operand dst, X86Operand src)
 {
     if (src.kind == XOP_IMM)
     {
-        bytebuf_append(buf, rex(false, false, false, dst.u.reg >= 8));
+        if (byte_reg_needs_rex(dst.u.reg))
+        {
+            bytebuf_append(buf, rex(false, false, false, dst.u.reg >= 8));
+        }
         bytebuf_append(buf, (u8) (X86_MOV_REG8_IMM8_BASE + (dst.u.reg & 7)));
         bytebuf_append_i8(buf, (i8) src.u.imm);
         return;
@@ -148,7 +158,10 @@ void emit_mov_byte(ByteBuf *buf, X86Operand dst, X86Operand src)
 
     if (dst.kind == XOP_REG && src.kind == XOP_REG)
     {
-        bytebuf_append(buf, rex(false, src.u.reg >= 8, false, dst.u.reg >= 8));
+        if (byte_reg_needs_rex(src.u.reg) || byte_reg_needs_rex(dst.u.reg))
+        {
+            bytebuf_append(buf, rex(false, src.u.reg >= 8, false, dst.u.reg >= 8));
+        }
         bytebuf_append(buf, X86_MOV_RM8_REG8);
         bytebuf_append(buf, modrm(3, src.u.reg, dst.u.reg));
         return;
@@ -158,7 +171,10 @@ void emit_mov_byte(ByteBuf *buf, X86Operand dst, X86Operand src)
     u8 reg = to_reg ? dst.u.reg : src.u.reg;
     X86Mem mem = to_reg ? src.u.mem : dst.u.mem;
     u8 mov_op = to_reg ? X86_MOV_REG8_RM8 : X86_MOV_RM8_REG8;
-    bytebuf_append(buf, rex_mem(false, reg >= 8, mem));
+    if (byte_reg_needs_rex(reg) || reg_is_extended(mem.base) || reg_is_extended(mem.index))
+    {
+        bytebuf_append(buf, rex_mem(false, reg >= 8, mem));
+    }
     bytebuf_append(buf, mov_op);
     emit_mem_operand(buf, reg, mem);
 }

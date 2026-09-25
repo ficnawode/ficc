@@ -208,3 +208,43 @@ TEST(x86_emit, reg_reg_extends_both_operands)
 
     arena_free(a);
 }
+
+TEST(x86_emit, byte_mov_omits_a_noop_rex)
+{
+    Arena *a = arena_new();
+    ByteBuf b;
+
+    /* al/cl/dl/bl encode without a prefix; a bare 0x40 would be a wasted byte. */
+    bytebuf_init(&b, a);
+    emit_mov(&b, 1, xop_reg(R_EAX), xop_imm(42));
+    expect_bytes(&b, (const u8[]) {0xb0, 0x2a}, 2);
+
+    bytebuf_init(&b, a);
+    emit_mov(&b, 1, xop_reg(R_EAX), xop_reg(R_ECX));
+    expect_bytes(&b, (const u8[]) {0x88, 0xc8}, 2);
+
+    X86Mem rbx0 = {.base = R_EBX, .index = NO_REG, .scale = 1, .disp = 0};
+    bytebuf_init(&b, a);
+    emit_mov(&b, 1, xop_mem(rbx0), xop_reg(R_EAX));
+    expect_bytes(&b, (const u8[]) {0x88, 0x03}, 2);
+
+    /* spl/bpl/sil/dil still need REX (4-7 map to ah/ch/dh/bh otherwise). */
+    bytebuf_init(&b, a);
+    emit_mov(&b, 1, xop_reg(R_ESP), xop_imm(42));
+    expect_bytes(&b, (const u8[]) {0x40, 0xb4, 0x2a}, 3);
+
+    bytebuf_init(&b, a);
+    emit_mov(&b, 1, xop_reg(R_ESP), xop_reg(R_EAX));
+    expect_bytes(&b, (const u8[]) {0x40, 0x88, 0xc4}, 3);
+
+    /* r8b-r15b need the REX bits. */
+    bytebuf_init(&b, a);
+    emit_mov(&b, 1, xop_reg(R_R8), xop_imm(42));
+    expect_bytes(&b, (const u8[]) {0x41, 0xb0, 0x2a}, 3);
+
+    bytebuf_init(&b, a);
+    emit_mov(&b, 1, xop_reg(R_EAX), xop_reg(R_R8));
+    expect_bytes(&b, (const u8[]) {0x44, 0x88, 0xc0}, 3);
+
+    arena_free(a);
+}
