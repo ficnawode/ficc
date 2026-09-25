@@ -1738,15 +1738,34 @@ static OutSecId out_sec_id_of(u16 idx)
     }
 }
 
-static void emit_symtab(Linker *lk, ByteBuf *symtab, ByteBuf *strtab)
+/* Non-debug sections are always emitted; an empty .debug_* section is dropped. */
+static bool keep_out_sec(const Linker *lk, OutSecId id)
+{
+    if (id < OUT_DEBUG_INFO || id > OUT_DEBUG_LOC)
+    {
+        return true;
+    }
+    return lk->out[id].size > 0;
+}
+
+/* A local section symbol per emitted section; `shndx` maps each EXE section
+   index to its emitted header index (0 when dropped).  Returns the symbol
+   index where globals begin (`sh_info`). */
+static u32 emit_symtab(Linker *lk, ByteBuf *symtab, ByteBuf *strtab, const u16 *shndx)
 {
     for (u64 i = 0; i < sizeof(Elf64_Sym); i++)
     {
         bytebuf_append(symtab, 0);
     }
+    u32 nlocal = 1;
     for (u16 i = EXE_TEXT; i <= EXE_DBG_LOC; i++)
     {
-        sym_emit(symtab, 0, ELF64_ST_INFO(STB_LOCAL, STT_SECTION), i, 0, 0);
+        if (shndx[i] == 0)
+        {
+            continue;
+        }
+        sym_emit(symtab, 0, ELF64_ST_INFO(STB_LOCAL, STT_SECTION), shndx[i], 0, 0);
+        nlocal++;
     }
     for (size_t i = 0; i < vec_size(lk->global_order); i++)
     {
@@ -1756,14 +1775,16 @@ static void emit_symtab(Linker *lk, ByteBuf *symtab, ByteBuf *strtab)
             continue;
         }
         u8 bind = g->is_weak ? STB_WEAK : STB_GLOBAL;
-        u16 shndx = g->is_abs ? SHN_ABS : out_sec_index((OutSecId) g->out_sec);
-        sym_emit(symtab, strtab_add(strtab, g->name), ELF64_ST_INFO(bind, g->type), shndx, g->addr,
+        u16 sec = g->is_abs ? SHN_ABS : shndx[out_sec_index((OutSecId) g->out_sec)];
+        sym_emit(symtab, strtab_add(strtab, g->name), ELF64_ST_INFO(bind, g->type), sec, g->addr,
                  0);
     }
+    return nlocal;
 }
 
 static void emit_shdrs(Linker *lk, ByteBuf *out, ByteBuf *shstrtab, u32 names[EXE_NSEC],
-                       const u64 off[EXE_NSEC], const u64 size[EXE_NSEC], u32 first_global)
+                       const u64 off[EXE_NSEC], const u64 size[EXE_NSEC], const u16 *shndx,
+                       u32 first_global)
 {
     bytebuf_append_u32(out, 0);
     bytebuf_append_u32(out, SHT_NULL);
@@ -1777,6 +1798,10 @@ static void emit_shdrs(Linker *lk, ByteBuf *out, ByteBuf *shstrtab, u32 names[EX
     bytebuf_append_u64(out, 0);
     for (u16 i = EXE_TEXT; i < EXE_NSEC; i++)
     {
+        if (i <= EXE_DBG_LOC && shndx[i] == 0)
+        {
+            continue;
+        }
         u32 type;
         u64 flags = 0, align = 1, entsize = 0, addr = 0;
         u32 link = 0, info = 0;
@@ -1793,7 +1818,7 @@ static void emit_shdrs(Linker *lk, ByteBuf *out, ByteBuf *shstrtab, u32 names[EX
         else if (i == EXE_SYMTAB)
         {
             type = SHT_SYMTAB;
-            link = EXE_STRTAB;
+            link = shndx[EXE_STRTAB];
             info = first_global;
             align = 8;
             entsize = sizeof(Elf64_Sym);
@@ -1835,7 +1860,24 @@ static void append_out_section(ByteBuf *out, Linker *lk, u16 idx, const u64 off[
     bytebuf_append_bytes(out, o->bytes.data, o->bytes.len);
 }
 
-static void emit_ehdr(ByteBuf *out, u64 entry, u64 shoff)
+/* Assign each EXE section index its emitted header index; an empty debug
+   section is dropped.  Returns the number of emitted headers. */
+static u16 build_exe_shndx(const Linker *lk, u16 shndx[EXE_NSEC])
+{
+    shndx[EXE_NULL] = 0;
+    u16 n = 1;
+    for (u16 i = EXE_TEXT; i <= EXE_DBG_LOC; i++)
+    {
+        shndx[i] = keep_out_sec(lk, out_sec_id_of(i)) ? n++ : 0;
+    }
+    for (u16 i = EXE_SYMTAB; i < EXE_NSEC; i++)
+    {
+        shndx[i] = n++;
+    }
+    return n;
+}
+
+static void emit_ehdr(ByteBuf *out, u64 entry, u64 shoff, u16 nshdr, u16 shstrndx)
 {
     bytebuf_append(out, ELFMAG0);
     bytebuf_append(out, ELFMAG1);
@@ -1860,8 +1902,8 @@ static void emit_ehdr(ByteBuf *out, u64 entry, u64 shoff)
     bytebuf_append_u16(out, sizeof(Elf64_Phdr));
     bytebuf_append_u16(out, 5);
     bytebuf_append_u16(out, sizeof(Elf64_Shdr));
-    bytebuf_append_u16(out, EXE_NSEC);
-    bytebuf_append_u16(out, EXE_SHSTRTAB);
+    bytebuf_append_u16(out, nshdr);
+    bytebuf_append_u16(out, shstrndx);
 }
 
 static void emit_phdrs(Linker *lk, ByteBuf *out)
@@ -1902,10 +1944,12 @@ static bool write_executable(Linker *lk)
     names[EXE_STRTAB] = strtab_add(&shstrtab, ".strtab");
     names[EXE_SHSTRTAB] = strtab_add(&shstrtab, ".shstrtab");
 
+    u16 shndx[EXE_NSEC];
+    u16 nshdr = build_exe_shndx(lk, shndx);
+
     strtab_init(&strtab, arena);
     bytebuf_init(&symtab, arena);
-    emit_symtab(lk, &symtab, &strtab);
-    u32 first_global = EXE_DBG_LOC - EXE_TEXT + 2;
+    u32 first_global = emit_symtab(lk, &symtab, &strtab, shndx);
 
     u64 off[EXE_NSEC], size[EXE_NSEC];
     section_offsets(lk, off, size);
@@ -1923,7 +1967,7 @@ static bool write_executable(Linker *lk)
 
     ByteBuf out;
     bytebuf_init(&out, arena);
-    emit_ehdr(&out, lk->entry, shoff);
+    emit_ehdr(&out, lk->entry, shoff, nshdr, shndx[EXE_SHSTRTAB]);
     emit_phdrs(lk, &out);
     append_out_section(&out, lk, EXE_TEXT, off);
     append_out_section(&out, lk, EXE_RODATA, off);
@@ -1932,17 +1976,19 @@ static bool write_executable(Linker *lk)
     append_out_section(&out, lk, EXE_DATA, off);
     append_out_section(&out, lk, EXE_INIT, off);
     append_out_section(&out, lk, EXE_FINI, off);
-    append_out_section(&out, lk, EXE_DBG_INFO, off);
-    append_out_section(&out, lk, EXE_DBG_ABBREV, off);
-    append_out_section(&out, lk, EXE_DBG_STR, off);
-    append_out_section(&out, lk, EXE_DBG_LINE, off);
-    append_out_section(&out, lk, EXE_DBG_LOC, off);
+    for (u16 i = EXE_DBG_INFO; i <= EXE_DBG_LOC; i++)
+    {
+        if (shndx[i] != 0)
+        {
+            append_out_section(&out, lk, i, off);
+        }
+    }
     pad_to(&out, off[EXE_SYMTAB]);
     bytebuf_append_bytes(&out, bytebuf_data(&symtab), bytebuf_len(&symtab));
     bytebuf_append_bytes(&out, bytebuf_data(&strtab), bytebuf_len(&strtab));
     bytebuf_append_bytes(&out, bytebuf_data(&shstrtab), bytebuf_len(&shstrtab));
     pad_to(&out, shoff);
-    emit_shdrs(lk, &out, &shstrtab, names, off, size, first_global);
+    emit_shdrs(lk, &out, &shstrtab, names, off, size, shndx, first_global);
 
     const char *path = lk->cfg->output_path ? lk->cfg->output_path : "a.out";
     FILE *f = fopen(path, "wb");
@@ -3554,7 +3600,7 @@ static void append_at(ByteBuf *out, u64 off, ByteBuf *src)
     bytebuf_append_bytes(out, bytebuf_data(src), bytebuf_len(src));
 }
 
-static void dyn_ehdr(ByteBuf *out, u64 entry, u64 shoff)
+static void dyn_ehdr(ByteBuf *out, u64 entry, u64 shoff, u16 nshdr, u16 shstrndx)
 {
     bytebuf_append(out, ELFMAG0);
     bytebuf_append(out, ELFMAG1);
@@ -3579,8 +3625,8 @@ static void dyn_ehdr(ByteBuf *out, u64 entry, u64 shoff)
     bytebuf_append_u16(out, sizeof(Elf64_Phdr));
     bytebuf_append_u16(out, 8);
     bytebuf_append_u16(out, sizeof(Elf64_Shdr));
-    bytebuf_append_u16(out, DX_NSEC);
-    bytebuf_append_u16(out, DX_SHSTRTAB);
+    bytebuf_append_u16(out, nshdr);
+    bytebuf_append_u16(out, shstrndx);
 }
 
 static void dyn_phdrs(Linker *lk, ByteBuf *out)
@@ -3603,9 +3649,9 @@ static void dyn_phdrs(Linker *lk, ByteBuf *out)
     phdr_emit(out, PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0x10);
 }
 
-static void dyn_section_headers(Linker *lk, ByteBuf *out, u32 nm[DX_NSEC], u64 off_symtab,
-                                u64 size_symtab, u64 off_strtab, u64 size_strtab, u64 off_sh,
-                                u64 size_sh, u32 first_global)
+static void dyn_section_headers(Linker *lk, ByteBuf *out, u32 nm[DX_NSEC], const u16 *dmap,
+                                u64 off_symtab, u64 size_symtab, u64 off_strtab, u64 size_strtab,
+                                u64 off_sh, u64 size_sh, u32 first_global)
 {
     dyn_shdr(out, 0, SHT_NULL, 0, 0, 0, 0, 0, 0, 0, 0);
     dyn_shdr(out, nm[DX_INTERP], SHT_PROGBITS, SHF_ALLOC, lk->dyn_addr[DSEC_INTERP],
@@ -3651,18 +3697,33 @@ static void dyn_section_headers(Linker *lk, ByteBuf *out, u32 nm[DX_NSEC], u64 o
              lk->out[OUT_DATA].offset, lk->out[OUT_DATA].size, 0, 0, 8, 0);
     dyn_shdr(out, nm[DX_BSS], SHT_NOBITS, SHF_ALLOC | SHF_WRITE, lk->out[OUT_BSS].addr,
              lk->out[OUT_BSS].offset, lk->out[OUT_BSS].size, 0, 0, 8, 0);
-    dyn_shdr(out, nm[DX_DBG_INFO], SHT_PROGBITS, 0, 0, lk->out[OUT_DEBUG_INFO].offset,
-             lk->out[OUT_DEBUG_INFO].size, 0, 0, 1, 0);
-    dyn_shdr(out, nm[DX_DBG_ABBREV], SHT_PROGBITS, 0, 0, lk->out[OUT_DEBUG_ABBREV].offset,
-             lk->out[OUT_DEBUG_ABBREV].size, 0, 0, 1, 0);
-    dyn_shdr(out, nm[DX_DBG_STR], SHT_PROGBITS, 0, 0, lk->out[OUT_DEBUG_STR].offset,
-             lk->out[OUT_DEBUG_STR].size, 0, 0, 1, 0);
-    dyn_shdr(out, nm[DX_DBG_LINE], SHT_PROGBITS, 0, 0, lk->out[OUT_DEBUG_LINE].offset,
-             lk->out[OUT_DEBUG_LINE].size, 0, 0, 1, 0);
-    dyn_shdr(out, nm[DX_DBG_LOC], SHT_PROGBITS, 0, 0, lk->out[OUT_DEBUG_LOC].offset,
-             lk->out[OUT_DEBUG_LOC].size, 0, 0, 1, 0);
-    dyn_shdr(out, nm[DX_SYMTAB], SHT_SYMTAB, 0, 0, off_symtab, size_symtab, DX_STRTAB, first_global,
-             8, sizeof(Elf64_Sym));
+    if (dmap[DX_DBG_INFO] != 0)
+    {
+        dyn_shdr(out, nm[DX_DBG_INFO], SHT_PROGBITS, 0, 0, lk->out[OUT_DEBUG_INFO].offset,
+                 lk->out[OUT_DEBUG_INFO].size, 0, 0, 1, 0);
+    }
+    if (dmap[DX_DBG_ABBREV] != 0)
+    {
+        dyn_shdr(out, nm[DX_DBG_ABBREV], SHT_PROGBITS, 0, 0, lk->out[OUT_DEBUG_ABBREV].offset,
+                 lk->out[OUT_DEBUG_ABBREV].size, 0, 0, 1, 0);
+    }
+    if (dmap[DX_DBG_STR] != 0)
+    {
+        dyn_shdr(out, nm[DX_DBG_STR], SHT_PROGBITS, 0, 0, lk->out[OUT_DEBUG_STR].offset,
+                 lk->out[OUT_DEBUG_STR].size, 0, 0, 1, 0);
+    }
+    if (dmap[DX_DBG_LINE] != 0)
+    {
+        dyn_shdr(out, nm[DX_DBG_LINE], SHT_PROGBITS, 0, 0, lk->out[OUT_DEBUG_LINE].offset,
+                 lk->out[OUT_DEBUG_LINE].size, 0, 0, 1, 0);
+    }
+    if (dmap[DX_DBG_LOC] != 0)
+    {
+        dyn_shdr(out, nm[DX_DBG_LOC], SHT_PROGBITS, 0, 0, lk->out[OUT_DEBUG_LOC].offset,
+                 lk->out[OUT_DEBUG_LOC].size, 0, 0, 1, 0);
+    }
+    dyn_shdr(out, nm[DX_SYMTAB], SHT_SYMTAB, 0, 0, off_symtab, size_symtab, dmap[DX_STRTAB],
+             first_global, 8, sizeof(Elf64_Sym));
     dyn_shdr(out, nm[DX_STRTAB], SHT_STRTAB, 0, 0, off_strtab, size_strtab, 0, 0, 1, 0);
     dyn_shdr(out, nm[DX_SHSTRTAB], SHT_STRTAB, 0, 0, off_sh, size_sh, 0, 0, 1, 0);
 }
@@ -3682,6 +3743,28 @@ static u32 debug_object_count(Linker *lk)
                 break;
             }
         }
+    }
+    return n;
+}
+
+/* Assign each DX section index its emitted header index; an empty debug
+   section is dropped.  Returns the number of emitted headers. */
+static u16 build_dyn_shndx(const Linker *lk, u16 shndx[DX_NSEC])
+{
+    u16 n = 1;
+    shndx[DX_NULL] = 0;
+    for (u16 i = DX_INTERP; i <= DX_BSS; i++)
+    {
+        shndx[i] = n++;
+    }
+    shndx[DX_DBG_INFO] = keep_out_sec(lk, OUT_DEBUG_INFO) ? n++ : 0;
+    shndx[DX_DBG_ABBREV] = keep_out_sec(lk, OUT_DEBUG_ABBREV) ? n++ : 0;
+    shndx[DX_DBG_STR] = keep_out_sec(lk, OUT_DEBUG_STR) ? n++ : 0;
+    shndx[DX_DBG_LINE] = keep_out_sec(lk, OUT_DEBUG_LINE) ? n++ : 0;
+    shndx[DX_DBG_LOC] = keep_out_sec(lk, OUT_DEBUG_LOC) ? n++ : 0;
+    for (u16 i = DX_SYMTAB; i < DX_NSEC; i++)
+    {
+        shndx[i] = n++;
     }
     return n;
 }
@@ -3721,10 +3804,26 @@ static bool write_dynamic(Linker *lk)
     nm[DX_STRTAB] = strtab_add(&sh, ".strtab");
     nm[DX_SHSTRTAB] = strtab_add(&sh, ".shstrtab");
 
+    u16 dmap[DX_NSEC];
+    u16 nshdr = build_dyn_shndx(lk, dmap);
+    u16 eshndx[EXE_NSEC] = {0};
+    eshndx[EXE_TEXT] = dmap[DX_TEXT];
+    eshndx[EXE_RODATA] = dmap[DX_RODATA];
+    eshndx[EXE_DATA] = dmap[DX_DATA];
+    eshndx[EXE_BSS] = dmap[DX_BSS];
+    eshndx[EXE_INIT] = dmap[DX_INIT];
+    eshndx[EXE_FINI] = dmap[DX_FINI];
+    eshndx[EXE_EH] = dmap[DX_EH];
+    eshndx[EXE_DBG_INFO] = dmap[DX_DBG_INFO];
+    eshndx[EXE_DBG_ABBREV] = dmap[DX_DBG_ABBREV];
+    eshndx[EXE_DBG_STR] = dmap[DX_DBG_STR];
+    eshndx[EXE_DBG_LINE] = dmap[DX_DBG_LINE];
+    eshndx[EXE_DBG_LOC] = dmap[DX_DBG_LOC];
+
     ByteBuf strtab, symtab;
     strtab_init(&strtab, arena);
     bytebuf_init(&symtab, arena);
-    emit_symtab(lk, &symtab, &strtab);
+    u32 first_global = emit_symtab(lk, &symtab, &strtab, eshndx);
 
     u64 cursor = align_up(lk->file_end, 8);
     u64 off_symtab = cursor;
@@ -3737,7 +3836,7 @@ static bool write_dynamic(Linker *lk)
 
     ByteBuf out;
     bytebuf_init(&out, arena);
-    dyn_ehdr(&out, lk->entry, shoff);
+    dyn_ehdr(&out, lk->entry, shoff, nshdr, dmap[DX_SHSTRTAB]);
     dyn_phdrs(lk, &out);
     append_at(&out, lk->dyn_off[DSEC_INTERP], &lk->dynbuf[DSEC_INTERP]);
     append_at(&out, lk->dyn_off[DSEC_HASH], &lk->dynbuf[DSEC_HASH]);
@@ -3758,17 +3857,32 @@ static bool write_dynamic(Linker *lk)
     append_at(&out, lk->dyn_off[DSEC_GOT], &lk->dynbuf[DSEC_GOT]);
     append_at(&out, lk->dyn_off[DSEC_GOT_PLT], &lk->dynbuf[DSEC_GOT_PLT]);
     append_at(&out, lk->out[OUT_DATA].offset, &lk->out[OUT_DATA].bytes);
-    append_at(&out, lk->out[OUT_DEBUG_INFO].offset, &lk->out[OUT_DEBUG_INFO].bytes);
-    append_at(&out, lk->out[OUT_DEBUG_ABBREV].offset, &lk->out[OUT_DEBUG_ABBREV].bytes);
-    append_at(&out, lk->out[OUT_DEBUG_STR].offset, &lk->out[OUT_DEBUG_STR].bytes);
-    append_at(&out, lk->out[OUT_DEBUG_LINE].offset, &lk->out[OUT_DEBUG_LINE].bytes);
-    append_at(&out, lk->out[OUT_DEBUG_LOC].offset, &lk->out[OUT_DEBUG_LOC].bytes);
+    if (dmap[DX_DBG_INFO] != 0)
+    {
+        append_at(&out, lk->out[OUT_DEBUG_INFO].offset, &lk->out[OUT_DEBUG_INFO].bytes);
+    }
+    if (dmap[DX_DBG_ABBREV] != 0)
+    {
+        append_at(&out, lk->out[OUT_DEBUG_ABBREV].offset, &lk->out[OUT_DEBUG_ABBREV].bytes);
+    }
+    if (dmap[DX_DBG_STR] != 0)
+    {
+        append_at(&out, lk->out[OUT_DEBUG_STR].offset, &lk->out[OUT_DEBUG_STR].bytes);
+    }
+    if (dmap[DX_DBG_LINE] != 0)
+    {
+        append_at(&out, lk->out[OUT_DEBUG_LINE].offset, &lk->out[OUT_DEBUG_LINE].bytes);
+    }
+    if (dmap[DX_DBG_LOC] != 0)
+    {
+        append_at(&out, lk->out[OUT_DEBUG_LOC].offset, &lk->out[OUT_DEBUG_LOC].bytes);
+    }
     append_at(&out, off_symtab, &symtab);
     append_at(&out, off_strtab, &strtab);
     append_at(&out, off_sh, &sh);
     pad_to(&out, shoff);
-    dyn_section_headers(lk, &out, nm, off_symtab, bytebuf_len(&symtab), off_strtab,
-                        bytebuf_len(&strtab), off_sh, bytebuf_len(&sh), EXE_DBG_LOC - EXE_TEXT + 2);
+    dyn_section_headers(lk, &out, nm, dmap, off_symtab, bytebuf_len(&symtab), off_strtab,
+                        bytebuf_len(&strtab), off_sh, bytebuf_len(&sh), first_global);
 
     const char *path = lk->cfg->output_path ? lk->cfg->output_path : "a.out";
     FILE *f = fopen(path, "wb");

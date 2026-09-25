@@ -675,7 +675,7 @@ static u64 record_die(InfoCtx *c, Type *t)
     {
         RecordField *f = (RecordField *) vec_get(fields, i);
         dwarf_uleb128(c->b, f->bit_width >= 0 ? ABBREV_MEMBER_BITFIELD : ABBREV_MEMBER);
-        info_string(c, f->name);
+        info_string(c, f->name ? f->name : "");
         type_ref_emit(c, f->type);
         dwarf_uleb128(c->b, f->offset);
         if (f->bit_width >= 0)
