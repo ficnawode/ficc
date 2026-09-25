@@ -1202,11 +1202,16 @@ static bool is_terminator(IrOpcode op)
            op == OP_SWITCH;
 }
 
-static size_t block_index_of_label(X86LowerCtx *ctx, const char *label)
+static size_t label_index(StrMap *label_to_index, const char *label)
 {
-    void *v = strmap_get(ctx->label_to_index, label);
+    void *v = strmap_get(label_to_index, label);
     ASSERT(v != NULL && "branch target names a real block");
     return (size_t) (uintptr_t) v - 1;
+}
+
+static size_t block_index_of_label(X86LowerCtx *ctx, const char *label)
+{
+    return label_index(ctx->label_to_index, label);
 }
 
 static void lower_br(IrInstr *in, X86LowerCtx *ctx)
@@ -1739,58 +1744,107 @@ static bool phi_operand_same(IrOperand a, IrOperand b)
     return a.u.vreg == b.u.vreg;
 }
 
+/* A block's pending PHI copies plus the scheduler's done flags. */
+typedef struct
+{
+    LowerPhiCopy **copies;
+    bool *done;
+    size_t n;
+} PhiCopyPlan;
+
+static PhiCopyPlan phi_copy_plan(Vec *pcs, Arena *arena)
+{
+    PhiCopyPlan plan;
+    plan.n = vec_size(pcs);
+    size_t nalloc = plan.n ? plan.n : 1;
+    plan.copies = arena_alloc(arena, nalloc * sizeof(LowerPhiCopy *), sizeof(void *));
+    plan.done = arena_alloc(arena, nalloc, 1);
+    memset(plan.done, 0, plan.n);
+    for (size_t i = 0; i < plan.n; i++)
+    {
+        plan.copies[i] = (LowerPhiCopy *) vec_get(pcs, i);
+    }
+    return plan;
+}
+
+/* Index of a pending copy whose destination no other pending copy reads, or `n`
+   when every remaining destination is a source (a cycle). */
+static size_t phi_ready_copy(LowerPhiCopy **work, const bool *done, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+    {
+        if (done[i])
+        {
+            continue;
+        }
+        u32 dst = work[i]->dst_vreg;
+        bool dst_is_source = false;
+        for (size_t j = 0; j < n; j++)
+        {
+            IrOperand s = work[j]->src;
+            if (done[j] || j == i || work[j]->src_is_scratch || s.is_imm || s.is_global ||
+                s.is_func)
+            {
+                continue;
+            }
+            if (s.u.vreg == dst)
+            {
+                dst_is_source = true;
+                break;
+            }
+        }
+        if (!dst_is_source)
+        {
+            return i;
+        }
+    }
+    return n;
+}
+
+/* Whether any block has a PHI-copy cycle, so lowering needs the scratch slot. */
+static bool phi_copies_need_scratch(Vec **phi_copies, size_t nblocks, Arena *arena)
+{
+    for (size_t bi = 0; bi < nblocks; bi++)
+    {
+        if (vec_size(phi_copies[bi]) == 0)
+        {
+            continue;
+        }
+        PhiCopyPlan plan = phi_copy_plan(phi_copies[bi], arena);
+        size_t remaining = plan.n;
+        while (remaining > 0)
+        {
+            size_t pick = phi_ready_copy(plan.copies, plan.done, plan.n);
+            if (pick == plan.n)
+            {
+                return true;
+            }
+            plan.done[pick] = true;
+            remaining--;
+        }
+    }
+    return false;
+}
+
 /* Emits a block's PHI copies with parallel-copy semantics. A copy whose
    destination is still a source of a pending copy must wait; when every
    remaining destination is a source (a cycle, e.g. a loop-carried swap), the
    cycle is broken through the scratch slot. */
 static void emit_block_phi_copies(X86LowerCtx *ctx, size_t bi)
 {
-    Vec *pcs = ctx->phi_copies[bi];
-    size_t n = vec_size(pcs);
-    if (n == 0)
+    if (vec_size(ctx->phi_copies[bi]) == 0)
     {
         return;
     }
-    LowerPhiCopy **work = arena_alloc(ctx->arena, n * sizeof(LowerPhiCopy *), sizeof(void *));
-    bool *done = arena_alloc(ctx->arena, n, 1);
-    memset(done, 0, n);
-    for (size_t i = 0; i < n; i++)
-    {
-        work[i] = (LowerPhiCopy *) vec_get(pcs, i);
-    }
+    PhiCopyPlan plan = phi_copy_plan(ctx->phi_copies[bi], ctx->arena);
+    LowerPhiCopy **work = plan.copies;
+    bool *done = plan.done;
+    size_t n = plan.n;
 
     size_t remaining = n;
     while (remaining > 0)
     {
-        size_t pick = n;
-        for (size_t i = 0; i < n; i++)
-        {
-            if (done[i])
-            {
-                continue;
-            }
-            u32 dst = work[i]->dst_vreg;
-            bool dst_is_source = false;
-            for (size_t j = 0; j < n; j++)
-            {
-                if (done[j] || j == i || work[j]->src_is_scratch)
-                {
-                    continue;
-                }
-                IrOperand s = work[j]->src;
-                if (!s.is_imm && !s.is_global && !s.is_func && s.u.vreg == dst)
-                {
-                    dst_is_source = true;
-                    break;
-                }
-            }
-            if (!dst_is_source)
-            {
-                pick = i;
-                break;
-            }
-        }
-
+        size_t pick = phi_ready_copy(work, done, n);
         if (pick < n)
         {
             if (work[pick]->src_is_scratch)
@@ -1825,12 +1879,12 @@ static void emit_block_phi_copies(X86LowerCtx *ctx, size_t bi)
     }
 }
 
-static void add_phi_copies(X86LowerCtx *ctx)
+static void build_phi_copies(IrFunction *f, StrMap *label_to_index, Vec **phi_copies, Arena *arena)
 {
-    size_t nblocks = vec_size(ctx->func->blocks);
+    size_t nblocks = vec_size(f->blocks);
     for (size_t bi = 0; bi < nblocks; bi++)
     {
-        IrBlock *blk = (IrBlock *) vec_get(ctx->func->blocks, bi);
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, bi);
         size_t ninstr = vec_size(blk->instrs);
         for (size_t ii = 0; ii < ninstr; ii++)
         {
@@ -1842,12 +1896,12 @@ static void add_phi_copies(X86LowerCtx *ctx)
             for (u32 e = 0; e < in->extra.phi.nentries; e++)
             {
                 IrPhiEntry *entry = &in->extra.phi.entries[e];
-                size_t pj = block_index_of_label(ctx, entry->label);
-                LowerPhiCopy *pc = arena_alloc(ctx->arena, sizeof(LowerPhiCopy), sizeof(void *));
+                size_t pj = label_index(label_to_index, entry->label);
+                LowerPhiCopy *pc = arena_alloc(arena, sizeof(LowerPhiCopy), sizeof(void *));
                 pc->src = entry->val;
                 pc->dst_vreg = in->result;
                 pc->src_is_scratch = false;
-                vec_push(ctx->phi_copies[pj], pc);
+                vec_push(phi_copies[pj], pc);
             }
         }
     }
@@ -2757,6 +2811,16 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     canonicalize_identity_geps(f, mod->next_vreg, arena);
     LiveIntervals set = liveinterval_compute(f, mod, arena);
     RegAllocation *alloc = regalloc_linear(f, &set, target, arena);
+
+    size_t nblocks = vec_size(f->blocks);
+    Vec **phi_copies = arena_alloc(arena, (nblocks ? nblocks : 1) * sizeof(Vec *), sizeof(void *));
+    for (size_t bi = 0; bi < nblocks; bi++)
+    {
+        phi_copies[bi] = vec_new(arena);
+    }
+    StrMap *label_to_index = index_labels(f, arena);
+    build_phi_copies(f, label_to_index, phi_copies, arena);
+
     bool omit_fp = false;
     if (x86_frame_can_omit_fp(f, debug) && alloc->frame_size == 0)
     {
@@ -2768,8 +2832,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
             omit_fp = true;
         }
     }
-    /* Reserve a 16-byte slot for breaking phi-copy cycles (parallel moves). */
-    if (!omit_fp)
+    if (!omit_fp && phi_copies_need_scratch(phi_copies, nblocks, arena))
     {
         alloc->frame_size += 16;
     }
@@ -2805,13 +2868,6 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     /* Reserved slot sits below every real spill slot. */
     i32 scratch_disp = -(i32) (frame.saved_bytes + alloc->frame_size);
 
-    size_t nblocks = vec_size(f->blocks);
-    Vec **phi_copies = arena_alloc(arena, (nblocks ? nblocks : 1) * sizeof(Vec *), sizeof(void *));
-    for (size_t bi = 0; bi < nblocks; bi++)
-    {
-        phi_copies[bi] = vec_new(arena);
-    }
-
     /* One extra slot: a value live out of the final block records `end` as
        npositions, the position just past the function. */
     u32 *position_offsets = arena_alloc(arena, (set.pos.npositions + 1) * sizeof(u32), sizeof(u32));
@@ -2842,7 +2898,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         .switch_tables = vec_new(arena),
         .block_offsets =
             arena_alloc(arena, (nblocks ? nblocks : 1) * sizeof(size_t), sizeof(size_t)),
-        .label_to_index = index_labels(f, arena),
+        .label_to_index = label_to_index,
         .pos = &set.pos,
         .position_offsets = position_offsets,
         .use_count = use_count,
@@ -2859,7 +2915,6 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     x86_frame_emit_prologue(buf, f, mod, alloc, &frame, debug);
     u32 off_params = (u32) bytebuf_len(buf);
 
-    add_phi_copies(&ctx);
     size_t *order = layout_blocks(f, &ctx, nblocks, arena);
     for (size_t pos = 0; pos < nblocks; pos++)
     {

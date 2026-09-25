@@ -181,6 +181,38 @@ TEST(x86_lower, shared_epilogue_falls_through_from_the_final_return)
     arena_free(a);
 }
 
+/* REX.W `sub rsp, imm` (`81 EC` imm32 or `83 EC` imm8). */
+static bool has_rsp_sub(ByteBuf *b)
+{
+    const u8 *code = bytebuf_data(b);
+    for (size_t i = 0; i + 3 < bytebuf_len(b); i++)
+    {
+        if (code[i] == 0x48 && (code[i + 1] == 0x81 || code[i + 1] == 0x83) && code[i + 2] == 0xEC)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+TEST(x86_lower, phi_copy_cycle_alone_reserves_the_scratch_slot)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module(
+        "int swap(int n) { int a = 1; int b = 2; while (n > 0) { int t = a; a = b; b = t; "
+        "n = n - 1; } return a - b; }\n"
+        "int pick(int c) { int x; if (c) x = 1; else x = 2; return x; }\n",
+        a);
+    EXPECT_NOTNULL(m);
+    CodegenModule *cm = codegen_ir_to_machine(m, NULL, a);
+    EXPECT_NOTNULL(cm);
+    ByteBuf *swap = ((CodegenFunc *) vec_get(cm->funcs, 0))->bytes;
+    ByteBuf *pick = ((CodegenFunc *) vec_get(cm->funcs, 1))->bytes;
+    EXPECT_TRUE(has_rsp_sub(swap));
+    EXPECT_FALSE(has_rsp_sub(pick));
+    arena_free(a);
+}
+
 static u32 zero_offset_gep_result(IrFunction *f)
 {
     for (size_t b = 0; b < vec_size(f->blocks); b++)
