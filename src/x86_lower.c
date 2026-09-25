@@ -513,6 +513,23 @@ static void lower_trunc(IrInstr *in, X86LowerCtx *ctx)
    in a register or spill slot feeds movsx/movzx (or a 32-bit mov for the
    zero-extend case) directly.  A rematerialized address has no value home, so
    it is materialized first. */
+static void emit_widen(X86LowerCtx *ctx, u8 sw, u8 dw, u8 dst, X86Operand src, bool is_signed)
+{
+    if (sw == 4 && !is_signed)
+    {
+        /* A 32-bit write zero-extends to 64; there is no movzx r32→r64. */
+        emit_mov(ctx->buf, W_DWORD, xop_reg(dst), src);
+    }
+    else if (is_signed)
+    {
+        emit_movsx(ctx->buf, sw, dw, dst, src);
+    }
+    else
+    {
+        emit_movzx(ctx->buf, sw, dw, dst, src);
+    }
+}
+
 static void lower_extend_int(X86LowerCtx *ctx, IrOperand op, u8 dw, u8 dst, bool is_signed)
 {
     if (op.is_imm)
@@ -530,34 +547,11 @@ static void lower_extend_int(X86LowerCtx *ctx, IrOperand op, u8 dw, u8 dst, bool
     if (l.kind == LOC_REG || l.kind == LOC_MEM)
     {
         X86Operand src = l.kind == LOC_REG ? xop_reg(l.reg) : xop_mem(rbp_mem(l.disp));
-        if (sw == 4 && !is_signed)
-        {
-            /* A 32-bit write zero-extends to 64; there is no movzx r32→r64. */
-            emit_mov(ctx->buf, W_DWORD, xop_reg(dst), src);
-        }
-        else if (is_signed)
-        {
-            emit_movsx(ctx->buf, sw, dw, dst, src);
-        }
-        else
-        {
-            emit_movzx(ctx->buf, sw, dw, dst, src);
-        }
+        emit_widen(ctx, sw, dw, dst, src, is_signed);
         return;
     }
     force_to_reg(ctx, op, dst);
-    if (sw == 4 && !is_signed)
-    {
-        emit_mov(ctx->buf, W_DWORD, xop_reg(dst), xop_reg(dst));
-    }
-    else if (is_signed)
-    {
-        emit_movsx(ctx->buf, sw, dw, dst, xop_reg(dst));
-    }
-    else
-    {
-        emit_movzx(ctx->buf, sw, dw, dst, xop_reg(dst));
-    }
+    emit_widen(ctx, sw, dw, dst, xop_reg(dst), is_signed);
 }
 
 static void lower_zext(IrInstr *in, X86LowerCtx *ctx)

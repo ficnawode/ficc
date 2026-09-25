@@ -503,6 +503,9 @@ static int coalesce_hint(const IrInstr *def, const int *phys_map, RegClass cls,
         case OP_FNEG:
         case OP_GEP:
         case OP_LOAD:
+        case OP_TRUNC:
+        case OP_SEXT:
+        case OP_ZEXT:
             if (def->nops > 0 && ir_operand_is_vreg(def->ops[0]))
             {
                 return phys_map[def->ops[0].u.vreg];
