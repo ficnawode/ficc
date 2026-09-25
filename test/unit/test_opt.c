@@ -1755,6 +1755,22 @@ TEST(opt, licm_keeps_loop_carried_defs)
     arena_free(a);
 }
 
+TEST(opt, mem_fwd_runs_at_level_1)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int g;\n"
+                                  "int main(void) { g = 40; return g; }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    EXPECT_EQ(ir_interp_run(m), 40);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_LOAD), 0);
+    EXPECT_EQ(count_opcode(m, OP_STORE), 1);
+    EXPECT_EQ(ir_interp_run(m), 40);
+    arena_free(a);
+}
+
 /* Store-then-load of the same global forwards the value; the load dies. */
 TEST(opt, mem_fwd_forwards_store_to_load)
 {

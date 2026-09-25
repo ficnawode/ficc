@@ -22,7 +22,7 @@ void opt_error(const char *fmt, ...)
 static const OptPassId level1_passes[] = {
     OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY, OPT_PASS_CAST,      OPT_PASS_CPROP,
     OPT_PASS_PHI_SIMP,   OPT_PASS_DCE,      OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER,
-    OPT_PASS_INLINE,     OPT_PASS_GVN,      OPT_PASS_LICM,
+    OPT_PASS_INLINE,     OPT_PASS_GVN,      OPT_PASS_LICM,      OPT_PASS_MEM_FWD,
 };
 static const OptPassId level2_passes[] = {
     OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY, OPT_PASS_CAST,      OPT_PASS_CPROP,
