@@ -4,6 +4,7 @@
 #include "ir.h"
 #include "target.h"
 #include "util/arena.h"
+#include "util/bitset.h"
 #include "util/types.h"
 
 /* A value's live range in instruction-position space; `assigned_reg` is -1
@@ -35,6 +36,9 @@ typedef struct
     u32 nvregs;
     LiveInterval *ivs; /* live vregs in ascending vreg order */
     u32 n;
+    u32 nblocks;       /* block count backing live_in/live_out, 0 when none */
+    Bitset **live_in;  /* per block: vregs live at block entry */
+    Bitset **live_out; /* per block: vregs live at block exit */
 } LiveIntervals;
 
 LiveIntervals liveinterval_compute(IrFunction *f, IrModule *mod, Arena *arena);

@@ -575,7 +575,8 @@ static void refine_block(IntervalCtx *cx, IrFunction *f, size_t b, Bitset **lvin
     walk_live_bits(lvout[b], cx->nvregs, extend_end_at, &ext);
 }
 
-static LiveIntervals collect_intervals(const IntervalCtx *cx, IrModule *mod, Arena *arena)
+static LiveIntervals collect_intervals(const IntervalCtx *cx, IrModule *mod, const Liveness *lv,
+                                       u32 nblocks, Arena *arena)
 {
     LiveInterval *ivs =
         arena_alloc(arena, cx->nvregs * sizeof(LiveInterval), _Alignof(LiveInterval));
@@ -594,7 +595,13 @@ static LiveIntervals collect_intervals(const IntervalCtx *cx, IrModule *mod, Are
         ivs[n].assigned_reg = -1;
         n++;
     }
-    LiveIntervals set = {.pos = *cx->pos, .nvregs = cx->nvregs, .ivs = ivs, .n = n};
+    LiveIntervals set = {.pos = *cx->pos,
+                         .nvregs = cx->nvregs,
+                         .ivs = ivs,
+                         .n = n,
+                         .nblocks = nblocks,
+                         .live_in = lv ? lv->lvin : NULL,
+                         .live_out = lv ? lv->lvout : NULL};
     return set;
 }
 
@@ -624,5 +631,5 @@ LiveIntervals liveinterval_compute(IrFunction *f, IrModule *mod, Arena *arena)
         refine_block(&cx, f, b, liveness.lvin, liveness.lvout, copy_uses[b], work);
     }
 
-    return collect_intervals(&cx, mod, arena);
+    return collect_intervals(&cx, mod, &liveness, (u32) bt.nblocks, arena);
 }

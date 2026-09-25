@@ -5,6 +5,7 @@
 #include "util/assert.h"
 #include "util/vec.h"
 #include <stdlib.h>
+#include <string.h>
 
 #define PRESSURE_SPLIT_MAX 16
 
@@ -38,6 +39,12 @@ typedef struct
     u32 from;
     u8 depth;
 } SplitTail;
+
+typedef struct
+{
+    u32 pred;
+    u32 succ;
+} CfgEdge;
 
 static const LiveInterval *interval_of(const RegAllocation *alloc, u32 vreg)
 {
@@ -594,6 +601,138 @@ static bool *collect_call_operands(IrFunction *f, u32 nvregs, Arena *arena)
     return op;
 }
 
+static CfgEdge *collect_edges(IrFunction *f, u32 *out_n, Arena *arena)
+{
+    size_t nblocks = vec_size(f->blocks);
+    u32 count = 0;
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        count += (u32) vec_size(((IrBlock *) vec_get(f->blocks, b))->preds);
+    }
+    CfgEdge *edges = arena_alloc(arena, (count ? count : 1) * sizeof(CfgEdge), _Alignof(CfgEdge));
+    u32 n = 0;
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *succ = (IrBlock *) vec_get(f->blocks, b);
+        size_t npred = vec_size(succ->preds);
+        for (size_t p = 0; p < npred; p++)
+        {
+            edges[n].pred = ((IrBlock *) vec_get(succ->preds, p))->index;
+            edges[n].succ = (u32) b;
+            n++;
+        }
+    }
+    *out_n = n;
+    return edges;
+}
+
+static u32 block_index_by_label(IrFunction *f, const char *label)
+{
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        if (strcmp(((IrBlock *) vec_get(f->blocks, b))->label, label) == 0)
+        {
+            return (u32) b;
+        }
+    }
+    return UINT32_MAX;
+}
+
+static u32 edge_index_of(const CfgEdge *edges, u32 nedges, u32 pred, u32 succ)
+{
+    for (u32 i = 0; i < nedges; i++)
+    {
+        if (edges[i].pred == pred && edges[i].succ == succ)
+        {
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
+/* Vregs live on each CFG edge, including PHI operands read at the predecessor's
+   end (which are not live-in to the successor). */
+static Bitset **collect_edge_live(IrFunction *f, const LiveIntervals *set, const CfgEdge *edges,
+                                  u32 nedges, Arena *arena)
+{
+    Bitset **live = arena_alloc(arena, (nedges ? nedges : 1) * sizeof(Bitset *), sizeof(void *));
+    for (u32 i = 0; i < nedges; i++)
+    {
+        live[i] = bitset_new(arena, set->nvregs);
+        bitset_or(live[i], set->live_in[edges[i].succ]);
+    }
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode != OP_PHI)
+            {
+                continue;
+            }
+            for (u32 e = 0; e < in->extra.phi.nentries; e++)
+            {
+                IrOperand val = in->extra.phi.entries[e].val;
+                if (!ir_operand_is_vreg(val))
+                {
+                    continue;
+                }
+                u32 pred = block_index_by_label(f, in->extra.phi.entries[e].label);
+                u32 ei = edge_index_of(edges, nedges, pred, (u32) b);
+                if (ei != UINT32_MAX)
+                {
+                    bitset_set(live[ei], val.u.vreg);
+                }
+            }
+        }
+    }
+    return live;
+}
+
+/* The last position at which a PHI result is defined (its latest predecessor
+   end); a split at or before it would cut the definition. */
+static u32 *collect_phi_max_def(IrFunction *f, const IrPositions *pos, u32 nvregs, Arena *arena)
+{
+    u32 *mx = arena_alloc(arena, (nvregs ? nvregs : 1) * sizeof(u32), sizeof(u32));
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        mx[v] = 0;
+    }
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode != OP_PHI || in->result == NO_VREG)
+            {
+                continue;
+            }
+            for (u32 e = 0; e < in->extra.phi.nentries; e++)
+            {
+                u32 p = block_index_by_label(f, in->extra.phi.entries[e].label);
+                if (p == UINT32_MAX)
+                {
+                    continue;
+                }
+                u32 gap = pos->block_end[p] > pos->block_base[p] ? pos->block_end[p] - 1
+                                                                 : pos->block_base[p];
+                if (gap > mx[in->result])
+                {
+                    mx[in->result] = gap;
+                }
+            }
+        }
+    }
+    return mx;
+}
+
 static int pick_register(const RegBank *bank, const ActiveInterval *active, u32 nactive,
                          bool crossing, u16 avoid, int hint, u32 start)
 {
@@ -843,6 +982,10 @@ typedef struct
     ActiveInterval *active;
     u32 nactive;
     Arena *arena;
+    const CfgEdge *edges;
+    u32 nedges;
+    Bitset **edge_live;
+    const u32 *phi_max_def;
 } ScanCtx;
 
 /* A value that lives over a call needs a callee-saved register or a slot.  A
@@ -862,6 +1005,128 @@ static bool scan_crosses(const ScanCtx *cx, const LiveInterval *iv)
             continue; /* the call defines the value; it need not survive it */
         }
         return true;
+    }
+    return false;
+}
+
+/* A split at call position `c` moves the value's home at `c`.  It is sound
+   only when no live CFG edge of the value straddles `c`: an edge from before
+   the split to after it would deliver the wrong home, and a backward edge
+   would do the same.  A PHI result must also be defined before the split. */
+static bool split_allowed_at(const ScanCtx *cx, u32 v, u32 c)
+{
+    if (cx->defs[v] && cx->defs[v]->opcode == OP_PHI && c <= cx->phi_max_def[v])
+    {
+        return false;
+    }
+    for (u32 i = 0; i < cx->nedges; i++)
+    {
+        if (!bitset_test(cx->edge_live[i], v))
+        {
+            continue;
+        }
+        u32 p = cx->edges[i].pred;
+        u32 s = cx->edges[i].succ;
+        u32 e = cx->pos->block_end[p] > cx->pos->block_base[p] ? cx->pos->block_end[p] - 1
+                                                               : cx->pos->block_base[p];
+        u32 b = cx->pos->block_base[s];
+        if ((e >= c) != (b > c))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* The uses of `v` at positions in [lo, hi).  Instruction operands, call
+   arguments, and an indirect callee all count; the threshold only decides
+   whether a reload pays for itself. */
+static u32 uses_between(const ScanCtx *cx, u32 v, u32 lo, u32 hi)
+{
+    u32 count = 0;
+    size_t nblocks = vec_size(cx->func->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(cx->func->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            u32 p = cx->pos->block_base[b] + (u32) 2 * (u32) ii;
+            if (p < lo || p >= hi)
+            {
+                continue;
+            }
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            for (u8 oi = 0; oi < in->nops; oi++)
+            {
+                if (ir_operand_is_vreg(in->ops[oi]) && in->ops[oi].u.vreg == v)
+                {
+                    count++;
+                }
+            }
+            if (in->opcode == OP_CALL)
+            {
+                if (in->extra.call.is_indirect && ir_operand_is_vreg(in->extra.call.callee) &&
+                    in->extra.call.callee.u.vreg == v)
+                {
+                    count++;
+                }
+                for (u32 a = 0; a < in->extra.call.nargs; a++)
+                {
+                    if (ir_operand_is_vreg(in->extra.call.args[a]) &&
+                        in->extra.call.args[a].u.vreg == v)
+                    {
+                        count++;
+                    }
+                }
+            }
+        }
+    }
+    return count;
+}
+
+static u32 next_call_pos(const ScanCtx *cx, u32 from)
+{
+    for (u32 i = 0; i < cx->ncall; i++)
+    {
+        if (cx->calls[i] > from)
+        {
+            return cx->calls[i];
+        }
+    }
+    return 0;
+}
+
+/* The first call strictly inside (from, end) at which the value may split.
+   A cut is only taken when the region it opens holds at least two uses, so
+   the reload is amortized against the store/reload pair it costs. */
+static u32 next_accepted_call(const ScanCtx *cx, const LiveInterval *iv, u32 from)
+{
+    for (u32 i = 0; i < cx->ncall; i++)
+    {
+        u32 c = cx->calls[i];
+        if (c <= from || c >= iv->end)
+        {
+            continue;
+        }
+        u32 next = next_call_pos(cx, c);
+        u32 hi = next ? next : iv->end + 1;
+        if (uses_between(cx, iv->vreg, c, hi) >= 2 && split_allowed_at(cx, iv->vreg, c))
+        {
+            return c;
+        }
+    }
+    return 0;
+}
+
+static bool has_call_in(const ScanCtx *cx, u32 lo, u32 hi)
+{
+    for (u32 i = 0; i < cx->ncall; i++)
+    {
+        if (cx->calls[i] > lo && cx->calls[i] < hi)
+        {
+            return true;
+        }
     }
     return false;
 }
@@ -1057,20 +1322,6 @@ static void scan_range(ScanCtx *cx, const LiveInterval *iv, u32 start, u32 end, 
     pressure_split(cx, iv, rec, start, end, crossing);
 }
 
-/* The first call strictly inside (start, end), or 0 when there is none.
-   Instruction positions are even, so a boundary is never position 0. */
-static u32 next_call_after(const ScanCtx *cx, u32 start, u32 end)
-{
-    for (u32 i = 0; i < cx->ncall; i++)
-    {
-        if (cx->calls[i] > start && cx->calls[i] < end)
-        {
-            return cx->calls[i];
-        }
-    }
-    return 0;
-}
-
 /* A value live across a call that touches its first position cannot be split:
    there is no earlier segment to store before the call. */
 static bool call_at_start(const ScanCtx *cx, const LiveInterval *iv)
@@ -1118,14 +1369,13 @@ static void scan_interval(ScanCtx *cx, Vec *tails, const LiveInterval *iv)
         cx->alloc->phys_map[iv->vreg] = reg;
         return;
     }
-    if (range_block(cx, iv->start, iv->end) < 0)
+    u32 call = next_accepted_call(cx, iv, iv->start);
+    if (call == 0)
     {
         scan_range(cx, iv, iv->start, iv->end, true);
         return;
     }
-    u32 call = next_call_after(cx, iv->start, iv->end);
-    ASSERT(call != 0 && "a crossing value has a call strictly inside its range");
-    scan_range(cx, iv, iv->start, call - 1, false);
+    scan_range(cx, iv, iv->start, call - 1, has_call_in(cx, iv->start, call));
     record_gap(cx, iv->vreg, call);
     SplitTail *tail = arena_alloc(cx->arena, sizeof(SplitTail), _Alignof(SplitTail));
     tail->iv = iv;
@@ -1136,9 +1386,9 @@ static void scan_interval(ScanCtx *cx, Vec *tails, const LiveInterval *iv)
 
 static void scan_tail(ScanCtx *cx, Vec *tails, const LiveInterval *iv, u32 from)
 {
-    u32 call = next_call_after(cx, from, iv->end);
+    u32 call = next_accepted_call(cx, iv, from);
     u32 end = call ? call - 1 : iv->end;
-    scan_range(cx, iv, from, end, false);
+    scan_range(cx, iv, from, end, has_call_in(cx, from, call ? call : iv->end));
     if (call)
     {
         record_gap(cx, iv->vreg, call);
@@ -1309,6 +1559,10 @@ RegAllocation *regalloc_linear_ex(IrFunction *f, const LiveIntervals *set, const
     Vec *segs = vec_new(arena);
     Vec *gaps = vec_new(arena);
     Vec *sgaps = vec_new(arena);
+    u32 nedges = 0;
+    CfgEdge *edges = collect_edges(f, &nedges, arena);
+    Bitset **edge_live = collect_edge_live(f, set, edges, nedges, arena);
+    u32 *phi_max_def = collect_phi_max_def(f, &set->pos, set->nvregs, arena);
     ScanCtx cx = {
         .alloc = alloc,
         .calls = calls,
@@ -1328,6 +1582,10 @@ RegAllocation *regalloc_linear_ex(IrFunction *f, const LiveIntervals *set, const
         .func = f,
         .remat = remat,
         .arena = arena,
+        .edges = edges,
+        .nedges = nedges,
+        .edge_live = edge_live,
+        .phi_max_def = phi_max_def,
     };
     cx.bank = &gpr;
     cx.arg_avoid = gpr_avoid;
