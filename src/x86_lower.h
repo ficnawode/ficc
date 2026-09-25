@@ -52,6 +52,7 @@ struct X86LowerCtx
     const char *next_label; /* label of the block emitted next (fallthrough) */
     Vec *lines;             /* Vec<LineEntry*> when recording -g line rows, else NULL */
     bool debug;             /* record line boundaries for DWARF */
+    bool flags_live;        /* a compare's EFLAGS are still pending a branch */
     int fpu_depth;          /* x87 stack depth; every lowering leaves it at 0 */
     i32 scratch_disp;       /* [rbp+disp] 16-byte slot used to break phi-copy cycles */
     bool shared_epilogue;   /* multiple returns jump to one epilogue instead of repeating it */

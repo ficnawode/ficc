@@ -116,6 +116,19 @@ static bool loc_at_soft(const RegAllocation *alloc, IrOperand op, u32 pos, RegLo
     return false;
 }
 
+/* Materialize `imm` into `reg`.  A zero becomes a shorter zeroing xor, which is
+   safe in the only contexts this feeds: operand setup (before the consuming
+   instruction's own flag write) and phi copies (past the terminator). */
+static void emit_imm_to_reg(X86LowerCtx *ctx, u8 width, u8 reg, i64 imm)
+{
+    if (imm == 0 && (width == 4 || width == 8) && !ctx->flags_live)
+    {
+        emit_xor_zero(ctx->buf, width, reg);
+        return;
+    }
+    emit_mov(ctx->buf, width, xop_reg(reg), xop_imm(imm));
+}
+
 /* Force `op` into physical `reg`, emitting an address load for globals/functions. */
 static void force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
 {
@@ -124,7 +137,7 @@ static void force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
     {
         /* Materialize the full 64-bit value: an imm32 load zero-extends and would
            lose the sign of a negative immediate used in a 64-bit context. */
-        emit_mov(b, W_QWORD, xop_reg(reg), xop_imm(op.u.imm));
+        emit_imm_to_reg(ctx, W_QWORD, reg, op.u.imm);
         return;
     }
     if (op.is_global)
@@ -1487,8 +1500,7 @@ static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
         u8 mf = MF_OF(dw);
         if (src.is_imm)
         {
-            emit_mov(ctx->buf, fp_imm_load_width(dw, src.u.imm), xop_reg(R_EAX),
-                     xop_imm(src.u.imm));
+            emit_imm_to_reg(ctx, fp_imm_load_width(dw, src.u.imm), R_EAX, src.u.imm);
             if (dl.kind == LOC_REG)
             {
                 emit_movd_to_xmm(ctx->buf, dl.reg, R_EAX, dw != W_DWORD);
@@ -1529,11 +1541,11 @@ static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
     {
         if (dl.kind == LOC_REG)
         {
-            emit_mov(ctx->buf, dw, xop_reg(dl.reg), xop_imm(src.u.imm));
+            emit_imm_to_reg(ctx, dw, dl.reg, src.u.imm);
         }
         else
         {
-            emit_mov(ctx->buf, dw, xop_reg(R_EAX), xop_imm(src.u.imm));
+            emit_imm_to_reg(ctx, dw, R_EAX, src.u.imm);
             emit_mov(ctx->buf, dw, xop_mem(rbp_mem(dl.disp)), xop_reg(R_EAX));
         }
         return;
@@ -1964,7 +1976,9 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
             lower_brcond_test(term, ctx);
         }
     }
-
+    /* The compare above sets the flags the branch below reads; the phi copies in
+       between must not clobber them, so they avoid a zeroing xor. */
+    ctx->flags_live = is_brcond;
     emit_block_phi_copies(ctx, bi);
 
     record_line_entry(ctx, term);
@@ -1972,6 +1986,7 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
     {
         u8 cc = fold_icmp ? icmp_cc[fold_icmp->opcode] : CC_NE;
         lower_brcond_branch(term, ctx, cc);
+        ctx->flags_live = false;
     }
     else if (term->opcode != OP_BR || !ctx->next_label ||
              strcmp(term->extra.br.target_label, ctx->next_label) != 0)
