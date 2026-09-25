@@ -46,17 +46,18 @@ struct X86LowerCtx
     StrMap *label_to_index;
     const IrPositions *pos; /* position numbering; position_offsets maps to bytes */
     u32 *position_offsets;
-    u32 cur_pos;            /* the position of the instruction being lowered */
-    u32 *use_count;         /* operand-reference count per vreg (brcond fold) */
-    GepFold *gep_folds;     /* vreg → folded-GEP recipe, GEP_FOLD_NONE when none */
-    const char *next_label; /* label of the block emitted next (fallthrough) */
-    Vec *lines;             /* Vec<LineEntry*> when recording -g line rows, else NULL */
-    bool debug;             /* record line boundaries for DWARF */
-    bool flags_live;        /* a compare's EFLAGS are still pending a branch */
-    int fpu_depth;          /* x87 stack depth; every lowering leaves it at 0 */
-    i32 scratch_disp;       /* [rbp+disp] 16-byte slot used to break phi-copy cycles */
-    bool shared_epilogue;   /* multiple returns jump to one epilogue instead of repeating it */
-    Vec *epilogue_jumps;    /* Vec<u32*> — rel32 fields of the `ret`s that jump to it */
+    u32 cur_pos;                /* the position of the instruction being lowered */
+    u32 *use_count;             /* operand-reference count per vreg (brcond fold) */
+    GepFold *gep_folds;         /* vreg → folded-GEP recipe, GEP_FOLD_NONE when none */
+    const char *next_label;     /* label of the block emitted next (fallthrough) */
+    Vec *lines;                 /* Vec<LineEntry*> when recording -g line rows, else NULL */
+    bool debug;                 /* record line boundaries for DWARF */
+    bool flags_live;            /* a compare's EFLAGS are still pending a branch */
+    int fpu_depth;              /* x87 stack depth; every lowering leaves it at 0 */
+    i32 scratch_disp;           /* [rbp+disp] 16-byte slot used to break phi-copy cycles */
+    bool shared_epilogue;       /* multiple returns jump to one epilogue instead of repeating it */
+    bool epilogue_follows_body; /* the shared epilogue is emitted adjacent to the final block */
+    Vec *epilogue_jumps;        /* Vec<u32*> — rel32 fields of the `ret`s that jump to it */
 };
 
 u8 x86_lower_vreg_width(X86LowerCtx *ctx, u32 vreg);

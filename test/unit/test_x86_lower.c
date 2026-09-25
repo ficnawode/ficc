@@ -91,6 +91,34 @@ TEST(x86_lower, caller_saved_call_gap_stores_before_and_reloads_after)
     arena_free(a);
 }
 
+/* A rel32 `jmp` whose displacement is zero targets the next instruction. */
+static size_t count_jmps_to_next(ByteBuf *b)
+{
+    const u8 *code = bytebuf_data(b);
+    size_t n = 0;
+    for (size_t i = 0; i + 5 <= bytebuf_len(b); i++)
+    {
+        if (code[i] == 0xE9 && code[i + 1] == 0 && code[i + 2] == 0 && code[i + 3] == 0 &&
+            code[i + 4] == 0)
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+TEST(x86_lower, shared_epilogue_falls_through_from_the_final_return)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int pick(int x) { if (x) return 1; return 0; }\n", a);
+    EXPECT_NOTNULL(m);
+    CodegenModule *cm = codegen_ir_to_machine(m, NULL, a);
+    EXPECT_NOTNULL(cm);
+    ByteBuf *bytes = ((CodegenFunc *) vec_get(cm->funcs, 0))->bytes;
+    EXPECT_EQ(count_jmps_to_next(bytes), 0u);
+    arena_free(a);
+}
+
 static u32 zero_offset_gep_result(IrFunction *f)
 {
     for (size_t b = 0; b < vec_size(f->blocks); b++)

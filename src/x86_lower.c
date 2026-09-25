@@ -1109,6 +1109,10 @@ static void lower_ret(IrInstr *in, X86LowerCtx *ctx)
     }
     if (ctx->shared_epilogue)
     {
+        if (ctx->next_label == NULL && ctx->epilogue_follows_body)
+        {
+            return;
+        }
         u32 *field = arena_alloc(ctx->arena, sizeof(u32), sizeof(u32));
         *field = (u32) emit_jmp_pending(ctx->buf);
         vec_push(ctx->epilogue_jumps, field);
@@ -2758,6 +2762,9 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     u32 *use_count = arena_alloc(arena, (set.nvregs ? set.nvregs : 1) * sizeof(u32), sizeof(u32));
     count_vreg_uses(f, set.nvregs, use_count);
 
+    bool multiple_rets = count_opcode(f, OP_RET) > 1;
+    bool epilogue_follows_body = multiple_rets && count_opcode(f, OP_SWITCH) == 0;
+
     X86LowerCtx ctx = {
         .func = f,
         .mod = mod,
@@ -2781,7 +2788,8 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         .lines = lines,
         .debug = debug,
         .scratch_disp = scratch_disp,
-        .shared_epilogue = count_opcode(f, OP_RET) > 1,
+        .shared_epilogue = multiple_rets,
+        .epilogue_follows_body = epilogue_follows_body,
         .epilogue_jumps = vec_new(arena),
     };
     analyze_gep_folds(&ctx, use_count, arena);
