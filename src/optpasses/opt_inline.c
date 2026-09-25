@@ -9,7 +9,7 @@
 
 /* Clones a callee into each direct call site, ahead of GVN/LICM. */
 
-#define INLINE_T2_MAX_INSTRS 20 /* tier-2 body cap, in non-phi instructions */
+#define INLINE_T2_MAX_INSTRS 8  /* tier-2 body cap, in non-phi instructions */
 #define INLINE_T2_LOOP_FACTOR 4 /* a call in a loop amortizes its own overhead */
 #define INLINE_T2_MAX_PARAMS 4  /* frame/spill cost guard for tier 2 */
 #define INLINE_T2_MAX_LOCALS 8  /* alloca count guard for tier 2 */
