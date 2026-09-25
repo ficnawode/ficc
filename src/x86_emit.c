@@ -186,6 +186,15 @@ void emit_mov_scalar(ByteBuf *buf, u8 width, X86Operand dst, X86Operand src)
 
     if (src.kind == XOP_IMM)
     {
+        if (width == 8 && (u64) src.u.imm <= 0xFFFFFFFFu)
+        {
+            /* B8+rd id into the 32-bit alias: two bytes shorter than C7 and
+               sign/zero-equivalent because the value is non-negative. */
+            emit_rex_if(buf, false, false, false, dst.u.reg >= 8);
+            bytebuf_append(buf, (u8) (X86_MOV_REG_IMM_BASE + (dst.u.reg & 7)));
+            bytebuf_append_u32(buf, (u32) src.u.imm);
+            return;
+        }
         if (width == 8 && fits_i32(src.u.imm))
         {
             /* C7 /0 id: sign-extending imm32, three bytes shorter than movabs. */

@@ -19,15 +19,18 @@ static void mov_imm(ByteBuf *b, Arena *a, u8 width, u8 reg, i64 imm, const u8 *w
     expect_bytes(b, want, n);
 }
 
-TEST(x86_emit, movq_imm32_sign_extends)
+TEST(x86_emit, movq_nonneg_imm_uses_32bit_form)
 {
     Arena *a = arena_new();
     ByteBuf b;
-    mov_imm(&b, a, 8, R_EAX, 42, (const u8[]) {0x48, 0xc7, 0xc0, 0x2a, 0, 0, 0}, 7);
+    /* B8+rd id writes the 32-bit alias, zero-extending: two bytes shorter than
+       the sign-extending C7 form and equivalent for a non-negative value. */
+    mov_imm(&b, a, 8, R_EAX, 42, (const u8[]) {0xb8, 0x2a, 0, 0, 0}, 5);
+    mov_imm(&b, a, 8, R_EAX, INT32_MAX, (const u8[]) {0xb8, 0xff, 0xff, 0xff, 0x7f}, 5);
+    mov_imm(&b, a, 8, R_R8, 7, (const u8[]) {0x41, 0xb8, 0x07, 0, 0, 0}, 6);
+    /* A negative value needs the full 64-bit sign extension. */
     mov_imm(&b, a, 8, R_EAX, -1, (const u8[]) {0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff}, 7);
     mov_imm(&b, a, 8, R_EAX, INT32_MIN, (const u8[]) {0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x80}, 7);
-    mov_imm(&b, a, 8, R_EAX, INT32_MAX, (const u8[]) {0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0x7f}, 7);
-    mov_imm(&b, a, 8, R_R8, 7, (const u8[]) {0x49, 0xc7, 0xc0, 0x07, 0, 0, 0}, 7);
     arena_free(a);
 }
 
@@ -35,8 +38,8 @@ TEST(x86_emit, movq_imm_out_of_range_uses_movabs)
 {
     Arena *a = arena_new();
     ByteBuf b;
-    mov_imm(&b, a, 8, R_EAX, (i64) INT32_MAX + 1,
-            (const u8[]) {0x48, 0xb8, 0x00, 0x00, 0x00, 0x80, 0, 0, 0, 0}, 10);
+    /* 2^31 still fits the zero-extending 32-bit form. */
+    mov_imm(&b, a, 8, R_EAX, (i64) INT32_MAX + 1, (const u8[]) {0xb8, 0x00, 0x00, 0x00, 0x80}, 5);
     mov_imm(&b, a, 8, R_EAX, 0x100000000LL,
             (const u8[]) {0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x01, 0, 0, 0}, 10);
     arena_free(a);
@@ -46,7 +49,7 @@ TEST(x86_emit, mov_zero_stays_a_move_for_flag_safety)
 {
     Arena *a = arena_new();
     ByteBuf b;
-    mov_imm(&b, a, 8, R_EAX, 0, (const u8[]) {0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00}, 7);
+    mov_imm(&b, a, 8, R_EAX, 0, (const u8[]) {0xb8, 0x00, 0x00, 0x00, 0x00}, 5);
     arena_free(a);
 }
 
