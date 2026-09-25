@@ -77,3 +77,18 @@ TEST(std_headers, math_macros)
                           "}\n",
                           0);
 }
+
+TEST(std_headers, struct_tm_matches_the_host_abi)
+{
+    /* glibc's struct tm carries tm_gmtoff and tm_zone beyond the nine standard
+       ints; a smaller declaration makes mktime/localtime write past the object. */
+    EXPECT_INTERP_AND_ELF("#include <time.h>\n"
+                          "_Static_assert(sizeof(struct tm) == 56, \"struct tm size\");\n"
+                          "int main(void) {\n"
+                          "    struct tm t;\n"
+                          "    t.tm_gmtoff = 0;\n"
+                          "    t.tm_zone = 0;\n"
+                          "    return (int) sizeof(t) - 56;\n"
+                          "}\n",
+                          0);
+}
