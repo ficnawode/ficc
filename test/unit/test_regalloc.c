@@ -516,7 +516,10 @@ TEST(regalloc, overfull_callee_saved_bank_splits_the_excess)
     arena_free(a);
 }
 
-TEST(regalloc, cross_block_crossing_value_is_split)
+/* A crossing value whose range spans blocks keeps one whole-range home: a cut
+   changes the value's home at the call, and instruction positions do not order
+   blocks by execution, so the post-call home has no sound definition. */
+TEST(regalloc, cross_block_crossing_value_keeps_one_home)
 {
     Arena *a = arena_new();
     u32 v;
@@ -524,19 +527,16 @@ TEST(regalloc, cross_block_crossing_value_is_split)
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     LiveIntervals set = liveinterval_compute(f, m, a);
     RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
-    /* The callee-saved bank is full, so the value splits at the call even
-       though its live range spans blocks: the call dominates every position
-       after it, so the post-call home is well defined. */
     const LiveInterval *iv = find_iv(&set, v);
-    EXPECT_EQ(alloc->seg_begin[v + 1] - alloc->seg_begin[v], 2u);
-    EXPECT_EQ(alloc->ncall_gaps, 1u);
-    EXPECT_TRUE(alloc->has_slot[v]);
+    EXPECT_EQ(alloc->seg_begin[v + 1] - alloc->seg_begin[v], 1u);
+    EXPECT_EQ(alloc->ncall_gaps, 0u);
     RegLoc pre = loc_at(alloc, ir_operand_vreg(v), iv->start);
     RegLoc post = loc_at(alloc, ir_operand_vreg(v), iv->end);
-    EXPECT_EQ(pre.kind, LOC_REG);
-    EXPECT_EQ(post.kind, LOC_REG);
-    EXPECT_FALSE(is_callee_saved(pre.reg));
-    EXPECT_FALSE(is_callee_saved(post.reg));
+    EXPECT_EQ(pre.kind, post.kind);
+    if (pre.kind == LOC_REG)
+    {
+        EXPECT_EQ(pre.reg, post.reg);
+    }
     arena_free(a);
 }
 

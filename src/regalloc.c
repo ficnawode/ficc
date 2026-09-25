@@ -516,6 +516,12 @@ static int coalesce_hint(const IrInstr *def, const int *phys_map, RegClass cls,
     {
         return -1;
     }
+    /* Only true two-address ops coalesce: a load reads its pointer to form an
+       address, so its result does not belong in the pointer's register. */
+    if (def->opcode == OP_LOAD)
+    {
+        return -1;
+    }
     switch (def->opcode)
     {
         case OP_ADD:
@@ -1203,17 +1209,6 @@ static bool has_call_in(const ScanCtx *cx, u32 lo, u32 hi)
     return false;
 }
 
-static int range_block(const ScanCtx *cx, u32 start, u32 end);
-
-/* A call is known to run inside one block, where position order is execution
-   order.  Across blocks the position span does not order execution, so a
-   cross-block range is treated as crossing every call and must keep a
-   call-safe home. */
-static bool range_crosses_calls(const ScanCtx *cx, u32 lo, u32 hi)
-{
-    return has_call_in(cx, lo, hi) || range_block(cx, lo, hi) < 0;
-}
-
 static u16 scan_avoid(const ScanCtx *cx, const LiveInterval *iv, u32 start, u32 end)
 {
     u16 avoid = cx->call_op[iv->vreg] ? cx->arg_avoid : 0;
@@ -1452,13 +1447,18 @@ static void scan_interval(ScanCtx *cx, Vec *tails, const LiveInterval *iv)
         cx->alloc->phys_map[iv->vreg] = reg;
         return;
     }
+    if (range_block(cx, iv->start, iv->end) < 0)
+    {
+        scan_range(cx, iv, iv->start, iv->end, true);
+        return;
+    }
     u32 call = next_accepted_call(cx, iv, iv->start);
     if (call == 0)
     {
         scan_range(cx, iv, iv->start, iv->end, true);
         return;
     }
-    scan_range(cx, iv, iv->start, call - 1, range_crosses_calls(cx, iv->start, call - 1));
+    scan_range(cx, iv, iv->start, call - 1, has_call_in(cx, iv->start, call));
     record_gap(cx, iv->vreg, call);
     SplitTail *tail = arena_alloc(cx->arena, sizeof(SplitTail), _Alignof(SplitTail));
     tail->iv = iv;
@@ -1471,7 +1471,7 @@ static void scan_tail(ScanCtx *cx, Vec *tails, const LiveInterval *iv, u32 from)
 {
     u32 call = next_accepted_call(cx, iv, from);
     u32 end = call ? call - 1 : iv->end;
-    scan_range(cx, iv, from, end, range_crosses_calls(cx, from, end));
+    scan_range(cx, iv, from, end, has_call_in(cx, from, call ? call : iv->end));
     if (call)
     {
         record_gap(cx, iv->vreg, call);
