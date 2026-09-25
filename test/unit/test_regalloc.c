@@ -5,8 +5,13 @@
 #include "target.h"
 #include "type.h"
 #include "util/arena.h"
+#include "util/assert.h"
 #include "util/vec.h"
 #include "x86_emit.h"
+
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static const LiveInterval *find_iv(const LiveIntervals *set, u32 vreg)
 {
@@ -190,6 +195,54 @@ TEST(regalloc, loc_at_reports_registers_and_slots)
     EXPECT_EQ(li.kind, LOC_IMM);
     arena_free(a);
 }
+
+TEST(regalloc, loc_at_is_stable_across_a_single_segment)
+{
+    Arena *a = arena_new();
+    u32 x, y, z;
+    IrModule *m = build_chain(a, &x, &y, &z);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    const LiveInterval *iv = find_iv(&set, x);
+    EXPECT_EQ(alloc->seg_begin[x + 1] - alloc->seg_begin[x], 1u);
+    RegLoc at_start = loc_at(alloc, ir_operand_vreg(x), iv->start);
+    RegLoc at_mid = loc_at(alloc, ir_operand_vreg(x), (iv->start + iv->end) / 2);
+    RegLoc at_end = loc_at(alloc, ir_operand_vreg(x), iv->end);
+    EXPECT_EQ(at_start.kind, LOC_REG);
+    EXPECT_EQ(at_start.reg, at_mid.reg);
+    EXPECT_EQ(at_mid.reg, at_end.reg);
+    arena_free(a);
+}
+
+#ifndef NDEBUG
+TEST(regalloc, loc_at_out_of_range_is_an_internal_error)
+{
+    Arena *a = arena_new();
+    u32 x, y, z;
+    IrModule *m = build_chain(a, &x, &y, &z);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    const LiveInterval *iv = find_iv(&set, x);
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        freopen("/dev/null", "w", stderr);
+        loc_at(alloc, ir_operand_vreg(x), iv->end + 1000u);
+        _exit(0);
+    }
+    ASSERT(pid > 0);
+    int status = 0;
+    ASSERT(waitpid(pid, &status, 0) == pid);
+    EXPECT_TRUE(WIFSIGNALED(status));
+    if (WIFSIGNALED(status))
+    {
+        EXPECT_EQ(WTERMSIG(status), SIGABRT);
+    }
+    arena_free(a);
+}
+#endif
 
 TEST(regalloc, x87_values_are_always_spilled)
 {
