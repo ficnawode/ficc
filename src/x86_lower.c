@@ -508,6 +508,58 @@ static void lower_trunc(IrInstr *in, X86LowerCtx *ctx)
     store_reg_result(ctx, in, w, R_EAX);
 }
 
+/* Widen `op` into `dst`.  The extension reads the source where it already
+   lives, so a register copy is never emitted just to widen in place: a source
+   in a register or spill slot feeds movsx/movzx (or a 32-bit mov for the
+   zero-extend case) directly.  A rematerialized address has no value home, so
+   it is materialized first. */
+static void lower_extend_int(X86LowerCtx *ctx, IrOperand op, u8 dw, u8 dst, bool is_signed)
+{
+    if (op.is_imm)
+    {
+        force_to_reg(ctx, op, dst);
+        return;
+    }
+    u8 sw = vreg_width(ctx, op.u.vreg);
+    RegLoc l = x86_lower_operand_loc(ctx, op);
+    if (sw >= dw)
+    {
+        force_to_reg(ctx, op, dst);
+        return;
+    }
+    if (l.kind == LOC_REG || l.kind == LOC_MEM)
+    {
+        X86Operand src = l.kind == LOC_REG ? xop_reg(l.reg) : xop_mem(rbp_mem(l.disp));
+        if (sw == 4 && !is_signed)
+        {
+            /* A 32-bit write zero-extends to 64; there is no movzx r32→r64. */
+            emit_mov(ctx->buf, W_DWORD, xop_reg(dst), src);
+        }
+        else if (is_signed)
+        {
+            emit_movsx(ctx->buf, sw, dw, dst, src);
+        }
+        else
+        {
+            emit_movzx(ctx->buf, sw, dw, dst, src);
+        }
+        return;
+    }
+    force_to_reg(ctx, op, dst);
+    if (sw == 4 && !is_signed)
+    {
+        emit_mov(ctx->buf, W_DWORD, xop_reg(dst), xop_reg(dst));
+    }
+    else if (is_signed)
+    {
+        emit_movsx(ctx->buf, sw, dw, dst, xop_reg(dst));
+    }
+    else
+    {
+        emit_movzx(ctx->buf, sw, dw, dst, xop_reg(dst));
+    }
+}
+
 static void lower_zext(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 dw = vreg_width(ctx, in->result);
@@ -539,15 +591,7 @@ static void lower_zext(IrInstr *in, X86LowerCtx *ctx)
         return;
     }
     u8 dst = rl.kind == LOC_REG ? rl.reg : R_EAX;
-    force_to_reg(ctx, in->ops[0], dst);
-    if (!in->ops[0].is_imm)
-    {
-        u8 sw = vreg_width(ctx, in->ops[0].u.vreg);
-        if (sw < 4)
-        {
-            emit_movzx(ctx->buf, sw, dw, dst, xop_reg(dst));
-        }
-    }
+    lower_extend_int(ctx, in->ops[0], dw, dst, false);
     if (rl.kind == LOC_MEM)
     {
         emit_mov(ctx->buf, dw, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
@@ -559,12 +603,7 @@ static void lower_sext(IrInstr *in, X86LowerCtx *ctx)
     u8 dw = vreg_width(ctx, in->result);
     RegLoc rl = result_loc(ctx, in);
     u8 dst = rl.kind == LOC_REG ? rl.reg : R_EAX;
-    force_to_reg(ctx, in->ops[0], dst);
-    if (!in->ops[0].is_imm)
-    {
-        u8 sw = vreg_width(ctx, in->ops[0].u.vreg);
-        emit_movsx(ctx->buf, sw, dw, dst, xop_reg(dst));
-    }
+    lower_extend_int(ctx, in->ops[0], dw, dst, true);
     if (rl.kind == LOC_MEM)
     {
         emit_mov(ctx->buf, dw, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));

@@ -219,3 +219,52 @@ TEST(codegen_quality, address_fold_escaping_pointer_stays_materialized)
                           "  int *q=&p->y; *q=*q+5; return a.y; }\n",
                           7);
 }
+
+TEST(codegen_quality, extend_negative_char_to_long)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ signed char c=-5; int i=c; long l=i;\n"
+                          "  return (int)(l+10); }\n",
+                          5);
+}
+
+TEST(codegen_quality, extend_unsigned_char_to_long)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ unsigned char c=250; long l=c; unsigned long u=l;\n"
+                          "  return (int)(u-200); }\n",
+                          50);
+}
+
+TEST(codegen_quality, extend_negative_short_to_int_and_long)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ short s=-300; int i=s; long l=s;\n"
+                          "  return (int)((l+301)*2 + (i+300)); }\n",
+                          2);
+}
+
+TEST(codegen_quality, zero_extend_unsigned_int_to_unsigned_long)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ unsigned int x=0x80000000u; unsigned long u=x;\n"
+                          "  return (int)((u>>31) + (u&1)); }\n",
+                          1);
+}
+
+TEST(codegen_quality, extend_loaded_narrow_values_in_loop)
+{
+    EXPECT_INTERP_AND_ELF("signed char a[8]={-1,-2,-3,-4,-5,-6,-7,-8};\n"
+                          "short b[8]={100,200,300,400,500,600,700,800};\n"
+                          "int main(void){ long s=0;\n"
+                          "  for (int i=0;i<8;i=i+1) s=s+a[i]+b[i];\n"
+                          "  return (int)(s%251); }\n",
+                          50);
+}
+
+TEST(codegen_quality, extend_under_register_pressure)
+{
+    EXPECT_INTERP_AND_ELF("volatile signed char vc; volatile unsigned short vu; volatile int vi;\n"
+                          "int main(void){ vc=-1; vu=60000; vi=100000;\n"
+                          "  long a=vc, b=vu, c=vi, d=a+b+c;\n"
+                          "  long e=vc, f=vu, g=vi, h=e+f+g;\n"
+                          "  long p=vc, q=vu, r=vi, t=p+q+r;\n"
+                          "  return (int)((d+h+t)%251); }\n",
+                          85);
+}
