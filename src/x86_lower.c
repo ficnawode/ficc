@@ -85,6 +85,37 @@ static X86Mem rbp_mem(i32 disp)
     return x86_mem_rbp(disp);
 }
 
+/* GepFold kinds: which operands lowering resolves at the use site. */
+#define GEP_FOLD_NONE 0
+#define GEP_FOLD_DISP 1 /* result holds the base; the constant offset is the disp */
+#define GEP_FOLD_A 2    /* result holds the base; the index resolves at the use */
+#define GEP_FOLD_B 3    /* result holds the index; the base resolves at the use */
+#define GEP_FOLD_PAIR 4 /* no result; both operands resolve at the use */
+
+/* Like loc_at, but returns false instead of asserting when `op` has no home at
+   `pos` (a folded-GEP use may read a value it does not literally name). */
+static bool loc_at_soft(const RegAllocation *alloc, IrOperand op, u32 pos, RegLoc *out)
+{
+    if (op.is_imm || op.is_global || op.is_func || op.u.vreg >= alloc->nvregs)
+    {
+        return false;
+    }
+    for (u32 s = alloc->seg_begin[op.u.vreg]; s < alloc->seg_begin[op.u.vreg + 1]; s++)
+    {
+        const RegSegment *seg = &alloc->segments[s];
+        if (pos >= seg->start && pos <= seg->end)
+        {
+            out->kind = seg->kind == SEG_REG     ? LOC_REG
+                        : seg->kind == SEG_REMAT ? LOC_REMAT
+                                                 : LOC_MEM;
+            out->reg = seg->reg;
+            out->disp = seg->kind == SEG_REMAT ? seg->disp : 0;
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Force `op` into physical `reg`, emitting an address load for globals/functions. */
 static void force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
 {
@@ -191,8 +222,58 @@ static X86Mem pointer_in_rax(X86LowerCtx *ctx, IrOperand ptr)
     return x86_mem_rax(0);
 }
 
+/* Resolve a folded base+index GEP at `pos`; `result_reg` carries whichever
+   operand the fold left in the result register (unused for the pair form). */
+static bool folded_mem_operand(const RegAllocation *alloc, const GepFold *gf, u8 result_reg,
+                               u32 pos, X86Mem *out)
+{
+    RegLoc bl, il;
+    X86Mem m = {.base = NO_REG, .index = NO_REG, .scale = gf->scale, .disp = 0};
+    if (gf->kind == GEP_FOLD_A)
+    {
+        if (!loc_at_soft(alloc, gf->index, pos, &il) || il.kind != LOC_REG)
+        {
+            return false;
+        }
+        m.base = result_reg;
+        m.index = il.reg;
+    }
+    else if (gf->kind == GEP_FOLD_B)
+    {
+        if (!loc_at_soft(alloc, gf->base, pos, &bl) || (bl.kind != LOC_REG && bl.kind != LOC_REMAT))
+        {
+            return false;
+        }
+        m.index = result_reg;
+        m.base = bl.kind == LOC_REMAT ? R_EBP : bl.reg;
+        m.disp = bl.kind == LOC_REMAT ? bl.disp : 0;
+    }
+    else if (gf->kind == GEP_FOLD_PAIR)
+    {
+        if (!loc_at_soft(alloc, gf->base, pos, &bl) || (bl.kind != LOC_REG && bl.kind != LOC_REMAT))
+        {
+            return false;
+        }
+        if (!loc_at_soft(alloc, gf->index, pos, &il) || il.kind != LOC_REG)
+        {
+            return false;
+        }
+        m.base = bl.kind == LOC_REMAT ? R_EBP : bl.reg;
+        m.disp = bl.kind == LOC_REMAT ? bl.disp : 0;
+        m.index = il.reg;
+    }
+    else
+    {
+        return false;
+    }
+    *out = m;
+    return true;
+}
+
 /* A pointer already in a register is used as the base directly; a
-   spilled/immediate/global pointer is materialized in `scratch` first. */
+   spilled/immediate/global pointer is materialized in `scratch` first.  A
+   folded GEP resolves into the memory operand itself, and a rematerialized
+   address is already `[%rbp+disp]`. */
 static X86Mem mem_operand_for_ptr(X86LowerCtx *ctx, IrOperand ptr, u8 scratch)
 {
     if (!ptr.is_imm && !ptr.is_global && !ptr.is_func)
@@ -200,7 +281,23 @@ static X86Mem mem_operand_for_ptr(X86LowerCtx *ctx, IrOperand ptr, u8 scratch)
         RegLoc l = x86_lower_operand_loc(ctx, ptr);
         if (l.kind == LOC_REG)
         {
-            return (X86Mem) {.base = l.reg, .index = NO_REG, .scale = 1, .disp = 0};
+            const GepFold *gf = &ctx->gep_folds[ptr.u.vreg];
+            if (gf->kind == GEP_FOLD_DISP)
+            {
+                return (X86Mem) {.base = l.reg, .index = NO_REG, .scale = 1, .disp = gf->disp};
+            }
+            if (gf->kind == GEP_FOLD_NONE)
+            {
+                return (X86Mem) {.base = l.reg, .index = NO_REG, .scale = 1, .disp = 0};
+            }
+            X86Mem m = {0};
+            ASSERT(folded_mem_operand(ctx->alloc, gf, l.reg, ctx->cur_pos, &m) &&
+                   "a folded GEP resolves at each of its uses");
+            return m;
+        }
+        if (l.kind == LOC_REMAT)
+        {
+            return rbp_mem(l.disp);
         }
     }
     force_to_reg(ctx, ptr, scratch);
@@ -847,6 +944,20 @@ static void lower_store(IrInstr *in, X86LowerCtx *ctx)
 
 static void lower_gep(IrInstr *in, X86LowerCtx *ctx)
 {
+    const GepFold *gf = &ctx->gep_folds[in->result];
+    if (gf->kind != GEP_FOLD_NONE)
+    {
+        if (gf->kind == GEP_FOLD_PAIR)
+        {
+            return; /* every use resolves both operands itself */
+        }
+        /* A/B/DISP: the result register carries one operand, so a use only has
+           to resolve the other (or the constant offset). */
+        RegLoc rl = result_loc(ctx, in);
+        ASSERT(rl.kind == LOC_REG && "a folded GEP result stays in a register");
+        force_to_reg(ctx, gf->kind == GEP_FOLD_B ? in->ops[1] : in->ops[0], rl.reg);
+        return;
+    }
     i64 stride = in->ops[2].u.imm;
     RegLoc rl = result_loc(ctx, in);
     u8 dst = rl.kind == LOC_REG ? rl.reg : R_EAX;
@@ -2127,6 +2238,381 @@ static void canonicalize_identity_geps(IrFunction *f, u32 nvregs, Arena *arena)
     }
 }
 
+/* Every segment home of `vreg` is a physical register: a folded address must
+   stay materialized (a SEG_MEM home would hold the base while a reloaded use
+   expects base+disp). */
+static bool all_segments_reg(const RegAllocation *alloc, u32 vreg)
+{
+    if (vreg >= alloc->nvregs)
+    {
+        return false;
+    }
+    for (u32 s = alloc->seg_begin[vreg]; s < alloc->seg_begin[vreg + 1]; s++)
+    {
+        if (alloc->segments[s].kind != SEG_REG)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* The operand positions a folded GEP can absorb: a load/store pointer, or (for
+   the constant form only) the base of another candidate. */
+static bool folds_into_use(const IrInstr *in, u8 oi, const bool *cand, bool allow_gep_base)
+{
+    if (in->opcode == OP_LOAD)
+    {
+        return oi == 0;
+    }
+    if (in->opcode == OP_STORE)
+    {
+        return oi == 1;
+    }
+    return allow_gep_base && in->opcode == OP_GEP && oi == 0 && in->result != NO_VREG &&
+           cand[in->result];
+}
+
+/* Phi entries and indirect-call arguments/callee are never foldable uses. */
+static void scan_gep_extra_uses(const IrInstr *in, const bool *cand, u32 nv, bool *bad)
+{
+    if (in->opcode == OP_PHI)
+    {
+        for (u32 e = 0; e < in->extra.phi.nentries; e++)
+        {
+            IrOperand op = in->extra.phi.entries[e].val;
+            if (ir_operand_is_vreg(op) && op.u.vreg < nv && cand[op.u.vreg])
+            {
+                bad[op.u.vreg] = true;
+            }
+        }
+    }
+    else if (in->opcode == OP_CALL)
+    {
+        if (in->extra.call.is_indirect && ir_operand_is_vreg(in->extra.call.callee) &&
+            in->extra.call.callee.u.vreg < nv && cand[in->extra.call.callee.u.vreg])
+        {
+            bad[in->extra.call.callee.u.vreg] = true;
+        }
+        for (u32 a = 0; a < in->extra.call.nargs; a++)
+        {
+            IrOperand op = in->extra.call.args[a];
+            if (ir_operand_is_vreg(op) && op.u.vreg < nv && cand[op.u.vreg])
+            {
+                bad[op.u.vreg] = true;
+            }
+        }
+    }
+}
+
+/* Mark every candidate vreg that has a use the fold cannot absorb; count its
+   load/store pointer uses into `ucount` when `ucount` is non-NULL. */
+static void scan_gep_uses(IrFunction *f, const bool *cand, bool allow_gep_base, u32 nv, u32 *ucount,
+                          bool *bad)
+{
+    for (size_t b = 0; b < vec_size(f->blocks); b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        for (size_t ii = 0; ii < vec_size(blk->instrs); ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            for (u8 oi = 0; oi < in->nops; oi++)
+            {
+                IrOperand op = in->ops[oi];
+                if (!ir_operand_is_vreg(op) || op.u.vreg >= nv || !cand[op.u.vreg])
+                {
+                    continue;
+                }
+                if (folds_into_use(in, oi, cand, allow_gep_base))
+                {
+                    if (ucount)
+                    {
+                        ucount[op.u.vreg]++;
+                    }
+                }
+                else
+                {
+                    bad[op.u.vreg] = true;
+                }
+            }
+            scan_gep_extra_uses(in, cand, nv, bad);
+        }
+    }
+}
+
+/* A constant-offset GEP whose every use is a load/store pointer (or the base of
+   another constant candidate) stays in its base: each use carries the byte
+   offset as its displacement. */
+static void constant_gep_folds(X86LowerCtx *ctx, const u32 *use_count, Arena *arena, GepFold *folds)
+{
+    const RegAllocation *alloc = ctx->alloc;
+    IrFunction *f = ctx->func;
+    u32 nv = alloc->nvregs;
+    u32 n = nv ? nv : 1;
+    bool *cand = arena_alloc(arena, n * sizeof(bool), sizeof(bool));
+    bool *valid = arena_alloc(arena, n * sizeof(bool), sizeof(bool));
+    bool *bad = arena_alloc(arena, n * sizeof(bool), sizeof(bool));
+    i64 *off = arena_alloc(arena, n * sizeof(i64), sizeof(i64));
+    i64 *cum = arena_alloc(arena, n * sizeof(i64), sizeof(i64));
+    IrOperand *gbase = arena_alloc(arena, n * sizeof(IrOperand), _Alignof(IrOperand));
+    for (u32 v = 0; v < nv; v++)
+    {
+        cand[v] = valid[v] = bad[v] = false;
+        off[v] = cum[v] = 0;
+        gbase[v] = ir_operand_imm(0);
+    }
+
+    for (size_t b = 0; b < vec_size(f->blocks); b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        for (size_t ii = 0; ii < vec_size(blk->instrs); ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode != OP_GEP || in->result == NO_VREG || !in->ops[1].is_imm ||
+                !in->ops[2].is_imm)
+            {
+                continue;
+            }
+            i64 o = in->ops[1].u.imm * in->ops[2].u.imm;
+            if (o == 0 || !fits_i32(o) || use_count[in->result] == 0 ||
+                !all_segments_reg(alloc, in->result))
+            {
+                continue;
+            }
+            cand[in->result] = true;
+            off[in->result] = o;
+            gbase[in->result] = in->ops[0];
+        }
+    }
+
+    /* Only a load/store pointer or the base of another candidate can absorb the
+       offset; anything else (phi, call argument, stored value, memcpy, ...)
+       forces the GEP to be materialized. */
+    scan_gep_uses(f, cand, true, nv, NULL, bad);
+
+    for (u32 v = 0; v < nv; v++)
+    {
+        valid[v] = cand[v] && !bad[v];
+    }
+    /* A candidate used as the base of an invalid candidate cannot fold: the
+       invalid user emits a real `lea` over the base and needs its full value. */
+    for (;;)
+    {
+        for (u32 v = 0; v < nv; v++)
+        {
+            cum[v] = off[v];
+        }
+        bool grew = true;
+        while (grew)
+        {
+            grew = false;
+            for (u32 v = 0; v < nv; v++)
+            {
+                IrOperand bs = gbase[v];
+                if (valid[v] && ir_operand_is_vreg(bs) && bs.u.vreg < nv && valid[bs.u.vreg] &&
+                    cum[v] != off[v] + cum[bs.u.vreg])
+                {
+                    cum[v] = off[v] + cum[bs.u.vreg];
+                    grew = true;
+                }
+            }
+        }
+        bool changed = false;
+        for (u32 v = 0; v < nv; v++)
+        {
+            if (valid[v] && !fits_i32(cum[v]))
+            {
+                valid[v] = false;
+                changed = true;
+            }
+        }
+        for (u32 v = 0; v < nv; v++)
+        {
+            IrOperand bs = gbase[v];
+            if (cand[v] && !valid[v] && ir_operand_is_vreg(bs) && bs.u.vreg < nv &&
+                valid[bs.u.vreg])
+            {
+                valid[bs.u.vreg] = false;
+                changed = true;
+            }
+        }
+        if (!changed)
+        {
+            break;
+        }
+    }
+    for (u32 v = 0; v < nv; v++)
+    {
+        if (valid[v])
+        {
+            folds[v].kind = GEP_FOLD_DISP;
+            folds[v].disp = (i32) cum[v];
+        }
+    }
+}
+
+/* A base+index GEP whose every use is a load/store pointer becomes a SIB
+   operand: whichever operand is live at the use is read there, the other is
+   carried in the result register (or, for the pair form, both resolve at the
+   use and the result is unused). */
+static void index_gep_folds(X86LowerCtx *ctx, const u32 *use_count, Arena *arena, GepFold *folds)
+{
+    const RegAllocation *alloc = ctx->alloc;
+    IrFunction *f = ctx->func;
+    u32 nv = alloc->nvregs;
+    u32 n = nv ? nv : 1;
+    bool *icand = arena_alloc(arena, n * sizeof(bool), sizeof(bool));
+    bool *ibad = arena_alloc(arena, n * sizeof(bool), sizeof(bool));
+    u32 *iscale = arena_alloc(arena, n * sizeof(u32), sizeof(u32));
+    IrOperand *ibase = arena_alloc(arena, n * sizeof(IrOperand), _Alignof(IrOperand));
+    IrOperand *iindex = arena_alloc(arena, n * sizeof(IrOperand), _Alignof(IrOperand));
+    u32 *ucount = arena_alloc(arena, (n + 1) * sizeof(u32), sizeof(u32));
+    for (u32 v = 0; v < nv; v++)
+    {
+        icand[v] = ibad[v] = false;
+        iscale[v] = 0;
+        ibase[v] = iindex[v] = ir_operand_imm(0);
+        ucount[v] = 0;
+    }
+    ucount[nv] = 0;
+
+    for (size_t b = 0; b < vec_size(f->blocks); b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        for (size_t ii = 0; ii < vec_size(blk->instrs); ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode != OP_GEP || in->result == NO_VREG || !in->ops[2].is_imm ||
+                !ir_operand_is_vreg(in->ops[1]) || folds[in->result].kind != GEP_FOLD_NONE)
+            {
+                continue;
+            }
+            u32 scale = (u32) in->ops[2].u.imm;
+            if (scale != 1 && scale != 2 && scale != 4 && scale != 8)
+            {
+                continue;
+            }
+            if (use_count[in->result] == 0 || !all_segments_reg(alloc, in->result))
+            {
+                continue;
+            }
+            icand[in->result] = true;
+            iscale[in->result] = scale;
+            ibase[in->result] = in->ops[0];
+            iindex[in->result] = in->ops[1];
+        }
+    }
+
+    /* Index folds may only feed load/store pointers; any other use keeps the
+       GEP materialized.  Count the foldable uses so a second pass can record
+       each one's position in a flat list. */
+    scan_gep_uses(f, icand, false, nv, ucount, ibad);
+    u32 *ustart = arena_alloc(arena, (n + 1) * sizeof(u32), sizeof(u32));
+    u32 total = 0;
+    for (u32 v = 0; v < nv; v++)
+    {
+        ustart[v] = total;
+        total += ucount[v];
+    }
+    ustart[nv] = total;
+    u32 *upos = arena_alloc(arena, (total ? total : 1) * sizeof(u32), sizeof(u32));
+    u32 *ucur = arena_alloc(arena, (n + 1) * sizeof(u32), sizeof(u32));
+    for (u32 v = 0; v <= nv; v++)
+    {
+        ucur[v] = ustart[v];
+    }
+    for (size_t b = 0; b < vec_size(f->blocks); b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        u32 base = ctx->pos->block_base[b];
+        for (size_t ii = 0; ii < vec_size(blk->instrs); ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            for (u8 oi = 0; oi < in->nops; oi++)
+            {
+                IrOperand op = in->ops[oi];
+                if (!ir_operand_is_vreg(op) || op.u.vreg >= nv || !icand[op.u.vreg])
+                {
+                    continue;
+                }
+                if ((in->opcode == OP_LOAD && oi == 0) || (in->opcode == OP_STORE && oi == 1))
+                {
+                    upos[ucur[op.u.vreg]++] = base + 2u * (u32) ii;
+                }
+            }
+        }
+    }
+
+    for (u32 v = 0; v < nv; v++)
+    {
+        if (!icand[v] || ibad[v])
+        {
+            continue;
+        }
+        bool pair_ok = true, a_ok = true, b_ok = true;
+        bool base_vreg = ir_operand_is_vreg(ibase[v]);
+        for (u32 k = ustart[v]; k < ustart[v + 1]; k++)
+        {
+            u32 p = upos[k];
+            RegLoc il, bl;
+            bool idx_live = loc_at_soft(alloc, iindex[v], p, &il) && il.kind == LOC_REG;
+            bool base_live = base_vreg && loc_at_soft(alloc, ibase[v], p, &bl) &&
+                             (bl.kind == LOC_REG || bl.kind == LOC_REMAT);
+            if (!(idx_live && base_live))
+            {
+                pair_ok = false;
+            }
+            if (!idx_live)
+            {
+                a_ok = false;
+            }
+            if (!base_live)
+            {
+                b_ok = false;
+            }
+        }
+        if (pair_ok)
+        {
+            folds[v].kind = GEP_FOLD_PAIR;
+        }
+        else if (a_ok)
+        {
+            folds[v].kind = GEP_FOLD_A;
+        }
+        else if (b_ok)
+        {
+            folds[v].kind = GEP_FOLD_B;
+        }
+        else
+        {
+            continue;
+        }
+        folds[v].scale = (u8) iscale[v];
+        folds[v].base = ibase[v];
+        folds[v].index = iindex[v];
+    }
+}
+
+/* Address folding: fold every GEP that only feeds load/store pointers into the
+   memory operands, so no `lea` is emitted for it.  Runs after register
+   allocation (it reads the segment homes) and before lowering. */
+static void analyze_gep_folds(X86LowerCtx *ctx, const u32 *use_count, Arena *arena)
+{
+    u32 nv = ctx->alloc->nvregs;
+    u32 n = nv ? nv : 1;
+    GepFold *folds = arena_alloc(arena, n * sizeof(GepFold), _Alignof(GepFold));
+    for (u32 v = 0; v < nv; v++)
+    {
+        folds[v].kind = GEP_FOLD_NONE;
+        folds[v].scale = 1;
+        folds[v].disp = 0;
+        folds[v].base = folds[v].index = ir_operand_imm(0);
+    }
+    ctx->gep_folds = folds;
+    constant_gep_folds(ctx, use_count, arena, folds);
+    index_gep_folds(ctx, use_count, arena, folds);
+}
+
 static u32 count_opcode(IrFunction *f, IrOpcode op)
 {
     u32 n = 0;
@@ -2250,6 +2736,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         .shared_epilogue = count_opcode(f, OP_RET) > 1,
         .epilogue_jumps = vec_new(arena),
     };
+    analyze_gep_folds(&ctx, use_count, arena);
 
     x86_frame_emit_prologue(buf, f, mod, alloc, &frame, debug);
     u32 off_params = (u32) bytebuf_len(buf);

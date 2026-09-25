@@ -13,6 +13,17 @@
 #include "x86_emit.h"
 #include "x86_frame.h"
 
+/* How a GEP is folded into its memory uses; each kind names which operands
+   lowering resolves at the use site (see analyze_gep_folds). */
+typedef struct
+{
+    u8 kind;         /* GEP_FOLD_* */
+    u8 scale;        /* base+index forms: SIB scale */
+    i32 disp;        /* GEP_FOLD_DISP: constant byte offset */
+    IrOperand base;  /* GEP_FOLD_B/PAIR: base resolved at each use */
+    IrOperand index; /* GEP_FOLD_A/PAIR: index resolved at each use */
+} GepFold;
+
 /* Shared lowering context; x86_sysv.c drives the call layer through the
    exported helpers below. */
 typedef struct X86LowerCtx X86LowerCtx;
@@ -37,6 +48,7 @@ struct X86LowerCtx
     u32 *position_offsets;
     u32 cur_pos;            /* the position of the instruction being lowered */
     u32 *use_count;         /* operand-reference count per vreg (brcond fold) */
+    GepFold *gep_folds;     /* vreg → folded-GEP recipe, GEP_FOLD_NONE when none */
     const char *next_label; /* label of the block emitted next (fallthrough) */
     Vec *lines;             /* Vec<LineEntry*> when recording -g line rows, else NULL */
     bool debug;             /* record line boundaries for DWARF */

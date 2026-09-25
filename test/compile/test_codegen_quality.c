@@ -176,3 +176,46 @@ TEST(codegen_quality, pressure_split_reloads_around_uses)
         "  return t%251; }\n",
         234);
 }
+
+TEST(codegen_quality, address_fold_struct_fields)
+{
+    EXPECT_INTERP_AND_ELF("struct P{ int x; int y; long z; };\n"
+                          "int main(void){ struct P a={3,4,5}; struct P *p=&a;\n"
+                          "  p->x=p->x+1; p->y=p->y*2; p->z=p->z+6;\n"
+                          "  return p->x+p->y+(int)p->z; }\n",
+                          23);
+}
+
+TEST(codegen_quality, address_fold_nested_constant_offsets)
+{
+    EXPECT_INTERP_AND_ELF("struct In{ int a; int b; }; struct Out{ struct In in; long c; };\n"
+                          "int main(void){ struct Out o={{7,8},9};\n"
+                          "  o.in.a=o.in.a+o.in.b; o.c=o.c+o.in.a;\n"
+                          "  return o.in.a+(int)o.c; }\n",
+                          39);
+}
+
+TEST(codegen_quality, address_fold_local_array_index)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ int a[6]={1,2,3,4,5,6}; int s=0;\n"
+                          "  for (int i=0;i<6;i=i+1) s=s+a[i]*i;\n"
+                          "  return s; }\n",
+                          70);
+}
+
+TEST(codegen_quality, address_fold_param_and_global_array)
+{
+    EXPECT_INTERP_AND_ELF("int g[4]={1,2,3,4};\n"
+                          "int f(int *p,int n){ int s=0;\n"
+                          "  for (int i=0;i<n;i=i+1) s=s+p[i]+g[i&3]; return s; }\n"
+                          "int main(void){ int a[4]={10,20,30,40}; return (f(a,4)+g[1])%251; }\n",
+                          112);
+}
+
+TEST(codegen_quality, address_fold_escaping_pointer_stays_materialized)
+{
+    EXPECT_INTERP_AND_ELF("struct P{ int x; int y; };\n"
+                          "int main(void){ struct P a={1,2}; struct P *p=&a;\n"
+                          "  int *q=&p->y; *q=*q+5; return a.y; }\n",
+                          7);
+}
