@@ -124,6 +124,35 @@ TEST(x86_lower, zero_extended_source_skips_the_zext_self_move)
     arena_free(a);
 }
 
+/* IMUL r,r,imm (imm8 `6B` or imm32 `69`) with a register ModRM. */
+static bool has_imul_imm(ByteBuf *b)
+{
+    const u8 *code = bytebuf_data(b);
+    size_t n = bytebuf_len(b);
+    for (size_t i = 0; i + 1 < n; i++)
+    {
+        if ((code[i] == 0x69 || code[i] == 0x6B) && (code[i + 1] & 0xC0) == 0xC0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+TEST(x86_lower, power_of_two_gep_stride_uses_a_shift)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("struct S16 { long a; long b; };\n"
+                                  "long get(struct S16 *p, int i) { return p[i].a; }\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    CodegenModule *cm = codegen_ir_to_machine(m, NULL, a);
+    EXPECT_NOTNULL(cm);
+    ByteBuf *bytes = ((CodegenFunc *) vec_get(cm->funcs, 0))->bytes;
+    EXPECT_FALSE(has_imul_imm(bytes));
+    arena_free(a);
+}
+
 /* A rel32 `jmp` whose displacement is zero targets the next instruction. */
 static size_t count_jmps_to_next(ByteBuf *b)
 {

@@ -317,6 +317,28 @@ static X86Mem mem_operand_for_ptr(X86LowerCtx *ctx, IrOperand ptr, u8 scratch)
     return (X86Mem) {.base = scratch, .index = NO_REG, .scale = 1, .disp = 0};
 }
 
+/* The low `width` bytes of an immediate, as the multiply sees them. */
+static bool mul_pow2_shift(i64 imm, u8 width, u8 *shift)
+{
+    u64 bits = width >= 8 ? (u64) imm : (u64) imm & ((1ULL << (width * 8)) - 1);
+    if (bits == 0 || (bits & (bits - 1)) != 0)
+    {
+        return false;
+    }
+    u8 k = 0;
+    while ((bits & 1) == 0)
+    {
+        bits >>= 1;
+        k++;
+    }
+    if (k >= (u8) (width * 8))
+    {
+        return false;
+    }
+    *shift = k;
+    return true;
+}
+
 static void lower_binary(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
@@ -1027,7 +1049,15 @@ static void lower_gep(IrInstr *in, X86LowerCtx *ctx)
         }
         else
         {
-            emit_imul_imm(ctx->buf, W_QWORD, R_R11, stride);
+            u8 shift = 0;
+            if (mul_pow2_shift(stride, W_QWORD, &shift))
+            {
+                emit_shift_imm(ctx->buf, W_QWORD, R_R11, shift_digit[OP_SHL], shift);
+            }
+            else
+            {
+                emit_imul_imm(ctx->buf, W_QWORD, R_R11, stride);
+            }
             X86Mem scaled = {.base = dst, .index = R_R11, .scale = 1, .disp = 0};
             emit_lea(ctx->buf, dst, scaled);
         }
