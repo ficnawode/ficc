@@ -921,20 +921,33 @@ static const FcmpSpec fcmp_specs[OP_FCMP_GE + 1] = {
     [OP_FCMP_GT] = {CC_A, 0},      [OP_FCMP_LE] = {CC_BE, OP_AND}, [OP_FCMP_GE] = {CC_AE, 0},
 };
 
-static void lower_fcmp(IrInstr *in, X86LowerCtx *ctx)
+/* Compare `ops[0]` and `ops[1]` into EFLAGS via ucomisd; shared by lower_fcmp
+   and the brcond fold. */
+static void emit_fcmp_flags(IrInstr *in, X86LowerCtx *ctx)
 {
-    u8 rw = vreg_width(ctx, in->result);
     u8 sw = in->ops[0].is_imm ? 8 : vreg_width(ctx, in->ops[0].u.vreg);
-    if (sw == W_LD)
-    {
-        x87_lower_fcmp(in, ctx);
-        return;
-    }
     ByteBuf *b = ctx->buf;
     u8 mf = MF_OF(sw);
-    fp_operand_to_xmm(ctx, in->ops[0], sw, R_XMM0);
+    u8 lhs = R_XMM0;
+    if (!in->ops[0].is_imm && !in->ops[0].is_global && !in->ops[0].is_func)
+    {
+        RegLoc ll = x86_lower_operand_loc(ctx, in->ops[0]);
+        if (ll.kind == LOC_REG)
+        {
+            lhs = ll.reg;
+        }
+        else
+        {
+            fp_operand_to_xmm(ctx, in->ops[0], sw, lhs);
+        }
+    }
+    else
+    {
+        fp_operand_to_xmm(ctx, in->ops[0], sw, lhs);
+    }
 
     IrOperand rhs = in->ops[1];
+    u8 rhs_reg = R_XMM1;
     if (rhs.is_imm)
     {
         emit_mov(b, fp_imm_load_width(sw, rhs.u.imm), xop_reg(R_EAX), xop_imm(rhs.u.imm));
@@ -945,27 +958,36 @@ static void lower_fcmp(IrInstr *in, X86LowerCtx *ctx)
         RegLoc sl = x86_lower_operand_loc(ctx, rhs);
         if (sl.kind == LOC_REG)
         {
-            if (sl.reg != R_XMM1)
-            {
-                emit_sse_op_reg(b, mf, X86_SSE_MOV, R_XMM1, sl.reg);
-            }
+            rhs_reg = sl.reg;
         }
         else
         {
             emit_sse_load(b, mf, R_XMM1, x86_frame_mem(ctx->frame, sl.disp));
         }
     }
-    emit_sse_ucomis(b, sw, R_XMM0, R_XMM1);
+    emit_sse_ucomis(b, sw, lhs, rhs_reg);
+}
+
+static void lower_fcmp(IrInstr *in, X86LowerCtx *ctx)
+{
+    u8 rw = vreg_width(ctx, in->result);
+    u8 sw = in->ops[0].is_imm ? 8 : vreg_width(ctx, in->ops[0].u.vreg);
+    if (sw == W_LD)
+    {
+        x87_lower_fcmp(in, ctx);
+        return;
+    }
+    emit_fcmp_flags(in, ctx);
 
     const FcmpSpec *spec = &fcmp_specs[in->opcode];
-    emit_setcc_reg(b, spec->cc, R_EAX);
+    emit_setcc_reg(ctx->buf, spec->cc, R_EAX);
     if (spec->join)
     {
         u8 pf_cc = spec->join == OP_AND ? CC_NP : CC_P;
-        emit_setcc_reg(b, pf_cc, R_R11);
-        emit_binop_rhs(b, W_BYTE, &arith_specs[spec->join], R_EAX, xop_reg(R_R11));
+        emit_setcc_reg(ctx->buf, pf_cc, R_R11);
+        emit_binop_rhs(ctx->buf, W_BYTE, &arith_specs[spec->join], R_EAX, xop_reg(R_R11));
     }
-    emit_movzbl_al_eax(b);
+    emit_movzbl_al_eax(ctx->buf);
     store_reg_result(ctx, in, rw, R_EAX);
 }
 
@@ -1076,17 +1098,31 @@ static void lower_gep(IrInstr *in, X86LowerCtx *ctx)
     {
         force_to_reg(ctx, in->ops[1], R_R11);
     }
-    force_to_reg(ctx, in->ops[0], dst);
+    /* A register base is the lea base directly; a spilled or immediate one is
+       materialized in `dst` first. */
+    u8 base = dst;
+    if (!in->ops[0].is_imm && !in->ops[0].is_global && !in->ops[0].is_func)
+    {
+        RegLoc bl = x86_lower_operand_loc(ctx, in->ops[0]);
+        if (bl.kind == LOC_REG)
+        {
+            base = bl.reg;
+        }
+    }
+    if (base == dst)
+    {
+        force_to_reg(ctx, in->ops[0], dst);
+    }
     if (idx_one)
     {
-        X86Mem m = {.base = dst, .index = NO_REG, .scale = 1, .disp = (i32) stride};
+        X86Mem m = {.base = base, .index = NO_REG, .scale = 1, .disp = (i32) stride};
         emit_lea(ctx->buf, dst, m);
     }
     else
     {
         if (stride == 1 || stride == 2 || stride == 4 || stride == 8)
         {
-            X86Mem scaled = {.base = dst, .index = R_R11, .scale = (u8) stride, .disp = 0};
+            X86Mem scaled = {.base = base, .index = R_R11, .scale = (u8) stride, .disp = 0};
             emit_lea(ctx->buf, dst, scaled);
         }
         else
@@ -1100,7 +1136,7 @@ static void lower_gep(IrInstr *in, X86LowerCtx *ctx)
             {
                 emit_imul_imm(ctx->buf, W_QWORD, R_R11, stride);
             }
-            X86Mem scaled = {.base = dst, .index = R_R11, .scale = 1, .disp = 0};
+            X86Mem scaled = {.base = base, .index = R_R11, .scale = 1, .disp = 0};
             emit_lea(ctx->buf, dst, scaled);
         }
     }
@@ -1299,6 +1335,17 @@ static void lower_brcond_branch(IrInstr *in, X86LowerCtx *ctx, u8 cc)
     emit_cond_branch(ctx, cc, in->extra.brcond.true_label, in->extra.brcond.false_label);
 }
 
+/* The unordered (PF) case is false for every ordered predicate and true for
+   `!=`; branch to the matching edge before the ordered condition. */
+static void lower_fcmp_branch(IrInstr *in, IrOpcode op, X86LowerCtx *ctx)
+{
+    const char *nan_target =
+        op == OP_FCMP_NE ? in->extra.brcond.true_label : in->extra.brcond.false_label;
+    emit_jcc(ctx->buf, CC_P, nan_target, ctx->block_patches, ctx->arena);
+    emit_cond_branch(ctx, fcmp_specs[op].cc, in->extra.brcond.true_label,
+                     in->extra.brcond.false_label);
+}
+
 static void lower_brcond(IrInstr *in, X86LowerCtx *ctx)
 {
     lower_brcond_test(in, ctx);
@@ -1308,6 +1355,11 @@ static void lower_brcond(IrInstr *in, X86LowerCtx *ctx)
 static bool is_icmp(IrOpcode op)
 {
     return op >= OP_ICMP_EQ && op <= OP_ICMP_SGE;
+}
+
+static bool is_fcmp(IrOpcode op)
+{
+    return op >= OP_FCMP_EQ && op <= OP_FCMP_GE;
 }
 
 /* Load the switch control into %rax at its exact 64-bit semantic value. */
@@ -1971,8 +2023,9 @@ static void fill_unset_positions(u32 *offsets, u32 from, u32 to, u32 value)
     }
 }
 
-/* A brcond over a single-use icmp immediately before it compares into the flags. */
-static IrInstr *foldable_brcond_icmp(IrBlock *blk, X86LowerCtx *ctx)
+/* A brcond over a single-use compare immediately before it compares into the
+   flags. */
+static IrInstr *foldable_brcond_cmp(IrBlock *blk, X86LowerCtx *ctx)
 {
     size_t n = vec_size(blk->instrs);
     if (n < 2)
@@ -1986,10 +2039,18 @@ static IrInstr *foldable_brcond_icmp(IrBlock *blk, X86LowerCtx *ctx)
     }
     IrInstr *prev = (IrInstr *) vec_get(blk->instrs, n - 2);
     u32 cond = term->ops[0].u.vreg;
-    if (!is_icmp(prev->opcode) || prev->result != cond || cond >= ctx->alloc->nvregs ||
-        ctx->use_count[cond] != 1)
+    if ((!is_icmp(prev->opcode) && !is_fcmp(prev->opcode)) || prev->result != cond ||
+        cond >= ctx->alloc->nvregs || ctx->use_count[cond] != 1)
     {
         return NULL;
+    }
+    if (is_fcmp(prev->opcode))
+    {
+        u8 w = prev->ops[0].is_imm ? 8 : vreg_width(ctx, prev->ops[0].u.vreg);
+        if (w == W_LD)
+        {
+            return NULL;
+        }
     }
     return prev;
 }
@@ -2060,7 +2121,7 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
     ctx->block_offsets[bi] = bytebuf_len(ctx->buf);
     size_t ninstr = vec_size(blk->instrs);
 
-    IrInstr *fold_icmp = foldable_brcond_icmp(blk, ctx);
+    IrInstr *fold_cmp = foldable_brcond_cmp(blk, ctx);
 
     size_t ii = 0;
     for (; ii < ninstr; ii++)
@@ -2071,12 +2132,12 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
             break;
         }
         ctx->cur_pos = pos_of(base, ii);
-        if (in != fold_icmp)
+        if (in != fold_cmp)
         {
             record_line_entry(ctx, in);
         }
         emit_seg_transitions(ctx, ctx->cur_pos);
-        if (in != fold_icmp)
+        if (in != fold_cmp)
         {
             lower_instr(in, ctx);
         }
@@ -2090,10 +2151,17 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
     ctx->cur_pos = bend - 1;
     if (is_brcond)
     {
-        if (fold_icmp)
+        if (fold_cmp)
         {
             ctx->cur_pos = pos_of(base, ii - 1);
-            emit_icmp_cmp(ctx, fold_icmp->ops[0], fold_icmp->ops[1]);
+            if (is_icmp(fold_cmp->opcode))
+            {
+                emit_icmp_cmp(ctx, fold_cmp->ops[0], fold_cmp->ops[1]);
+            }
+            else
+            {
+                emit_fcmp_flags(fold_cmp, ctx);
+            }
             ctx->cur_pos = bend - 1;
         }
         else
@@ -2109,8 +2177,18 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
     record_line_entry(ctx, term);
     if (is_brcond)
     {
-        u8 cc = fold_icmp ? icmp_cc[fold_icmp->opcode] : CC_NE;
-        lower_brcond_branch(term, ctx, cc);
+        if (fold_cmp && is_icmp(fold_cmp->opcode))
+        {
+            lower_brcond_branch(term, ctx, icmp_cc[fold_cmp->opcode]);
+        }
+        else if (fold_cmp)
+        {
+            lower_fcmp_branch(term, fold_cmp->opcode, ctx);
+        }
+        else
+        {
+            lower_brcond_branch(term, ctx, CC_NE);
+        }
         ctx->flags_live = false;
     }
     else if (term->opcode != OP_BR || !ctx->next_label ||
