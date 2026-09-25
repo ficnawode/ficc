@@ -1,6 +1,8 @@
-# Phase 25 codegen-quality baseline: HEAD a4d71ca, before subphases B-D.
-# `make bench` (with LUA_DIR=<lua tree>) re-measures and prints the delta.
-self.text 1442606
-self.data 7391
-self.rodata 49013
-self.bin 1530384
+# Phase 25.5 baseline: the post-Phase-25-I/J compiler (HEAD 7957d73) generating
+# code for the same source, so `make bench` prints the live-range-splitting delta
+# (self.text 943500 -> 933195, self.bin 1031368 -> 1022712 after 25.5).
+# With LUA_DIR=<lua tree> set, `make bench` also measures lua.text/lua.cpu.
+self.text 943500
+self.data 7415
+self.rodata 50166
+self.bin 1031368
