@@ -1829,6 +1829,36 @@ static bool phi_operand_same(IrOperand a, IrOperand b)
     return a.u.vreg == b.u.vreg;
 }
 
+/* PHI copies share registers (coalescing, argument lanes), so parallel-copy
+   ordering must compare physical locations, not vregs: two distinct vregs can
+   occupy one register. */
+static bool phi_loc_same(RegLoc a, RegLoc b)
+{
+    if (a.kind != b.kind)
+    {
+        return false;
+    }
+    if (a.kind == LOC_REG)
+    {
+        return a.reg == b.reg;
+    }
+    return a.kind == LOC_MEM && a.disp == b.disp;
+}
+
+static bool phi_src_same_loc(const RegAllocation *alloc, const LowerPhiCopy *a,
+                             const LowerPhiCopy *b, u32 pos)
+{
+    if (a->src_is_scratch != b->src_is_scratch)
+    {
+        return false;
+    }
+    if (!ir_operand_is_vreg(a->src) || !ir_operand_is_vreg(b->src))
+    {
+        return phi_operand_same(a->src, b->src);
+    }
+    return phi_loc_same(loc_at(alloc, a->src, pos), loc_at(alloc, b->src, pos));
+}
+
 /* A block's pending PHI copies plus the scheduler's done flags. */
 typedef struct
 {
@@ -1854,7 +1884,8 @@ static PhiCopyPlan phi_copy_plan(Vec *pcs, Arena *arena)
 
 /* Index of a pending copy whose destination no other pending copy reads, or `n`
    when every remaining destination is a source (a cycle). */
-static size_t phi_ready_copy(LowerPhiCopy **work, const bool *done, size_t n)
+static size_t phi_ready_copy(const RegAllocation *alloc, LowerPhiCopy **work, const bool *done,
+                             size_t n, u32 pos)
 {
     for (size_t i = 0; i < n; i++)
     {
@@ -1862,17 +1893,15 @@ static size_t phi_ready_copy(LowerPhiCopy **work, const bool *done, size_t n)
         {
             continue;
         }
-        u32 dst = work[i]->dst_vreg;
+        RegLoc dl = loc_at(alloc, ir_operand_vreg(work[i]->dst_vreg), pos);
         bool dst_is_source = false;
         for (size_t j = 0; j < n; j++)
         {
-            IrOperand s = work[j]->src;
-            if (done[j] || j == i || work[j]->src_is_scratch || s.is_imm || s.is_global ||
-                s.is_func)
+            if (done[j] || j == i || work[j]->src_is_scratch || !ir_operand_is_vreg(work[j]->src))
             {
                 continue;
             }
-            if (s.u.vreg == dst)
+            if (phi_loc_same(loc_at(alloc, work[j]->src, pos), dl))
             {
                 dst_is_source = true;
                 break;
@@ -1887,7 +1916,8 @@ static size_t phi_ready_copy(LowerPhiCopy **work, const bool *done, size_t n)
 }
 
 /* Whether any block has a PHI-copy cycle, so lowering needs the scratch slot. */
-static bool phi_copies_need_scratch(Vec **phi_copies, size_t nblocks, Arena *arena)
+static bool phi_copies_need_scratch(const RegAllocation *alloc, const IrPositions *pos,
+                                    Vec **phi_copies, size_t nblocks, Arena *arena)
 {
     for (size_t bi = 0; bi < nblocks; bi++)
     {
@@ -1896,10 +1926,12 @@ static bool phi_copies_need_scratch(Vec **phi_copies, size_t nblocks, Arena *are
             continue;
         }
         PhiCopyPlan plan = phi_copy_plan(phi_copies[bi], arena);
+        u32 p =
+            pos->block_end[bi] > pos->block_base[bi] ? pos->block_end[bi] - 1 : pos->block_base[bi];
         size_t remaining = plan.n;
         while (remaining > 0)
         {
-            size_t pick = phi_ready_copy(plan.copies, plan.done, plan.n);
+            size_t pick = phi_ready_copy(alloc, plan.copies, plan.done, plan.n, p);
             if (pick == plan.n)
             {
                 return true;
@@ -1929,7 +1961,7 @@ static void emit_block_phi_copies(X86LowerCtx *ctx, size_t bi)
     size_t remaining = n;
     while (remaining > 0)
     {
-        size_t pick = phi_ready_copy(work, done, n);
+        size_t pick = phi_ready_copy(ctx->alloc, work, done, n, ctx->cur_pos);
         if (pick < n)
         {
             if (work[pick]->src_is_scratch)
@@ -1956,7 +1988,7 @@ static void emit_block_phi_copies(X86LowerCtx *ctx, size_t bi)
         for (size_t i = 0; i < n; i++)
         {
             if (!done[i] && !work[i]->src_is_scratch &&
-                phi_operand_same(work[i]->src, work[c]->src))
+                phi_src_same_loc(ctx->alloc, work[i], work[c], ctx->cur_pos))
             {
                 work[i]->src_is_scratch = true;
             }
@@ -2944,7 +2976,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         }
         omit_fp = true;
     }
-    if (phi_copies_need_scratch(phi_copies, nblocks, arena))
+    if (phi_copies_need_scratch(alloc, &set.pos, phi_copies, nblocks, arena))
     {
         alloc->frame_size += 16;
     }

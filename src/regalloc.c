@@ -1048,14 +1048,16 @@ static int *collect_arg_prefs(IrFunction *f, u32 nvregs, const TargetDesc *targe
 }
 
 /* When no register is free, a shorter-lived interval can take the register of
-   an active interval that ends farther away and is read at most as often.
-   Never evict a value with more reads than the one taking its register: that
-   would trade a hot value for a colder one.  Returns the index to evict, or
-   -1. */
+   an active interval that ends farther away.  Prefer the active read at most
+   as often as the newcomer, so a hot value is not displaced by a colder one;
+   when every active is hotter, the one ending farthest still gives way.
+   Returns the index to evict, or -1. */
 static int pick_eviction(const ScanCtx *cx, bool crossing, u16 avoid, u32 iv_end, u32 new_uses)
 {
     int best = -1;
+    int cold = -1;
     u32 best_end = iv_end;
+    u32 cold_end = iv_end;
     for (u32 a = 0; a < cx->nactive; a++)
     {
         u8 reg = cx->active[a].reg;
@@ -1067,17 +1069,18 @@ static int pick_eviction(const ScanCtx *cx, bool crossing, u16 avoid, u32 iv_end
         {
             continue;
         }
-        if (cx->use_count[cx->active[a].vreg] > new_uses)
-        {
-            continue;
-        }
         if (cx->active[a].end > best_end)
         {
             best_end = cx->active[a].end;
             best = (int) a;
         }
+        if (cx->use_count[cx->active[a].vreg] <= new_uses && cx->active[a].end > cold_end)
+        {
+            cold_end = cx->active[a].end;
+            cold = (int) a;
+        }
     }
-    return best;
+    return cold >= 0 ? cold : best;
 }
 
 /* A value that lives over a call needs a callee-saved register or a slot.  A
@@ -1198,6 +1201,17 @@ static bool has_call_in(const ScanCtx *cx, u32 lo, u32 hi)
         }
     }
     return false;
+}
+
+static int range_block(const ScanCtx *cx, u32 start, u32 end);
+
+/* A call is known to run inside one block, where position order is execution
+   order.  Across blocks the position span does not order execution, so a
+   cross-block range is treated as crossing every call and must keep a
+   call-safe home. */
+static bool range_crosses_calls(const ScanCtx *cx, u32 lo, u32 hi)
+{
+    return has_call_in(cx, lo, hi) || range_block(cx, lo, hi) < 0;
 }
 
 static u16 scan_avoid(const ScanCtx *cx, const LiveInterval *iv, u32 start, u32 end)
@@ -1444,7 +1458,7 @@ static void scan_interval(ScanCtx *cx, Vec *tails, const LiveInterval *iv)
         scan_range(cx, iv, iv->start, iv->end, true);
         return;
     }
-    scan_range(cx, iv, iv->start, call - 1, has_call_in(cx, iv->start, call));
+    scan_range(cx, iv, iv->start, call - 1, range_crosses_calls(cx, iv->start, call - 1));
     record_gap(cx, iv->vreg, call);
     SplitTail *tail = arena_alloc(cx->arena, sizeof(SplitTail), _Alignof(SplitTail));
     tail->iv = iv;
@@ -1457,7 +1471,7 @@ static void scan_tail(ScanCtx *cx, Vec *tails, const LiveInterval *iv, u32 from)
 {
     u32 call = next_accepted_call(cx, iv, from);
     u32 end = call ? call - 1 : iv->end;
-    scan_range(cx, iv, from, end, has_call_in(cx, from, call ? call : iv->end));
+    scan_range(cx, iv, from, end, range_crosses_calls(cx, from, end));
     if (call)
     {
         record_gap(cx, iv->vreg, call);
