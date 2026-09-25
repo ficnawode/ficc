@@ -346,14 +346,34 @@ static bool mul_pow2_shift(i64 imm, u8 width, u8 *shift)
     return true;
 }
 
+static bool operand_in_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
+{
+    if (op.is_imm || op.is_global || op.is_func)
+    {
+        return false;
+    }
+    RegLoc l = x86_lower_operand_loc(ctx, op);
+    return l.kind == LOC_REG && l.reg == reg;
+}
+
 static void lower_binary(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
     const ArithSpec *s = &arith_specs[in->opcode];
     RegLoc rl = result_loc(ctx, in);
     u8 dst = rl.kind == LOC_REG ? rl.reg : R_EAX;
+    /* The RHS dies here, so it may alias `dst`; stage it before `dst` is overwritten. */
+    X86Operand rhs;
+    if (operand_in_reg(ctx, in->ops[1], dst))
+    {
+        emit_mov(ctx->buf, w, xop_reg(R_R11), xop_reg(dst));
+        rhs = xop_reg(R_R11);
+    }
+    else
+    {
+        rhs = resolve_rhs(ctx, in->ops[1], w, R_R11);
+    }
     force_to_reg(ctx, in->ops[0], dst);
-    X86Operand rhs = resolve_rhs(ctx, in->ops[1], w, R_R11);
     bool unit = rhs.kind == XOP_IMM && (rhs.u.imm == 1 || rhs.u.imm == -1);
     if (unit && (in->opcode == OP_ADD || in->opcode == OP_SUB))
     {
@@ -388,15 +408,23 @@ static void lower_shift(IrInstr *in, X86LowerCtx *ctx)
     u8 w = vreg_width(ctx, in->result);
     RegLoc rl = result_loc(ctx, in);
     u8 dst = rl.kind == LOC_REG ? rl.reg : R_EAX;
-    force_to_reg(ctx, in->ops[0], dst);
     if (in->ops[1].is_imm)
     {
+        force_to_reg(ctx, in->ops[0], dst);
         emit_shift_imm(ctx->buf, w, dst, shift_digit[in->opcode], (u8) in->ops[1].u.imm);
     }
     else
     {
-        force_to_reg(ctx, in->ops[1], R_ECX);
-        emit_shift_cl(ctx->buf, w, dst, shift_digit[in->opcode]);
+        /* The count dies here and may alias `dst`; stage it before `%cl` claims `%ecx`. */
+        force_to_reg(ctx, in->ops[1], R_R11);
+        u8 value = dst == R_ECX ? R_EAX : dst;
+        force_to_reg(ctx, in->ops[0], value);
+        emit_mov(ctx->buf, W_BYTE, xop_reg(R_ECX), xop_reg(R_R11));
+        emit_shift_cl(ctx->buf, w, value, shift_digit[in->opcode]);
+        if (value != dst)
+        {
+            emit_mov(ctx->buf, w, xop_reg(dst), xop_reg(value));
+        }
     }
     if (rl.kind == LOC_MEM)
     {
@@ -1042,15 +1070,20 @@ static void lower_gep(IrInstr *in, X86LowerCtx *ctx)
     i64 stride = in->ops[2].u.imm;
     RegLoc rl = result_loc(ctx, in);
     u8 dst = rl.kind == LOC_REG ? rl.reg : R_EAX;
+    bool idx_one = in->ops[1].is_imm && in->ops[1].u.imm == 1;
+    /* The index dies here and may alias `dst`; stage it before the base overwrites `dst`. */
+    if (!idx_one)
+    {
+        force_to_reg(ctx, in->ops[1], R_R11);
+    }
     force_to_reg(ctx, in->ops[0], dst);
-    if (in->ops[1].is_imm && in->ops[1].u.imm == 1)
+    if (idx_one)
     {
         X86Mem m = {.base = dst, .index = NO_REG, .scale = 1, .disp = (i32) stride};
         emit_lea(ctx->buf, dst, m);
     }
     else
     {
-        force_to_reg(ctx, in->ops[1], R_R11);
         if (stride == 1 || stride == 2 || stride == 4 || stride == 8)
         {
             X86Mem scaled = {.base = dst, .index = R_R11, .scale = (u8) stride, .disp = 0};
@@ -1083,16 +1116,6 @@ static void lower_alloca(IrInstr *in, X86LowerCtx *ctx)
        each use (LOC_REMAT), so the definition emits nothing. */
     (void) in;
     (void) ctx;
-}
-
-static bool operand_in_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
-{
-    if (op.is_imm || op.is_global || op.is_func)
-    {
-        return false;
-    }
-    RegLoc l = x86_lower_operand_loc(ctx, op);
-    return l.kind == LOC_REG && l.reg == reg;
 }
 
 /* rdi <- dst, rsi <- src, then rep movsb.  The two moves are ordered so a
