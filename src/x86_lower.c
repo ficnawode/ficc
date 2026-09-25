@@ -2300,3 +2300,62 @@ void x86_lower_store_vreg_from_reg(X86LowerCtx *ctx, u32 vreg, u8 width, u8 reg)
 {
     store_vreg_from_reg(ctx, vreg, width, reg);
 }
+
+static bool gpr_reg_survives_call(const X86LowerCtx *ctx, u8 reg)
+{
+    for (u8 i = 0; i < ctx->target->gpr.ncallee_saved; i++)
+    {
+        if (ctx->target->gpr.callee_saved[i] == reg)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static X86Mem gap_slot(X86LowerCtx *ctx, u32 vreg)
+{
+    return rbp_mem(-(i32) ctx->alloc->slot_map[vreg]);
+}
+
+void x86_lower_call_gaps(X86LowerCtx *ctx, bool before)
+{
+    u32 ngaps = 0;
+    const CallGap *gaps = regalloc_call_gaps(ctx->alloc, ctx->cur_pos, &ngaps);
+    for (u32 g = 0; g < ngaps; g++)
+    {
+        u32 v = gaps[g].vreg;
+        u8 w = vreg_width(ctx, v);
+        if (w == W_LD)
+        {
+            continue; /* x87 values are memory-only and never split */
+        }
+        RegLoc pre = loc_at(ctx->alloc, ir_operand_vreg(v), gaps[g].pos - 1);
+        RegLoc post = loc_at(ctx->alloc, ir_operand_vreg(v), gaps[g].pos);
+        bool fp = ir_vreg_float(ctx->mod, v);
+        bool survives = pre.kind == LOC_REG && post.kind == LOC_REG && pre.reg == post.reg && !fp &&
+                        gpr_reg_survives_call(ctx, pre.reg);
+        if (before && pre.kind == LOC_REG && !survives)
+        {
+            if (fp)
+            {
+                emit_sse_store(ctx->buf, MF_OF(w), gap_slot(ctx, v), pre.reg);
+            }
+            else
+            {
+                emit_mov(ctx->buf, w, xop_mem(gap_slot(ctx, v)), xop_reg(pre.reg));
+            }
+        }
+        else if (!before && post.kind == LOC_REG && !survives)
+        {
+            if (fp)
+            {
+                emit_sse_load(ctx->buf, MF_OF(w), post.reg, gap_slot(ctx, v));
+            }
+            else
+            {
+                emit_mov(ctx->buf, w, xop_reg(post.reg), xop_mem(gap_slot(ctx, v)));
+            }
+        }
+    }
+}

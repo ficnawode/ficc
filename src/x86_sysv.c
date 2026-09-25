@@ -416,6 +416,9 @@ static void emit_call_target(X86LowerCtx *ctx, IrInstr *in)
 
 void x86_sysv_lower_call(IrInstr *in, X86LowerCtx *ctx)
 {
+    /* Caller-saved registers are clobbered from the first argument move on, so
+       every split value is stored before the call sequence begins. */
+    x86_lower_call_gaps(ctx, true);
     u32 nargs = in->extra.call.nargs;
     u32 nalloc = MAX(nargs, 1);
     SysvArgPlan *plans =
@@ -460,6 +463,7 @@ void x86_sysv_lower_call(IrInstr *in, X86LowerCtx *ctx)
     }
     emit_call_target(ctx, in);
     store_call_result(ctx, in);
+    x86_lower_call_gaps(ctx, false);
 
     if (total_stack > 0)
     {

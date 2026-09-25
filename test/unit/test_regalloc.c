@@ -121,6 +121,87 @@ static IrModule *build_phi_chain(Arena *a, u32 *v, u32 *p)
     return m;
 }
 
+/* `n` values defined in one block, all read after a call in that same block;
+   more than the callee-saved bank forces the excess to split at the call. */
+static IrModule *build_many_crossing_call(Arena *a, u32 *vals, u32 n)
+{
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    for (u32 i = 0; i < n; i++)
+    {
+        vals[i] = ir_alloc_vreg(m, 8, true, false);
+        ir_emit_binop(entry, OP_ADD, vals[i], ir_operand_imm((i64) i + 1), ir_operand_imm(3));
+    }
+    u32 r = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_call(entry, r, "foo", 0, NULL);
+    u32 acc = r;
+    for (u32 i = 0; i < n; i++)
+    {
+        u32 next = ir_alloc_vreg(m, 8, true, false);
+        ir_emit_binop(entry, OP_ADD, next, ir_operand_vreg(acc), ir_operand_vreg(vals[i]));
+        acc = next;
+    }
+    ir_emit_ret(entry, ir_operand_vreg(acc));
+    return m;
+}
+
+/* A value defined in the entry block and read after a call in a successor:
+   its range spans blocks, so it must not be split at the call. */
+static IrModule *build_cross_block_crossing(Arena *a, u32 *v)
+{
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    IrBlock *body = ir_func_add_block(f, "body");
+    *v = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ADD, *v, ir_operand_imm(1), ir_operand_imm(2));
+    ir_emit_br(entry, body->label);
+    vec_push(body->preds, entry);
+    u32 r = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_call(body, r, "foo", 0, NULL);
+    u32 out = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(body, OP_ADD, out, ir_operand_vreg(*v), ir_operand_vreg(r));
+    ir_emit_ret(body, ir_operand_vreg(out));
+    return m;
+}
+
+/* A value read twice before a call and twice after it, with the callee-saved
+   bank already full, so the value must split at the call. */
+static IrModule *build_two_sided_split(Arena *a, u32 *target)
+{
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    u32 dummy[5];
+    for (u32 i = 0; i < 5; i++)
+    {
+        dummy[i] = ir_alloc_vreg(m, 8, true, false);
+        ir_emit_binop(entry, OP_ADD, dummy[i], ir_operand_imm((i64) i + 1), ir_operand_imm(2));
+    }
+    *target = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ADD, *target, ir_operand_imm(7), ir_operand_imm(8));
+    u32 pre1 = ir_alloc_vreg(m, 8, true, false);
+    u32 pre2 = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ADD, pre1, ir_operand_vreg(*target), ir_operand_vreg(*target));
+    ir_emit_binop(entry, OP_ADD, pre2, ir_operand_vreg(pre1), ir_operand_vreg(*target));
+    u32 r = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_call(entry, r, "foo", 0, NULL);
+    u32 post1 = ir_alloc_vreg(m, 8, true, false);
+    u32 post2 = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ADD, post1, ir_operand_vreg(*target), ir_operand_vreg(r));
+    ir_emit_binop(entry, OP_ADD, post2, ir_operand_vreg(post1), ir_operand_vreg(*target));
+    u32 acc = post2;
+    for (u32 i = 0; i < 5; i++)
+    {
+        u32 next = ir_alloc_vreg(m, 8, true, false);
+        ir_emit_binop(entry, OP_ADD, next, ir_operand_vreg(acc), ir_operand_vreg(dummy[i]));
+        acc = next;
+    }
+    ir_emit_ret(entry, ir_operand_vreg(acc));
+    return m;
+}
+
 static u32 count_spilled(const RegAllocation *alloc, const LiveIntervals *set)
 {
     u32 spilled = 0;
@@ -281,7 +362,7 @@ TEST(regalloc, call_crossing_gpr_uses_a_callee_saved_register)
     arena_free(a);
 }
 
-TEST(regalloc, call_crossing_xmm_spills)
+TEST(regalloc, call_crossing_xmm_splits_at_the_call)
 {
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
@@ -296,9 +377,101 @@ TEST(regalloc, call_crossing_xmm_spills)
     ir_emit_ret(entry, ir_operand_imm(0));
     LiveIntervals set = liveinterval_compute(f, m, a);
     RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
-    EXPECT_EQ(find_iv(&set, d)->cls, RC_XMM);
-    EXPECT_EQ(alloc->phys_map[d], -1);
-    EXPECT_TRUE(alloc->slot_map[d] > 0);
+    const LiveInterval *iv = find_iv(&set, d);
+    EXPECT_EQ(iv->cls, RC_XMM);
+    /* No XMM lane is callee-saved, so the value is split at the call and rides
+       caller-saved lanes with a store/reload gap. */
+    EXPECT_EQ(alloc->seg_begin[d + 1] - alloc->seg_begin[d], 2u);
+    EXPECT_EQ(alloc->ncall_gaps, 1u);
+    EXPECT_TRUE(alloc->has_slot[d]);
+    EXPECT_EQ(loc_at(alloc, ir_operand_vreg(d), iv->start).kind, LOC_REG);
+    EXPECT_EQ(loc_at(alloc, ir_operand_vreg(d), iv->end).kind, LOC_REG);
+    arena_free(a);
+}
+
+TEST(regalloc, overfull_callee_saved_bank_splits_the_excess)
+{
+    Arena *a = arena_new();
+    u32 vals[7];
+    IrModule *m = build_many_crossing_call(a, vals, 7);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    /* Five callee-saved GPRs take the first five values whole; the last two
+       split at the call. */
+    EXPECT_EQ(alloc->saved_mask, 0x3Du);
+    EXPECT_EQ(alloc->ncall_gaps, 2u);
+    u32 split = vals[6];
+    EXPECT_EQ(alloc->seg_begin[split + 1] - alloc->seg_begin[split], 2u);
+    EXPECT_TRUE(alloc->has_slot[split]);
+    const LiveInterval *iv = find_iv(&set, split);
+    RegLoc pre = loc_at(alloc, ir_operand_vreg(split), iv->start);
+    RegLoc post = loc_at(alloc, ir_operand_vreg(split), iv->end);
+    EXPECT_EQ(pre.kind, LOC_REG);
+    EXPECT_EQ(post.kind, LOC_REG);
+    EXPECT_FALSE(is_callee_saved(pre.reg));
+    EXPECT_FALSE(is_callee_saved(post.reg));
+    arena_free(a);
+}
+
+TEST(regalloc, cross_block_crossing_value_is_not_split)
+{
+    Arena *a = arena_new();
+    u32 v;
+    IrModule *m = build_cross_block_crossing(a, &v);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    /* A range that spans blocks has no single execution order, so the call
+       boundary is not split: the value keeps one whole-range home. */
+    EXPECT_EQ(alloc->seg_begin[v + 1] - alloc->seg_begin[v], 1u);
+    EXPECT_EQ(alloc->ncall_gaps, 0u);
+    EXPECT_FALSE(alloc->has_slot[v]);
+    arena_free(a);
+}
+
+TEST(regalloc, split_value_read_on_both_sides_of_a_call)
+{
+    Arena *a = arena_new();
+    u32 target;
+    IrModule *m = build_two_sided_split(a, &target);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    const LiveInterval *iv = find_iv(&set, target);
+    EXPECT_EQ(alloc->seg_begin[target + 1] - alloc->seg_begin[target], 2u);
+    EXPECT_TRUE(alloc->has_slot[target]);
+    EXPECT_EQ(alloc->ncall_gaps, 1u);
+    RegLoc pre = loc_at(alloc, ir_operand_vreg(target), iv->start);
+    RegLoc post = loc_at(alloc, ir_operand_vreg(target), iv->end);
+    EXPECT_EQ(pre.kind, LOC_REG);
+    EXPECT_EQ(post.kind, LOC_REG);
+    EXPECT_FALSE(is_callee_saved(pre.reg));
+    EXPECT_FALSE(is_callee_saved(post.reg));
+    arena_free(a);
+}
+
+TEST(regalloc, split_subrange_falls_back_to_a_slot_under_pressure)
+{
+    Arena *a = arena_new();
+    u32 vals[16];
+    IrModule *m = build_many_crossing_call(a, vals, 16);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    bool slot_run = false;
+    for (u32 i = 0; i < 16; i++)
+    {
+        for (u32 s = alloc->seg_begin[vals[i]]; s < alloc->seg_begin[vals[i] + 1]; s++)
+        {
+            if (alloc->segments[s].kind == SEG_MEM)
+            {
+                slot_run = true;
+            }
+        }
+    }
+    EXPECT_TRUE(alloc->ncall_gaps > 0u);
+    EXPECT_TRUE(slot_run);
     arena_free(a);
 }
 

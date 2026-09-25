@@ -8,8 +8,19 @@
 
 typedef struct
 {
-    const LiveInterval *iv;
+    u32 vreg;
+    u32 start;
+    u32 end;
+    u8 kind;
     u8 reg;
+} SegRec;
+
+typedef struct
+{
+    u32 vreg;
+    u32 end;
+    u8 reg;
+    SegRec *rec;
 } ActiveInterval;
 
 typedef struct
@@ -17,6 +28,12 @@ typedef struct
     u32 pos;
     u16 mask;
 } ClobberPos;
+
+typedef struct
+{
+    const LiveInterval *iv;
+    u32 from;
+} SplitTail;
 
 static const LiveInterval *interval_of(const RegAllocation *alloc, u32 vreg)
 {
@@ -43,6 +60,7 @@ static const LiveInterval *interval_of(const RegAllocation *alloc, u32 vreg)
 }
 
 static int bank_callee_index(const RegBank *bank, u8 reg);
+static const RegSegment *find_segment(const RegAllocation *alloc, u32 vreg, u32 pos);
 
 static ClobberPos *collect_clobbers(IrFunction *f, const IrPositions *pos, const TargetDesc *target,
                                     u32 *out_n, Arena *arena)
@@ -124,6 +142,12 @@ static RegAllocation *alloc_new(const LiveIntervals *set, Arena *arena)
     }
     alloc->remat = remat;
     alloc->remat_disp = remat_disp;
+    u8 *has_slot = arena_alloc(arena, set->nvregs * sizeof(u8), sizeof(u8));
+    for (u32 v = 0; v < set->nvregs; v++)
+    {
+        has_slot[v] = 0;
+    }
+    alloc->has_slot = has_slot;
     return alloc;
 }
 
@@ -174,16 +198,46 @@ static Vec *call_site_vec(const u32 *calls, u32 ncall, Arena *arena)
     return sites;
 }
 
-static u32 pack_spills(const RegAllocation *alloc, const LiveIntervals *set,
-                       const TargetDesc *target, Arena *arena)
+/* A value owns a slot when it has a SEG_MEM run or a call gap; one slot serves
+   every run and every gap of the vreg.  Rematerialized values never do. */
+static void mark_slot_users(RegAllocation *alloc, const LiveIntervals *set)
 {
+    for (u32 v = 0; v < set->nvregs; v++)
+    {
+        alloc->has_slot[v] = 0;
+    }
+    for (u32 v = 0; v < set->nvregs; v++)
+    {
+        if (alloc->remat[v])
+        {
+            continue;
+        }
+        for (u32 s = alloc->seg_begin[v]; s < alloc->seg_begin[v + 1]; s++)
+        {
+            if (alloc->segments[s].kind == SEG_MEM)
+            {
+                alloc->has_slot[v] = 1;
+                break;
+            }
+        }
+    }
+    for (u32 g = 0; g < alloc->ncall_gaps; g++)
+    {
+        alloc->has_slot[alloc->call_gaps[g].vreg] = 1;
+    }
+}
+
+static u32 pack_spills(RegAllocation *alloc, const LiveIntervals *set, const TargetDesc *target,
+                       Arena *arena)
+{
+    mark_slot_users(alloc, set);
     SlotRange *ranges =
         arena_alloc(arena, (set->n ? set->n : 1) * sizeof(SlotRange), _Alignof(SlotRange));
     u32 n = 0;
     for (u32 i = 0; i < set->n; i++)
     {
         const LiveInterval *iv = &set->ivs[i];
-        if (alloc->phys_map[iv->vreg] >= 0 || alloc->remat[iv->vreg])
+        if (!alloc->has_slot[iv->vreg])
         {
             continue;
         }
@@ -197,64 +251,121 @@ static u32 pack_spills(const RegAllocation *alloc, const LiveIntervals *set,
     return spill_pack_slots(target, ranges, n, alloc->slot_map, arena);
 }
 
-/* One whole-range segment per live vreg, derived from the whole-range
-   allocation; splitting later replaces this with several segments. */
-static void build_segments(RegAllocation *alloc, const LiveIntervals *set, Arena *arena)
+static int seg_rec_cmp(const void *a, const void *b)
 {
+    const SegRec *ra = *(const SegRec *const *) a;
+    const SegRec *rb = *(const SegRec *const *) b;
+    if (ra->vreg != rb->vreg)
+    {
+        return ra->vreg < rb->vreg ? -1 : 1;
+    }
+    if (ra->start != rb->start)
+    {
+        return ra->start < rb->start ? -1 : 1;
+    }
+    if (ra->end != rb->end)
+    {
+        return ra->end < rb->end ? -1 : 1;
+    }
+    if (ra->kind != rb->kind)
+    {
+        return ra->kind < rb->kind ? -1 : 1;
+    }
+    return ra->reg < rb->reg ? -1 : (ra->reg > rb->reg ? 1 : 0);
+}
+
+static int call_gap_cmp(const void *a, const void *b)
+{
+    const CallGap *ga = (const CallGap *) a;
+    const CallGap *gb = (const CallGap *) b;
+    if (ga->pos != gb->pos)
+    {
+        return ga->pos < gb->pos ? -1 : 1;
+    }
+    return ga->vreg < gb->vreg ? -1 : (ga->vreg > gb->vreg ? 1 : 0);
+}
+
+/* A vreg with no record (x87, or one that never got a range) lives in memory
+   for its whole span. */
+static void build_segments(RegAllocation *alloc, const LiveIntervals *set, Vec *recs, Vec *gaps,
+                           Arena *arena)
+{
+    size_t nrec = vec_size(recs);
+    SegRec **order = arena_alloc(arena, (nrec ? nrec : 1) * sizeof(SegRec *), sizeof(void *));
+    for (size_t i = 0; i < nrec; i++)
+    {
+        order[i] = (SegRec *) vec_get(recs, i);
+    }
+    qsort(order, nrec, sizeof(SegRec *), seg_rec_cmp);
+
     RegSegment *segs =
-        arena_alloc(arena, (set->n ? set->n : 1) * sizeof(RegSegment), _Alignof(RegSegment));
+        arena_alloc(arena, (set->n + nrec + 1) * sizeof(RegSegment), _Alignof(RegSegment));
     u32 *begin = arena_alloc(arena, (set->nvregs + 1) * sizeof(u32), sizeof(u32));
     u32 si = 0;
-    size_t ii = 0;
+    size_t ri = 0;
+    size_t ivi = 0;
     for (u32 v = 0; v < set->nvregs; v++)
     {
         begin[v] = si;
-        if (ii >= set->n || set->ivs[ii].vreg != v)
+        if (ivi >= set->n || set->ivs[ivi].vreg != v)
         {
             continue;
         }
-        const LiveInterval *iv = &set->ivs[ii];
-        segs[si].start = iv->start;
-        segs[si].end = iv->end;
-        segs[si].reg = 0;
+        const LiveInterval *iv = &set->ivs[ivi++];
         if (alloc->remat[v])
         {
-            segs[si].kind = SEG_REMAT;
+            segs[si++] = (RegSegment) {iv->start, iv->end, SEG_REMAT, 0};
+            continue;
         }
-        else if (alloc->phys_map[v] >= 0)
+        u32 before = si;
+        while (ri < nrec && order[ri]->vreg == v)
         {
-            segs[si].kind = SEG_REG;
-            segs[si].reg = (u8) alloc->phys_map[v];
+            segs[si++] =
+                (RegSegment) {order[ri]->start, order[ri]->end, order[ri]->kind, order[ri]->reg};
+            ri++;
         }
-        else
+        if (si == before)
         {
-            segs[si].kind = SEG_MEM;
+            segs[si++] = (RegSegment) {iv->start, iv->end, SEG_MEM, 0};
         }
-        si++;
-        ii++;
     }
     begin[set->nvregs] = si;
     alloc->segments = segs;
     alloc->seg_begin = begin;
     alloc->nsegments = si;
-    alloc->call_gaps = vec_new(arena);
+
+    size_t ngap = vec_size(gaps);
+    alloc->ncall_gaps = (u32) ngap;
+    alloc->call_gaps = arena_alloc(arena, (ngap ? ngap : 1) * sizeof(CallGap), _Alignof(CallGap));
+    for (size_t i = 0; i < ngap; i++)
+    {
+        alloc->call_gaps[i] = *(CallGap *) vec_get(gaps, i);
+    }
+    qsort(alloc->call_gaps, ngap, sizeof(CallGap), call_gap_cmp);
 }
 
-/* Every callee-saved register any segment rides must be preserved by the
-   prologue, whether or not the whole value stayed in one register. */
+/* Only the bank's own class counts: XMM register ids share the GPR numbering. */
 static u8 saved_mask_of(const RegAllocation *alloc, const RegBank *bank)
 {
     u8 mask = 0;
-    for (u32 s = 0; s < alloc->nsegments; s++)
+    for (u32 v = 0; v < alloc->nvregs; v++)
     {
-        if (alloc->segments[s].kind != SEG_REG)
+        const LiveInterval *iv = interval_of(alloc, v);
+        if (!iv || iv->cls != bank->cls)
         {
             continue;
         }
-        int idx = bank_callee_index(bank, alloc->segments[s].reg);
-        if (idx >= 0)
+        for (u32 s = alloc->seg_begin[v]; s < alloc->seg_begin[v + 1]; s++)
         {
-            mask |= (u8) (1u << idx);
+            if (alloc->segments[s].kind != SEG_REG)
+            {
+                continue;
+            }
+            int idx = bank_callee_index(bank, alloc->segments[s].reg);
+            if (idx >= 0)
+            {
+                mask |= (u8) (1u << idx);
+            }
         }
     }
     return mask;
@@ -266,8 +377,8 @@ RegAllocation *regalloc_all_spilled(IrFunction *f, const LiveIntervals *set, Are
     u32 ncall = 0;
     u32 *calls = collect_call_positions(f, &set->pos, &ncall, arena);
     alloc->call_sites = call_site_vec(calls, ncall, arena);
+    build_segments(alloc, set, vec_new(arena), vec_new(arena), arena);
     alloc->frame_size = pack_spills(alloc, set, x86_64_target(), arena);
-    build_segments(alloc, set, arena);
     return alloc;
 }
 
@@ -387,6 +498,30 @@ static int coalesce_hint(const IrInstr *def, const int *phys_map, RegClass cls,
     }
 }
 
+static u32 *collect_def_positions(IrFunction *f, const IrPositions *pos, u32 nvregs, Arena *arena)
+{
+    u32 *out = arena_alloc(arena, (nvregs ? nvregs : 1) * sizeof(u32), sizeof(u32));
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        out[v] = 0;
+    }
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->result != NO_VREG)
+            {
+                out[in->result] = pos->block_base[b] + (u32) 2 * (u32) ii;
+            }
+        }
+    }
+    return out;
+}
+
 static IrInstr **collect_defs(IrFunction *f, u32 nvregs, Arena *arena)
 {
     IrInstr **defs = arena_alloc(arena, (nvregs ? nvregs : 1) * sizeof(IrInstr *), sizeof(void *));
@@ -411,18 +546,42 @@ static IrInstr **collect_defs(IrFunction *f, u32 nvregs, Arena *arena)
     return defs;
 }
 
-/* A value live at a call must ride a callee-saved register or a slot. The start
-   bound is inclusive: an entry parameter (position 0) survives an entry call. */
-static bool crosses_call(const u32 *calls, u32 ncall, u32 start, u32 end)
+/* Every vreg read by a call (argument or indirect callee).  A value read at the
+   call position must resolve to its pre-call home, so it is never split. */
+static bool *collect_call_operands(IrFunction *f, u32 nvregs, Arena *arena)
 {
-    for (u32 i = 0; i < ncall; i++)
+    bool *op = arena_alloc(arena, (nvregs ? nvregs : 1) * sizeof(bool), sizeof(bool));
+    for (u32 v = 0; v < nvregs; v++)
     {
-        if (calls[i] >= start && calls[i] < end)
+        op[v] = false;
+    }
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
         {
-            return true;
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode != OP_CALL)
+            {
+                continue;
+            }
+            if (in->extra.call.is_indirect && ir_operand_is_vreg(in->extra.call.callee))
+            {
+                op[in->extra.call.callee.u.vreg] = true;
+            }
+            for (u32 a = 0; a < in->extra.call.nargs; a++)
+            {
+                IrOperand arg = in->extra.call.args[a];
+                if (ir_operand_is_vreg(arg))
+                {
+                    op[arg.u.vreg] = true;
+                }
+            }
         }
     }
-    return false;
+    return op;
 }
 
 static int pick_register(const RegBank *bank, const ActiveInterval *active, u32 nactive,
@@ -436,7 +595,7 @@ static int pick_register(const RegBank *bank, const ActiveInterval *active, u32 
         bool blocked = false;
         for (u32 a = 0; a < nactive; a++)
         {
-            if (active[a].reg == (u8) hint && active[a].iv->end > start)
+            if (active[a].reg == (u8) hint && active[a].end > start)
             {
                 blocked = true;
                 break;
@@ -639,71 +798,302 @@ static int pick_eviction(const RegBank *bank, const ActiveInterval *active, u32 
         {
             continue;
         }
-        if (active[a].iv->end > best_end)
+        if (active[a].end > best_end)
         {
-            best_end = active[a].iv->end;
+            best_end = active[a].end;
             best = (int) a;
         }
     }
     return best;
 }
 
-static void linear_scan_class(RegAllocation *alloc, const LiveInterval **order, u32 nintervals,
-                              const RegBank *bank, const u32 *calls, u32 ncall, const bool *call_op,
-                              u16 arg_avoid, const ClobberPos *clob, u32 nclob, IrInstr **defs,
-                              const RegClass *vreg_cls, const int *pref, Arena *arena)
+typedef struct
 {
-    ActiveInterval *active = arena_alloc(
-        arena, (nintervals ? nintervals : 1) * sizeof(ActiveInterval), _Alignof(ActiveInterval));
-    u32 nactive = 0;
-    for (u32 k = 0; k < nintervals; k++)
+    RegAllocation *alloc;
+    const RegBank *bank;
+    const u32 *calls;
+    u32 ncall;
+    const bool *call_op;
+    u16 arg_avoid;
+    const ClobberPos *clob;
+    u32 nclob;
+    IrInstr **defs;
+    const u32 *def_pos;
+    const bool *call_operand;
+    const IrPositions *pos;
+    const RegClass *vreg_cls;
+    const int *pref;
+    Vec *segs;
+    Vec *gaps;
+    ActiveInterval *active;
+    u32 nactive;
+    Arena *arena;
+} ScanCtx;
+
+/* A value that lives over a call needs a callee-saved register or a slot.  A
+   call's own result starts at the call position and so need not survive it. */
+static bool scan_crosses(const ScanCtx *cx, const LiveInterval *iv)
+{
+    for (u32 i = 0; i < cx->ncall; i++)
     {
-        const LiveInterval *iv = order[k];
-        if (iv->cls != bank->cls || alloc->remat[iv->vreg])
+        u32 c = cx->calls[i];
+        if (c < iv->start || c >= iv->end)
         {
             continue;
         }
-        for (u32 a = 0; a < nactive;)
+        if (c == cx->def_pos[iv->vreg] && cx->defs[iv->vreg] &&
+            cx->defs[iv->vreg]->opcode == OP_CALL)
         {
-            if (active[a].iv->end < iv->start)
-            {
-                active[a] = active[--nactive];
-            }
-            else
-            {
-                a++;
-            }
+            continue; /* the call defines the value; it need not survive it */
         }
-        bool crossing = crosses_call(calls, ncall, iv->start, iv->end);
-        u16 avoid = call_op[iv->vreg] ? arg_avoid : 0;
-        if (bank->cls == RC_GPR)
+        return true;
+    }
+    return false;
+}
+
+static u16 scan_avoid(const ScanCtx *cx, const LiveInterval *iv, u32 start, u32 end)
+{
+    u16 avoid = cx->call_op[iv->vreg] ? cx->arg_avoid : 0;
+    if (cx->bank->cls == RC_GPR)
+    {
+        avoid |= clobber_avoid(cx->clob, cx->nclob, start, end);
+    }
+    return avoid;
+}
+
+static SegRec *seg_rec_new(ScanCtx *cx, u32 vreg, u32 start, u32 end)
+{
+    SegRec *rec = arena_alloc(cx->arena, sizeof(SegRec), _Alignof(SegRec));
+    rec->vreg = vreg;
+    rec->start = start;
+    rec->end = end;
+    rec->kind = SEG_MEM;
+    rec->reg = 0;
+    vec_push(cx->segs, rec);
+    return rec;
+}
+
+static void push_active(ScanCtx *cx, const SegRec *rec)
+{
+    cx->active[cx->nactive].vreg = rec->vreg;
+    cx->active[cx->nactive].end = rec->end;
+    cx->active[cx->nactive].reg = rec->reg;
+    cx->active[cx->nactive].rec = (SegRec *) rec;
+    cx->nactive++;
+}
+
+static int range_hint(const ScanCtx *cx, const LiveInterval *iv)
+{
+    int hint = coalesce_hint(cx->defs[iv->vreg], cx->alloc->phys_map, iv->cls, cx->vreg_cls);
+    return hint >= 0 ? hint : cx->pref[iv->vreg];
+}
+
+static int assign_range(ScanCtx *cx, bool crossing, u16 avoid, int hint, SegRec *rec)
+{
+    int reg = pick_register(cx->bank, cx->active, cx->nactive, crossing, avoid, hint, rec->start);
+    if (reg < 0)
+    {
+        int ev = pick_eviction(cx->bank, cx->active, cx->nactive, crossing, avoid, rec->end);
+        if (ev >= 0)
         {
-            avoid |= clobber_avoid(clob, nclob, iv->start, iv->end);
+            reg = cx->active[ev].reg;
+            cx->active[ev].rec->kind = SEG_MEM;
+            cx->active[ev].rec->reg = 0;
+            cx->alloc->phys_map[cx->active[ev].vreg] = -1;
+            cx->active[ev] = cx->active[--cx->nactive];
         }
-        int hint = coalesce_hint(defs[iv->vreg], alloc->phys_map, iv->cls, vreg_cls);
-        if (hint < 0)
+    }
+    if (reg < 0)
+    {
+        return -1;
+    }
+    rec->kind = SEG_REG;
+    rec->reg = (u8) reg;
+    push_active(cx, rec);
+    return reg;
+}
+
+static void scan_range(ScanCtx *cx, const LiveInterval *iv, u32 start, u32 end, bool crossing)
+{
+    SegRec *rec = seg_rec_new(cx, iv->vreg, start, end);
+    int reg = assign_range(cx, crossing, scan_avoid(cx, iv, start, end), range_hint(cx, iv), rec);
+    if (reg >= 0 && start == iv->start && end == iv->end)
+    {
+        cx->alloc->phys_map[iv->vreg] = reg;
+    }
+}
+
+/* The first call strictly inside (start, end), or 0 when there is none.
+   Instruction positions are even, so a boundary is never position 0. */
+static u32 next_call_after(const ScanCtx *cx, u32 start, u32 end)
+{
+    for (u32 i = 0; i < cx->ncall; i++)
+    {
+        if (cx->calls[i] > start && cx->calls[i] < end)
         {
-            hint = pref[iv->vreg];
+            return cx->calls[i];
         }
-        int reg = pick_register(bank, active, nactive, crossing, avoid, hint, iv->start);
-        if (reg < 0)
-        {
-            int ev = pick_eviction(bank, active, nactive, crossing, avoid, iv->end);
-            if (ev >= 0)
-            {
-                reg = active[ev].reg;
-                alloc->phys_map[active[ev].iv->vreg] = -1;
-                active[ev] = active[--nactive];
-            }
-        }
-        if (reg < 0)
+    }
+    return 0;
+}
+
+/* A value live across a call that touches its first position cannot be split:
+   there is no earlier segment to store before the call. */
+static bool call_at_start(const ScanCtx *cx, const LiveInterval *iv)
+{
+    for (u32 i = 0; i < cx->ncall; i++)
+    {
+        if (cx->calls[i] != iv->start)
         {
             continue;
         }
-        alloc->phys_map[iv->vreg] = reg;
-        active[nactive].iv = iv;
-        active[nactive].reg = (u8) reg;
-        nactive++;
+        if (cx->defs[iv->vreg] && cx->defs[iv->vreg]->opcode == OP_CALL)
+        {
+            continue; /* the call defines the value */
+        }
+        return true;
+    }
+    return false;
+}
+
+static void record_gap(ScanCtx *cx, u32 vreg, u32 pos)
+{
+    CallGap *g = arena_alloc(cx->arena, sizeof(CallGap), _Alignof(CallGap));
+    g->pos = pos;
+    g->vreg = vreg;
+    vec_push(cx->gaps, g);
+}
+
+/* The block containing the whole [start, end] range, or -1 when it spans more
+   than one.  Splitting is only sound inside one block: there position order is
+   execution order, so a store before a call always precedes the call. */
+static int range_block(const ScanCtx *cx, u32 start, u32 end)
+{
+    for (u32 b = 0; b < cx->pos->nblocks; b++)
+    {
+        if (start >= cx->pos->block_base[b] && start < cx->pos->block_end[b])
+        {
+            return end < cx->pos->block_end[b] ? (int) b : -1;
+        }
+    }
+    return -1;
+}
+
+static void scan_interval(ScanCtx *cx, Vec *tails, const LiveInterval *iv)
+{
+    int hint = range_hint(cx, iv);
+    bool crossing = scan_crosses(cx, iv);
+    if (!crossing || cx->call_op[iv->vreg] || cx->call_operand[iv->vreg] || call_at_start(cx, iv))
+    {
+        scan_range(cx, iv, iv->start, iv->end, crossing);
+        return;
+    }
+    int reg = pick_register(cx->bank, cx->active, cx->nactive, true,
+                            scan_avoid(cx, iv, iv->start, iv->end), hint, iv->start);
+    if (reg >= 0)
+    {
+        SegRec *whole = seg_rec_new(cx, iv->vreg, iv->start, iv->end);
+        whole->kind = SEG_REG;
+        whole->reg = (u8) reg;
+        push_active(cx, whole);
+        cx->alloc->phys_map[iv->vreg] = reg;
+        return;
+    }
+    if (range_block(cx, iv->start, iv->end) < 0)
+    {
+        scan_range(cx, iv, iv->start, iv->end, true);
+        return;
+    }
+    u32 call = next_call_after(cx, iv->start, iv->end);
+    ASSERT(call != 0 && "a crossing value has a call strictly inside its range");
+    scan_range(cx, iv, iv->start, call - 1, false);
+    record_gap(cx, iv->vreg, call);
+    SplitTail *tail = arena_alloc(cx->arena, sizeof(SplitTail), _Alignof(SplitTail));
+    tail->iv = iv;
+    tail->from = call;
+    vec_push(tails, tail);
+}
+
+static void scan_tail(ScanCtx *cx, Vec *tails, const LiveInterval *iv, u32 from)
+{
+    u32 call = next_call_after(cx, from, iv->end);
+    u32 end = call ? call - 1 : iv->end;
+    scan_range(cx, iv, from, end, false);
+    if (call)
+    {
+        record_gap(cx, iv->vreg, call);
+        SplitTail *tail = arena_alloc(cx->arena, sizeof(SplitTail), _Alignof(SplitTail));
+        tail->iv = iv;
+        tail->from = call;
+        vec_push(tails, tail);
+    }
+}
+
+static u32 tail_min_index(const Vec *tails)
+{
+    u32 best = 0;
+    for (u32 i = 1; i < (u32) vec_size(tails); i++)
+    {
+        const SplitTail *a = (const SplitTail *) vec_get(tails, i);
+        const SplitTail *b = (const SplitTail *) vec_get(tails, best);
+        if (a->from < b->from || (a->from == b->from && a->iv->vreg < b->iv->vreg))
+        {
+            best = i;
+        }
+    }
+    return best;
+}
+
+static bool tail_precedes(const Vec *tails, const LiveInterval *iv)
+{
+    const SplitTail *t = (const SplitTail *) vec_get(tails, tail_min_index(tails));
+    return t->from < iv->start || (t->from == iv->start && t->iv->vreg < iv->vreg);
+}
+
+static void expire(ScanCtx *cx, u32 pos)
+{
+    for (u32 a = 0; a < cx->nactive;)
+    {
+        if (cx->active[a].end < pos)
+        {
+            cx->active[a] = cx->active[--cx->nactive];
+        }
+        else
+        {
+            a++;
+        }
+    }
+}
+
+/* Intervals and split tails are merged in (start, vreg) order so the active
+   set always reflects everything live at the range being allocated. */
+static void linear_scan_class(ScanCtx *cx, const LiveInterval **order, u32 nintervals)
+{
+    cx->active = arena_alloc(cx->arena, (nintervals ? nintervals : 1) * sizeof(ActiveInterval),
+                             _Alignof(ActiveInterval));
+    cx->nactive = 0;
+    Vec *tails = vec_new(cx->arena);
+    u32 k = 0;
+    while (k < nintervals || vec_size(tails) > 0)
+    {
+        bool take_tail = k >= nintervals || (vec_size(tails) > 0 && tail_precedes(tails, order[k]));
+        if (take_tail)
+        {
+            u32 ti = tail_min_index(tails);
+            SplitTail t = *(SplitTail *) vec_get(tails, ti);
+            vec_set(tails, ti, vec_last(tails));
+            vec_pop(tails);
+            expire(cx, t.from);
+            scan_tail(cx, tails, t.iv, t.from);
+            continue;
+        }
+        const LiveInterval *iv = order[k++];
+        if (iv->cls != cx->bank->cls || cx->alloc->remat[iv->vreg])
+        {
+            continue;
+        }
+        expire(cx, iv->start);
+        scan_interval(cx, tails, iv);
     }
 }
 
@@ -782,14 +1172,60 @@ RegAllocation *regalloc_linear_ex(IrFunction *f, const LiveIntervals *set, const
     int *pref = collect_arg_prefs(f, set->nvregs, target, arena);
     u16 gpr_avoid = call_arg_avoid_mask(&gpr, target->gp_args, target->ngp);
     u16 xmm_avoid = call_arg_avoid_mask(&target->xmm, target->fp_args, target->nfp);
-    linear_scan_class(alloc, order, set->n, &gpr, calls, ncall, call_op, gpr_avoid, clob, nclob,
-                      defs, vreg_cls, pref, arena);
-    linear_scan_class(alloc, order, set->n, &target->xmm, calls, ncall, call_op, xmm_avoid, clob,
-                      nclob, defs, vreg_cls, pref, arena);
-    build_segments(alloc, set, arena);
+    Vec *segs = vec_new(arena);
+    Vec *gaps = vec_new(arena);
+    ScanCtx cx = {
+        .alloc = alloc,
+        .calls = calls,
+        .ncall = ncall,
+        .call_op = call_op,
+        .clob = clob,
+        .nclob = nclob,
+        .defs = defs,
+        .def_pos = collect_def_positions(f, &set->pos, set->nvregs, arena),
+        .call_operand = collect_call_operands(f, set->nvregs, arena),
+        .pos = &set->pos,
+        .vreg_cls = vreg_cls,
+        .pref = pref,
+        .segs = segs,
+        .gaps = gaps,
+        .arena = arena,
+    };
+    cx.bank = &gpr;
+    cx.arg_avoid = gpr_avoid;
+    linear_scan_class(&cx, order, set->n);
+    cx.bank = &target->xmm;
+    cx.arg_avoid = xmm_avoid;
+    linear_scan_class(&cx, order, set->n);
+    build_segments(alloc, set, segs, gaps, arena);
     alloc->saved_mask = saved_mask_of(alloc, &gpr);
     alloc->frame_size = pack_spills(alloc, set, target, arena);
     return alloc;
+}
+
+const CallGap *regalloc_call_gaps(const RegAllocation *alloc, u32 pos, u32 *count)
+{
+    u32 lo = 0;
+    u32 hi = alloc->ncall_gaps;
+    while (lo < hi)
+    {
+        u32 mid = lo + (hi - lo) / 2;
+        if (alloc->call_gaps[mid].pos < pos)
+        {
+            lo = mid + 1;
+        }
+        else
+        {
+            hi = mid;
+        }
+    }
+    u32 n = 0;
+    while (lo + n < alloc->ncall_gaps && alloc->call_gaps[lo + n].pos == pos)
+    {
+        n++;
+    }
+    *count = n;
+    return n ? &alloc->call_gaps[lo] : NULL;
 }
 
 static const RegSegment *find_segment(const RegAllocation *alloc, u32 vreg, u32 pos)

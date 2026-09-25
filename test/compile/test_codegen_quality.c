@@ -138,3 +138,25 @@ TEST(codegen_quality, unsigned_long_shift)
                           "  return (int)(x>>60); }\n",
                           15);
 }
+
+TEST(codegen_quality, gpr_values_split_across_a_call)
+{
+    EXPECT_INTERP_AND_ELF("volatile int src;\n"
+                          "int f(int x,int y,int z,int w,int v){ return x+y+z+w+v; }\n"
+                          "int main(void){ src=10;\n"
+                          "  int a=src,b=src+1,c=src+2,d=src+3,e=src+4,g=src+5,h=src+6,i=src+7;\n"
+                          "  int r=f(1,2,3,4,5);\n"
+                          "  return (a+b+c+d+e+g+h+i+r)%251; }\n",
+                          123);
+}
+
+TEST(codegen_quality, xmm_values_split_across_a_call)
+{
+    EXPECT_INTERP_AND_ELF("volatile double dsrc;\n"
+                          "double f(double x){ return x+1.0; }\n"
+                          "int main(void){ dsrc=2.5;\n"
+                          "  double a=dsrc,b=dsrc+1.0,c=dsrc+2.0;\n"
+                          "  double r=f(0.5);\n"
+                          "  return (int)(a+b+c+r); }\n",
+                          12);
+}

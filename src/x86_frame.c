@@ -175,7 +175,7 @@ void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *targe
     }
     for (u32 v = 0; v < alloc->nvregs; v++)
     {
-        if (alloc->phys_map[v] < 0)
+        if (alloc->has_slot[v])
         {
             alloc->slot_map[v] += out->saved_bytes;
         }

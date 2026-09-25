@@ -46,7 +46,9 @@ typedef struct
     RegSegment *segments; /* flat, ordered by (vreg, start) */
     u32 *seg_begin;       /* CSR rows, length nvregs+1 */
     u32 nsegments;
-    Vec *call_gaps; /* Vec<CallGap*> — vregs split at a call, sorted by (pos, vreg) */
+    CallGap *call_gaps; /* vregs split at a call, ordered by (pos, vreg) */
+    u32 ncall_gaps;
+    u8 *has_slot; /* vreg → 1 when a packed spill slot is reserved for it */
 } RegAllocation;
 
 /* All-spilled allocation: every vreg rides its own packed spill slot, matching
@@ -81,5 +83,9 @@ typedef struct
 /* Resolve a vreg/immediate operand at position `pos` against the allocation;
    globals and function addresses are emitted by lowering, never resolved here. */
 RegLoc loc_at(const RegAllocation *alloc, IrOperand op, u32 pos);
+
+/* The vregs whose location changes across the call at `pos`, or NULL when
+   none.  `count` receives the number of entries. */
+const CallGap *regalloc_call_gaps(const RegAllocation *alloc, u32 pos, u32 *count);
 
 #endif

@@ -56,6 +56,11 @@ void x86_lower_store_reg_result(X86LowerCtx *ctx, IrInstr *in, u8 width, u8 reg)
 X86Mem x86_lower_pointer_in_rax(X86LowerCtx *ctx, IrOperand ptr);
 void x86_lower_store_vreg_from_reg(X86LowerCtx *ctx, u32 vreg, u8 width, u8 reg);
 
+/* Store (before) or reload (after) every value split across the call at
+   ctx->cur_pos.  `before` runs ahead of argument setup; `after` follows the
+   result store. */
+void x86_lower_call_gaps(X86LowerCtx *ctx, bool before);
+
 /* Register-allocating lowering entry: fills cm->funcs from the IR module. */
 size_t x86_lower_module(CodegenModule *cm, IrModule *ir, bool debug, Arena *arena);
 
