@@ -87,6 +87,7 @@ typedef enum
     OPT_PASS_REASSOC,
     OPT_PASS_STRENGTH,
     OPT_PASS_DSE,
+    OPT_PASS_CANON,
 } OptPassId;
 
 /* A pass selection: the list and its length together. */
@@ -215,5 +216,6 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx);
 bool opt_pass_strength(OptimizerContext *ctx);
 bool opt_pass_reassoc(OptimizerContext *ctx);
 bool opt_pass_dse(OptimizerContext *ctx);
+bool opt_pass_canon(OptimizerContext *ctx);
 
 #endif

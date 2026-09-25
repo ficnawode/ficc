@@ -489,3 +489,29 @@ TEST(casting, negative_imm_sextended_into_wide_param)
                           "}\n",
                           0);
 }
+
+/* Constant casts fold at build time without changing the value in any direction. */
+TEST(casting, constant_casts_fold_across_widths)
+{
+    EXPECT_INTERP_AND_ELF(
+        "long long widen(void) { return (long long) 4660; }\n"
+        "long long narrow_signed(void) { return (int) 4294967295; }\n"
+        "unsigned long long narrow_unsigned(void) { return (unsigned int) 4294967295u; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    if (widen() != 4660)\n"
+        "        return 1;\n"
+        "    if (narrow_signed() != -1)\n"
+        "        return 2;\n"
+        "    if (narrow_unsigned() != 4294967295ULL)\n"
+        "        return 3;\n"
+        "    return 0;\n"
+        "}\n",
+        0);
+}
+
+/* A pointer-typed constant is still an integer at its own width when cast back. */
+TEST(casting, constant_pointer_to_integer_cast)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) { return (int)(void *)0; }\n", 0);
+}

@@ -426,28 +426,64 @@ TEST(ir_builder, multiple_string_literals)
 TEST(ir_builder, cast_narrowing_emits_trunc)
 {
     Arena *a = arena_new();
-    IrModule *m = tc_build_module("int main(void) {\n"
-                                  "    int v = 300;\n"
+    IrModule *m = tc_build_module("int narrow(int v) {\n"
                                   "    return (char)v;\n"
-                                  "}\n",
+                                  "}\n"
+                                  "int main(void) { return narrow(300); }\n",
                                   a);
     EXPECT_NOTNULL(m);
     bool saw_trunc = false;
-    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
-    for (size_t bi = 0; bi < vec_size(f->blocks); bi++)
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
     {
-        IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
-        for (size_t ii = 0; ii < vec_size(bb->instrs); ii++)
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+        for (size_t bi = 0; bi < vec_size(f->blocks); bi++)
         {
-            IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
-            if (in->opcode == OP_TRUNC)
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
+            for (size_t ii = 0; ii < vec_size(bb->instrs); ii++)
             {
-                saw_trunc = true;
+                IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
+                if (in->opcode == OP_TRUNC)
+                {
+                    saw_trunc = true;
+                }
             }
         }
     }
     EXPECT_TRUE(saw_trunc);
     EXPECT_EQ(ir_interp_run(m), 44);
+    arena_free(a);
+}
+
+TEST(ir_builder, constant_widening_cast_folds)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) { return (int)(long long) 4660; }", a);
+    EXPECT_NOTNULL(m);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    IrBlock *bb = (IrBlock *) vec_get(f->blocks, 0);
+    EXPECT_EQ(vec_size(bb->instrs), 1);
+    IrInstr *in = (IrInstr *) vec_get(bb->instrs, 0);
+    EXPECT_EQ(in->opcode, OP_RET);
+    EXPECT_TRUE(in->ops[0].is_imm);
+    EXPECT_EQ(in->ops[0].u.imm, 4660);
+    EXPECT_EQ(ir_interp_run(m), 4660);
+    arena_free(a);
+}
+
+TEST(ir_builder, constant_narrowing_cast_wraps_at_the_target_width)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) { return (int) 4294967295; }", a);
+    EXPECT_NOTNULL(m);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    IrBlock *bb = (IrBlock *) vec_get(f->blocks, 0);
+    EXPECT_EQ(vec_size(bb->instrs), 1);
+    IrInstr *in = (IrInstr *) vec_get(bb->instrs, 0);
+    EXPECT_EQ(in->opcode, OP_RET);
+    EXPECT_TRUE(in->ops[0].is_imm);
+    EXPECT_EQ(in->ops[0].u.imm, -1);
+    EXPECT_EQ(ir_interp_run(m), -1);
     arena_free(a);
 }
 
@@ -470,14 +506,11 @@ TEST(ir_builder, alignof_type_folds_to_imm)
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int main(void) { return (int) _Alignof(long); }", a);
     EXPECT_NOTNULL(m);
-    /* _Alignof folds to a compile-time constant: the first instruction is a
-       width conversion of the imm 8 (size_t result converted to int), with no
-       memory access or arithmetic on the way. */
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     IrBlock *bb = (IrBlock *) vec_get(f->blocks, 0);
-    EXPECT_EQ(vec_size(bb->instrs), 3);
+    EXPECT_EQ(vec_size(bb->instrs), 1);
     IrInstr *in = (IrInstr *) vec_get(bb->instrs, 0);
-    EXPECT_TRUE(in->opcode == OP_ZEXT || in->opcode == OP_SEXT);
+    EXPECT_EQ(in->opcode, OP_RET);
     EXPECT_TRUE(in->ops[0].is_imm);
     EXPECT_EQ(in->ops[0].u.imm, 8);
     EXPECT_EQ(ir_interp_run(m), 8);
@@ -495,8 +528,9 @@ TEST(ir_builder, alignof_expr_folds_to_imm)
     EXPECT_NOTNULL(m);
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     IrBlock *bb = (IrBlock *) vec_get(f->blocks, 0);
+    EXPECT_EQ(vec_size(bb->instrs), 1);
     IrInstr *in = (IrInstr *) vec_get(bb->instrs, 0);
-    EXPECT_TRUE(in->opcode == OP_ZEXT || in->opcode == OP_SEXT);
+    EXPECT_EQ(in->opcode, OP_RET);
     EXPECT_TRUE(in->ops[0].is_imm);
     EXPECT_EQ(in->ops[0].u.imm, 8);
     EXPECT_EQ(ir_interp_run(m), 8);

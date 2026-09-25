@@ -2300,6 +2300,66 @@ TEST(opt, reassoc_combines_addends)
     arena_free(a);
 }
 
+TEST(opt, canon_moves_immediates_to_operand_one)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = add_int_param(m, "x", 4, true);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrParam *p = (IrParam *) vec_get(f->params, 0);
+    u32 sum = ir_alloc_vreg(m, 4, true, false);
+    u32 prod = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(entry, OP_ADD, sum, ir_operand_imm(5), ir_operand_vreg(p->vreg));
+    ir_emit_binop(entry, OP_MUL, prod, ir_operand_imm(7), ir_operand_vreg(sum));
+    ir_emit_ret(entry, ir_operand_vreg(prod));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_TRUE(opt_pass_canon(&ctx));
+    EXPECT_EQ(def_of(m, sum)->ops[0].u.vreg, p->vreg);
+    EXPECT_EQ(def_of(m, sum)->ops[1].u.imm, 5);
+    EXPECT_EQ(def_of(m, prod)->ops[0].u.vreg, sum);
+    EXPECT_EQ(def_of(m, prod)->ops[1].u.imm, 7);
+    EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+TEST(opt, canon_mirrors_ordered_comparisons)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = add_int_param(m, "x", 4, true);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrParam *p = (IrParam *) vec_get(f->params, 0);
+    u32 slt = ir_alloc_vreg(m, 1, false, false);
+    u32 uge = ir_alloc_vreg(m, 1, false, false);
+    ir_emit_binop(entry, OP_ICMP_SLT, slt, ir_operand_imm(5), ir_operand_vreg(p->vreg));
+    ir_emit_binop(entry, OP_ICMP_UGE, uge, ir_operand_imm(9), ir_operand_vreg(p->vreg));
+    ir_emit_ret(entry, ir_operand_vreg(slt));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_TRUE(opt_pass_canon(&ctx));
+    EXPECT_EQ(def_of(m, slt)->opcode, OP_ICMP_SGT);
+    EXPECT_EQ(def_of(m, slt)->ops[0].u.vreg, p->vreg);
+    EXPECT_EQ(def_of(m, slt)->ops[1].u.imm, 5);
+    EXPECT_EQ(def_of(m, uge)->opcode, OP_ICMP_ULE);
+    EXPECT_EQ(def_of(m, uge)->ops[0].u.vreg, p->vreg);
+    EXPECT_EQ(def_of(m, uge)->ops[1].u.imm, 9);
+    EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+TEST(opt, canon_pipeline_preserves_value)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int f(int x) { return 5 * x + (0 == x) + (5 < x); }\n"
+                                  "int main(void) { return f(6); }\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    i64 before = ir_interp_run(m);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), before);
+    arena_free(a);
+}
+
 TEST(opt, dse_drops_an_overwritten_store)
 {
     Arena *a = arena_new();

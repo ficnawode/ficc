@@ -310,6 +310,15 @@ static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *
     {
         return val;
     }
+    if (val.is_imm && type_is_integer(src_type) && (tgt_w >= src_w || type_is_integer(target_type)))
+    {
+        i64 imm = type_reduce_int(src_type, val.u.imm);
+        if (tgt_w < src_w)
+        {
+            imm = type_reduce_int(target_type, imm);
+        }
+        return ir_operand_imm(imm);
+    }
     if (val.is_imm)
     {
         u32 src_vreg = alloc_vreg_from_type(ctx, src_type);
