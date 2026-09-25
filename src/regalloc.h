@@ -10,7 +10,7 @@ typedef enum
 {
     SEG_REG,   /* in physical register `reg` */
     SEG_MEM,   /* at [rbp - slot_map[vreg]] */
-    SEG_REMAT, /* recomputed from [rbp + remat_disp[vreg]] */
+    SEG_REMAT, /* recomputed from [rbp + disp] */
 } SegKind;
 
 typedef struct
@@ -19,6 +19,7 @@ typedef struct
     u32 end;   /* last position, inclusive */
     u8 kind;   /* SegKind */
     u8 reg;    /* SEG_REG: physical register id */
+    i32 disp;  /* SEG_REMAT: %rbp displacement to recompute */
 } RegSegment;
 
 /* A vreg whose location changes across the call at `pos`: the pre-segment
@@ -28,6 +29,14 @@ typedef struct
     u32 pos;
     u32 vreg;
 } CallGap;
+
+/* A vreg whose location changes between the instructions around `pos`: the
+   pre-segment holds [., pos-1], the post-segment [pos, .]. */
+typedef struct
+{
+    u32 pos;
+    u32 vreg;
+} SegGap;
 
 /* Pure data: the allocator's output, consumed by lowering and frame building. */
 typedef struct
@@ -40,14 +49,14 @@ typedef struct
     Vec *call_sites; /* Vec<u32*> — instruction positions of every OP_CALL */
     u8 saved_mask;   /* bit i set when target->gpr.callee_saved[i] is used */
     u32 frame_size;  /* packed spill bytes below %rbp */
-    u8 *remat;       /* vreg → 1 when the value is recomputed at each use, not stored */
-    i32 *remat_disp; /* vreg → [rbp+disp] the recomputed address loads from (remat only) */
 
     RegSegment *segments; /* flat, ordered by (vreg, start) */
     u32 *seg_begin;       /* CSR rows, length nvregs+1 */
     u32 nsegments;
     CallGap *call_gaps; /* vregs split at a call, ordered by (pos, vreg) */
     u32 ncall_gaps;
+    SegGap *seg_gaps; /* vregs split at a pressure point, ordered by (pos, vreg) */
+    u32 nseg_gaps;
     u8 *has_slot; /* vreg → 1 when a packed spill slot is reserved for it */
 } RegAllocation;
 
@@ -84,8 +93,22 @@ typedef struct
    globals and function addresses are emitted by lowering, never resolved here. */
 RegLoc loc_at(const RegAllocation *alloc, IrOperand op, u32 pos);
 
+/* True when the value is recomputed at each use (an alloca or a constant-index
+   address derived from one) rather than kept in a segment home. */
+bool regalloc_is_remat(const RegAllocation *alloc, u32 vreg);
+
+/* Set the %rbp displacement a rematerialized value is recomputed from. */
+void regalloc_set_remat_disp(RegAllocation *alloc, u32 vreg, i32 disp);
+
+/* Read a rematerialized value's recompute displacement, 0 when it is not remat. */
+i32 regalloc_remat_disp(const RegAllocation *alloc, u32 vreg);
+
 /* The vregs whose location changes across the call at `pos`, or NULL when
    none.  `count` receives the number of entries. */
 const CallGap *regalloc_call_gaps(const RegAllocation *alloc, u32 pos, u32 *count);
+
+/* The vregs whose location changes around the instruction at `pos`, or NULL
+   when none.  `count` receives the number of entries. */
+const SegGap *regalloc_seg_gaps(const RegAllocation *alloc, u32 pos, u32 *count);
 
 #endif

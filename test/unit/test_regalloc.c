@@ -215,6 +215,11 @@ static u32 count_spilled(const RegAllocation *alloc, const LiveIntervals *set)
     return spilled;
 }
 
+static u32 segment_count(const RegAllocation *alloc, u32 vreg)
+{
+    return alloc->seg_begin[vreg + 1] - alloc->seg_begin[vreg];
+}
+
 TEST(regalloc, overlapping_intervals_never_share_a_register)
 {
     Arena *a = arena_new();
@@ -475,6 +480,103 @@ TEST(regalloc, split_subrange_falls_back_to_a_slot_under_pressure)
     arena_free(a);
 }
 
+TEST(regalloc, pressure_split_reloads_at_the_next_use)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_pressure(a);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    /* A value that is longer than every active interval cannot evict one, so
+       it spills up to its next use and then rides a freed register. */
+    EXPECT_TRUE(alloc->nseg_gaps > 0u);
+    u32 reloaded = 0;
+    for (u32 v = 0; v < alloc->nvregs; v++)
+    {
+        if (segment_count(alloc, v) < 2)
+        {
+            continue;
+        }
+        u32 first = alloc->seg_begin[v];
+        EXPECT_EQ(alloc->segments[first].kind, SEG_MEM);
+        RegLoc tail = loc_at(alloc, ir_operand_vreg(v), alloc->segments[first + 1].start);
+        EXPECT_EQ(tail.kind, LOC_REG);
+        reloaded++;
+    }
+    EXPECT_TRUE(reloaded >= 1u);
+    arena_free(a);
+}
+
+TEST(regalloc, pressure_segments_never_overlap_in_a_register)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_pressure(a);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    for (u32 u = 0; u < alloc->nvregs; u++)
+    {
+        const LiveInterval *iu = find_iv(&set, u);
+        for (u32 v = u + 1; v < alloc->nvregs; v++)
+        {
+            const LiveInterval *iv = find_iv(&set, v);
+            if (!iu || !iv || iu->cls != iv->cls)
+            {
+                continue;
+            }
+            for (u32 su = alloc->seg_begin[u]; su < alloc->seg_begin[u + 1]; su++)
+            {
+                if (alloc->segments[su].kind != SEG_REG)
+                {
+                    continue;
+                }
+                for (u32 sv = alloc->seg_begin[v]; sv < alloc->seg_begin[v + 1]; sv++)
+                {
+                    if (alloc->segments[sv].kind != SEG_REG)
+                    {
+                        continue;
+                    }
+                    bool overlap = alloc->segments[su].start < alloc->segments[sv].end &&
+                                   alloc->segments[sv].start < alloc->segments[su].end;
+                    if (overlap)
+                    {
+                        EXPECT_TRUE(alloc->segments[su].reg != alloc->segments[sv].reg);
+                    }
+                }
+            }
+        }
+    }
+    arena_free(a);
+}
+
+TEST(regalloc, split_segments_cover_the_live_interval_without_gaps)
+{
+    Arena *a = arena_new();
+    u32 vals[16];
+    IrModule *m = build_many_crossing_call(a, vals, 16);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    for (u32 i = 0; i < set.n; i++)
+    {
+        u32 v = set.ivs[i].vreg;
+        u32 lo = alloc->seg_begin[v];
+        u32 hi = alloc->seg_begin[v + 1];
+        EXPECT_TRUE(lo < hi);
+        EXPECT_EQ(alloc->segments[lo].start, set.ivs[i].start);
+        EXPECT_EQ(alloc->segments[hi - 1].end, set.ivs[i].end);
+        for (u32 s = lo; s < hi; s++)
+        {
+            EXPECT_TRUE(alloc->segments[s].start <= alloc->segments[s].end);
+            if (s > lo)
+            {
+                EXPECT_EQ(alloc->segments[s].start, alloc->segments[s - 1].end + 1);
+            }
+        }
+    }
+    arena_free(a);
+}
+
 TEST(regalloc, pressure_beyond_the_bank_spills)
 {
     Arena *a = arena_new();
@@ -674,9 +776,15 @@ TEST(regalloc, alloca_results_are_rematerialized)
     RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
     /* A static alloca's address is a cheap %rbp-relative lea, so it is never
        given a register or a spill slot; lowering recomputes it at each use. */
-    EXPECT_EQ(alloc->remat[p], 1);
+    EXPECT_TRUE(regalloc_is_remat(alloc, p));
     EXPECT_EQ(alloc->phys_map[p], -1);
-    EXPECT_EQ(loc_at(alloc, ir_operand_vreg(p), 0).kind, LOC_REMAT);
+    EXPECT_EQ(segment_count(alloc, p), 1u);
+    EXPECT_EQ(alloc->segments[alloc->seg_begin[p]].kind, SEG_REMAT);
+    regalloc_set_remat_disp(alloc, p, -24);
+    EXPECT_EQ(regalloc_remat_disp(alloc, p), -24);
+    RegLoc rl = loc_at(alloc, ir_operand_vreg(p), 0);
+    EXPECT_EQ(rl.kind, LOC_REMAT);
+    EXPECT_EQ(rl.disp, -24);
     arena_free(a);
 }
 
@@ -695,8 +803,9 @@ TEST(regalloc, constant_index_gep_over_alloca_is_rematerialized)
     ir_emit_ret(entry, ir_operand_vreg(x));
     LiveIntervals set = liveinterval_compute(f, m, a);
     RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
-    EXPECT_EQ(alloc->remat[q], 1);
+    EXPECT_TRUE(regalloc_is_remat(alloc, q));
     EXPECT_EQ(alloc->phys_map[q], -1);
+    EXPECT_EQ(alloc->segments[alloc->seg_begin[q]].kind, SEG_REMAT);
     EXPECT_EQ(loc_at(alloc, ir_operand_vreg(q), 2).kind, LOC_REMAT);
     arena_free(a);
 }

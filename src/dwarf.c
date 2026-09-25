@@ -433,7 +433,7 @@ static i64 emit_segment_loc(InfoCtx *c, CodegenFunc *cf, u32 vreg, const RegSegm
     else
     {
         u8 fexpr[FBREG_EXPR_MAX];
-        u32 flen = fbreg_expr(c->loc->arena, fexpr, (i64) cf->alloc->remat_disp[vreg] - CFA_TO_RBP);
+        u32 flen = fbreg_expr(c->loc->arena, fexpr, (i64) seg->disp - CFA_TO_RBP);
         loc_range(c, begin, end, fexpr, flen);
     }
     return end;

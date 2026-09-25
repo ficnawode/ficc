@@ -160,3 +160,19 @@ TEST(codegen_quality, xmm_values_split_across_a_call)
                           "  return (int)(a+b+c+r); }\n",
                           12);
 }
+
+TEST(codegen_quality, pressure_split_reloads_around_uses)
+{
+    EXPECT_INTERP_AND_ELF(
+        "int main(void){ volatile int s; s=1;\n"
+        "  int a=s,b=s+1,c=s+2,d=s+3,e=s+4,f=s+5,g=s+6,h=s+7,i=s+8,j=s+9,k=s+10,l=s+11;\n"
+        "  int t=0;\n"
+        "  t=t+a; t=t+b; t=t+c; t=t+d; t=t+e; t=t+f;\n"
+        "  t=t+g; t=t+h; t=t+i; t=t+j; t=t+k; t=t+l;\n"
+        "  t=t+a; t=t+b; t=t+c; t=t+d; t=t+e; t=t+f;\n"
+        "  t=t+g; t=t+h; t=t+i; t=t+j; t=t+k; t=t+l;\n"
+        "  t=t+a; t=t+b; t=t+c; t=t+d; t=t+e; t=t+f;\n"
+        "  t=t+g; t=t+h; t=t+i; t=t+j; t=t+k; t=t+l;\n"
+        "  return t%251; }\n",
+        234);
+}

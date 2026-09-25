@@ -1278,7 +1278,7 @@ static void lower_instr(IrInstr *in, X86LowerCtx *ctx)
 {
     /* A rematerialized result (a static alloca or an address derived from one)
        has no home; its uses recompute it, so the definition emits nothing. */
-    if (in->result != NO_VREG && ctx->alloc->remat[in->result])
+    if (in->result != NO_VREG && regalloc_is_remat(ctx->alloc, in->result))
     {
         return;
     }
@@ -1713,6 +1713,65 @@ static IrInstr *foldable_brcond_icmp(IrBlock *blk, X86LowerCtx *ctx)
     return prev;
 }
 
+/* A value split at a pressure point changes home between the instructions
+   around `pos`: store it to the slot, or reload it into the new register. */
+static void emit_seg_move(X86LowerCtx *ctx, u32 vreg, RegLoc pre, RegLoc post)
+{
+    u8 w = vreg_width(ctx, vreg);
+    bool fp = ir_vreg_float(ctx->mod, vreg);
+    i32 disp = -(i32) ctx->alloc->slot_map[vreg];
+    if (pre.kind == LOC_REG && post.kind == LOC_MEM)
+    {
+        if (fp)
+        {
+            emit_sse_store(ctx->buf, MF_OF(w), rbp_mem(disp), pre.reg);
+        }
+        else
+        {
+            emit_mov(ctx->buf, w, xop_mem(rbp_mem(disp)), xop_reg(pre.reg));
+        }
+    }
+    else if (pre.kind == LOC_MEM && post.kind == LOC_REG)
+    {
+        if (fp)
+        {
+            emit_sse_load(ctx->buf, MF_OF(w), post.reg, rbp_mem(disp));
+        }
+        else
+        {
+            emit_mov(ctx->buf, w, xop_reg(post.reg), xop_mem(rbp_mem(disp)));
+        }
+    }
+    else if (pre.kind == LOC_REG && post.kind == LOC_REG && pre.reg != post.reg)
+    {
+        if (fp)
+        {
+            emit_sse_op_reg(ctx->buf, MF_OF(w), X86_SSE_MOV, post.reg, pre.reg);
+        }
+        else
+        {
+            emit_mov(ctx->buf, w, xop_reg(post.reg), xop_reg(pre.reg));
+        }
+    }
+}
+
+static void emit_seg_transitions(X86LowerCtx *ctx, u32 pos)
+{
+    u32 n = 0;
+    const SegGap *gaps = regalloc_seg_gaps(ctx->alloc, pos, &n);
+    for (u32 g = 0; g < n; g++)
+    {
+        u32 v = gaps[g].vreg;
+        if (vreg_width(ctx, v) == W_LD)
+        {
+            continue;
+        }
+        RegLoc pre = loc_at(ctx->alloc, ir_operand_vreg(v), pos - 1);
+        RegLoc post = loc_at(ctx->alloc, ir_operand_vreg(v), pos);
+        emit_seg_move(ctx, v, pre, post);
+    }
+}
+
 static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
 {
     u32 base = ctx->pos->block_base[bi];
@@ -1730,10 +1789,14 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
         {
             break;
         }
+        ctx->cur_pos = pos_of(base, ii);
         if (in != fold_icmp)
         {
-            ctx->cur_pos = pos_of(base, ii);
             record_line_entry(ctx, in);
+        }
+        emit_seg_transitions(ctx, ctx->cur_pos);
+        if (in != fold_icmp)
+        {
             lower_instr(in, ctx);
         }
         ctx->position_offsets[pos_of(base, ii)] = (u32) bytebuf_len(ctx->buf);
@@ -1742,6 +1805,7 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
 
     IrInstr *term = (IrInstr *) vec_get(blk->instrs, ii);
     bool is_brcond = term->opcode == OP_BRCOND;
+    emit_seg_transitions(ctx, pos_of(base, ii));
     ctx->cur_pos = bend - 1;
     if (is_brcond)
     {
@@ -2120,7 +2184,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
             IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
             if (in->opcode == OP_ALLOCA)
             {
-                alloc->remat_disp[in->result] = -(i32) in->frame_off;
+                regalloc_set_remat_disp(alloc, in->result, -(i32) in->frame_off);
             }
         }
     }
@@ -2130,10 +2194,12 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         for (size_t ii = 0; ii < vec_size(blk->instrs); ii++)
         {
             IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
-            if (in->opcode == OP_GEP && alloc->remat[in->result] && ir_operand_is_vreg(in->ops[0]))
+            if (in->opcode == OP_GEP && regalloc_is_remat(alloc, in->result) &&
+                ir_operand_is_vreg(in->ops[0]))
             {
                 i64 off = in->ops[1].u.imm * in->ops[2].u.imm;
-                alloc->remat_disp[in->result] = alloc->remat_disp[in->ops[0].u.vreg] + (i32) off;
+                i32 base = regalloc_remat_disp(alloc, in->ops[0].u.vreg);
+                regalloc_set_remat_disp(alloc, in->result, base + (i32) off);
             }
         }
     }
@@ -2206,15 +2272,6 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
 
     fill_unset_positions(position_offsets, 0, set.pos.npositions, (u32) bytebuf_len(buf));
     position_offsets[set.pos.npositions] = (u32) bytebuf_len(buf);
-    u32 *live_end = arena_alloc(arena, (set.nvregs ? set.nvregs : 1) * sizeof(u32), sizeof(u32));
-    for (u32 v = 0; v < set.nvregs; v++)
-    {
-        live_end[v] = (u32) bytebuf_len(buf);
-    }
-    for (u32 i = 0; i < set.n; i++)
-    {
-        live_end[set.ivs[i].vreg] = position_offsets[set.ivs[i].end];
-    }
     size_t nparams = vec_size(f->params);
     u32 *param_stage = arena_alloc(arena, (nparams ? nparams : 1) * sizeof(u32), sizeof(u32));
     x86_frame_param_stages(f, &frame, debug, param_stage);
@@ -2234,9 +2291,6 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     cf->frame.nsaved = frame.nsaved;
     cf->is_static = f->is_static;
     cf->func = f;
-    cf->slot_off = alloc->slot_map;
-    cf->phys_map = alloc->phys_map;
-    cf->live_end = live_end;
     cf->param_stage = param_stage;
     cf->alloc = alloc;
     cf->position_offsets = debug ? position_offsets : NULL;
@@ -2333,7 +2387,7 @@ void x86_lower_call_gaps(X86LowerCtx *ctx, bool before)
         RegLoc pre = loc_at(ctx->alloc, ir_operand_vreg(v), gaps[g].pos - 1);
         RegLoc post = loc_at(ctx->alloc, ir_operand_vreg(v), gaps[g].pos);
         bool fp = ir_vreg_float(ctx->mod, v);
-        bool survives = pre.kind == LOC_REG && post.kind == LOC_REG && pre.reg == post.reg && !fp &&
+        bool survives = pre.kind == LOC_REG && post.kind == LOC_REG && !fp &&
                         gpr_reg_survives_call(ctx, pre.reg);
         if (before && pre.kind == LOC_REG && !survives)
         {
@@ -2346,9 +2400,16 @@ void x86_lower_call_gaps(X86LowerCtx *ctx, bool before)
                 emit_mov(ctx->buf, w, xop_mem(gap_slot(ctx, v)), xop_reg(pre.reg));
             }
         }
-        else if (!before && post.kind == LOC_REG && !survives)
+        else if (!before && post.kind == LOC_REG)
         {
-            if (fp)
+            if (survives)
+            {
+                if (pre.reg != post.reg)
+                {
+                    emit_mov(ctx->buf, w, xop_reg(post.reg), xop_reg(pre.reg));
+                }
+            }
+            else if (fp)
             {
                 emit_sse_load(ctx->buf, MF_OF(w), post.reg, gap_slot(ctx, v));
             }

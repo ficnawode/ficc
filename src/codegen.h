@@ -39,19 +39,16 @@ typedef struct CodegenFunc CodegenFunc;
 struct CodegenFunc
 {
     const char *name;
-    ByteBuf *bytes;      /* machine-code bytes; the single source of truth for output */
-    size_t offset;       /* start position in .text */
-    Vec *patches;        /* Vec<PatchSite*> — function call patches */
-    Vec *global_patches; /* Vec<GlobalPatch*> — global-data reference patches */
-    Vec *func_patches;   /* Vec<FuncAddrPatch*> — function-address loads */
-    Vec *lines;          /* Vec<LineEntry*>, NULL without -g */
-    FuncFrame frame;     /* prologue layout for .eh_frame CFI */
-    bool is_static;      /* emit as STB_LOCAL in the object file */
-    IrFunction *func;    /* owning IR function: param names/types for .debug_info */
-    u32 *slot_off;       /* per-vreg frame offsets below %rbp; spilled param locations */
-    int *phys_map;       /* per-vreg physical register id, -1 when spilled; param locations */
-    u32 *live_end;       /* per-vreg byte offset just past the value's last use (debug_loc) */
-    u32 *param_stage;    /* per-param stage-slot offset below %rbp, 0 when there is none */
+    ByteBuf *bytes;             /* machine-code bytes; the single source of truth for output */
+    size_t offset;              /* start position in .text */
+    Vec *patches;               /* Vec<PatchSite*> — function call patches */
+    Vec *global_patches;        /* Vec<GlobalPatch*> — global-data reference patches */
+    Vec *func_patches;          /* Vec<FuncAddrPatch*> — function-address loads */
+    Vec *lines;                 /* Vec<LineEntry*>, NULL without -g */
+    FuncFrame frame;            /* prologue layout for .eh_frame CFI */
+    bool is_static;             /* emit as STB_LOCAL in the object file */
+    IrFunction *func;           /* owning IR function: param names/types for .debug_info */
+    u32 *param_stage;           /* per-param stage-slot offset below %rbp, 0 when there is none */
     const RegAllocation *alloc; /* segment table backing loc_at and debug locations */
     u32 *position_offsets;      /* position → byte offset, NULL without -g */
 };

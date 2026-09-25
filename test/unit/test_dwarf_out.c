@@ -190,6 +190,33 @@ TEST(dwarf_out, line_table_matches_codegen_line_entries)
     arena_free(a);
 }
 
+/* A segment's live byte span within the function, as the .debug_loc writer
+   computes it: a parameter's home is valid from the body start when defined at
+   position 0, and the span is clamped to the function. */
+static bool expect_seg_bounds(const CodegenFunc *cf, const RegSegment *seg, i64 *begin, i64 *end)
+{
+    i64 func_off = (i64) cf->offset;
+    i64 body = func_off + (i64) cf->frame.off_params;
+    i64 fn_end = func_off + (i64) bytebuf_len((ByteBuf *) cf->bytes);
+    i64 b = seg->start == 0 ? body : func_off + (i64) cf->position_offsets[seg->start];
+    i64 e = func_off + (i64) cf->position_offsets[seg->end];
+    if (b < body)
+    {
+        b = body;
+    }
+    if (e > fn_end)
+    {
+        e = fn_end;
+    }
+    if (b >= e)
+    {
+        return false;
+    }
+    *begin = b;
+    *end = e;
+    return true;
+}
+
 TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
 {
     Arena *a = arena_new();
@@ -229,8 +256,8 @@ TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
         EXPECT_TRUE(low->kind == DW_ATTR_ADDR);
         DwarfCheckAttr *high = dwarf_check_attr(die, DW_AT_high_pc);
         EXPECT_TRUE(high && high->num == bytebuf_len(cf->bytes));
-        /* Parameter DIEs in IR order: a location list whose first range is the
-           register home and, when the home is reusable, a stage-slot fallback. */
+        /* Parameter DIEs in IR order: one range per allocated segment, then the
+           entry-printed stage slot over the remainder of the function. */
         for (size_t p = 0; p < vec_size(cf->func->params); p++)
         {
             IrParam *pp = (IrParam *) vec_get(cf->func->params, p);
@@ -248,52 +275,71 @@ TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
             {
                 continue;
             }
-            int phys = cf->phys_map ? cf->phys_map[pp->vreg] : -1;
+            const RegAllocation *alloc = cf->alloc;
             Vec *ranges = dwarf_check_locs(&dc, loc->num, a);
             EXPECT_NOTNULL(ranges);
-            if (!ranges || vec_size(ranges) == 0)
+            if (!ranges)
             {
                 continue;
             }
-            DwarfCheckLocRange *first = (DwarfCheckLocRange *) vec_get(ranges, 0);
-            u64 func_off = (u64) cf->offset;
-            u64 func_size = (u64) bytebuf_len(cf->bytes);
-            EXPECT_EQ(first->begin, func_off + cf->frame.off_params);
-            if (phys >= 0)
+            i64 func_off = (i64) cf->offset;
+            i64 func_size = (i64) bytebuf_len(cf->bytes);
+            i64 reached = func_off + (i64) cf->frame.off_params;
+            size_t ri = 0;
+            for (u32 s = alloc->seg_begin[pp->vreg]; s < alloc->seg_begin[pp->vreg + 1]; s++)
             {
-                /* The register home is a one-byte DW_OP_regN with the exact lane. */
-                u8 want;
-                if (type_is_fp(pp->type))
+                const RegSegment *seg = &alloc->segments[s];
+                i64 begin;
+                i64 end;
+                if (!expect_seg_bounds(cf, seg, &begin, &end))
                 {
-                    want = x86_dwarf_xmm_number((u8) phys);
+                    continue;
+                }
+                if (ri >= vec_size(ranges))
+                {
+                    EXPECT_TRUE(false);
+                    break;
+                }
+                DwarfCheckLocRange *r = (DwarfCheckLocRange *) vec_get(ranges, ri++);
+                EXPECT_EQ(r->begin, (u64) begin);
+                EXPECT_EQ(r->end, (u64) end);
+                if (end > reached)
+                {
+                    reached = end;
+                }
+                if (seg->kind == SEG_REG)
+                {
+                    u8 want = type_is_fp(pp->type) ? x86_dwarf_xmm_number(seg->reg)
+                                                   : x86_dwarf_gpr_number(seg->reg);
+                    EXPECT_EQ(r->expr_len, 1);
+                    EXPECT_EQ(r->expr[0], (u8) (DW_OP_reg0 + want));
                 }
                 else
                 {
-                    want = x86_dwarf_gpr_number((u8) phys);
-                }
-                EXPECT_EQ(first->expr_len, 1);
-                EXPECT_EQ(first->expr[0], (u8) (DW_OP_reg0 + want));
-                EXPECT_EQ(first->end, func_off + cf->live_end[pp->vreg]);
-                if (vec_size(ranges) == 2)
-                {
-                    DwarfCheckLocRange *fb = (DwarfCheckLocRange *) vec_get(ranges, 1);
-                    EXPECT_EQ(fb->begin, func_off + cf->live_end[pp->vreg]);
-                    EXPECT_EQ(fb->end, func_off + func_size);
-                    EXPECT_EQ(fb->expr[0], DW_OP_fbreg);
-                    i64 disp;
-                    EXPECT_TRUE(dwarf_check_sleb128(fb->expr + 1, fb->expr_len - 1, &disp) > 0);
-                    EXPECT_EQ(disp, -(i64) cf->param_stage[p] - 16);
+                    i64 want =
+                        seg->kind == SEG_REMAT ? (i64) seg->disp : -(i64) alloc->slot_map[pp->vreg];
+                    EXPECT_EQ(r->expr[0], DW_OP_fbreg);
+                    i64 disp = 0;
+                    EXPECT_TRUE(dwarf_check_sleb128(r->expr + 1, r->expr_len - 1, &disp) > 0);
+                    EXPECT_EQ(disp, want - 16);
                 }
             }
-            else
+            if (cf->param_stage[p] != 0 && reached < func_off + func_size)
             {
-                EXPECT_EQ(vec_size(ranges), 1);
-                EXPECT_EQ(first->end, func_off + func_size);
-                EXPECT_EQ(first->expr[0], DW_OP_fbreg);
-                i64 disp;
-                EXPECT_TRUE(dwarf_check_sleb128(first->expr + 1, first->expr_len - 1, &disp) > 0);
-                EXPECT_EQ(disp, -(i64) cf->slot_off[pp->vreg] - 16);
+                if (ri >= vec_size(ranges))
+                {
+                    EXPECT_TRUE(false);
+                    continue;
+                }
+                DwarfCheckLocRange *r = (DwarfCheckLocRange *) vec_get(ranges, ri++);
+                EXPECT_EQ(r->begin, (u64) reached);
+                EXPECT_EQ(r->end, (u64) (func_off + func_size));
+                EXPECT_EQ(r->expr[0], DW_OP_fbreg);
+                i64 disp = 0;
+                EXPECT_TRUE(dwarf_check_sleb128(r->expr + 1, r->expr_len - 1, &disp) > 0);
+                EXPECT_EQ(disp, -(i64) cf->param_stage[p] - 16);
             }
+            EXPECT_EQ(ri, vec_size(ranges));
         }
     }
 
