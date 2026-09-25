@@ -46,6 +46,39 @@ typedef struct
     u32 succ;
 } CfgEdge;
 
+typedef struct
+{
+    RegAllocation *alloc;
+    const RegBank *bank;
+    const u32 *calls;
+    u32 ncall;
+    const bool *call_op;
+    u16 arg_avoid;
+    const ClobberPos *clob;
+    u32 nclob;
+    IrInstr **defs;
+    const u32 *def_pos;
+    const bool *call_operand;
+    const IrPositions *pos;
+    const RegClass *vreg_cls;
+    const int *pref;
+    Vec *segs;
+    Vec *gaps;
+    Vec *seg_gaps;
+    Vec *tails;
+    const IrFunction *func;
+    const bool *remat;
+    const u32 *use_count;
+    u8 split_depth;
+    ActiveInterval *active;
+    u32 nactive;
+    Arena *arena;
+    const CfgEdge *edges;
+    u32 nedges;
+    Bitset **edge_live;
+    const u32 *phi_max_def;
+} ScanCtx;
+
 static const LiveInterval *interval_of(const RegAllocation *alloc, u32 vreg)
 {
     u32 lo = 0;
@@ -566,6 +599,88 @@ static IrInstr **collect_defs(IrFunction *f, u32 nvregs, Arena *arena)
     return defs;
 }
 
+static u32 instr_use_count(const IrInstr *in, u32 vreg)
+{
+    u32 count = 0;
+    for (u8 oi = 0; oi < in->nops; oi++)
+    {
+        if (ir_operand_is_vreg(in->ops[oi]) && in->ops[oi].u.vreg == vreg)
+        {
+            count++;
+        }
+    }
+    if (in->opcode == OP_CALL)
+    {
+        if (in->extra.call.is_indirect && ir_operand_is_vreg(in->extra.call.callee) &&
+            in->extra.call.callee.u.vreg == vreg)
+        {
+            count++;
+        }
+        for (u32 a = 0; a < in->extra.call.nargs; a++)
+        {
+            if (ir_operand_is_vreg(in->extra.call.args[a]) && in->extra.call.args[a].u.vreg == vreg)
+            {
+                count++;
+            }
+        }
+    }
+    return count;
+}
+
+/* Reads of every vreg, PHI-edge operands included: a spilled value is reloaded
+   at each read, so its read count is its spill cost. */
+static u32 *collect_use_counts(IrFunction *f, u32 nvregs, Arena *arena)
+{
+    u32 *counts = arena_alloc(arena, (nvregs ? nvregs : 1) * sizeof(u32), sizeof(u32));
+    for (u32 v = 0; v < nvregs; v++)
+    {
+        counts[v] = 0;
+    }
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            for (u8 oi = 0; oi < in->nops; oi++)
+            {
+                if (ir_operand_is_vreg(in->ops[oi]))
+                {
+                    counts[in->ops[oi].u.vreg]++;
+                }
+            }
+            if (in->opcode == OP_CALL)
+            {
+                if (in->extra.call.is_indirect && ir_operand_is_vreg(in->extra.call.callee))
+                {
+                    counts[in->extra.call.callee.u.vreg]++;
+                }
+                for (u32 a = 0; a < in->extra.call.nargs; a++)
+                {
+                    if (ir_operand_is_vreg(in->extra.call.args[a]))
+                    {
+                        counts[in->extra.call.args[a].u.vreg]++;
+                    }
+                }
+            }
+            if (in->opcode == OP_PHI)
+            {
+                for (u32 e = 0; e < in->extra.phi.nentries; e++)
+                {
+                    IrOperand val = in->extra.phi.entries[e].val;
+                    if (ir_operand_is_vreg(val))
+                    {
+                        counts[val.u.vreg]++;
+                    }
+                }
+            }
+        }
+    }
+    return counts;
+}
+
 /* Every vreg read by a call (argument or indirect callee).  A value read at the
    call position must resolve to its pre-call home, so it is never split. */
 static bool *collect_call_operands(IrFunction *f, u32 nvregs, Arena *arena)
@@ -933,63 +1048,37 @@ static int *collect_arg_prefs(IrFunction *f, u32 nvregs, const TargetDesc *targe
 }
 
 /* When no register is free, a shorter-lived interval can take the register of
-   the active interval that ends farthest. Returns the index to evict, or -1. */
-static int pick_eviction(const RegBank *bank, const ActiveInterval *active, u32 nactive,
-                         bool crossing, u16 avoid, u32 iv_end)
+   an active interval that ends farther away and is read at most as often.
+   Never evict a value with more reads than the one taking its register: that
+   would trade a hot value for a colder one.  Returns the index to evict, or
+   -1. */
+static int pick_eviction(const ScanCtx *cx, bool crossing, u16 avoid, u32 iv_end, u32 new_uses)
 {
     int best = -1;
     u32 best_end = iv_end;
-    for (u32 a = 0; a < nactive; a++)
+    for (u32 a = 0; a < cx->nactive; a++)
     {
-        u8 reg = active[a].reg;
+        u8 reg = cx->active[a].reg;
         if (avoid & (u16) (1u << reg))
         {
             continue;
         }
-        if (crossing && bank_callee_index(bank, reg) < 0)
+        if (crossing && bank_callee_index(cx->bank, reg) < 0)
         {
             continue;
         }
-        if (active[a].end > best_end)
+        if (cx->use_count[cx->active[a].vreg] > new_uses)
         {
-            best_end = active[a].end;
+            continue;
+        }
+        if (cx->active[a].end > best_end)
+        {
+            best_end = cx->active[a].end;
             best = (int) a;
         }
     }
     return best;
 }
-
-typedef struct
-{
-    RegAllocation *alloc;
-    const RegBank *bank;
-    const u32 *calls;
-    u32 ncall;
-    const bool *call_op;
-    u16 arg_avoid;
-    const ClobberPos *clob;
-    u32 nclob;
-    IrInstr **defs;
-    const u32 *def_pos;
-    const bool *call_operand;
-    const IrPositions *pos;
-    const RegClass *vreg_cls;
-    const int *pref;
-    Vec *segs;
-    Vec *gaps;
-    Vec *seg_gaps;
-    Vec *tails;
-    const IrFunction *func;
-    const bool *remat;
-    u8 split_depth;
-    ActiveInterval *active;
-    u32 nactive;
-    Arena *arena;
-    const CfgEdge *edges;
-    u32 nedges;
-    Bitset **edge_live;
-    const u32 *phi_max_def;
-} ScanCtx;
 
 /* A value that lives over a call needs a callee-saved register or a slot.  A
    call's own result starts at the call position and so need not survive it. */
@@ -1059,30 +1148,7 @@ static u32 uses_between(const ScanCtx *cx, u32 v, u32 lo, u32 hi)
             {
                 continue;
             }
-            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
-            for (u8 oi = 0; oi < in->nops; oi++)
-            {
-                if (ir_operand_is_vreg(in->ops[oi]) && in->ops[oi].u.vreg == v)
-                {
-                    count++;
-                }
-            }
-            if (in->opcode == OP_CALL)
-            {
-                if (in->extra.call.is_indirect && ir_operand_is_vreg(in->extra.call.callee) &&
-                    in->extra.call.callee.u.vreg == v)
-                {
-                    count++;
-                }
-                for (u32 a = 0; a < in->extra.call.nargs; a++)
-                {
-                    if (ir_operand_is_vreg(in->extra.call.args[a]) &&
-                        in->extra.call.args[a].u.vreg == v)
-                    {
-                        count++;
-                    }
-                }
-            }
+            count += instr_use_count((IrInstr *) vec_get(blk->instrs, ii), v);
         }
     }
     return count;
@@ -1184,7 +1250,7 @@ static int assign_range(ScanCtx *cx, bool crossing, u16 avoid, int hint, SegRec 
     int reg = pick_register(cx->bank, cx->active, cx->nactive, crossing, avoid, hint, rec->start);
     if (reg < 0)
     {
-        int ev = pick_eviction(cx->bank, cx->active, cx->nactive, crossing, avoid, rec->end);
+        int ev = pick_eviction(cx, crossing, avoid, rec->end, cx->use_count[rec->vreg]);
         if (ev >= 0)
         {
             reg = cx->active[ev].reg;
@@ -1584,6 +1650,7 @@ RegAllocation *regalloc_linear_ex(IrFunction *f, const LiveIntervals *set, const
         .seg_gaps = sgaps,
         .func = f,
         .remat = remat,
+        .use_count = collect_use_counts(f, set->nvregs, arena),
         .arena = arena,
         .edges = edges,
         .nedges = nedges,

@@ -263,6 +263,41 @@ static IrModule *build_two_sided_split(Arena *a, u32 *target)
     return m;
 }
 
+/* A hot long-lived value (`hot`) and a cold later value (`cold`) compete for a
+   full bank.  Eviction must take a colder active value, never the hot one. */
+static IrModule *build_hot_eviction(Arena *a, u32 *hot, u32 *cold)
+{
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    *hot = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ADD, *hot, ir_operand_imm(1), ir_operand_imm(2));
+    u32 fill[11];
+    for (u32 i = 0; i < 11; i++)
+    {
+        fill[i] = ir_alloc_vreg(m, 8, true, false);
+        ir_emit_binop(entry, OP_ADD, fill[i], ir_operand_imm((i64) i + 3), ir_operand_imm(0));
+    }
+    *cold = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ADD, *cold, ir_operand_imm(0), ir_operand_imm(0));
+    u32 acc = ir_alloc_vreg(m, 8, true, false);
+    ir_emit_binop(entry, OP_ADD, acc, ir_operand_vreg(*cold), ir_operand_imm(0));
+    for (u32 i = 0; i < 11; i++)
+    {
+        u32 next = ir_alloc_vreg(m, 8, true, false);
+        ir_emit_binop(entry, OP_ADD, next, ir_operand_vreg(acc), ir_operand_vreg(fill[i]));
+        acc = next;
+    }
+    for (u32 i = 0; i < 5; i++)
+    {
+        u32 next = ir_alloc_vreg(m, 8, true, false);
+        ir_emit_binop(entry, OP_ADD, next, ir_operand_vreg(acc), ir_operand_vreg(*hot));
+        acc = next;
+    }
+    ir_emit_ret(entry, ir_operand_vreg(acc));
+    return m;
+}
+
 static u32 count_spilled(const RegAllocation *alloc, const LiveIntervals *set)
 {
     u32 spilled = 0;
@@ -275,7 +310,6 @@ static u32 count_spilled(const RegAllocation *alloc, const LiveIntervals *set)
     }
     return spilled;
 }
-
 static u32 segment_count(const RegAllocation *alloc, u32 vreg)
 {
     return alloc->seg_begin[vreg + 1] - alloc->seg_begin[vreg];
@@ -596,6 +630,21 @@ TEST(regalloc, pressure_split_reloads_at_the_next_use)
         reloaded++;
     }
     EXPECT_TRUE(reloaded >= 1u);
+    arena_free(a);
+}
+
+TEST(regalloc, eviction_never_spills_the_hottest_active_value)
+{
+    Arena *a = arena_new();
+    u32 hot, cold;
+    IrModule *m = build_hot_eviction(a, &hot, &cold);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    /* `hot` is defined first and read most; when `cold` cannot get a register
+       the allocator takes a colder value's register instead of `hot`'s. */
+    EXPECT_TRUE(alloc->phys_map[hot] >= 0);
+    EXPECT_TRUE(count_spilled(alloc, &set) >= 1u);
     arena_free(a);
 }
 
