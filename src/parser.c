@@ -1250,7 +1250,9 @@ static Type *parse_group_suffixes(Parser *p, Type *t, u32 *nptr, Vec **captured_
         {
             next_token(p);
             bool variadic = false;
+            push_scope(p);
             Vec *params = parse_param_list(p, &variadic);
+            pop_scope(p);
             if (!params)
             {
                 return NULL;

@@ -162,6 +162,20 @@ TEST(parser, prototype_variadic)
     arena_free(a);
 }
 
+/* C11 §6.2.1p4: a parameter name has function-prototype scope, so it must not
+   collide with a file-scope typedef of the same spelling. */
+TEST(parser, parenthesized_declarator_param_does_not_leak)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("extern int(foo)(int option);\n"
+                            "typedef struct option { int x; } option;\n"
+                            "option o;\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    EXPECT_EQ(ast->kind, AST_PROGRAM);
+    arena_free(a);
+}
+
 TEST(parser, prototype_storage_class)
 {
     Arena *a = arena_new();
