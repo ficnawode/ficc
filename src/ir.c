@@ -395,6 +395,178 @@ bool ir_operand_is_vreg(IrOperand op)
     return !op.is_imm && !op.is_global && !op.is_func;
 }
 
+static void dump_type_name(Type *type)
+{
+    if (!type)
+    {
+        printf("?");
+        return;
+    }
+
+    switch (type->kind)
+    {
+        case TYPE_VOID:
+            printf("void");
+            return;
+        case TYPE_BOOL:
+            printf("b1");
+            return;
+        case TYPE_PTR:
+            printf("p%u", (unsigned) type->width);
+            return;
+        case TYPE_FLOAT:
+        case TYPE_DOUBLE:
+        case TYPE_LONG_DOUBLE:
+            printf("f%u", (unsigned) type->width);
+            return;
+        case TYPE_INT:
+        case TYPE_CHAR:
+        case TYPE_SHORT:
+        case TYPE_LONG:
+        case TYPE_LLONG:
+        case TYPE_ENUM:
+            printf("i%u", (unsigned) type->width);
+            return;
+        case TYPE_UCHAR:
+        case TYPE_USHORT:
+        case TYPE_UINT:
+        case TYPE_ULONG:
+        case TYPE_ULLONG:
+            printf("u%u", (unsigned) type->width);
+            return;
+        case TYPE_STRUCT:
+        case TYPE_UNION:
+            printf("%s %s", type->kind == TYPE_STRUCT ? "struct" : "union",
+                   type->record.tag ? type->record.tag : "<anonymous>");
+            return;
+        case TYPE_ARRAY:
+            printf("[%llu x ", (unsigned long long) type->arr.length);
+            dump_type_name(type->arr.elem);
+            printf("]");
+            return;
+        case TYPE_FUNC:
+            dump_type_name(type->func.ret);
+            printf(" (");
+            for (size_t i = 0; i < vec_size(type->func.params); i++)
+            {
+                if (i)
+                {
+                    printf(", ");
+                }
+                dump_type_name((Type *) vec_get(type->func.params, i));
+            }
+            if (type->func.is_variadic)
+            {
+                if (vec_size(type->func.params))
+                {
+                    printf(", ");
+                }
+                printf("...");
+            }
+            printf(")");
+            return;
+    }
+    printf("?");
+}
+
+static void dump_vreg_type(const IrModule *m, u32 vreg)
+{
+    u32 bits = (u32) m->widths[vreg] * 8;
+    if (m->floatness[vreg])
+    {
+        printf("f%u", bits);
+    }
+    else if (m->signedness[vreg])
+    {
+        printf("i%u", bits);
+    }
+    else
+    {
+        printf("u%u", bits);
+    }
+}
+
+static bool vreg_is_pointer(const IrModule *m, const IrFunction *func, u32 vreg)
+{
+    for (size_t i = 0; i < vec_size(func->params); i++)
+    {
+        IrParam *param = (IrParam *) vec_get(func->params, i);
+        if (param->vreg == vreg)
+        {
+            return type_is_ptr(param->type);
+        }
+    }
+
+    for (size_t b = 0; b < vec_size(func->blocks); b++)
+    {
+        IrBlock *block = (IrBlock *) vec_get(func->blocks, b);
+        for (size_t i = 0; i < vec_size(block->instrs); i++)
+        {
+            IrInstr *ins = (IrInstr *) vec_get(block->instrs, i);
+            if (ins->result != vreg)
+            {
+                continue;
+            }
+            if (ins->opcode == OP_ALLOCA || ins->opcode == OP_GEP ||
+                (ins->opcode == OP_CALL && ins->extra.call.ret_type &&
+                 type_is_ptr(ins->extra.call.ret_type)))
+            {
+                return true;
+            }
+            if (ins->opcode == OP_PHI)
+            {
+                for (u32 e = 0; e < ins->extra.phi.nentries; e++)
+                {
+                    IrOperand val = ins->extra.phi.entries[e].val;
+                    if (!val.is_imm && !val.is_global && !val.is_func && val.u.vreg != vreg &&
+                        vreg_is_pointer(m, func, val.u.vreg))
+                    {
+                        return true;
+                    }
+                }
+            }
+            else if (ins->opcode == OP_SELECT)
+            {
+                for (u8 o = 0; o < ins->nops; o++)
+                {
+                    IrOperand val = ins->ops[o];
+                    if (!val.is_imm && !val.is_global && !val.is_func && val.u.vreg != vreg &&
+                        vreg_is_pointer(m, func, val.u.vreg))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+static void dump_result_type(const IrModule *m, const IrFunction *func, const IrInstr *ins)
+{
+    u32 bits = (u32) m->widths[ins->result] * 8;
+    if (vreg_is_pointer(m, func, ins->result) || ins->opcode == OP_ALLOCA ||
+        ins->opcode == OP_GEP ||
+        (ins->opcode == OP_CALL && ins->extra.call.ret_type &&
+         type_is_ptr(ins->extra.call.ret_type)))
+    {
+        printf("p%u", bits);
+    }
+    else if ((ins->opcode >= OP_ICMP_EQ && ins->opcode <= OP_ICMP_SGE) ||
+             (ins->opcode >= OP_FCMP_EQ && ins->opcode <= OP_FCMP_GE))
+    {
+        printf("b1");
+    }
+    else if (ins->opcode == OP_CALL && ins->extra.call.ret_type)
+    {
+        dump_type_name(ins->extra.call.ret_type);
+    }
+    else
+    {
+        dump_vreg_type(m, ins->result);
+    }
+}
+
 static void dump_operand(IrOperand op)
 {
     if (op.is_global)
@@ -440,7 +612,16 @@ static void dump_call_args(IrInstr *ins)
     for (u32 i = 0; i < ins->extra.call.nargs; i++)
     {
         printf(", ");
-        dump_operand(ins->extra.call.args[i]);
+        if (ins->extra.call.arg_types)
+        {
+            dump_operand(ins->extra.call.args[i]);
+            printf(" : ");
+            dump_type_name(ins->extra.call.arg_types[i]);
+        }
+        else
+        {
+            dump_operand(ins->extra.call.args[i]);
+        }
     }
     if (ins->extra.call.is_variadic)
     {
@@ -461,13 +642,14 @@ static void dump_switch_cases(IrInstr *ins)
     }
 }
 
-static void dump_instr(IrInstr *ins, IrModule *m)
+static void dump_instr(IrInstr *ins, IrModule *m, IrFunction *func)
 {
     printf("    ");
     if (ins->result != NO_VREG)
     {
-        printf("v%u:w%u%s = ", ins->result, m->widths[ins->result],
-               m->floatness[ins->result] ? "f" : "");
+        printf("v%u : ", ins->result);
+        dump_result_type(m, func, ins);
+        printf(" = ");
     }
 
     const char *name = ir_opcode_name(ins->opcode) + 3;
@@ -520,7 +702,29 @@ void ir_dump(IrModule *m)
     for (size_t func_i = 0; func_i < nfuncs; func_i++)
     {
         IrFunction *func = (IrFunction *) vec_get(m->funcs, func_i);
-        printf("func %s -> %s {\n", func->name, type_kind_name(func->ret_type->kind));
+        printf("func %s(", func->name);
+        size_t nparams = vec_size(func->params);
+        for (size_t param_i = 0; param_i < nparams; param_i++)
+        {
+            if (param_i)
+            {
+                printf(", ");
+            }
+            IrParam *param = (IrParam *) vec_get(func->params, param_i);
+            printf("v%u : ", param->vreg);
+            dump_type_name(param->type);
+        }
+        if (func->is_variadic)
+        {
+            if (nparams)
+            {
+                printf(", ");
+            }
+            printf("...");
+        }
+        printf(") -> ");
+        dump_type_name(func->ret_type);
+        printf(" {\n");
         size_t nblocks = vec_size(func->blocks);
         for (size_t block_i = 0; block_i < nblocks; block_i++)
         {
@@ -530,7 +734,7 @@ void ir_dump(IrModule *m)
             for (size_t instr_i = 0; instr_i < ninstrs; instr_i++)
             {
                 IrInstr *ins = (IrInstr *) vec_get(bb->instrs, instr_i);
-                dump_instr(ins, m);
+                dump_instr(ins, m, func);
             }
         }
         printf("}\n");
