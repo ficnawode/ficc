@@ -142,7 +142,7 @@ static void emit_fp_to_xmm(X86LowerCtx *ctx, IrOperand op, u8 width, u8 xmm)
     }
     else if (l.kind == LOC_MEM)
     {
-        emit_sse_load(ctx->buf, MF_OF(width), xmm, x86_lower_rbp_mem(l.disp));
+        emit_sse_load(ctx->buf, MF_OF(width), xmm, x86_lower_frame_mem(ctx, l.disp));
     }
     else
     {
@@ -159,7 +159,7 @@ static void store_fp_home(X86LowerCtx *ctx, IrInstr *in, u8 width, u8 xmm)
     }
     else
     {
-        emit_sse_store(ctx->buf, MF_OF(width), x86_lower_rbp_mem(rl.disp), xmm);
+        emit_sse_store(ctx->buf, MF_OF(width), x86_lower_frame_mem(ctx, rl.disp), xmm);
     }
 }
 
@@ -184,7 +184,7 @@ static void emit_stack_arg(X86LowerCtx *ctx, IrOperand op, const SysvArgPlan *p)
     {
         RegLoc l = x86_lower_operand_loc(ctx, op);
         ASSERT(l.kind == LOC_MEM && "x87 values are memory-only");
-        emit_mov16(ctx->buf, x86_lower_rbp_mem(l.disp), dst);
+        emit_mov16(ctx->buf, x86_lower_frame_mem(ctx, l.disp), dst);
         return;
     }
     if (type_is_fp(p->type))
@@ -279,7 +279,7 @@ static void emit_gp_arg_move(X86LowerCtx *ctx, const GpArgMove *m)
     }
     else if (m->kind == GP_ARG_MEM)
     {
-        emit_mov(ctx->buf, m->width, xop_reg(m->dst), xop_mem(x86_lower_rbp_mem(m->disp)));
+        emit_mov(ctx->buf, m->width, xop_reg(m->dst), xop_mem(x86_lower_frame_mem(ctx, m->disp)));
     }
     else if (m->src_reg != m->dst)
     {
@@ -374,7 +374,7 @@ static void store_raw_result(X86LowerCtx *ctx, IrInstr *in, u8 reg, bool is_fp)
     }
     else
     {
-        emit_mov(ctx->buf, W_QWORD, xop_mem(x86_lower_rbp_mem(rl.disp)), xop_reg(reg));
+        emit_mov(ctx->buf, W_QWORD, xop_mem(x86_lower_frame_mem(ctx, rl.disp)), xop_reg(reg));
     }
 }
 
@@ -393,7 +393,7 @@ static void store_call_result(X86LowerCtx *ctx, IrInstr *in)
     {
         RegLoc rl = x86_lower_result_loc(ctx, in);
         ASSERT(rl.kind == LOC_MEM && "x87 results are memory-only");
-        x87_emit_fstpt(ctx->buf, x86_lower_rbp_mem(rl.disp));
+        x87_emit_fstpt(ctx->buf, x86_lower_frame_mem(ctx, rl.disp));
     }
     else
     {
@@ -479,9 +479,9 @@ void x86_sysv_lower_va_start(IrInstr *in, X86LowerCtx *ctx)
     emit_mov(ctx->buf, W_DWORD, xop_mem(x86_mem_rax(VA_FIELD_GP_OFFSET)), xop_reg(R_ECX));
     emit_mov(ctx->buf, W_DWORD, xop_reg(R_ECX), xop_imm(vd->fp_offset));
     emit_mov(ctx->buf, W_DWORD, xop_mem(x86_mem_rax(VA_FIELD_FP_OFFSET)), xop_reg(R_ECX));
-    emit_lea(ctx->buf, R_EDX, x86_lower_rbp_mem(STACK_PARAM_BASE + (i32) vd->stack_skip));
+    emit_lea(ctx->buf, R_EDX, x86_lower_frame_mem(ctx, STACK_PARAM_BASE + (i32) vd->stack_skip));
     emit_mov(ctx->buf, W_QWORD, xop_mem(x86_mem_rax(VA_FIELD_OVF)), xop_reg(R_EDX));
-    emit_lea(ctx->buf, R_EDX, x86_lower_rbp_mem(-(i32) ctx->frame->save_area_off));
+    emit_lea(ctx->buf, R_EDX, x86_lower_frame_mem(ctx, -(i32) ctx->frame->save_area_off));
     emit_mov(ctx->buf, W_QWORD, xop_mem(x86_mem_rax(VA_FIELD_REGS)), xop_reg(R_EDX));
 }
 
@@ -496,7 +496,7 @@ static void lower_va_arg_ld(IrInstr *in, X86LowerCtx *ctx)
     emit_lea(b, R_EDX, x86_mem_rcx(STACK_ALIGN));
     emit_mov(b, W_QWORD, xop_mem(x86_mem_rax(VA_FIELD_OVF)), xop_reg(R_EDX));
     RegLoc rl = x86_lower_result_loc(ctx, in);
-    emit_mov16(b, x86_mem_rcx(0), x86_lower_rbp_mem(rl.disp));
+    emit_mov16(b, x86_mem_rcx(0), x86_lower_frame_mem(ctx, rl.disp));
 }
 
 void x86_sysv_lower_va_arg(IrInstr *in, X86LowerCtx *ctx)

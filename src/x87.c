@@ -300,14 +300,14 @@ static X86Mem ld_operand_mem(X86LowerCtx *ctx, IrOperand op)
     ASSERT(ir_operand_is_vreg(op) && "long double operands are vregs");
     RegLoc l = x86_lower_operand_loc(ctx, op);
     ASSERT(l.kind == LOC_MEM && "x87 values are memory-only");
-    return x86_lower_rbp_mem(l.disp);
+    return x86_lower_frame_mem(ctx, l.disp);
 }
 
 static X86Mem ld_result_mem(X86LowerCtx *ctx, IrInstr *in)
 {
     RegLoc l = x86_lower_result_loc(ctx, in);
     ASSERT(l.kind == LOC_MEM && "x87 results are memory-only");
-    return x86_lower_rbp_mem(l.disp);
+    return x86_lower_frame_mem(ctx, l.disp);
 }
 
 /* Load an integer operand into %rax, sign/zero-extended to its 64-bit value; reports signedness. */
@@ -461,7 +461,7 @@ static void fp_operand_to_xmm(X86LowerCtx *ctx, IrOperand op, u8 w, u8 xmm)
         }
         return;
     }
-    emit_sse_load(b, MF_OF(w), xmm, x86_lower_rbp_mem(l.disp));
+    emit_sse_load(b, MF_OF(w), xmm, x86_lower_frame_mem(ctx, l.disp));
 }
 
 /* Long double ↔ float/double via the x87 stack; register homes stage through %rsp. */
@@ -492,11 +492,11 @@ void x87_lower_fconv(IrInstr *in, X86LowerCtx *ctx)
         }
         else if (dw == W_DWORD)
         {
-            emit_fstps(ctx, x86_lower_rbp_mem(rl.disp));
+            emit_fstps(ctx, x86_lower_frame_mem(ctx, rl.disp));
         }
         else
         {
-            emit_fstpl(ctx, x86_lower_rbp_mem(rl.disp));
+            emit_fstpl(ctx, x86_lower_frame_mem(ctx, rl.disp));
         }
     }
     else
@@ -520,7 +520,7 @@ void x87_lower_fconv(IrInstr *in, X86LowerCtx *ctx)
             }
             else
             {
-                src_mem = x86_lower_rbp_mem(sl.disp);
+                src_mem = x86_lower_frame_mem(ctx, sl.disp);
             }
         }
         if (sw == W_DWORD)

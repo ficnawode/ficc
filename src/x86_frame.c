@@ -19,6 +19,15 @@ static X86Mem mem_plus(X86Mem m, u32 add)
     return m;
 }
 
+X86Mem x86_frame_mem(const LinearFrame *frame, i32 disp)
+{
+    if (frame->omit_fp)
+    {
+        return x86_mem_rsp(disp + frame->disp_bias);
+    }
+    return x86_mem_rbp(disp);
+}
+
 static SysvArgPlan *plan_params(IrFunction *f, Arena *arena)
 {
     size_t n = vec_size(f->params);
@@ -121,12 +130,83 @@ static bool function_makes_calls(IrFunction *f)
     return false;
 }
 
-/* Whether the frame pointer may be dropped: no debug frame, no variadic save
-   area, no alloca/phi scratch, and every parameter arriving in a register.
-   The allocator must additionally spill nothing (checked by the caller). */
-bool x86_frame_can_omit_fp(IrFunction *f, bool debug)
+/* A call with arguments past the register banks is set up by moving %rsp, after
+   which an %rsp-based frame would no longer line up. */
+static bool function_uses_stack_args(IrFunction *f)
 {
-    if (debug || f->is_variadic)
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->opcode != OP_CALL || in->extra.call.nargs == 0)
+            {
+                continue;
+            }
+            u32 nargs = in->extra.call.nargs;
+            u32 nalloc = MAX(nargs, 1);
+            SysvArgPlan *plans =
+                arena_alloc(f->arena, nalloc * sizeof(SysvArgPlan), _Alignof(SysvArgPlan));
+            Type **types = arena_alloc(f->arena, nalloc * sizeof(Type *), sizeof(Type *));
+            for (u32 i = 0; i < nargs; i++)
+            {
+                types[i] = in->extra.call.arg_types[i];
+            }
+            u32 fp_used = 0;
+            if (sysv_plan_args(types, nargs, plans, &fp_used) > 0)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* x87 conversions stage through %rsp, so a long double anywhere rules the
+   frame pointer out. */
+static bool function_uses_x87(IrModule *mod, IrFunction *f)
+{
+    size_t nparams = vec_size(f->params);
+    for (size_t i = 0; i < nparams; i++)
+    {
+        if (mod->widths[((IrParam *) vec_get(f->params, i))->vreg] == 16)
+        {
+            return true;
+        }
+    }
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(blk->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
+            if (in->result != NO_VREG && mod->widths[in->result] == 16)
+            {
+                return true;
+            }
+            for (u32 o = 0; o < in->nops; o++)
+            {
+                if (ir_operand_is_vreg(in->ops[o]) && mod->widths[in->ops[o].u.vreg] == 16)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/* Whether the frame pointer may be dropped: no debug frame, no variadic save
+   area, every parameter arriving in a register, and %rsp staying put after the
+   prologue. */
+bool x86_frame_can_omit_fp(IrModule *mod, IrFunction *f, bool debug)
+{
+    if (debug || f->is_variadic || function_uses_stack_args(f) || function_uses_x87(mod, f))
     {
         return false;
     }
@@ -137,20 +217,6 @@ bool x86_frame_can_omit_fp(IrFunction *f, bool debug)
         if (plans[i].on_stack || plans[i].is_record)
         {
             return false;
-        }
-    }
-    size_t nblocks = vec_size(f->blocks);
-    for (size_t b = 0; b < nblocks; b++)
-    {
-        IrBlock *blk = (IrBlock *) vec_get(f->blocks, b);
-        size_t ninstr = vec_size(blk->instrs);
-        for (size_t ii = 0; ii < ninstr; ii++)
-        {
-            IrOpcode op = ((IrInstr *) vec_get(blk->instrs, ii))->opcode;
-            if (op == OP_ALLOCA || op == OP_PHI)
-            {
-                return false;
-            }
         }
     }
     return true;
@@ -164,15 +230,6 @@ void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *targe
 
     out->omit_fp = omit_fp;
     collect_saved(alloc, target, out);
-    if (omit_fp)
-    {
-        /* No slots to place: the frame is only what call alignment needs. */
-        out->saved_bytes = (u32) out->nsaved * 8;
-        out->frame_size = (function_makes_calls(f) && (out->nsaved % 2 == 0)) ? 8 : 0;
-        out->stage_base = 0;
-        out->save_area_off = 0;
-        return;
-    }
     for (u32 v = 0; v < alloc->nvregs; v++)
     {
         if (alloc->has_slot[v])
@@ -201,19 +258,36 @@ void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *targe
         locals_end = out->save_area_off;
     }
     locals_end += plan_allocas(f, locals_end);
-    out->frame_size = align_up(locals_end, STACK_ALIGN);
+    u32 frame_size = align_up(locals_end, STACK_ALIGN);
 
     /* The pushes below %rbp total 8*nsaved; an odd count leaves %rsp 8 mod 16
        before `sub`, so pad the reservation to keep call sites 16-aligned. */
     if (out->nsaved & 1)
     {
-        out->frame_size += 8;
+        frame_size += 8;
+    }
+    out->frame_size = frame_size;
+
+    if (!omit_fp)
+    {
+        return;
+    }
+    if (locals_end > out->saved_bytes)
+    {
+        /* Slot disps stay %rbp-relative; %rsp sits 8 bytes below the missing push. */
+        out->disp_bias = (i32) ((u32) out->nsaved * 8 + frame_size);
+        out->frame_size = frame_size + 8;
+    }
+    else
+    {
+        out->disp_bias = 0;
+        out->frame_size = (function_makes_calls(f) && (out->nsaved % 2 == 0)) ? 8 : 0;
     }
 }
 
 static X86Mem stage_mem(const LinearFrame *frame, u32 off)
 {
-    return x86_mem_rbp(-(i32) (frame->stage_base + off));
+    return x86_frame_mem(frame, -(i32) (frame->stage_base + off));
 }
 
 /* Advance the running stage-slot cursor past `plan` and return the offset the
@@ -235,16 +309,17 @@ static void spill_variadic_regs(ByteBuf *buf, IrFunction *f, const TargetDesc *t
     u32 va_gp_bytes = (u32) target->ngp * VA_GP_STRIDE;
     for (u8 i = 0; i < target->ngp; i++)
     {
-        emit_mov(buf, W_QWORD,
-                 xop_mem(x86_mem_rbp(-(i32) frame->save_area_off + (i32) i * VA_GP_STRIDE)),
-                 xop_reg(target->gp_args[i]));
+        emit_mov(
+            buf, W_QWORD,
+            xop_mem(x86_frame_mem(frame, -(i32) frame->save_area_off + (i32) i * VA_GP_STRIDE)),
+            xop_reg(target->gp_args[i]));
     }
     for (u8 i = 0; i < target->nfp; i++)
     {
-        emit_sse_store(
-            buf, MF_DOUBLE,
-            x86_mem_rbp(-(i32) frame->save_area_off + (i32) va_gp_bytes + (i32) i * VA_XMM_STRIDE),
-            i);
+        emit_sse_store(buf, MF_DOUBLE,
+                       x86_frame_mem(frame, -(i32) frame->save_area_off + (i32) va_gp_bytes +
+                                                (i32) i * VA_XMM_STRIDE),
+                       i);
     }
 }
 
@@ -334,7 +409,7 @@ static void load_record_home(ByteBuf *buf, const SysvArgPlan *plan, RegLoc home,
     {
         disp = -(i32) (frame->stage_base + off);
     }
-    emit_lea(buf, R_R11, x86_mem_rbp(disp));
+    emit_lea(buf, R_R11, plan->on_stack ? x86_mem_rbp(disp) : x86_frame_mem(frame, disp));
     if (home.kind == LOC_REG)
     {
         if (home.reg != R_R11)
@@ -344,17 +419,18 @@ static void load_record_home(ByteBuf *buf, const SysvArgPlan *plan, RegLoc home,
     }
     else
     {
-        emit_mov(buf, W_QWORD, xop_mem(x86_mem_rbp(home.disp)), xop_reg(R_R11));
+        emit_mov(buf, W_QWORD, xop_mem(x86_frame_mem(frame, home.disp)), xop_reg(R_R11));
     }
 }
 
 /* Move a scalar parameter into its home from its incoming register or stack slot. */
-static void load_scalar_home(ByteBuf *buf, RegLoc home, u8 width, bool is_fp, X86Operand src)
+static void load_scalar_home(ByteBuf *buf, const LinearFrame *frame, RegLoc home, u8 width,
+                             bool is_fp, X86Operand src)
 {
     if (is_fp && width == W_LD)
     {
         ASSERT(home.kind == LOC_MEM && src.kind == XOP_MEM && "x87 values are memory-only");
-        emit_mov16(buf, src.u.mem, x86_mem_rbp(home.disp));
+        emit_mov16(buf, src.u.mem, x86_frame_mem(frame, home.disp));
     }
     else if (is_fp && home.kind == LOC_REG)
     {
@@ -374,12 +450,12 @@ static void load_scalar_home(ByteBuf *buf, RegLoc home, u8 width, bool is_fp, X8
     {
         if (src.kind == XOP_REG)
         {
-            emit_sse_store(buf, MF_OF(width), x86_mem_rbp(home.disp), src.u.reg);
+            emit_sse_store(buf, MF_OF(width), x86_frame_mem(frame, home.disp), src.u.reg);
         }
         else
         {
             emit_sse_load(buf, MF_OF(width), R_XMM0, src.u.mem);
-            emit_sse_store(buf, MF_OF(width), x86_mem_rbp(home.disp), R_XMM0);
+            emit_sse_store(buf, MF_OF(width), x86_frame_mem(frame, home.disp), R_XMM0);
         }
     }
     else if (home.kind == LOC_REG)
@@ -398,12 +474,12 @@ static void load_scalar_home(ByteBuf *buf, RegLoc home, u8 width, bool is_fp, X8
     }
     else if (src.kind == XOP_REG)
     {
-        emit_mov(buf, width, xop_mem(x86_mem_rbp(home.disp)), xop_reg(src.u.reg));
+        emit_mov(buf, width, xop_mem(x86_frame_mem(frame, home.disp)), xop_reg(src.u.reg));
     }
     else
     {
         emit_mov(buf, width, xop_reg(R_EAX), xop_mem(src.u.mem));
-        emit_mov(buf, width, xop_mem(x86_mem_rbp(home.disp)), xop_reg(R_EAX));
+        emit_mov(buf, width, xop_mem(x86_frame_mem(frame, home.disp)), xop_reg(R_EAX));
     }
 }
 
@@ -440,7 +516,7 @@ static void load_param_homes(ByteBuf *buf, IrFunction *f, IrModule *mod, const R
         }
         else
         {
-            load_scalar_home(buf, home, mod->widths[p->vreg], mod->floatness[p->vreg],
+            load_scalar_home(buf, frame, home, mod->widths[p->vreg], mod->floatness[p->vreg],
                              scalar_param_src(p, plan, mod, target));
         }
     }

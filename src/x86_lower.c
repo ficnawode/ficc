@@ -80,11 +80,6 @@ static u8 load_int_operand(X86LowerCtx *ctx, IrOperand op, bool *is_signed);
 static u8 fp_imm_load_width(u8 w, i64 imm);
 static void fp_operand_to_xmm(X86LowerCtx *ctx, IrOperand op, u8 w, u8 xmm);
 
-static X86Mem rbp_mem(i32 disp)
-{
-    return x86_mem_rbp(disp);
-}
-
 /* GepFold kinds: which operands lowering resolves at the use site. */
 #define GEP_FOLD_NONE 0
 #define GEP_FOLD_DISP 1 /* result holds the base; the constant offset is the disp */
@@ -162,10 +157,10 @@ static void force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
     }
     if (l.kind == LOC_REMAT)
     {
-        emit_lea(b, reg, rbp_mem(l.disp));
+        emit_lea(b, reg, x86_frame_mem(ctx->frame, l.disp));
         return;
     }
-    emit_mov(b, w, xop_reg(reg), xop_mem(rbp_mem(l.disp)));
+    emit_mov(b, w, xop_reg(reg), xop_mem(x86_frame_mem(ctx->frame, l.disp)));
 }
 
 /* Resolve `op` to an operand without forcing register placement. */
@@ -192,10 +187,10 @@ static X86Operand resolve(X86LowerCtx *ctx, IrOperand op, u8 scratch)
     }
     if (l.kind == LOC_REMAT)
     {
-        emit_lea(ctx->buf, scratch, rbp_mem(l.disp));
+        emit_lea(ctx->buf, scratch, x86_frame_mem(ctx->frame, l.disp));
         return xop_reg(scratch);
     }
-    return xop_mem(rbp_mem(l.disp));
+    return xop_mem(x86_frame_mem(ctx->frame, l.disp));
 }
 
 /* A right-hand operand; an imm64 that no encoding reaches is materialized in `scratch`. */
@@ -225,7 +220,7 @@ static void store_reg_result(X86LowerCtx *ctx, IrInstr *in, u8 width, u8 reg)
         }
         return;
     }
-    emit_mov(ctx->buf, width, xop_mem(rbp_mem(l.disp)), xop_reg(reg));
+    emit_mov(ctx->buf, width, xop_mem(x86_frame_mem(ctx->frame, l.disp)), xop_reg(reg));
 }
 
 /* Address of the pointee in %rax; globals/functions carry their own relocations. */
@@ -237,8 +232,22 @@ static X86Mem pointer_in_rax(X86LowerCtx *ctx, IrOperand ptr)
 
 /* Resolve a folded base+index GEP at `pos`; `result_reg` carries whichever
    operand the fold left in the result register (unused for the pair form). */
-static bool folded_mem_operand(const RegAllocation *alloc, const GepFold *gf, u8 result_reg,
-                               u32 pos, X86Mem *out)
+static void remat_mem_base(const LinearFrame *frame, RegLoc bl, X86Mem *m)
+{
+    if (bl.kind == LOC_REMAT)
+    {
+        X86Mem fm = x86_frame_mem(frame, bl.disp);
+        m->base = fm.base;
+        m->disp = fm.disp;
+    }
+    else
+    {
+        m->base = bl.reg;
+    }
+}
+
+static bool folded_mem_operand(const RegAllocation *alloc, const LinearFrame *frame,
+                               const GepFold *gf, u8 result_reg, u32 pos, X86Mem *out)
 {
     RegLoc bl, il;
     X86Mem m = {.base = NO_REG, .index = NO_REG, .scale = gf->scale, .disp = 0};
@@ -258,8 +267,7 @@ static bool folded_mem_operand(const RegAllocation *alloc, const GepFold *gf, u8
             return false;
         }
         m.index = result_reg;
-        m.base = bl.kind == LOC_REMAT ? R_EBP : bl.reg;
-        m.disp = bl.kind == LOC_REMAT ? bl.disp : 0;
+        remat_mem_base(frame, bl, &m);
     }
     else if (gf->kind == GEP_FOLD_PAIR)
     {
@@ -271,8 +279,7 @@ static bool folded_mem_operand(const RegAllocation *alloc, const GepFold *gf, u8
         {
             return false;
         }
-        m.base = bl.kind == LOC_REMAT ? R_EBP : bl.reg;
-        m.disp = bl.kind == LOC_REMAT ? bl.disp : 0;
+        remat_mem_base(frame, bl, &m);
         m.index = il.reg;
     }
     else
@@ -304,13 +311,13 @@ static X86Mem mem_operand_for_ptr(X86LowerCtx *ctx, IrOperand ptr, u8 scratch)
                 return (X86Mem) {.base = l.reg, .index = NO_REG, .scale = 1, .disp = 0};
             }
             X86Mem m = {0};
-            ASSERT(folded_mem_operand(ctx->alloc, gf, l.reg, ctx->cur_pos, &m) &&
+            ASSERT(folded_mem_operand(ctx->alloc, ctx->frame, gf, l.reg, ctx->cur_pos, &m) &&
                    "a folded GEP resolves at each of its uses");
             return m;
         }
         if (l.kind == LOC_REMAT)
         {
-            return rbp_mem(l.disp);
+            return x86_frame_mem(ctx->frame, l.disp);
         }
     }
     force_to_reg(ctx, ptr, scratch);
@@ -359,7 +366,7 @@ static void lower_binary(IrInstr *in, X86LowerCtx *ctx)
     }
     if (rl.kind == LOC_MEM)
     {
-        emit_mov(ctx->buf, w, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
+        emit_mov(ctx->buf, w, xop_mem(x86_frame_mem(ctx->frame, rl.disp)), xop_reg(dst));
     }
 }
 
@@ -372,7 +379,7 @@ static void lower_unary(IrInstr *in, X86LowerCtx *ctx)
     emit_unary(ctx->buf, w, dst, unary_digit[in->opcode]);
     if (rl.kind == LOC_MEM)
     {
-        emit_mov(ctx->buf, w, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
+        emit_mov(ctx->buf, w, xop_mem(x86_frame_mem(ctx->frame, rl.disp)), xop_reg(dst));
     }
 }
 
@@ -393,7 +400,7 @@ static void lower_shift(IrInstr *in, X86LowerCtx *ctx)
     }
     if (rl.kind == LOC_MEM)
     {
-        emit_mov(ctx->buf, w, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
+        emit_mov(ctx->buf, w, xop_mem(x86_frame_mem(ctx->frame, rl.disp)), xop_reg(dst));
     }
 }
 
@@ -497,7 +504,8 @@ static void emit_icmp_cmp(X86LowerCtx *ctx, IrOperand lhs, IrOperand rhs)
         }
         else if (w1 == w && rl.kind == LOC_MEM)
         {
-            emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg, xop_mem(rbp_mem(rl.disp)));
+            emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg,
+                           xop_mem(x86_frame_mem(ctx->frame, rl.disp)));
         }
         else
         {
@@ -507,7 +515,7 @@ static void emit_icmp_cmp(X86LowerCtx *ctx, IrOperand lhs, IrOperand rhs)
         return;
     }
     emit_movzx(ctx->buf, w1, w, R_R11,
-               rl.kind == LOC_REG ? xop_reg(rl.reg) : xop_mem(rbp_mem(rl.disp)));
+               rl.kind == LOC_REG ? xop_reg(rl.reg) : xop_mem(x86_frame_mem(ctx->frame, rl.disp)));
     emit_binop_rhs(ctx->buf, w, &cmp_spec, lreg, xop_reg(R_R11));
 }
 
@@ -585,7 +593,8 @@ static void lower_extend_int(X86LowerCtx *ctx, IrOperand op, u8 dw, u8 dst, bool
     }
     if (l.kind == LOC_REG || l.kind == LOC_MEM)
     {
-        X86Operand src = l.kind == LOC_REG ? xop_reg(l.reg) : xop_mem(rbp_mem(l.disp));
+        X86Operand src =
+            l.kind == LOC_REG ? xop_reg(l.reg) : xop_mem(x86_frame_mem(ctx->frame, l.disp));
         emit_widen(ctx, sw, dw, dst, src, is_signed);
         return;
     }
@@ -611,7 +620,7 @@ static void lower_zext(IrInstr *in, X86LowerCtx *ctx)
             else
             {
                 emit_movd_to_xmm(ctx->buf, R_XMM0, R_EAX, dw != W_DWORD);
-                emit_sse_store(ctx->buf, mf, rbp_mem(rl.disp), R_XMM0);
+                emit_sse_store(ctx->buf, mf, x86_frame_mem(ctx->frame, rl.disp), R_XMM0);
             }
             return;
         }
@@ -619,7 +628,7 @@ static void lower_zext(IrInstr *in, X86LowerCtx *ctx)
         fp_operand_to_xmm(ctx, in->ops[0], dw, dst);
         if (rl.kind == LOC_MEM)
         {
-            emit_sse_store(ctx->buf, mf, rbp_mem(rl.disp), dst);
+            emit_sse_store(ctx->buf, mf, x86_frame_mem(ctx->frame, rl.disp), dst);
         }
         return;
     }
@@ -627,7 +636,7 @@ static void lower_zext(IrInstr *in, X86LowerCtx *ctx)
     lower_extend_int(ctx, in->ops[0], dw, dst, false);
     if (rl.kind == LOC_MEM)
     {
-        emit_mov(ctx->buf, dw, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
+        emit_mov(ctx->buf, dw, xop_mem(x86_frame_mem(ctx->frame, rl.disp)), xop_reg(dst));
     }
 }
 
@@ -639,7 +648,7 @@ static void lower_sext(IrInstr *in, X86LowerCtx *ctx)
     lower_extend_int(ctx, in->ops[0], dw, dst, true);
     if (rl.kind == LOC_MEM)
     {
-        emit_mov(ctx->buf, dw, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
+        emit_mov(ctx->buf, dw, xop_mem(x86_frame_mem(ctx->frame, rl.disp)), xop_reg(dst));
     }
 }
 
@@ -672,7 +681,7 @@ static void fp_operand_to_xmm(X86LowerCtx *ctx, IrOperand op, u8 w, u8 xmm)
         }
         return;
     }
-    emit_sse_load(b, MF_OF(w), xmm, rbp_mem(l.disp));
+    emit_sse_load(b, MF_OF(w), xmm, x86_frame_mem(ctx->frame, l.disp));
 }
 
 static void store_fp_result(X86LowerCtx *ctx, IrInstr *in, u8 w, u8 xmm)
@@ -686,7 +695,7 @@ static void store_fp_result(X86LowerCtx *ctx, IrInstr *in, u8 w, u8 xmm)
         }
         return;
     }
-    emit_sse_store(ctx->buf, MF_OF(w), rbp_mem(rl.disp), xmm);
+    emit_sse_store(ctx->buf, MF_OF(w), x86_frame_mem(ctx->frame, rl.disp), xmm);
 }
 
 /* u64 ≥ 2^63 to float/double: clear the top bit, convert, add 2^63 back. */
@@ -834,12 +843,12 @@ static void lower_fbin(IrInstr *in, X86LowerCtx *ctx)
         }
         else
         {
-            emit_sse_op_mem(ctx->buf, mf, s->mem, dst, rbp_mem(sl.disp));
+            emit_sse_op_mem(ctx->buf, mf, s->mem, dst, x86_frame_mem(ctx->frame, sl.disp));
         }
     }
     if (rl.kind == LOC_MEM)
     {
-        emit_sse_store(ctx->buf, mf, rbp_mem(rl.disp), dst);
+        emit_sse_store(ctx->buf, mf, x86_frame_mem(ctx->frame, rl.disp), dst);
     }
 }
 
@@ -868,7 +877,7 @@ static void lower_fneg(IrInstr *in, X86LowerCtx *ctx)
     }
     if (rl.kind == LOC_MEM)
     {
-        emit_sse_store(ctx->buf, MF_OF(w), rbp_mem(rl.disp), dst);
+        emit_sse_store(ctx->buf, MF_OF(w), x86_frame_mem(ctx->frame, rl.disp), dst);
     }
 }
 
@@ -915,7 +924,7 @@ static void lower_fcmp(IrInstr *in, X86LowerCtx *ctx)
         }
         else
         {
-            emit_sse_load(b, mf, R_XMM1, rbp_mem(sl.disp));
+            emit_sse_load(b, mf, R_XMM1, x86_frame_mem(ctx->frame, sl.disp));
         }
     }
     emit_sse_ucomis(b, sw, R_XMM0, R_XMM1);
@@ -940,7 +949,7 @@ static void lower_load(IrInstr *in, X86LowerCtx *ctx)
     if (w == W_LD)
     {
         ASSERT(rl.kind == LOC_MEM && "x87 values are memory-only");
-        emit_mov16(ctx->buf, addr, rbp_mem(rl.disp));
+        emit_mov16(ctx->buf, addr, x86_frame_mem(ctx->frame, rl.disp));
         return;
     }
     if (rl.cls == RC_XMM)
@@ -952,7 +961,7 @@ static void lower_load(IrInstr *in, X86LowerCtx *ctx)
             return;
         }
         emit_sse_load(ctx->buf, mf, R_XMM0, addr);
-        emit_sse_store(ctx->buf, mf, rbp_mem(rl.disp), R_XMM0);
+        emit_sse_store(ctx->buf, mf, x86_frame_mem(ctx->frame, rl.disp), R_XMM0);
         return;
     }
     if (rl.kind == LOC_REG)
@@ -962,7 +971,7 @@ static void lower_load(IrInstr *in, X86LowerCtx *ctx)
     }
     u8 tmp = addr.base == R_R11 ? R_EAX : R_R11;
     emit_mov(ctx->buf, w, xop_reg(tmp), xop_mem(addr));
-    emit_mov(ctx->buf, w, xop_mem(rbp_mem(rl.disp)), xop_reg(tmp));
+    emit_mov(ctx->buf, w, xop_mem(x86_frame_mem(ctx->frame, rl.disp)), xop_reg(tmp));
 }
 
 static void lower_store(IrInstr *in, X86LowerCtx *ctx)
@@ -982,7 +991,7 @@ static void lower_store(IrInstr *in, X86LowerCtx *ctx)
         RegLoc sl = x86_lower_operand_loc(ctx, val);
         ASSERT(sl.kind == LOC_MEM && "x87 values are memory-only");
         X86Mem addr = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
-        emit_mov16(ctx->buf, rbp_mem(sl.disp), addr);
+        emit_mov16(ctx->buf, x86_frame_mem(ctx->frame, sl.disp), addr);
         return;
     }
     if (operand_is_fp_vreg(ctx, val))
@@ -995,7 +1004,7 @@ static void lower_store(IrInstr *in, X86LowerCtx *ctx)
             emit_sse_store(ctx->buf, mf, addr, sl.reg);
             return;
         }
-        emit_sse_load(ctx->buf, mf, R_XMM0, rbp_mem(sl.disp));
+        emit_sse_load(ctx->buf, mf, R_XMM0, x86_frame_mem(ctx->frame, sl.disp));
         emit_sse_store(ctx->buf, mf, addr, R_XMM0);
         return;
     }
@@ -1064,7 +1073,7 @@ static void lower_gep(IrInstr *in, X86LowerCtx *ctx)
     }
     if (rl.kind == LOC_MEM)
     {
-        emit_mov(ctx->buf, W_QWORD, xop_mem(rbp_mem(rl.disp)), xop_reg(dst));
+        emit_mov(ctx->buf, W_QWORD, xop_mem(x86_frame_mem(ctx->frame, rl.disp)), xop_reg(dst));
     }
 }
 
@@ -1501,7 +1510,7 @@ static void store_reg_to_loc(X86LowerCtx *ctx, RegLoc l, u8 width, u8 reg)
         }
         return;
     }
-    emit_mov(ctx->buf, width, xop_mem(rbp_mem(l.disp)), xop_reg(reg));
+    emit_mov(ctx->buf, width, xop_mem(x86_frame_mem(ctx->frame, l.disp)), xop_reg(reg));
 }
 
 static void store_vreg_from_reg(X86LowerCtx *ctx, u32 vreg, u8 width, u8 reg)
@@ -1518,12 +1527,13 @@ static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
         {
             ASSERT(src.u.imm == 0 && "nonzero immediate in a width-16 phi copy");
             emit_sse_xor(ctx->buf, 0, R_XMM0, R_XMM0);
-            emit_mov16_store(ctx->buf, rbp_mem(dl.disp));
+            emit_mov16_store(ctx->buf, x86_frame_mem(ctx->frame, dl.disp));
             return;
         }
         RegLoc sl = x86_lower_operand_loc(ctx, src);
         ASSERT(sl.kind == LOC_MEM && dl.kind == LOC_MEM && "x87 values are memory-only");
-        emit_mov16(ctx->buf, rbp_mem(sl.disp), rbp_mem(dl.disp));
+        emit_mov16(ctx->buf, x86_frame_mem(ctx->frame, sl.disp),
+                   x86_frame_mem(ctx->frame, dl.disp));
         return;
     }
     if (src.is_global)
@@ -1551,7 +1561,7 @@ static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
             else
             {
                 emit_movd_to_xmm(ctx->buf, R_XMM0, R_EAX, dw != W_DWORD);
-                emit_sse_store(ctx->buf, mf, rbp_mem(dl.disp), R_XMM0);
+                emit_sse_store(ctx->buf, mf, x86_frame_mem(ctx->frame, dl.disp), R_XMM0);
             }
             return;
         }
@@ -1567,17 +1577,17 @@ static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
             }
             else
             {
-                emit_sse_load(ctx->buf, mf, dl.reg, rbp_mem(sl.disp));
+                emit_sse_load(ctx->buf, mf, dl.reg, x86_frame_mem(ctx->frame, sl.disp));
             }
             return;
         }
         if (sl.kind == LOC_REG)
         {
-            emit_sse_store(ctx->buf, mf, rbp_mem(dl.disp), sl.reg);
+            emit_sse_store(ctx->buf, mf, x86_frame_mem(ctx->frame, dl.disp), sl.reg);
             return;
         }
-        emit_sse_load(ctx->buf, mf, R_XMM0, rbp_mem(sl.disp));
-        emit_sse_store(ctx->buf, mf, rbp_mem(dl.disp), R_XMM0);
+        emit_sse_load(ctx->buf, mf, R_XMM0, x86_frame_mem(ctx->frame, sl.disp));
+        emit_sse_store(ctx->buf, mf, x86_frame_mem(ctx->frame, dl.disp), R_XMM0);
         return;
     }
     if (src.is_imm)
@@ -1589,7 +1599,7 @@ static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
         else
         {
             emit_imm_to_reg(ctx, dw, R_EAX, src.u.imm);
-            emit_mov(ctx->buf, dw, xop_mem(rbp_mem(dl.disp)), xop_reg(R_EAX));
+            emit_mov(ctx->buf, dw, xop_mem(x86_frame_mem(ctx->frame, dl.disp)), xop_reg(R_EAX));
         }
         return;
     }
@@ -1611,17 +1621,17 @@ static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
         }
         else
         {
-            emit_mov(ctx->buf, dw, xop_reg(dl.reg), xop_mem(rbp_mem(sl.disp)));
+            emit_mov(ctx->buf, dw, xop_reg(dl.reg), xop_mem(x86_frame_mem(ctx->frame, sl.disp)));
         }
         return;
     }
     if (sl.kind == LOC_REG)
     {
-        emit_mov(ctx->buf, dw, xop_mem(rbp_mem(dl.disp)), xop_reg(sl.reg));
+        emit_mov(ctx->buf, dw, xop_mem(x86_frame_mem(ctx->frame, dl.disp)), xop_reg(sl.reg));
         return;
     }
-    emit_mov(ctx->buf, dw, xop_reg(R_EAX), xop_mem(rbp_mem(sl.disp)));
-    emit_mov(ctx->buf, dw, xop_mem(rbp_mem(dl.disp)), xop_reg(R_EAX));
+    emit_mov(ctx->buf, dw, xop_reg(R_EAX), xop_mem(x86_frame_mem(ctx->frame, sl.disp)));
+    emit_mov(ctx->buf, dw, xop_mem(x86_frame_mem(ctx->frame, dl.disp)), xop_reg(R_EAX));
 }
 
 /* A PHI edge's copy runs at its predecessor's end, so it reads the incoming
@@ -1636,7 +1646,7 @@ static void emit_phi_copy(X86LowerCtx *ctx, IrOperand src, u32 dst_vreg)
 /* Saves `src` into the 16-byte scratch slot used to break phi-copy cycles. */
 static void emit_scratch_store(X86LowerCtx *ctx, IrOperand src)
 {
-    X86Mem sm = rbp_mem(ctx->scratch_disp);
+    X86Mem sm = x86_frame_mem(ctx->frame, ctx->scratch_disp);
     if (src.is_imm)
     {
         emit_mov(ctx->buf, W_QWORD, xop_reg(R_EAX), xop_imm(src.u.imm));
@@ -1660,7 +1670,7 @@ static void emit_scratch_store(X86LowerCtx *ctx, IrOperand src)
     if (w == W_LD)
     {
         ASSERT(sl.kind == LOC_MEM && "x87 values are memory-only");
-        emit_mov16(ctx->buf, sm, rbp_mem(sl.disp));
+        emit_mov16(ctx->buf, sm, x86_frame_mem(ctx->frame, sl.disp));
         return;
     }
     if (sl.cls == RC_XMM)
@@ -1681,7 +1691,7 @@ static void emit_scratch_store(X86LowerCtx *ctx, IrOperand src)
     }
     else
     {
-        emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_mem(rbp_mem(sl.disp)));
+        emit_mov(ctx->buf, w, xop_reg(R_EAX), xop_mem(x86_frame_mem(ctx->frame, sl.disp)));
         emit_mov(ctx->buf, w, xop_mem(sm), xop_reg(R_EAX));
     }
 }
@@ -1689,13 +1699,13 @@ static void emit_scratch_store(X86LowerCtx *ctx, IrOperand src)
 /* Restores the scratch slot into the phi destination `dst_vreg`. */
 static void emit_scratch_load(X86LowerCtx *ctx, u32 dst_vreg)
 {
-    X86Mem sm = rbp_mem(ctx->scratch_disp);
+    X86Mem sm = x86_frame_mem(ctx->frame, ctx->scratch_disp);
     u8 dw = vreg_width(ctx, dst_vreg);
     RegLoc dl = x86_lower_operand_loc(ctx, ir_operand_vreg(dst_vreg));
     if (dw == W_LD)
     {
         ASSERT(dl.kind == LOC_MEM && "x87 values are memory-only");
-        emit_mov16(ctx->buf, rbp_mem(dl.disp), sm);
+        emit_mov16(ctx->buf, x86_frame_mem(ctx->frame, dl.disp), sm);
         return;
     }
     if (dl.cls == RC_XMM)
@@ -1708,7 +1718,7 @@ static void emit_scratch_load(X86LowerCtx *ctx, u32 dst_vreg)
         else
         {
             emit_sse_load(ctx->buf, mf, R_XMM0, sm);
-            emit_sse_store(ctx->buf, mf, rbp_mem(dl.disp), R_XMM0);
+            emit_sse_store(ctx->buf, mf, x86_frame_mem(ctx->frame, dl.disp), R_XMM0);
         }
         return;
     }
@@ -1719,7 +1729,7 @@ static void emit_scratch_load(X86LowerCtx *ctx, u32 dst_vreg)
     else
     {
         emit_mov(ctx->buf, dw, xop_reg(R_EAX), xop_mem(sm));
-        emit_mov(ctx->buf, dw, xop_mem(rbp_mem(dl.disp)), xop_reg(R_EAX));
+        emit_mov(ctx->buf, dw, xop_mem(x86_frame_mem(ctx->frame, dl.disp)), xop_reg(R_EAX));
     }
 }
 
@@ -1972,22 +1982,22 @@ static void emit_seg_move(X86LowerCtx *ctx, u32 vreg, RegLoc pre, RegLoc post)
     {
         if (fp)
         {
-            emit_sse_store(ctx->buf, MF_OF(w), rbp_mem(disp), pre.reg);
+            emit_sse_store(ctx->buf, MF_OF(w), x86_frame_mem(ctx->frame, disp), pre.reg);
         }
         else
         {
-            emit_mov(ctx->buf, w, xop_mem(rbp_mem(disp)), xop_reg(pre.reg));
+            emit_mov(ctx->buf, w, xop_mem(x86_frame_mem(ctx->frame, disp)), xop_reg(pre.reg));
         }
     }
     else if (pre.kind == LOC_MEM && post.kind == LOC_REG)
     {
         if (fp)
         {
-            emit_sse_load(ctx->buf, MF_OF(w), post.reg, rbp_mem(disp));
+            emit_sse_load(ctx->buf, MF_OF(w), post.reg, x86_frame_mem(ctx->frame, disp));
         }
         else
         {
-            emit_mov(ctx->buf, w, xop_reg(post.reg), xop_mem(rbp_mem(disp)));
+            emit_mov(ctx->buf, w, xop_reg(post.reg), xop_mem(x86_frame_mem(ctx->frame, disp)));
         }
     }
     else if (pre.kind == LOC_REG && post.kind == LOC_REG && pre.reg != post.reg)
@@ -2822,17 +2832,18 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     build_phi_copies(f, label_to_index, phi_copies, arena);
 
     bool omit_fp = false;
-    if (x86_frame_can_omit_fp(f, debug) && alloc->frame_size == 0)
+    if (x86_frame_can_omit_fp(mod, f, debug) && alloc->frame_size == 0)
     {
-        /* Nothing spills, so %rbp is free to join the register bank. */
+        /* A spill-free function's frame is only the phi scratch or a static
+           alloca; %rbp is then free to join the register bank. */
         RegAllocation *lean = regalloc_linear_ex(f, &set, target, arena, true);
         if (lean->frame_size == 0)
         {
             alloc = lean;
-            omit_fp = true;
         }
+        omit_fp = true;
     }
-    if (!omit_fp && phi_copies_need_scratch(phi_copies, nblocks, arena))
+    if (phi_copies_need_scratch(phi_copies, nblocks, arena))
     {
         alloc->frame_size += 16;
     }
@@ -2985,9 +2996,9 @@ RegLoc x86_lower_operand_loc(X86LowerCtx *ctx, IrOperand op)
     return loc_at(ctx->alloc, op, ctx->cur_pos);
 }
 
-X86Mem x86_lower_rbp_mem(i32 disp)
+X86Mem x86_lower_frame_mem(X86LowerCtx *ctx, i32 disp)
 {
-    return rbp_mem(disp);
+    return x86_frame_mem(ctx->frame, disp);
 }
 
 void x86_lower_force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
@@ -3029,7 +3040,7 @@ static bool gpr_reg_survives_call(const X86LowerCtx *ctx, u8 reg)
 
 static X86Mem gap_slot(X86LowerCtx *ctx, u32 vreg)
 {
-    return rbp_mem(-(i32) ctx->alloc->slot_map[vreg]);
+    return x86_frame_mem(ctx->frame, -(i32) ctx->alloc->slot_map[vreg]);
 }
 
 void x86_lower_call_gaps(X86LowerCtx *ctx, bool before)

@@ -64,7 +64,7 @@ struct X86LowerCtx
 u8 x86_lower_vreg_width(X86LowerCtx *ctx, u32 vreg);
 u8 x86_lower_operand_width(X86LowerCtx *ctx, IrOperand op);
 RegLoc x86_lower_operand_loc(X86LowerCtx *ctx, IrOperand op);
-X86Mem x86_lower_rbp_mem(i32 disp);
+X86Mem x86_lower_frame_mem(X86LowerCtx *ctx, i32 disp);
 void x86_lower_force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg);
 RegLoc x86_lower_result_loc(X86LowerCtx *ctx, IrInstr *in);
 void x86_lower_store_reg_result(X86LowerCtx *ctx, IrInstr *in, u8 width, u8 reg);

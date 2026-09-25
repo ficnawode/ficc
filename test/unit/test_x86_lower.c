@@ -47,8 +47,13 @@ TEST(x86_lower, same_callee_saved_call_gap_emits_no_moves)
     RegAllocation alloc = gap_alloc(a, v, R_EBX, R_EBX);
     ByteBuf b;
     bytebuf_init(&b, a);
-    X86LowerCtx ctx = {
-        .mod = m, .buf = &b, .alloc = &alloc, .target = x86_64_target(), .cur_pos = 2};
+    LinearFrame frame = {0};
+    X86LowerCtx ctx = {.mod = m,
+                       .buf = &b,
+                       .alloc = &alloc,
+                       .frame = &frame,
+                       .target = x86_64_target(),
+                       .cur_pos = 2};
     x86_lower_call_gaps(&ctx, true);
     EXPECT_EQ(bytebuf_len(&b), 0u);
     x86_lower_call_gaps(&ctx, false);
@@ -64,8 +69,13 @@ TEST(x86_lower, distinct_callee_saved_call_gap_coalesces_to_one_move)
     RegAllocation alloc = gap_alloc(a, v, R_EBX, R_R12);
     ByteBuf b;
     bytebuf_init(&b, a);
-    X86LowerCtx ctx = {
-        .mod = m, .buf = &b, .alloc = &alloc, .target = x86_64_target(), .cur_pos = 2};
+    LinearFrame frame = {0};
+    X86LowerCtx ctx = {.mod = m,
+                       .buf = &b,
+                       .alloc = &alloc,
+                       .frame = &frame,
+                       .target = x86_64_target(),
+                       .cur_pos = 2};
     x86_lower_call_gaps(&ctx, true);
     EXPECT_EQ(bytebuf_len(&b), 0u);
     x86_lower_call_gaps(&ctx, false);
@@ -81,8 +91,13 @@ TEST(x86_lower, caller_saved_call_gap_stores_before_and_reloads_after)
     RegAllocation alloc = gap_alloc(a, v, R_EAX, R_ECX);
     ByteBuf b;
     bytebuf_init(&b, a);
-    X86LowerCtx ctx = {
-        .mod = m, .buf = &b, .alloc = &alloc, .target = x86_64_target(), .cur_pos = 2};
+    LinearFrame frame = {0};
+    X86LowerCtx ctx = {.mod = m,
+                       .buf = &b,
+                       .alloc = &alloc,
+                       .frame = &frame,
+                       .target = x86_64_target(),
+                       .cur_pos = 2};
     x86_lower_call_gaps(&ctx, true);
     size_t stored = bytebuf_len(&b);
     EXPECT_TRUE(stored > 0);
@@ -210,6 +225,54 @@ TEST(x86_lower, phi_copy_cycle_alone_reserves_the_scratch_slot)
     ByteBuf *pick = ((CodegenFunc *) vec_get(cm->funcs, 1))->bytes;
     EXPECT_TRUE(has_rsp_sub(swap));
     EXPECT_FALSE(has_rsp_sub(pick));
+    arena_free(a);
+}
+
+/* The `push rbp` + `mov rbp, rsp` prologue pair. */
+static bool has_fp_prologue(ByteBuf *b)
+{
+    const u8 *code = bytebuf_data(b);
+    for (size_t i = 0; i + 4 <= bytebuf_len(b); i++)
+    {
+        if (code[i] == 0x55 && code[i + 1] == 0x48 && code[i + 2] == 0x89 && code[i + 3] == 0xE5)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+TEST(x86_lower, spill_free_functions_omit_the_frame_pointer)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module(
+        "int pick(int c) { int x; if (c) x = 1; else x = 2; return x; }\n"
+        "int swap(int n) { int a = 1; int b = 2; while (n > 0) { int t = a; a = b; b = t; "
+        "n = n - 1; } return a - b; }\n"
+        "int arr(int n) { char buf[16]; buf[0] = (char)n; return buf[0]; }\n",
+        a);
+    EXPECT_NOTNULL(m);
+    CodegenModule *cm = codegen_ir_to_machine(m, NULL, a);
+    EXPECT_NOTNULL(cm);
+    for (size_t i = 0; i < 3; i++)
+    {
+        EXPECT_FALSE(has_fp_prologue(((CodegenFunc *) vec_get(cm->funcs, i))->bytes));
+    }
+    arena_free(a);
+}
+
+TEST(x86_lower, stack_argument_call_keeps_the_frame_pointer)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module(
+        "long g(long a, long b, long c, long d, long e, long f, long h) { return a + h; }\n"
+        "long call7(long x) { return g(x, 1, 2, 3, 4, 5, 6); }\n",
+        a);
+    EXPECT_NOTNULL(m);
+    CodegenModule *cm = codegen_ir_to_machine(m, NULL, a);
+    EXPECT_NOTNULL(cm);
+    ByteBuf *bytes = ((CodegenFunc *) vec_get(cm->funcs, 1))->bytes;
+    EXPECT_TRUE(has_fp_prologue(bytes));
     arena_free(a);
 }
 
