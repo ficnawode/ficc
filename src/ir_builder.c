@@ -113,16 +113,18 @@ struct FuncBuilder
 {
     IrModule *mod;
     IrFunction *f;
-    U64Map *block_locals; /* (u64)IrBlock* -> BlockLocals* */
-    Vec *loop_stack;      /* Vec<LoopContext*> */
-    Vec *switch_stack;    /* Vec<SwitchCtx*> */
-    StrMap *goto_labels;  /* label name -> IrBlock* */
-    StrMap *func_types;   /* function name -> Type* (interned function type) */
-    StrMap *global_map;   /* file-scope variable name -> u32* (index into mod->globals) */
-    U64Map *static_map;   /* (u64)ASTVarDecl* -> u32* (index into mod->globals) */
-    Vec *spilled;         /* Vec<ASTVarDecl*>: block-scope autos whose address is taken */
-    U64Map *spill_slots;  /* (u64)ASTVarDecl* -> IrOperand* (function-entry slot addr) */
-    u32 sret_vreg;        /* hidden sret pointer vreg for record-returning funcs */
+    U64Map *block_locals;  /* (u64)IrBlock* -> BlockLocals* */
+    Vec *loop_stack;       /* Vec<LoopContext*> */
+    Vec *switch_stack;     /* Vec<SwitchCtx*> */
+    StrMap *goto_labels;   /* label name -> IrBlock* */
+    StrMap *func_types;    /* function name -> Type* (interned function type) */
+    StrMap *global_map;    /* file-scope variable name -> u32* (index into mod->globals) */
+    U64Map *static_map;    /* (u64)ASTVarDecl* -> u32* (index into mod->globals) */
+    Vec *spilled;          /* Vec<ASTVarDecl*>: block-scope autos whose address is taken */
+    U64Map *spill_slots;   /* (u64)ASTVarDecl* -> IrOperand* (function-entry slot addr) */
+    U64Map *param_decls;   /* (u64)ASTVarDecl* -> non-NULL for parameters */
+    U64Map *local_records; /* (u64)ASTVarDecl* -> IrLocal* (debug locations) */
+    u32 sret_vreg;         /* hidden sret pointer vreg for record-returning funcs */
     bool failed;
 };
 
@@ -436,6 +438,31 @@ static bool already_spilled(FuncBuilder *ctx, ASTVarDecl *decl)
     return false;
 }
 
+/* Record the SSA vreg that now carries an address-not-taken scalar local, so the
+   DWARF writer can describe its location list. */
+static void record_local_vreg(FuncBuilder *ctx, ASTVarDecl *var, IrOperand val)
+{
+    if (!ir_operand_is_vreg(val) || !is_spillable_var(var) ||
+        u64map_get(ctx->param_decls, (u64) (uintptr_t) var) || already_spilled(ctx, var))
+    {
+        return;
+    }
+    IrLocal *l = u64map_get(ctx->local_records, (u64) (uintptr_t) var);
+    if (!l)
+    {
+        l = ir_func_add_local(ctx->f, var->name, var->type);
+        u64map_set(ctx->local_records, (u64) (uintptr_t) var, l);
+    }
+    size_t n = vec_size(l->vregs);
+    if (n > 0 && *(u32 *) vec_get(l->vregs, n - 1) == val.u.vreg)
+    {
+        return;
+    }
+    u32 *slot = arena_alloc(ctx->mod->arena, sizeof(u32), sizeof(u32));
+    *slot = val.u.vreg;
+    vec_push(l->vregs, slot);
+}
+
 static IrOperand *spill_slot(FuncBuilder *ctx, ASTVarDecl *var)
 {
     return u64map_get(ctx->spill_slots, (u64) (uintptr_t) var);
@@ -514,6 +541,7 @@ static void write_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb, IrOpe
         ir_emit_store(bb, val, *slot, var->type->size, type_is_volatile(var->type));
         return;
     }
+    record_local_vreg(ctx, var, val);
     BlockLocals *bl = get_block_locals(ctx, bb);
     u64map_set(bl->locals, (u64) (uintptr_t) var, persist_operand(ctx, val));
 }
@@ -547,6 +575,7 @@ static IrOperand build_phi(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
     /* Register before filling: a loop header's back-edge can resolve through
        this block while its PHI is being built, which must terminate. */
     u64map_set(bl->locals, (u64) (uintptr_t) var, persist_operand(ctx, ir_operand_vreg(dst)));
+    record_local_vreg(ctx, var, ir_operand_vreg(dst));
     fill_phi_entries(ctx, bb, var, phi);
     return ir_operand_vreg(dst);
 }
@@ -555,6 +584,7 @@ static void insert_phi(FuncBuilder *ctx, IrBlock *bb, ASTVarDecl *var, u32 dst)
 {
     u32 nentries = (u32) vec_size(bb->preds);
     IrInstr *phi = ir_emit_phi_at_start(bb, dst, nentries);
+    record_local_vreg(ctx, var, ir_operand_vreg(dst));
     fill_phi_entries(ctx, bb, var, phi);
 }
 
@@ -3655,6 +3685,7 @@ static void setup_params(FuncBuilder *ctx, ASTFuncDef *ast, IrBlock *entry)
             agg_type = param->type;
         }
         push_param(ctx, param->name, ssa_type, vreg, agg_type);
+        u64map_set(ctx->param_decls, (u64) (uintptr_t) param, (void *) 1);
         write_variable(ctx, param, entry, ir_operand_vreg(vreg));
     }
 }
@@ -3963,6 +3994,8 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
                        .static_map = u64map_new(mod->arena),
                        .spilled = vec_new(mod->arena),
                        .spill_slots = u64map_new(mod->arena),
+                       .param_decls = u64map_new(mod->arena),
+                       .local_records = u64map_new(mod->arena),
                        .sret_vreg = NO_VREG};
 
     /* Pre-create blocks for all labels so gotos can target them. */

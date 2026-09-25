@@ -428,3 +428,88 @@ TEST(dwarf_out, eh_fdes_match_codegen)
 
     arena_free(a);
 }
+
+static char local_src[] = "int add(int a, int b)\n"
+                          "{\n"
+                          "    int t = a + b;\n"
+                          "    return t * 2;\n"
+                          "}\n"
+                          "int main(void)\n"
+                          "{\n"
+                          "    int x = add(3, 4);\n"
+                          "    return x;\n"
+                          "}\n";
+
+static CodegenFunc *cf_by_name(CodegenModule *cm, const char *name)
+{
+    for (size_t i = 0; i < vec_size(cm->funcs); i++)
+    {
+        CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, i);
+        if (strcmp(cf->name, name) == 0)
+        {
+            return cf;
+        }
+    }
+    return NULL;
+}
+
+TEST(dwarf_out, scalar_locals_get_segment_location_lists)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module(local_src, a);
+    CodegenConfig cfg = {.debug = true};
+    CodegenModule *cm = codegen_ir_to_machine(m, &cfg, a);
+    DwarfOutput out = {0};
+    dwarf_build(cm, "local.c", "/tmp", &out, a);
+
+    DwarfCheck dc;
+    dwarf_check_from_buffers(&dc, a, bytebuf_data(&out.debug_info), bytebuf_len(&out.debug_info),
+                             bytebuf_data(&out.debug_abbrev), bytebuf_len(&out.debug_abbrev),
+                             bytebuf_data(&out.debug_line), bytebuf_len(&out.debug_line),
+                             bytebuf_data(&out.debug_loc), bytebuf_len(&out.debug_loc), NULL, 0,
+                             NULL, 0, norm_relas(a, out.rela_info, 0),
+                             norm_relas(a, out.rela_line, 0), NULL);
+
+    DwarfCheckInfo *info = dwarf_check_info(&dc, a);
+    show_dwarf_out("local", &dc);
+    EXPECT_NOTNULL(info);
+    if (!info)
+    {
+        arena_free(a);
+        return;
+    }
+
+    CodegenFunc *add = cf_by_name(cm, "add");
+    EXPECT_NOTNULL(add);
+
+    /* add()'s `t` is an SSA scalar local: a DW_TAG_variable whose location list
+       stays inside add()'s body and names a register or spill slot. */
+    DwarfCheckDie *t = dwarf_check_die_named(info, "t");
+    EXPECT_NOTNULL(t);
+    if (t && add)
+    {
+        EXPECT_TRUE(t->tag == DW_TAG_variable);
+        DwarfCheckAttr *tl = dwarf_check_attr(t, DW_AT_location);
+        EXPECT_NOTNULL(tl);
+        EXPECT_TRUE(tl->kind == DW_ATTR_LOC);
+        Vec *tr = dwarf_check_locs(&dc, tl->num, a);
+        EXPECT_NOTNULL(tr);
+        EXPECT_TRUE(vec_size(tr) >= 1);
+        for (size_t i = 0; i < vec_size(tr); i++)
+        {
+            DwarfCheckLocRange *r = (DwarfCheckLocRange *) vec_get(tr, i);
+            EXPECT_TRUE(r->begin >= (u64) add->offset + add->frame.off_params);
+            EXPECT_TRUE(r->end <= (u64) add->offset + bytebuf_len(add->bytes));
+            EXPECT_TRUE(r->begin < r->end);
+            bool reg = r->expr[0] >= DW_OP_reg0 && r->expr[0] <= DW_OP_reg0 + 15;
+            EXPECT_TRUE(reg || r->expr[0] == DW_OP_fbreg);
+        }
+    }
+
+    /* main()'s `x` receives a call result: still a named local with a list. */
+    DwarfCheckDie *x = dwarf_check_die_named(info, "x");
+    EXPECT_NOTNULL(x);
+    EXPECT_TRUE(x && x->tag == DW_TAG_variable);
+
+    arena_free(a);
+}

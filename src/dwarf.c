@@ -122,6 +122,7 @@ enum
     ABBREV_ENUM_TYPE = 17,
     ABBREV_SUBROUTINE_TYPE = 18,
     ABBREV_SUBPROG_PARAM = 19,
+    ABBREV_LOCAL_VARIABLE = 20,
 };
 
 enum
@@ -377,39 +378,133 @@ static u8 dwarf_reg_number(Type *type, int phys)
     return x86_dwarf_gpr_number((u8) phys);
 }
 
-/* A parameter's location list: DW_OP_regN over its live range, then the stable
-   stage slot once the register home is reusable; a spilled parameter is fbreg
-   for the whole function. */
-static void emit_param_locs(InfoCtx *c, CodegenFunc *cf, IrParam *p, size_t pi)
+/* A segment's inclusive position span as a function-relative byte range: a
+   value defined at `start` is available past that instruction, and dies past
+   its last use at `end`.  `entry_home` is set for a parameter, whose home is
+   written by the prologue and so is valid from the body start (position 0).
+   Returns false for an empty span. */
+static bool segment_bounds(CodegenFunc *cf, const RegSegment *seg, bool entry_home, i64 *out_begin,
+                           i64 *out_end)
 {
     i64 func_off = (i64) cf->offset;
     i64 body = func_off + (i64) cf->frame.off_params;
-    i64 end = func_off + (i64) bytebuf_len(cf->bytes);
-    int phys = cf->phys_map[p->vreg];
-    if (phys < 0)
+    i64 fn_end = func_off + (i64) bytebuf_len(cf->bytes);
+    const u32 *off = cf->position_offsets;
+    i64 begin = (entry_home && seg->start == 0) ? body : func_off + (i64) off[seg->start];
+    i64 end = func_off + (i64) off[seg->end];
+    if (begin < body)
+    {
+        begin = body;
+    }
+    if (end > fn_end)
+    {
+        end = fn_end;
+    }
+    if (begin >= end)
+    {
+        return false;
+    }
+    *out_begin = begin;
+    *out_end = end;
+    return true;
+}
+
+/* Emit one location-list entry for a segment; returns its byte end (0 when empty). */
+static i64 emit_segment_loc(InfoCtx *c, CodegenFunc *cf, u32 vreg, const RegSegment *seg,
+                            Type *type, bool entry_home)
+{
+    i64 begin;
+    i64 end;
+    if (!segment_bounds(cf, seg, entry_home, &begin, &end))
+    {
+        return 0;
+    }
+    if (seg->kind == SEG_REG)
+    {
+        u8 rexpr = (u8) (DW_OP_reg0 + dwarf_reg_number(type, seg->reg));
+        loc_range(c, begin, end, &rexpr, 1);
+    }
+    else if (seg->kind == SEG_MEM)
     {
         u8 fexpr[FBREG_EXPR_MAX];
-        u32 flen = fbreg_expr(c->loc->arena, fexpr, -(i64) cf->slot_off[p->vreg] - CFA_TO_RBP);
-        loc_range(c, body, end, fexpr, flen);
-        loc_list_end(c);
-        return;
+        u32 flen = fbreg_expr(c->loc->arena, fexpr, -(i64) cf->alloc->slot_map[vreg] - CFA_TO_RBP);
+        loc_range(c, begin, end, fexpr, flen);
     }
+    else
+    {
+        u8 fexpr[FBREG_EXPR_MAX];
+        u32 flen = fbreg_expr(c->loc->arena, fexpr, (i64) cf->alloc->remat_disp[vreg] - CFA_TO_RBP);
+        loc_range(c, begin, end, fexpr, flen);
+    }
+    return end;
+}
 
-    i64 live_end = func_off + (i64) cf->live_end[p->vreg];
-    if (live_end > end)
+/* A parameter's location list: one entry per segment, then the entry-printed
+   stage slot over the remainder of the function (the slot keeps the incoming
+   value for the whole frame). */
+static void emit_param_locs(InfoCtx *c, CodegenFunc *cf, IrParam *p, size_t pi)
+{
+    const RegAllocation *alloc = cf->alloc;
+    i64 fn_end = (i64) cf->offset + (i64) bytebuf_len(cf->bytes);
+    i64 reached = (i64) cf->offset + (i64) cf->frame.off_params;
+    for (u32 s = alloc->seg_begin[p->vreg]; s < alloc->seg_begin[p->vreg + 1]; s++)
     {
-        live_end = end;
+        i64 end = emit_segment_loc(c, cf, p->vreg, &alloc->segments[s], p->type, true);
+        if (end > reached)
+        {
+            reached = end;
+        }
     }
-    if (live_end > body)
-    {
-        u8 rexpr = (u8) (DW_OP_reg0 + dwarf_reg_number(p->type, phys));
-        loc_range(c, body, live_end, &rexpr, 1);
-    }
-    if (live_end < end && cf->param_stage[pi] != 0)
+    if (cf->param_stage[pi] != 0 && reached < fn_end)
     {
         u8 fexpr[FBREG_EXPR_MAX];
         u32 flen = fbreg_expr(c->loc->arena, fexpr, -(i64) cf->param_stage[pi] - CFA_TO_RBP);
-        loc_range(c, MAX(live_end, body), end, fexpr, flen);
+        loc_range(c, reached, fn_end, fexpr, flen);
+    }
+    loc_list_end(c);
+}
+
+/* True when any of the local's SSA versions has a non-empty segment. */
+static bool local_has_loc(CodegenFunc *cf, IrLocal *l)
+{
+    const RegAllocation *alloc = cf->alloc;
+    size_t nv = vec_size(l->vregs);
+    for (size_t i = 0; i < nv; i++)
+    {
+        u32 vreg = *(u32 *) vec_get(l->vregs, i);
+        if (vreg >= alloc->nvregs)
+        {
+            continue;
+        }
+        for (u32 s = alloc->seg_begin[vreg]; s < alloc->seg_begin[vreg + 1]; s++)
+        {
+            i64 begin;
+            i64 end;
+            if (segment_bounds(cf, &alloc->segments[s], false, &begin, &end))
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/* A local's location list is the union of its SSA versions' segment entries. */
+static void emit_local_locs(InfoCtx *c, CodegenFunc *cf, IrLocal *l)
+{
+    const RegAllocation *alloc = cf->alloc;
+    size_t nv = vec_size(l->vregs);
+    for (size_t i = 0; i < nv; i++)
+    {
+        u32 vreg = *(u32 *) vec_get(l->vregs, i);
+        if (vreg >= alloc->nvregs)
+        {
+            continue;
+        }
+        for (u32 s = alloc->seg_begin[vreg]; s < alloc->seg_begin[vreg + 1]; s++)
+        {
+            emit_segment_loc(c, cf, vreg, &alloc->segments[s], l->type, false);
+        }
     }
     loc_list_end(c);
 }
@@ -772,6 +867,21 @@ static void subprogram_emit(InfoCtx *c, CodegenFunc *cf)
         emit_param_locs(c, cf, p, i);
         bytebuf_append_u32(c->b, loc_off);
     }
+    size_t nlocals = vec_size(cf->func->locals);
+    for (size_t i = 0; i < nlocals; i++)
+    {
+        IrLocal *l = (IrLocal *) vec_get(cf->func->locals, i);
+        if (vec_size(l->vregs) == 0 || !local_has_loc(cf, l))
+        {
+            continue;
+        }
+        dwarf_uleb128(c->b, ABBREV_LOCAL_VARIABLE);
+        info_string(c, l->name);
+        type_ref_emit(c, l->type);
+        u32 loc_off = (u32) bytebuf_len(c->loc);
+        emit_local_locs(c, cf, l);
+        bytebuf_append_u32(c->b, loc_off);
+    }
     bytebuf_append(c->b, 0); /* end of this subprogram's children */
 }
 
@@ -1014,6 +1124,18 @@ static void abbrev_emit(ByteBuf *b)
     dwarf_uleb128(b, 0);
     dwarf_uleb128(b, DW_AT_type);
     dwarf_uleb128(b, DW_FORM_ref4);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+
+    dwarf_uleb128(b, ABBREV_LOCAL_VARIABLE);
+    dwarf_uleb128(b, DW_TAG_variable);
+    dwarf_uleb128(b, 0);
+    dwarf_uleb128(b, DW_AT_name);
+    dwarf_uleb128(b, DW_FORM_string);
+    dwarf_uleb128(b, DW_AT_type);
+    dwarf_uleb128(b, DW_FORM_ref4);
+    dwarf_uleb128(b, DW_AT_location);
+    dwarf_uleb128(b, DW_FORM_sec_offset);
     bytebuf_append(b, 0);
     bytebuf_append(b, 0);
 

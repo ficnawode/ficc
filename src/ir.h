@@ -202,6 +202,14 @@ struct IrParam
     Type *agg_type; /* the record passed by value, else NULL (scalar/pointer/sret) */
 };
 
+typedef struct IrLocal IrLocal;
+struct IrLocal
+{
+    const char *name;
+    Type *type;
+    Vec *vregs; /* SSA versions carrying the local, in assignment order */
+};
+
 struct IrFunction
 {
     const char *name;
@@ -209,6 +217,7 @@ struct IrFunction
     Arena *arena;
     Vec *params;      /* Vec<IrParam*> */
     Vec *blocks;      /* Vec<IrBlock*> */
+    Vec *locals;      /* Vec<IrLocal*> — address-not-taken SSA scalars (debug only) */
     u32 cur_line;     /* source line for the next emitted instruction (0 until a stmt/expr) */
     bool is_static;   /* internal linkage (stays local in the object file) */
     bool is_variadic; /* trailing unnamed args beyond the named params (C11 §6.7.6.3p8) */
@@ -278,6 +287,7 @@ struct IrModule
 IrModule *ir_module_new(Arena *arena);
 IrFunction *ir_module_add_func(IrModule *m, const char *name, Type *ret_type);
 IrBlock *ir_func_add_block(IrFunction *f, const char *label);
+IrLocal *ir_func_add_local(IrFunction *f, const char *name, Type *type);
 /* Unlink `bb` from f->blocks, renumbering the blocks that follow it. */
 void ir_func_remove_block(IrFunction *f, IrBlock *bb);
 

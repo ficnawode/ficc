@@ -119,6 +119,26 @@ TEST(debug_info, program_surface_dies)
         EXPECT_TRUE(is_reg || is_fbreg);
     }
 
+    /* An address-not-taken SSA scalar local ships as a DW_TAG_variable whose
+       location list describes its home (register or spill slot). */
+    DwarfCheckDie *local_t = dwarf_check_die_named(info, "t");
+    EXPECT_NOTNULL(local_t);
+    EXPECT_TRUE(local_t->tag == DW_TAG_variable);
+    DwarfCheckAttr *tloc = dwarf_check_attr(local_t, DW_AT_location);
+    EXPECT_NOTNULL(tloc);
+    EXPECT_TRUE(tloc->kind == DW_ATTR_LOC);
+    Vec *tranges = dwarf_check_locs(out, tloc->num, a);
+    EXPECT_NOTNULL(tranges);
+    EXPECT_TRUE(vec_size(tranges) >= 1);
+    for (size_t i = 0; i < vec_size(tranges); i++)
+    {
+        DwarfCheckLocRange *r = (DwarfCheckLocRange *) vec_get(tranges, i);
+        EXPECT_TRUE(r->begin < r->end);
+        EXPECT_TRUE(r->expr_len >= 1);
+        bool rreg = r->expr[0] >= DW_OP_reg0 && r->expr[0] <= DW_OP_reg0 + 15;
+        EXPECT_TRUE(rreg || r->expr[0] == DW_OP_fbreg);
+    }
+
     /* Globals addressable via DW_OP_addr; the extern declares no location. */
     DwarfCheckDie *shelf = dwarf_check_die_named(info, "shelf");
     DwarfCheckDie *counter = dwarf_check_die_named(info, "counter");

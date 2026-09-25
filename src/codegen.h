@@ -3,6 +3,7 @@
 
 #include "cli.h"
 #include "ir.h"
+#include "regalloc.h"
 #include "util/bytebuf.h"
 #include "util/types.h"
 #include "x86_emit.h"
@@ -51,6 +52,8 @@ struct CodegenFunc
     int *phys_map;       /* per-vreg physical register id, -1 when spilled; param locations */
     u32 *live_end;       /* per-vreg byte offset just past the value's last use (debug_loc) */
     u32 *param_stage;    /* per-param stage-slot offset below %rbp, 0 when there is none */
+    const RegAllocation *alloc; /* segment table backing loc_at and debug locations */
+    u32 *position_offsets;      /* position → byte offset, NULL without -g */
 };
 
 /* IrModule-level codegen records */

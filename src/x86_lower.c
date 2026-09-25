@@ -2147,9 +2147,10 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         phi_copies[bi] = vec_new(arena);
     }
 
-    u32 *position_offsets = arena_alloc(
-        arena, (set.pos.npositions ? set.pos.npositions : 1) * sizeof(u32), sizeof(u32));
-    for (u32 p = 0; p < set.pos.npositions; p++)
+    /* One extra slot: a value live out of the final block records `end` as
+       npositions, the position just past the function. */
+    u32 *position_offsets = arena_alloc(arena, (set.pos.npositions + 1) * sizeof(u32), sizeof(u32));
+    for (u32 p = 0; p <= set.pos.npositions; p++)
     {
         position_offsets[p] = POS_UNSET;
     }
@@ -2204,6 +2205,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     resolve_block_patches(&ctx);
 
     fill_unset_positions(position_offsets, 0, set.pos.npositions, (u32) bytebuf_len(buf));
+    position_offsets[set.pos.npositions] = (u32) bytebuf_len(buf);
     u32 *live_end = arena_alloc(arena, (set.nvregs ? set.nvregs : 1) * sizeof(u32), sizeof(u32));
     for (u32 v = 0; v < set.nvregs; v++)
     {
@@ -2236,6 +2238,8 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     cf->phys_map = alloc->phys_map;
     cf->live_end = live_end;
     cf->param_stage = param_stage;
+    cf->alloc = alloc;
+    cf->position_offsets = debug ? position_offsets : NULL;
 }
 
 size_t x86_lower_module(CodegenModule *cm, IrModule *ir, bool debug, Arena *arena)

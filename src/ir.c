@@ -40,9 +40,20 @@ IrFunction *ir_module_add_func(IrModule *m, const char *name, Type *ret_type)
     f->arena = m->arena;
     f->params = vec_new(m->arena);
     f->blocks = vec_new(m->arena);
+    f->locals = vec_new(m->arena);
     f->cur_line = 0;
     vec_push(m->funcs, f);
     return f;
+}
+
+IrLocal *ir_func_add_local(IrFunction *f, const char *name, Type *type)
+{
+    IrLocal *l = arena_alloc(f->arena, sizeof(IrLocal), sizeof(void *));
+    l->name = name;
+    l->type = type;
+    l->vregs = vec_new(f->arena);
+    vec_push(f->locals, l);
+    return l;
 }
 
 IrBlock *ir_func_add_block(IrFunction *f, const char *label)
