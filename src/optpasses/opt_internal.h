@@ -128,8 +128,11 @@ struct OptimizerContext
     CfgInfo *cfg;
     Dominators *doms;
     LoopInfo *loops;
-    struct IrInstr **def_vreg;          /* producing instruction per vreg */
-    u32 *use_count;                     /* operand-reference count per vreg */
+    struct IrInstr **def_vreg; /* producing instruction per vreg */
+    u32 *use_count;            /* operand-reference count per vreg */
+    struct IrBlock **def_block;
+    struct IrInstr **def_instr;
+    u32 value_cap;
     u64 inline_sites;                   /* monotonic inline-site counter (unique clone labels) */
     struct HashMap *inline_lineage;     /* IrBlock* -> Vec<IrFunction*>: a clone's ancestry */
     struct HashMap *inline_caller_used; /* IrFunction* -> u32: clones a caller absorbed overall */
@@ -172,7 +175,7 @@ void opt_drop_edge(struct IrBlock *from, struct IrBlock *to);
 
 /* Value analysis (opt.c). */
 
-/* Fill ctx->def_vreg/ctx->use_count for f (fresh arena arrays, module-sized). */
+void opt_ensure_value_arrays(OptimizerContext *ctx);
 void opt_make_value_analysis(OptimizerContext *ctx, struct IrFunction *f);
 
 /* Def replacement (opt.c): schedule vreg -> operand substitutions, then resolve. */

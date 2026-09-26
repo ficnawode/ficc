@@ -71,6 +71,16 @@ void *arena_alloc(Arena *a, size_t size, size_t align)
     return c->buf + pos;
 }
 
+size_t arena_bytes(const Arena *a)
+{
+    size_t total = 0;
+    for (const Chunk *c = a->head; c; c = c->next)
+    {
+        total += c->cap;
+    }
+    return total;
+}
+
 void arena_free(Arena *a)
 {
     Chunk *c = a->head;

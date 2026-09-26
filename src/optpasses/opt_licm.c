@@ -178,8 +178,9 @@ bool opt_pass_licm(OptimizerContext *ctx)
         }
 
         u32 nvregs = ctx->mod->width_count;
-        IrBlock **def_block = arena_alloc(ctx->arena, nvregs * sizeof(IrBlock *), sizeof(void *));
-        IrInstr **def_instr = arena_alloc(ctx->arena, nvregs * sizeof(IrInstr *), sizeof(void *));
+        opt_ensure_value_arrays(ctx);
+        IrBlock **def_block = ctx->def_block;
+        IrInstr **def_instr = ctx->def_instr;
         for (u32 v = 0; v < nvregs; v++)
         {
             def_block[v] = NULL;

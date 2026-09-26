@@ -486,8 +486,16 @@ static void dump_vreg_type(const IrModule *m, u32 vreg)
     }
 }
 
-static bool vreg_is_pointer(const IrModule *m, const IrFunction *func, u32 vreg)
+static bool vreg_is_pointer(const IrModule *m, const IrFunction *func, u32 vreg, bool *visited)
 {
+    if (vreg < m->next_vreg && visited[vreg])
+    {
+        return false;
+    }
+    if (vreg < m->next_vreg)
+    {
+        visited[vreg] = true;
+    }
     for (size_t i = 0; i < vec_size(func->params); i++)
     {
         IrParam *param = (IrParam *) vec_get(func->params, i);
@@ -519,7 +527,7 @@ static bool vreg_is_pointer(const IrModule *m, const IrFunction *func, u32 vreg)
                 {
                     IrOperand val = ins->extra.phi.entries[e].val;
                     if (!val.is_imm && !val.is_global && !val.is_func && val.u.vreg != vreg &&
-                        vreg_is_pointer(m, func, val.u.vreg))
+                        vreg_is_pointer(m, func, val.u.vreg, visited))
                     {
                         return true;
                     }
@@ -531,7 +539,7 @@ static bool vreg_is_pointer(const IrModule *m, const IrFunction *func, u32 vreg)
                 {
                     IrOperand val = ins->ops[o];
                     if (!val.is_imm && !val.is_global && !val.is_func && val.u.vreg != vreg &&
-                        vreg_is_pointer(m, func, val.u.vreg))
+                        vreg_is_pointer(m, func, val.u.vreg, visited))
                     {
                         return true;
                     }
@@ -542,10 +550,12 @@ static bool vreg_is_pointer(const IrModule *m, const IrFunction *func, u32 vreg)
     return false;
 }
 
-static void dump_result_type(const IrModule *m, const IrFunction *func, const IrInstr *ins)
+static void dump_result_type(const IrModule *m, const IrFunction *func, const IrInstr *ins,
+                             bool *visited)
 {
     u32 bits = (u32) m->widths[ins->result] * 8;
-    if (vreg_is_pointer(m, func, ins->result) || ins->opcode == OP_ALLOCA ||
+    memset(visited, 0, m->next_vreg * sizeof(bool));
+    if (vreg_is_pointer(m, func, ins->result, visited) || ins->opcode == OP_ALLOCA ||
         ins->opcode == OP_GEP ||
         (ins->opcode == OP_CALL && ins->extra.call.ret_type &&
          type_is_ptr(ins->extra.call.ret_type)))
@@ -642,13 +652,13 @@ static void dump_switch_cases(IrInstr *ins)
     }
 }
 
-static void dump_instr(IrInstr *ins, IrModule *m, IrFunction *func)
+static void dump_instr(IrInstr *ins, IrModule *m, IrFunction *func, bool *visited)
 {
     printf("    ");
     if (ins->result != NO_VREG)
     {
         printf("v%u : ", ins->result);
-        dump_result_type(m, func, ins);
+        dump_result_type(m, func, ins, visited);
         printf(" = ");
     }
 
@@ -698,6 +708,8 @@ static void dump_instr(IrInstr *ins, IrModule *m, IrFunction *func)
 
 void ir_dump(IrModule *m)
 {
+    bool *visited =
+        arena_alloc(m->arena, (m->next_vreg ? m->next_vreg : 1) * sizeof(bool), sizeof(bool));
     size_t nfuncs = vec_size(m->funcs);
     for (size_t func_i = 0; func_i < nfuncs; func_i++)
     {
@@ -734,7 +746,7 @@ void ir_dump(IrModule *m)
             for (size_t instr_i = 0; instr_i < ninstrs; instr_i++)
             {
                 IrInstr *ins = (IrInstr *) vec_get(bb->instrs, instr_i);
-                dump_instr(ins, m, func);
+                dump_instr(ins, m, func, visited);
             }
         }
         printf("}\n");

@@ -96,10 +96,63 @@ static const OptPass *pass_lookup(OptPassId id)
     return NULL;
 }
 
+static bool pass_skipped(const char *name)
+{
+    const char *skip = getenv("FICC_SKIP_PASSES");
+    if (!skip || !*skip)
+    {
+        return false;
+    }
+    size_t n = strlen(name);
+    for (const char *p = skip; *p;)
+    {
+        while (*p == ' ' || *p == ',')
+        {
+            p++;
+        }
+        const char *s = p;
+        while (*p && *p != ' ' && *p != ',')
+        {
+            p++;
+        }
+        size_t len = (size_t) (p - s);
+        if (len == n && strncmp(s, name, n) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void trace_counts(IrModule *mod, size_t *instrs, size_t *blocks)
+{
+    size_t ni = 0, nb = 0;
+    size_t nf = vec_size(mod->funcs);
+    for (size_t fi = 0; fi < nf; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(mod->funcs, fi);
+        nb += vec_size(f->blocks);
+        size_t nblk = vec_size(f->blocks);
+        for (size_t b = 0; b < nblk; b++)
+        {
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+            ni += vec_size(bb->instrs);
+        }
+    }
+    *instrs = ni;
+    *blocks = nb;
+}
+
 /* Run the config's passes to fixpoint, bounded by its iteration budget. */
 static void run_pipeline(OptimizerContext *ctx)
 {
     const OptConfig *cfg = ctx->opts;
+    u32 max_iters = cfg->max_iterations;
+    const char *env_iters = getenv("FICC_OPT_MAX_ITER");
+    if (env_iters && *env_iters)
+    {
+        max_iters = (u32) strtoul(env_iters, NULL, 10);
+    }
     u32 iterations = 0;
     for (;;)
     {
@@ -113,14 +166,29 @@ static void run_pipeline(OptimizerContext *ctx)
                 opt_error("unknown pass id %d", (int) id);
                 exit(1);
             }
-            if (!pass->fn)
+            if (!pass->fn || pass_skipped(pass->name))
             {
-                continue; /* reserved pass, not implemented yet */
+                continue;
             }
-            if (pass->fn(ctx))
+            bool trace = getenv("FICC_OPT_TRACE") != NULL;
+            size_t bi = 0, bb0 = 0, ai = 0, ab = 0;
+            if (trace)
+            {
+                trace_counts(ctx->mod, &bi, &bb0);
+            }
+            bool pass_changed = pass->fn(ctx);
+            if (pass_changed)
             {
                 ctx->changed = true;
                 ctx->cfg_epoch++;
+            }
+            if (trace)
+            {
+                trace_counts(ctx->mod, &ai, &ab);
+                size_t abytes = arena_bytes(ctx->arena);
+                fprintf(stderr, "opt: iter %u pass %s %s ins %zu->%zu blk %zu->%zu arena %zuMB\n",
+                        iterations, pass->name, pass_changed ? "CHG" : "   ", bi, ai, bb0, ab,
+                        abytes / (1024 * 1024));
             }
 #ifdef OPT_VERIFY
             if (!opt_verify(ctx->mod))
@@ -134,11 +202,12 @@ static void run_pipeline(OptimizerContext *ctx)
         {
             return;
         }
-        if (++iterations >= cfg->max_iterations)
+        if (iterations >= max_iters)
         {
             opt_error("pass pipeline failed to converge");
             exit(1);
         }
+        iterations++;
     }
 }
 
@@ -479,12 +548,28 @@ static void count_use_operand(IrModule *mod, u32 *uses, IrOperand op)
     }
 }
 
+void opt_ensure_value_arrays(OptimizerContext *ctx)
+{
+    u32 n = ctx->mod->width_count;
+    if (n <= ctx->value_cap)
+    {
+        return;
+    }
+    u32 cap = n < 64 ? 64 : n;
+    ctx->def_vreg = arena_alloc(ctx->arena, cap * sizeof(IrInstr *), sizeof(void *));
+    ctx->use_count = arena_alloc(ctx->arena, cap * sizeof(u32), sizeof(u32));
+    ctx->def_block = arena_alloc(ctx->arena, cap * sizeof(IrBlock *), sizeof(void *));
+    ctx->def_instr = arena_alloc(ctx->arena, cap * sizeof(IrInstr *), sizeof(void *));
+    ctx->value_cap = cap;
+}
+
 void opt_make_value_analysis(OptimizerContext *ctx, IrFunction *f)
 {
     IrModule *mod = ctx->mod;
     u32 nvregs = mod->width_count;
-    IrInstr **defs = arena_alloc(ctx->arena, nvregs * sizeof(IrInstr *), sizeof(void *));
-    u32 *uses = arena_alloc(ctx->arena, nvregs * sizeof(u32), sizeof(u32));
+    opt_ensure_value_arrays(ctx);
+    IrInstr **defs = ctx->def_vreg;
+    u32 *uses = ctx->use_count;
     for (u32 v = 0; v < nvregs; v++)
     {
         defs[v] = NULL;

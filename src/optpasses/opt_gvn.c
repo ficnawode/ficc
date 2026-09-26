@@ -195,7 +195,8 @@ bool opt_pass_gvn(OptimizerContext *ctx)
         Dominators *doms = opt_get_doms(ctx, f);
 
         u32 nvregs = ctx->mod->width_count;
-        IrBlock **def_block = arena_alloc(ctx->arena, nvregs * sizeof(IrBlock *), sizeof(void *));
+        opt_ensure_value_arrays(ctx);
+        IrBlock **def_block = ctx->def_block;
         for (u32 v = 0; v < nvregs; v++)
         {
             def_block[v] = NULL;

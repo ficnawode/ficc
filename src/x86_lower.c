@@ -2179,27 +2179,25 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
 
     IrInstr *term = (IrInstr *) vec_get(blk->instrs, ii);
     bool is_brcond = term->opcode == OP_BRCOND;
-    emit_seg_transitions(ctx, pos_of(base, ii));
-    ctx->cur_pos = bend - 1;
-    if (is_brcond)
+    /* The folded compare runs before the terminator's segment transitions,
+       which may reuse a register it still reads. */
+    if (is_brcond && fold_cmp)
     {
-        if (fold_cmp)
+        ctx->cur_pos = pos_of(base, ii - 1);
+        if (is_icmp(fold_cmp->opcode))
         {
-            ctx->cur_pos = pos_of(base, ii - 1);
-            if (is_icmp(fold_cmp->opcode))
-            {
-                emit_icmp_cmp(ctx, fold_cmp->ops[0], fold_cmp->ops[1]);
-            }
-            else
-            {
-                emit_fcmp_flags(fold_cmp, ctx);
-            }
-            ctx->cur_pos = bend - 1;
+            emit_icmp_cmp(ctx, fold_cmp->ops[0], fold_cmp->ops[1]);
         }
         else
         {
-            lower_brcond_test(term, ctx);
+            emit_fcmp_flags(fold_cmp, ctx);
         }
+    }
+    emit_seg_transitions(ctx, pos_of(base, ii));
+    ctx->cur_pos = bend - 1;
+    if (is_brcond && !fold_cmp)
+    {
+        lower_brcond_test(term, ctx);
     }
     /* The compare above sets the flags the branch below reads; the phi copies in
        between must not clobber them, so they avoid a zeroing xor. */
@@ -2940,6 +2938,184 @@ static bool *analyze_zero_extended(IrFunction *f, const u8 *widths, u32 nvregs, 
     return known;
 }
 
+static IrBlock *block_by_label(IrFunction *f, const char *label)
+{
+    size_t n = vec_size(f->blocks);
+    for (size_t i = 0; i < n; i++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, i);
+        if (strcmp(bb->label, label) == 0)
+        {
+            return bb;
+        }
+    }
+    return NULL;
+}
+
+static bool block_phi_refs_label(IrBlock *bb, const char *label)
+{
+    size_t n = vec_size(bb->instrs);
+    for (size_t i = 0; i < n; i++)
+    {
+        IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
+        if (in->opcode != OP_PHI)
+        {
+            break;
+        }
+        for (u32 e = 0; e < in->extra.phi.nentries; e++)
+        {
+            if (strcmp(in->extra.phi.entries[e].label, label) == 0)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static void rename_phi_label(IrBlock *bb, const char *from, const char *to)
+{
+    size_t n = vec_size(bb->instrs);
+    for (size_t i = 0; i < n; i++)
+    {
+        IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
+        if (in->opcode != OP_PHI)
+        {
+            break;
+        }
+        for (u32 e = 0; e < in->extra.phi.nentries; e++)
+        {
+            if (strcmp(in->extra.phi.entries[e].label, from) == 0)
+            {
+                in->extra.phi.entries[e].label = to;
+            }
+        }
+    }
+}
+
+static bool terminator_splits(IrInstr *term)
+{
+    if (term->opcode == OP_BRCOND)
+    {
+        return strcmp(term->extra.brcond.true_label, term->extra.brcond.false_label) != 0;
+    }
+    return term->opcode == OP_SWITCH;
+}
+
+static void push_successor(Vec *labels, const char *label)
+{
+    if (!label)
+    {
+        return;
+    }
+    for (size_t i = 0; i < vec_size(labels); i++)
+    {
+        if (strcmp((const char *) vec_get(labels, i), label) == 0)
+        {
+            return;
+        }
+    }
+    vec_push(labels, (void *) label);
+}
+
+static Vec *successor_labels(IrInstr *term, Arena *arena)
+{
+    Vec *labels = vec_new(arena);
+    if (term->opcode == OP_BRCOND)
+    {
+        push_successor(labels, term->extra.brcond.true_label);
+        push_successor(labels, term->extra.brcond.false_label);
+        return labels;
+    }
+    push_successor(labels, term->extra.sw.default_label);
+    for (u32 c = 0; c < term->extra.sw.ncases; c++)
+    {
+        push_successor(labels, term->extra.sw.cases[c].label);
+    }
+    return labels;
+}
+
+static void retarget_terminator(IrBlock *bb, const char *from, const char *to)
+{
+    IrInstr *term = (IrInstr *) vec_last(bb->instrs);
+    if (term->opcode == OP_BRCOND)
+    {
+        if (strcmp(term->extra.brcond.true_label, from) == 0)
+        {
+            term->extra.brcond.true_label = to;
+        }
+        if (strcmp(term->extra.brcond.false_label, from) == 0)
+        {
+            term->extra.brcond.false_label = to;
+        }
+        return;
+    }
+    for (u32 c = 0; c < term->extra.sw.ncases; c++)
+    {
+        if (strcmp(term->extra.sw.cases[c].label, from) == 0)
+        {
+            term->extra.sw.cases[c].label = to;
+        }
+    }
+    if (term->extra.sw.default_label && strcmp(term->extra.sw.default_label, from) == 0)
+    {
+        term->extra.sw.default_label = to;
+    }
+}
+
+static void split_one_edge(IrFunction *f, IrBlock *pred, IrBlock *succ, const char *target,
+                           u32 *serial, Arena *arena)
+{
+    char *name = arena_alloc(arena, 32, 1);
+    snprintf(name, 32, "phi.edge.%u", (*serial)++);
+    IrBlock *edge = ir_func_add_block(f, name);
+    ir_emit_br(edge, target);
+    vec_push(edge->preds, pred);
+    rename_phi_label(succ, pred->label, edge->label);
+    retarget_terminator(pred, target, edge->label);
+    size_t npred = vec_size(succ->preds);
+    for (size_t p = 0; p < npred; p++)
+    {
+        if (vec_get(succ->preds, p) == pred)
+        {
+            vec_set(succ->preds, p, edge);
+            break;
+        }
+    }
+}
+
+/* PHI copies run at a block's end, so a copy for one successor edge would also
+   run on the block's other edges; split those edges into trampolines. */
+static void split_phi_edges(IrFunction *f, Arena *arena)
+{
+    u32 serial = 0;
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *pred = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(pred->instrs);
+        if (ninstr == 0)
+        {
+            continue;
+        }
+        IrInstr *term = (IrInstr *) vec_get(pred->instrs, ninstr - 1);
+        if (!terminator_splits(term))
+        {
+            continue;
+        }
+        Vec *labels = successor_labels(term, arena);
+        for (size_t s = 0; s < vec_size(labels); s++)
+        {
+            const char *label = (const char *) vec_get(labels, s);
+            IrBlock *succ = block_by_label(f, label);
+            if (succ && block_phi_refs_label(succ, pred->label))
+            {
+                split_one_edge(f, pred, succ, label, &serial, arena);
+            }
+        }
+    }
+}
+
 static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *arena, bool debug)
 {
     ByteBuf *buf = arena_alloc(arena, sizeof(ByteBuf), sizeof(void *));
@@ -2952,6 +3128,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
 
     const TargetDesc *target = x86_64_target();
     canonicalize_identity_geps(f, mod->next_vreg, arena);
+    split_phi_edges(f, arena);
     LiveIntervals set = liveinterval_compute(f, mod, arena);
     RegAllocation *alloc = regalloc_linear(f, &set, target, arena);
 
