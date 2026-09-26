@@ -1220,3 +1220,24 @@ TEST(records, sizeof_member_array)
                           "}\n",
                           80);
 }
+
+TEST(records, copy16_round_trip)
+{
+    /* A 16-byte struct copies as one movups pair, so the value must survive
+       both the return-by-value slot and repeated assignment. */
+    EXPECT_INTERP_AND_ELF("struct Quad { int a; int b; int c; int d; };\n"
+                          "struct Quad make(int x)\n"
+                          "{\n"
+                          "    struct Quad q;\n"
+                          "    q.a = x; q.b = x + 1; q.c = x + 2; q.d = x + 3;\n"
+                          "    return q;\n"
+                          "}\n"
+                          "int main(void)\n"
+                          "{\n"
+                          "    struct Quad p = make(1);\n"
+                          "    struct Quad q = p;\n"
+                          "    struct Quad r = q;\n"
+                          "    return r.a + r.b + r.c + r.d;\n"
+                          "}\n",
+                          10);
+}

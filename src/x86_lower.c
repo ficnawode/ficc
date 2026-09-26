@@ -1154,6 +1154,31 @@ static void lower_alloca(IrInstr *in, X86LowerCtx *ctx)
     (void) ctx;
 }
 
+/* A scalar- or 16-byte block is one load and one store; the read completes
+   before the write, so a self-overlapping copy is still correct.  This avoids
+   the %rsi/%rdi/%rcx setup and rep-movsb start-up a byte loop would pay. */
+static bool lower_memcpy_block(IrInstr *in, X86LowerCtx *ctx)
+{
+    u64 size = (u64) in->ops[2].u.imm;
+    if (size == 16)
+    {
+        X86Mem src = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
+        X86Mem dst = mem_operand_for_ptr(ctx, in->ops[0], R_EAX);
+        emit_mov16(ctx->buf, src, dst);
+        return true;
+    }
+    if (size != 1 && size != 2 && size != 4 && size != 8)
+    {
+        return false;
+    }
+    u8 w = size == 1 ? W_BYTE : size == 2 ? W_WORD : size == 4 ? W_DWORD : W_QWORD;
+    X86Mem src = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
+    emit_mov(ctx->buf, w, xop_reg(R_R11), xop_mem(src));
+    X86Mem dst = mem_operand_for_ptr(ctx, in->ops[0], R_EAX);
+    emit_mov(ctx->buf, w, xop_mem(dst), xop_reg(R_R11));
+    return true;
+}
+
 /* rdi <- dst, rsi <- src, then rep movsb.  The two moves are ordered so a
    source still living in %rdi or %rsi is read before its register is
    overwritten (the pathological swap goes through %rax). */
@@ -1161,6 +1186,10 @@ static void lower_memcpy(IrInstr *in, X86LowerCtx *ctx)
 {
     IrOperand dst = in->ops[0];
     IrOperand src = in->ops[1];
+    if (lower_memcpy_block(in, ctx))
+    {
+        return;
+    }
     if (operand_in_reg(ctx, dst, R_ESI) && operand_in_reg(ctx, src, R_EDI))
     {
         force_to_reg(ctx, src, R_EAX);
