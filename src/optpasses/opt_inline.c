@@ -9,7 +9,7 @@
 
 /* Clones a callee into each direct call site, ahead of GVN/LICM. */
 
-#define INLINE_T2_MAX_INSTRS 8  /* tier-2 body cap, in non-phi instructions */
+#define INLINE_T2_MAX_INSTRS 2  /* tier-2 body cap, in non-phi instructions */
 #define INLINE_T2_LOOP_FACTOR 4 /* a call in a loop amortizes its own overhead */
 #define INLINE_T2_MAX_PARAMS 4  /* frame/spill cost guard for tier 2 */
 #define INLINE_T2_MAX_LOCALS 8  /* alloca count guard for tier 2 */
@@ -153,14 +153,48 @@ static u32 count_allocas(IrFunction *callee)
     return n;
 }
 
+/* Direct call sites naming `name` across the whole module. */
+static u32 count_module_calls(IrModule *mod, const char *name)
+{
+    u32 n = 0;
+    size_t nfuncs = vec_size(mod->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(mod->funcs, fi);
+        size_t nblocks = vec_size(f->blocks);
+        for (size_t b = 0; b < nblocks; b++)
+        {
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+            size_t ninstrs = vec_size(bb->instrs);
+            for (size_t j = 0; j < ninstrs; j++)
+            {
+                IrInstr *in = (IrInstr *) vec_get(bb->instrs, j);
+                if (in->opcode == OP_CALL && !in->extra.call.is_indirect && in->extra.call.name &&
+                    strcmp(in->extra.call.name, name) == 0)
+                {
+                    n++;
+                }
+            }
+        }
+    }
+    return n;
+}
+
+/* A static with one call site has no other use once that site is cloned, so
+   DFE removes the original: the clone replaces the definition it costs. */
+static bool single_use_static(IrModule *mod, IrFunction *callee)
+{
+    return callee->is_static && count_module_calls(mod, callee->name) == 1;
+}
+
 /* Tier 1 needs no size census; tier 2 is the size filter. */
-static bool callee_eligible(IrFunction *callee, bool in_loop)
+static bool callee_eligible(IrModule *mod, IrFunction *callee, bool in_loop)
 {
     if (callee->is_variadic || callee_uses_va_or_special(callee) || callee_entry_has_phis(callee))
     {
         return false;
     }
-    if (callee->is_inline)
+    if (callee->is_inline || single_use_static(mod, callee))
     {
         return true;
     }
@@ -196,7 +230,7 @@ static bool site_eligible(InlinePass *ip, IrFunction *caller, Vec *lin, IrFuncti
             return false;
         }
     }
-    return callee_eligible(callee, in_loop);
+    return callee_eligible(ip->ctx->mod, callee, in_loop);
 }
 
 typedef struct

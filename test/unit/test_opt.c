@@ -2416,3 +2416,95 @@ TEST(opt, o3_strength_is_distinct_from_o2)
     arena_free(a1);
     arena_free(a2);
 }
+
+/* DFE: a static helper inlined at its only call site leaves no reference, so
+   its definition is dropped (codegen lowers every IrFunction otherwise). */
+TEST(opt, dfe_removes_inlined_static)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static int twice(int x) { return x + x; }\n"
+                                  "int main(void) { return twice(21); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "twice") == 0);
+    EXPECT_TRUE(fn_by_name(m, "twice") == NULL); /* body dropped */
+    EXPECT_EQ(ir_interp_run(m), 42);
+    arena_free(a);
+}
+
+/* DFE keeps an exported function: another translation unit may call it. */
+TEST(opt, dfe_keeps_exported_function)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int twice(int x) { return x + x; }\n"
+                                  "int main(void) { return twice(21); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_NOTNULL(fn_by_name(m, "twice"));
+    EXPECT_EQ(ir_interp_run(m), 42);
+    arena_free(a);
+}
+
+/* DFE keeps a static whose address escapes (is_func operand), even with no
+   direct call left: an indirect call may still reach it. */
+TEST(opt, dfe_keeps_address_taken_static)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static int pick(int x) { return x + 1; }\n"
+                                  "typedef int (*fp)(int);\n"
+                                  "int (*g)(int) = pick;\n"
+                                  "int main(void) { return g(41); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_NOTNULL(fn_by_name(m, "pick"));
+    EXPECT_EQ(ir_interp_run(m), 42);
+    arena_free(a);
+}
+
+/* A static single-use helper larger than the tier-2 cap still inlines: DFE
+   removes the definition, so the clone does not reproduce the body. */
+TEST(opt, inline_single_use_static_over_cap)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("static int many(int k)\n"
+                                  "{\n"
+                                  "    int s = 0;\n"
+                                  "    s = s + k; s = s + k; s = s + k; s = s + k; s = s + k;\n"
+                                  "    s = s + k; s = s + k; s = s + k; s = s + k; s = s + k;\n"
+                                  "    return s;\n"
+                                  "}\n"
+                                  "int main(void) { return many(1); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_TRUE(count_calls_to(m, "many") == 0);
+    EXPECT_TRUE(fn_by_name(m, "many") == NULL);
+    EXPECT_EQ(ir_interp_run(m), 10);
+    arena_free(a);
+}
+
+/* DFE must see a function operand passed as an argument to a direct call:
+   walk(callback) keeps `callback` alive even when no call names it directly. */
+TEST(opt, dfe_keeps_func_passed_as_direct_call_arg)
+{
+    Arena *a = arena_new();
+    IrModule *m =
+        tc_build_module("typedef void (*fn)(int);\n"
+                        "static void callback(int x) { (void) x; }\n"
+                        "static void walk(fn f, int n) { for (int i = 0; i < n; i++) f(i); }\n"
+                        "int main(void) { walk(callback, 5); return 7; }\n",
+                        a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_NOTNULL(fn_by_name(m, "callback"));
+    EXPECT_EQ(ir_interp_run(m), 7);
+    arena_free(a);
+}

@@ -81,6 +81,7 @@ typedef enum
     OPT_PASS_CFG_CLEAN,
     OPT_PASS_PREHEADER,
     OPT_PASS_INLINE,
+    OPT_PASS_DFE,
     OPT_PASS_GVN,
     OPT_PASS_LICM,
     OPT_PASS_MEM_FWD,
@@ -213,6 +214,7 @@ bool opt_pass_preheader(OptimizerContext *ctx);
 /* Optimize passes (one file each). */
 
 bool opt_pass_inline(OptimizerContext *ctx);
+bool opt_pass_dfe(OptimizerContext *ctx);
 bool opt_pass_gvn(OptimizerContext *ctx);
 bool opt_pass_licm(OptimizerContext *ctx);
 bool opt_pass_mem_fwd(OptimizerContext *ctx);

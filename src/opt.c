@@ -74,6 +74,7 @@ static const OptPass opt_passes[] = {
     {OPT_PASS_CFG_CLEAN, "cfg_clean", opt_pass_cfg_clean},
     {OPT_PASS_PREHEADER, "preheader", opt_pass_preheader},
     {OPT_PASS_INLINE, "inline", opt_pass_inline},
+    {OPT_PASS_DFE, "dfe", opt_pass_dfe},
     {OPT_PASS_GVN, "gvn", opt_pass_gvn},
     {OPT_PASS_LICM, "licm", opt_pass_licm},
     {OPT_PASS_MEM_FWD, "mem_fwd", opt_pass_mem_fwd},
@@ -200,7 +201,7 @@ static void run_pipeline(OptimizerContext *ctx)
         }
         if (!ctx->changed)
         {
-            return;
+            break;
         }
         if (iterations >= max_iters)
         {
@@ -208,6 +209,17 @@ static void run_pipeline(OptimizerContext *ctx)
             exit(1);
         }
         iterations++;
+    }
+    /* Dead function elimination runs once the rest of the pipeline stops
+       cloning: a function may be unreferenced at any single iteration and
+       still be referenced by a clone a later inline pass produces. */
+    const OptPass *dfe = pass_lookup(OPT_PASS_DFE);
+    if (dfe && dfe->fn && !pass_skipped(dfe->name))
+    {
+        while (dfe->fn(ctx))
+        {
+            ctx->cfg_epoch++;
+        }
     }
 }
 
