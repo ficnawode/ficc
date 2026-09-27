@@ -202,10 +202,12 @@ static void emit_reg_arg(X86LowerCtx *ctx, IrOperand op, const SysvArgPlan *p)
 {
     if (p->is_record)
     {
+        /* R11 is reserved scratch and never an argument lane, so the record's
+           address is materialized once and read at every chunk offset. */
+        x86_lower_force_to_reg(ctx, op, R_R11);
         for (u8 c = 0; c < p->nchunks; c++)
         {
             const SysvChunk *chunk = &p->chunks[c];
-            x86_lower_force_to_reg(ctx, op, R_R11);
             X86Mem src = x86_mem_r11((i32) chunk->chunk_off);
             if (chunk->kind == SYSV_GP)
             {
