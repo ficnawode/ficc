@@ -122,6 +122,7 @@ struct FuncBuilder
     U64Map *static_map;    /* (u64)ASTVarDecl* -> u32* (index into mod->globals) */
     Vec *spilled;          /* Vec<ASTVarDecl*>: block-scope autos whose address is taken */
     U64Map *spill_slots;   /* (u64)ASTVarDecl* -> IrOperand* (function-entry slot addr) */
+    U64Map *mem_slots;     /* (u64)ASTVarDecl* -> IrOperand* (aggregate object address) */
     U64Map *param_decls;   /* (u64)ASTVarDecl* -> non-NULL for parameters */
     U64Map *local_records; /* (u64)ASTVarDecl* -> IrLocal* (debug locations) */
     u32 sret_vreg;         /* hidden sret pointer vreg for record-returning funcs */
@@ -494,6 +495,16 @@ static void emit_spill_allocas(FuncBuilder *ctx, IrBlock *entry)
 
 static IrOperand read_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
 {
+    /* An aggregate/union/array object is its storage address, which is fixed
+       for the whole function (the entry slot, or the caller's copy for a record
+       parameter).  Return it directly: routing it through per-block SSA would
+       yield a PHI whose incoming value from a switch's dispatch block is the
+       undefined `0` when the object was declared inside the switch body. */
+    IrOperand *mem = u64map_get(ctx->mem_slots, (u64) (uintptr_t) var);
+    if (mem)
+    {
+        return *mem;
+    }
     IrOperand *slot = spill_slot(ctx, var);
     if (slot)
     {
@@ -544,6 +555,13 @@ static IrOperand read_var_at_merge(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *b
 
 static void write_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb, IrOperand val)
 {
+    /* Aggregate objects have a fixed storage address; remember it instead of
+       tracking a per-block SSA value (see read_variable). */
+    if (type_is_memory(var->type))
+    {
+        u64map_set(ctx->mem_slots, (u64) (uintptr_t) var, persist_operand(ctx, val));
+        return;
+    }
     IrOperand *slot = spill_slot(ctx, var);
     if (slot)
     {
@@ -2039,10 +2057,11 @@ static bool fold_constant_ir(ASTNode *node, i64 *out)
                 *out = type_reduce_int(ce->target_type, v);
                 return true;
             }
-            /* Null pointer constant spelled with a cast, e.g. `(void*)0`. */
-            if (type_is_ptr(ce->target_type) && v == 0)
+            /* An address constant may be an integer constant expression cast
+               to pointer type (§6.6p9), not only the null pointer constant. */
+            if (type_is_ptr(ce->target_type))
             {
-                *out = 0;
+                *out = v;
                 return true;
             }
             return false;
@@ -2613,7 +2632,7 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
             /* FP elements fold to their bits at the object's precision. */
             Type *wt = type_unqual(w->type);
             FpConst c;
-            if (!fold_float_constant(w->value, &c))
+            if (!fold_float_operand(w->value, &c, true))
             {
                 ir_error(w->value, "initializer element is not a constant");
                 return false;
@@ -2721,6 +2740,26 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
 static u32 emit_global_decl(ASTVarDecl *vd, IrModule *mod, Arena *arena, StrMap *global_map,
                             U64Map *static_map)
 {
+    /* C tentative definitions merge: `int x;` followed by `int x = 1;` (or a
+       second `int x;`) is a single object (§6.9.2).  Likewise an `extern`
+       declaration of a name that is later defined.  Reuse the existing slot
+       rather than emitting a duplicate symbol with the same name. */
+    u32 *existing = strmap_get(global_map, vd->name);
+    if (existing)
+    {
+        IrGlobal *g = (IrGlobal *) vec_get(mod->globals, *existing);
+        bool new_is_extern = vd->storage == SC_EXTERN;
+        bool new_is_def = vd->plan || vd->init || vd->has_const_init;
+        if (!new_is_extern && (new_is_def || g->linkage == IR_LINK_EXTERN))
+        {
+            if (!fill_global(g, vd, mod, global_map, static_map, arena))
+            {
+                return NO_VREG;
+            }
+        }
+        return *existing;
+    }
+
     IrGlobal *g = arena_alloc(arena, sizeof(IrGlobal), sizeof(void *));
     g->name = vd->name;
     /* Reserve the index before filling so `&g` self-references resolve. */
@@ -4003,6 +4042,7 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
                        .static_map = u64map_new(mod->arena),
                        .spilled = vec_new(mod->arena),
                        .spill_slots = u64map_new(mod->arena),
+                       .mem_slots = u64map_new(mod->arena),
                        .param_decls = u64map_new(mod->arena),
                        .local_records = u64map_new(mod->arena),
                        .sret_vreg = NO_VREG};
