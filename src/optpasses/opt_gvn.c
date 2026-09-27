@@ -203,7 +203,7 @@ bool opt_pass_gvn(OptimizerContext *ctx)
         }
         build_def_block(f, def_block);
 
-        HashMap *table = hashmap_new(ctx->arena, vn_key_hash, vn_key_eq);
+        HashMap *table = hashmap_new(ctx->scratch, vn_key_hash, vn_key_eq);
         opt_repl_begin(ctx);
         for (u32 k = 0; k < cfg->nreach; k++)
         {
@@ -232,7 +232,7 @@ bool opt_pass_gvn(OptimizerContext *ctx)
                 }
                 else
                 {
-                    VnKey *stored = arena_alloc(ctx->arena, sizeof(VnKey), _Alignof(VnKey));
+                    VnKey *stored = arena_alloc(ctx->scratch, sizeof(VnKey), _Alignof(VnKey));
                     *stored = key;
                     hashmap_set(table, stored, (void *) (uintptr_t) (in->result + 1));
                 }

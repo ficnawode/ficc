@@ -177,6 +177,12 @@ static void run_pipeline(OptimizerContext *ctx)
             {
                 trace_counts(ctx->mod, &bi, &bb0);
             }
+            /* Analysis built by one pass is dead once it returns; reuse the scratch. */
+            arena_reset(ctx->scratch);
+            ctx->cache_f = NULL;
+            ctx->cfg = NULL;
+            ctx->doms = NULL;
+            ctx->loops = NULL;
             bool pass_changed = pass->fn(ctx);
             if (pass_changed)
             {
@@ -229,9 +235,9 @@ static void ensure_caches(OptimizerContext *ctx, IrFunction *f)
     {
         return;
     }
-    ctx->cfg = opt_cfg_build(f, ctx->arena);
-    ctx->doms = opt_doms_build(ctx->cfg, ctx->arena);
-    ctx->loops = opt_loops_find(f, ctx->cfg, ctx->doms, ctx->arena);
+    ctx->cfg = opt_cfg_build(f, ctx->scratch);
+    ctx->doms = opt_doms_build(ctx->cfg, ctx->scratch);
+    ctx->loops = opt_loops_find(f, ctx->cfg, ctx->doms, ctx->scratch);
     ctx->cache_f = f;
     ctx->cache_epoch = ctx->cfg_epoch;
 }
@@ -257,7 +263,7 @@ LoopInfo *opt_get_loops(OptimizerContext *ctx, IrFunction *f)
 Vec *opt_rpo_order(OptimizerContext *ctx, IrFunction *f)
 {
     CfgInfo *cfg = opt_get_cfg(ctx, f);
-    Vec *order = vec_new(ctx->arena);
+    Vec *order = vec_new(ctx->scratch);
     for (u32 k = 0; k < cfg->nreach; k++)
     {
         vec_push(order, cfg->rpo[k]);
@@ -770,7 +776,9 @@ void optimize(IrModule *mod, OptLevel level, Arena *arena)
     memset(&ctx, 0, sizeof(ctx));
     ctx.mod = mod;
     ctx.arena = arena;
+    ctx.scratch = arena_new();
     ctx.opts = opt_config_for(level);
 
     run_pipeline(&ctx);
+    arena_free(ctx.scratch);
 }

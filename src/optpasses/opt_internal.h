@@ -121,6 +121,7 @@ struct OptimizerContext
 {
     struct IrModule *mod;
     Arena *arena;
+    Arena *scratch; /* per-pass analysis scratch; reset before each pass */
     bool changed;               /* a pass in the last table iteration changed the IR */
     const OptConfig *opts;      /* the pass selection driving the optimizer */
     struct IrFunction *cache_f; /* function the caches below describe (NULL: none) */

@@ -849,6 +849,7 @@ static OptimizerContext make_ctx(IrModule *m, Arena *a)
     memset(&ctx, 0, sizeof(ctx));
     ctx.mod = m;
     ctx.arena = a;
+    ctx.scratch = a;
     ctx.opts = opt_config_for(OPT_LEVEL_0);
     return ctx;
 }

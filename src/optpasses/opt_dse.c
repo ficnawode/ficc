@@ -56,7 +56,7 @@ bool opt_pass_dse(OptimizerContext *ctx)
         for (size_t b = 0; b < nblocks; b++)
         {
             IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
-            Vec *dead = vec_new(ctx->arena);
+            Vec *dead = vec_new(ctx->scratch);
             size_t n = vec_size(bb->instrs);
             for (size_t i = 0; i < n; i++)
             {

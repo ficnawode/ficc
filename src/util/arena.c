@@ -81,6 +81,19 @@ size_t arena_bytes(const Arena *a)
     return total;
 }
 
+void arena_reset(Arena *a)
+{
+    Chunk *c = a->head;
+    while (c)
+    {
+        Chunk *next = c->next;
+        free(c->buf);
+        free(c);
+        c = next;
+    }
+    a->head = chunk_new(CHUNK_SIZE);
+}
+
 void arena_free(Arena *a)
 {
     Chunk *c = a->head;

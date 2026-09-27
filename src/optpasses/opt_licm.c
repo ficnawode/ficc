@@ -198,14 +198,14 @@ bool opt_pass_licm(OptimizerContext *ctx)
                 continue;
             }
 
-            HashSet *loop_blocks = hashset_new(ctx->arena, ptr_hash, ptr_eq);
+            HashSet *loop_blocks = hashset_new(ctx->scratch, ptr_hash, ptr_eq);
             size_t nblocks = vec_size(loop->blocks);
             for (size_t bi = 0; bi < nblocks; bi++)
             {
                 hashset_add(loop_blocks, vec_get(loop->blocks, bi));
             }
 
-            HashSet *hoisted = hashset_new(ctx->arena, ptr_hash, ptr_eq);
+            HashSet *hoisted = hashset_new(ctx->scratch, ptr_hash, ptr_eq);
             bool progress = true;
             while (progress)
             {

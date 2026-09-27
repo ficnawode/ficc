@@ -69,7 +69,7 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx)
         for (size_t bi = 0; bi < nblocks; bi++)
         {
             IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
-            Vec *facts = vec_new(ctx->arena);
+            Vec *facts = vec_new(ctx->scratch);
             size_t i = 0;
             while (i < vec_size(bb->instrs))
             {
@@ -93,7 +93,7 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx)
                     u8 w = (u8) in->ops[2].u.imm;
                     if (w != 16)
                     {
-                        FwdFact *fact = arena_alloc(ctx->arena, sizeof(FwdFact), _Alignof(FwdFact));
+                        FwdFact *fact = arena_alloc(ctx->scratch, sizeof(FwdFact), _Alignof(FwdFact));
                         fact_clear_fields(fact);
                         fact->kind = FWD_STORE;
                         fact->ptr = in->ops[1];
@@ -149,7 +149,7 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx)
                     }
                     if (w != 16)
                     {
-                        FwdFact *fact = arena_alloc(ctx->arena, sizeof(FwdFact), _Alignof(FwdFact));
+                        FwdFact *fact = arena_alloc(ctx->scratch, sizeof(FwdFact), _Alignof(FwdFact));
                         fact_clear_fields(fact);
                         fact->kind = FWD_LOAD;
                         fact->ptr = ptr;

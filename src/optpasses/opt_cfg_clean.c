@@ -129,7 +129,7 @@ static void remove_block(IrFunction *f, StrMap *labels, IrBlock *bb)
 
 static bool prune_unreachable(OptimizerContext *ctx, IrFunction *f, StrMap *labels)
 {
-    u8 *seen = reachable(f, labels, ctx->arena);
+    u8 *seen = reachable(f, labels, ctx->scratch);
     bool pruned = false;
     size_t n = vec_size(f->blocks);
     for (size_t k = n; k-- > 1;)
@@ -350,7 +350,7 @@ bool opt_pass_cfg_clean(OptimizerContext *ctx)
     for (size_t fi = 0; fi < nfuncs; fi++)
     {
         IrFunction *f = (IrFunction *) vec_get(ctx->mod->funcs, fi);
-        StrMap *labels = opt_label_map_build(f, ctx->arena);
+        StrMap *labels = opt_label_map_build(f, ctx->scratch);
         changed |= prune_unreachable(ctx, f, labels);
         changed |= fold_constant_brcond(ctx, f, labels);
         changed |= merge_jump_stubs(ctx, f, labels);

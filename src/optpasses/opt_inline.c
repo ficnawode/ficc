@@ -452,6 +452,7 @@ static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 
 {
     IrModule *mod = ip->ctx->mod;
     Arena *arena = ip->ctx->arena;
+    Arena *scratch = ip->ctx->scratch;
     u64 site = ip->ctx->inline_sites;
 
     u32 nparams = (u32) vec_size(callee->params);
@@ -463,7 +464,7 @@ static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 
 
     /* Param vregs -> the arg operands; cloned results -> fresh vregs. */
     u32 nvregs = mod->width_count;
-    IrOperand *vreg_map = arena_alloc(arena, nvregs * sizeof(IrOperand), sizeof(IrOperand));
+    IrOperand *vreg_map = arena_alloc(scratch, nvregs * sizeof(IrOperand), sizeof(IrOperand));
     for (u32 v = 0; v < nvregs; v++)
     {
         vreg_map[v] = ir_operand_vreg(NO_VREG); /* the "unmapped" sentinel */
@@ -521,8 +522,8 @@ static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 
     rename_phi_pred(caller, bb->label, cont->label);
 
     /* Clone the blocks first so label translations resolve, then fill them. */
-    Vec *cloned = vec_new(arena);
-    StrMap *labels = strmap_new(arena);
+    Vec *cloned = vec_new(scratch);
+    StrMap *labels = strmap_new(scratch);
     Vec *clone_lin = child_lineage(ip, parent_lineage, callee);
     for (size_t cbi = 0; cbi < ncb; cbi++)
     {
@@ -538,7 +539,7 @@ static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 
     InlineCtx ic = {.nvregs = nvregs, .vreg_map = vreg_map, .labels = labels};
 
     /* Allocate the callee's allocas once in the caller's entry, not per site. */
-    Vec *hoisted = vec_new(arena);
+    Vec *hoisted = vec_new(scratch);
     u32 ncloned = 0;
     for (size_t cbi = 0; cbi < ncb; cbi++)
     {
@@ -722,7 +723,7 @@ static bool process_caller(InlinePass *ip, IrFunction *caller)
     /* Loop info is pooled before cloning; the growth/lineage maps persist. */
     LoopInfo *loops = opt_get_loops(ip->ctx, caller);
     scan_blocks(ip, caller, loops);
-    rebuild_preds(caller, ip->ctx->arena);
+    rebuild_preds(caller, ip->ctx->scratch);
     return ip->ctx->inline_sites != sites_before;
 }
 
