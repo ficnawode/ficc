@@ -1,4 +1,4 @@
-/* SysV FP ABI + file-scope FP globals, end-to-end golden. Expect exit 42. */
+/* SysV FP ABI. Expect exit 42. */
 
 double g = 1.5;
 const double gc = 6.25;

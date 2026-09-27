@@ -1,12 +1,8 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Phase 13d: the comma operator (§6.5.17). It is the C11 *expression* level:
-   the left operand is evaluated as a void expression and discarded, the value
-   is the right operand's. Commas in argument lists, initializer lists, and
-   designator indexes are *separators*, not the operator — those stay at the
-   assignment-expression level. Every program must produce the same result
-   through the interpreter and through the compiled ELF. */
+/* C11 §6.5.17: the left operand is evaluated as a void expression and
+   discarded; the value is the right operand's. */
 
 TEST(comma, value_is_right_operand)
 {
@@ -145,13 +141,24 @@ TEST(comma, in_init_list_is_separator)
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int a[3] = {1, 2, 3};\n"
                           "    int i = 0;\n"
-                          "    a[i++] = (4, 41);\n" /* inner paren → comma op */
+                          "    a[i++] = (4, 41);\n"
                           "    a[i++] = 1;\n"
                           "    if (a[0] != 41) return 1;\n"
                           "    if (i != 2) return 2;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
+}
+
+TEST(comma, declaration_list_comma_is_separator)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a = (1, 2), b = (3, 4);\n"
+                          "    if (a != 2) return 1;\n"
+                          "    if (b != 4) return 2;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
 }
 
 TEST(comma, size_of_paren_primary)
@@ -178,8 +185,6 @@ TEST(comma, left_side_effects_before_right)
                           "}\n",
                           42);
 }
-
-/* negatives (all must fail to build) */
 
 TEST(comma, negative_not_an_lvalue)
 {

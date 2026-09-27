@@ -8,7 +8,6 @@
 #include "util/bytebuf.h"
 #include "x86_lower.h"
 
-/* A two-segment split at the call position 2: [0,1] then [2,3]. */
 static RegAllocation gap_alloc(Arena *arena, u32 vreg, u8 pre_reg, u8 post_reg)
 {
     RegAllocation alloc = {0};
@@ -228,7 +227,6 @@ TEST(x86_lower, phi_copy_cycle_alone_reserves_the_scratch_slot)
     arena_free(a);
 }
 
-/* The `push rbp` + `mov rbp, rsp` prologue pair. */
 static bool has_fp_prologue(ByteBuf *b)
 {
     const u8 *code = bytebuf_data(b);
@@ -304,9 +302,7 @@ TEST(x86_lower, identity_geps_fold_before_liveness)
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     u32 g = zero_offset_gep_result(f);
     EXPECT_TRUE(g != NO_VREG);
-    /* The segment table is only retained after lowering in debug builds (it
-       backs DWARF locations); a plain build frees it with the per-function
-       scratch arena, so inspect it under -g. */
+    /* The segment table backs DWARF locations and is retained only under -g. */
     CodegenConfig dbg = {.debug = true};
     CodegenModule *cm = codegen_ir_to_machine(m, &dbg, a);
     EXPECT_NOTNULL(cm);

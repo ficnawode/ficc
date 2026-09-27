@@ -3,8 +3,6 @@
 
 #include "util/arena.h"
 
-/* Phase 14c: _Bool — 1-byte unsigned integer that normalizes to 0/1. */
-
 TEST(bool, declare_and_normalize)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -92,19 +90,39 @@ TEST(bool, block_static_normalizes)
                           0);
 }
 
-TEST(bool, arrays_and_records)
+TEST(bool, uninitialized_globals_default_zero)
 {
-    EXPECT_INTERP_AND_ELF("struct S { _Bool f; int n; };\n"
+    EXPECT_INTERP_AND_ELF("_Bool g;\n"
+                          "static _Bool s;\n"
                           "int main(void) {\n"
+                          "    if (g != 0) return 1;\n"
+                          "    if (s != 0) return 2;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(bool, array_elements_normalize)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    _Bool arr[3] = {17, 0, 1};\n"
                           "    if (arr[0] != 1) return 1;\n"
                           "    if (arr[1] != 0) return 2;\n"
                           "    if (arr[2] != 1) return 3;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(bool, record_member_and_copy_normalize)
+{
+    EXPECT_INTERP_AND_ELF("struct S { _Bool f; int n; };\n"
+                          "int main(void) {\n"
                           "    struct S s = {9, 10};\n"
-                          "    if (s.f != 1) return 4;\n"
-                          "    if (s.n != 10) return 5;\n"
+                          "    if (s.f != 1) return 1;\n"
+                          "    if (s.n != 10) return 2;\n"
                           "    struct S t = s;\n"
-                          "    if (t.f != 1) return 6;\n"
+                          "    if (t.f != 1) return 3;\n"
                           "    return 0;\n"
                           "}\n",
                           0);
@@ -143,22 +161,30 @@ TEST(bool, casts_fold_and_run)
                           0);
 }
 
-TEST(bool, logic_and_switch)
+TEST(bool, logical_operators_yield_bool)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    _Bool b = (5 > 3);\n"
                           "    if (b != 1) return 1;\n"
                           "    if (!b) return 2;\n"
                           "    if (b && 1 != 1) return 3;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(bool, switch_selects_on_bool)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    switch ((_Bool)2) {\n"
                           "        case 1: return 0;\n"
-                          "        default: return 4;\n"
+                          "        default: return 1;\n"
                           "    }\n"
                           "}\n",
                           0);
 }
 
-TEST(bool, incdec_and_compound_assign)
+TEST(bool, increment_decrement_normalize)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    _Bool b = 0;\n"
@@ -167,10 +193,19 @@ TEST(bool, incdec_and_compound_assign)
                           "    if (b != 1) return 1;\n"
                           "    b--;\n"
                           "    if (b != 0) return 2;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(bool, compound_assign_normalize)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    _Bool b = 0;\n"
                           "    b += 1;\n"
-                          "    if (b != 1) return 3;\n"
+                          "    if (b != 1) return 1;\n"
                           "    b *= 0;\n"
-                          "    if (b != 0) return 4;\n"
+                          "    if (b != 0) return 2;\n"
                           "    return 0;\n"
                           "}\n",
                           0);
@@ -197,7 +232,6 @@ TEST(bool, const_write_rejected)
 
 TEST(bool, bool_name_stays_identifier)
 {
-    /* bool/true/false arrive later via <stdbool.h> (Phase 17). */
     EXPECT_BUILD_FAIL("int main(void) {\n"
                       "    bool b = 1;\n"
                       "    return 0;\n"

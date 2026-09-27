@@ -1,10 +1,7 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Phase 23: wide/UTF string and character literals (§6.4.4.4, §6.4.5). The
-   encoding prefix selects the element type: none/u8 -> char, L -> wchar_t
-   (int here), u -> char16_t, U -> char32_t. Both the interpreter and the
-   compiled ELF must agree. */
+/* Wide/UTF string and character literals (C11 §6.4.4.4, §6.4.5). */
 
 TEST(wide_string, content_and_indexing)
 {
@@ -58,13 +55,31 @@ TEST(wide_string, inferred_array_length)
                           42);
 }
 
-TEST(wide_string, utf16_and_utf32_arrays)
+TEST(wide_string, utf16_array_init)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    unsigned short c[] = u\"hi\";\n"
                           "    if (c[0] != 'h' || c[1] != 'i' || sizeof(c) != 6) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(wide_string, utf32_array_init)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    unsigned int d[] = U\"hi\";\n"
-                          "    if (d[0] != 'h' || d[1] != 'i' || sizeof(d) != 12) return 2;\n"
+                          "    if (d[0] != 'h' || d[1] != 'i' || sizeof(d) != 12) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(wide_string, adjacent_literal_concatenation)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    const int *w = L\"a\" L\"b\";\n"
+                          "    if (w[0] != 'a' || w[1] != 'b' || w[2] != 0) return 1;\n"
                           "    return 42;\n"
                           "}\n",
                           42);

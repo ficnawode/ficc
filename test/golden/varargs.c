@@ -1,12 +1,4 @@
-/* Phase 15: variadic functions — end-to-end golden. Compile with ficc
-   (`ficc -run varargs.c` for the interpreter, `ficc -c` + `gcc -no-pie` for
-   the ELF), and expect exit status 42.
-
-   Exercises the full builtin surface together: a variadic definition, the
-   register save area, `__builtin_va_start`, GP-area reads via
-   `__builtin_va_arg`, the overflow-area cross (seven trailing ints), and a
-   passed-through `__builtin_va_list`. Uses the Phase 15 native `__builtin_va_*`
-   spellings — the raw names arrive via the `<stdarg.h>` shim in Phase 17. */
+/* Expect exit 42. */
 
 int sum(int n, ...)
 {
@@ -33,7 +25,7 @@ int probe(int a, ...)
     __builtin_va_list ap;
     __builtin_va_start(ap, a);
     int gp_base = *(int *) ap + *(int *) ((char *) ap + 4); /* gp_offset + fp_offset */
-    int pair = read_pair(ap);                               /* walk through a helper */
+    int pair = read_pair(ap);
     __builtin_va_end(ap);
     return gp_base + pair;
 }

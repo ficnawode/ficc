@@ -1,10 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Backend-quality corpus: the shapes codegen changes (constant materialization,
-   switch lowering, compares, spills) are most likely to miscompile. Every case
-   asserts the interpreter and the linked ELF agree on the exit value. */
-
 TEST(codegen_quality, compare_zero_signed)
 {
     EXPECT_INTERP_AND_ELF(
@@ -27,13 +23,20 @@ TEST(codegen_quality, compare_zero_narrow)
                           7);
 }
 
-TEST(codegen_quality, inc_dec_loops)
+TEST(codegen_quality, increment_loop)
 {
     EXPECT_INTERP_AND_ELF("int main(void){ int s=0;\n"
                           "  for (int i=0;i<10;i=i+1) { s=s+i; }\n"
+                          "  return s; }\n",
+                          45);
+}
+
+TEST(codegen_quality, decrement_loop)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ int s=0;\n"
                           "  for (int j=10;j>0;j=j-1) { s=s+1; }\n"
                           "  return s; }\n",
-                          55);
+                          10);
 }
 
 TEST(codegen_quality, constant_materialization_boundaries)
@@ -116,12 +119,18 @@ TEST(codegen_quality, call_arg_pressure)
                           36);
 }
 
-TEST(codegen_quality, leaf_and_call_frames)
+TEST(codegen_quality, leaf_frame)
+{
+    EXPECT_INTERP_AND_ELF("int leaf(int x){ return x*x; }\n"
+                          "int main(void){ return leaf(5)%251; }\n",
+                          25);
+}
+
+TEST(codegen_quality, call_frame)
 {
     EXPECT_INTERP_AND_ELF("int add(int a,int b){ return a+b; }\n"
-                          "int leaf(int x){ return x*x; }\n"
-                          "int main(void){ return (leaf(5)+add(10,7))%251; }\n",
-                          42);
+                          "int main(void){ return add(10,7)%251; }\n",
+                          17);
 }
 
 TEST(codegen_quality, long_double_compare)
@@ -203,13 +212,21 @@ TEST(codegen_quality, address_fold_local_array_index)
                           70);
 }
 
-TEST(codegen_quality, address_fold_param_and_global_array)
+TEST(codegen_quality, address_fold_param_array)
+{
+    EXPECT_INTERP_AND_ELF("int f(int *p,int n){ int s=0;\n"
+                          "  for (int i=0;i<n;i=i+1) s=s+p[i]; return s; }\n"
+                          "int main(void){ int a[4]={10,20,30,40}; return f(a,4)%251; }\n",
+                          100);
+}
+
+TEST(codegen_quality, address_fold_global_array)
 {
     EXPECT_INTERP_AND_ELF("int g[4]={1,2,3,4};\n"
-                          "int f(int *p,int n){ int s=0;\n"
-                          "  for (int i=0;i<n;i=i+1) s=s+p[i]+g[i&3]; return s; }\n"
-                          "int main(void){ int a[4]={10,20,30,40}; return (f(a,4)+g[1])%251; }\n",
-                          112);
+                          "int f(int n){ int s=0;\n"
+                          "  for (int i=0;i<n;i=i+1) s=s+g[i&3]; return s; }\n"
+                          "int main(void){ return f(4)%251; }\n",
+                          10);
 }
 
 TEST(codegen_quality, address_fold_escaping_pointer_stays_materialized)
@@ -234,10 +251,17 @@ TEST(codegen_quality, extend_unsigned_char_to_long)
                           50);
 }
 
-TEST(codegen_quality, extend_negative_short_to_int_and_long)
+TEST(codegen_quality, extend_negative_short_to_int)
 {
-    EXPECT_INTERP_AND_ELF("int main(void){ short s=-300; int i=s; long l=s;\n"
-                          "  return (int)((l+301)*2 + (i+300)); }\n",
+    EXPECT_INTERP_AND_ELF("int main(void){ short s=-300; int i=s;\n"
+                          "  return (int)(i+300); }\n",
+                          0);
+}
+
+TEST(codegen_quality, extend_negative_short_to_long)
+{
+    EXPECT_INTERP_AND_ELF("int main(void){ short s=-300; long l=s;\n"
+                          "  return (int)((l+301)*2); }\n",
                           2);
 }
 

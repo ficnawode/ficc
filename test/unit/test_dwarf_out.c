@@ -7,8 +7,6 @@
 #include "dwarfcheck.h"
 #include "util/bytebuf.h"
 
-/* In-process decode cross-checked against codegen's own records. */
-
 static Vec *norm_relas(Arena *a, Vec *src, u32 sym_override)
 {
     Vec *v = vec_new(a);
@@ -128,9 +126,8 @@ TEST(dwarf_out, line_table_matches_codegen_line_entries)
     show_dwarf_out("line", &dc);
     EXPECT_NOTNULL(lines);
 
-    /* Expected rows from codegen's line entries, deduping same-line runs like dwarf.c. */
     size_t nfuncs = vec_size(cm->funcs);
-    Vec *exp = vec_new(a); /* Vec<{addr,line}> */
+    Vec *exp = vec_new(a);
     for (size_t f = 0; f < nfuncs; f++)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, f);
@@ -160,8 +157,8 @@ TEST(dwarf_out, line_table_matches_codegen_line_entries)
             nstmt++;
         }
     }
-    EXPECT_EQ(nstmt, nfuncs);                                 /* one end_sequence per function */
-    EXPECT_EQ(vec_size(lines->rows), vec_size(exp) + nfuncs); /* stmt rows + end rows */
+    EXPECT_EQ(nstmt, nfuncs);
+    EXPECT_EQ(vec_size(lines->rows), vec_size(exp) + nfuncs);
 
     size_t ei = 0;
     for (size_t i = 0; i < vec_size(lines->rows); i++)
@@ -178,7 +175,30 @@ TEST(dwarf_out, line_table_matches_codegen_line_entries)
     }
     EXPECT_EQ(ei, vec_size(exp));
 
-    /* set_address operands equal the function .text offsets in order. */
+    arena_free(a);
+}
+
+TEST(dwarf_out, line_table_set_addresses_match_function_offsets)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module(unit_src, a);
+    CodegenConfig cfg = {.debug = true};
+    CodegenModule *cm = codegen_ir_to_machine(m, &cfg, a);
+    DwarfOutput out = {0};
+    dwarf_build(cm, "unit.c", "/tmp", &out, a);
+
+    DwarfCheck dc;
+    Vec *rela_line = norm_relas(a, out.rela_line, 0);
+    dwarf_check_from_buffers(&dc, a, bytebuf_data(&out.debug_info), bytebuf_len(&out.debug_info),
+                             bytebuf_data(&out.debug_abbrev), bytebuf_len(&out.debug_abbrev),
+                             bytebuf_data(&out.debug_line), bytebuf_len(&out.debug_line), NULL, 0,
+                             NULL, 0, NULL, 0, NULL, rela_line, NULL);
+
+    DwarfCheckLines *lines = dwarf_check_lines(&dc, a);
+    show_dwarf_out("line", &dc);
+    EXPECT_NOTNULL(lines);
+
+    size_t nfuncs = vec_size(cm->funcs);
     EXPECT_EQ(vec_size(lines->set_addresses), nfuncs);
     for (size_t f = 0; f < nfuncs; f++)
     {
@@ -190,9 +210,6 @@ TEST(dwarf_out, line_table_matches_codegen_line_entries)
     arena_free(a);
 }
 
-/* A segment's live byte span within the function, as the .debug_loc writer
-   computes it: a parameter's home is valid from the body start when defined at
-   position 0, and the span is clamped to the function. */
 static bool expect_seg_bounds(const CodegenFunc *cf, const RegSegment *seg, i64 *begin, i64 *end)
 {
     i64 func_off = (i64) cf->offset;
@@ -217,7 +234,7 @@ static bool expect_seg_bounds(const CodegenFunc *cf, const RegSegment *seg, i64 
     return true;
 }
 
-TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
+TEST(dwarf_out, subprograms_and_params_cross_checked)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module(unit_src, a);
@@ -240,7 +257,6 @@ TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
     EXPECT_NOTNULL(info);
 
     size_t nfuncs = vec_size(cm->funcs);
-    /* One subprogram DIE per function; low_pc via reloc, high_pc the exact size. */
     EXPECT_EQ(vec_size(dwarf_check_dies_by_tag(info, DW_TAG_subprogram)), nfuncs);
     for (size_t f = 0; f < nfuncs; f++)
     {
@@ -256,8 +272,6 @@ TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
         EXPECT_TRUE(low->kind == DW_ATTR_ADDR);
         DwarfCheckAttr *high = dwarf_check_attr(die, DW_AT_high_pc);
         EXPECT_TRUE(high && high->num == bytebuf_len(cf->bytes));
-        /* Parameter DIEs in IR order: one range per allocated segment, then the
-           entry-printed stage slot over the remainder of the function. */
         for (size_t p = 0; p < vec_size(cf->func->params); p++)
         {
             IrParam *pp = (IrParam *) vec_get(cf->func->params, p);
@@ -343,7 +357,31 @@ TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
         }
     }
 
-    /* Globals: defined ones carry DW_OP_addr, externs none, names match. */
+    arena_free(a);
+}
+
+TEST(dwarf_out, globals_and_types_cross_checked)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module(unit_src, a);
+    CodegenConfig cfg = {.debug = true};
+    CodegenModule *cm = codegen_ir_to_machine(m, &cfg, a);
+    DwarfOutput out = {0};
+    dwarf_build(cm, "unit.c", "/tmp", &out, a);
+
+    DwarfCheck dc;
+    dwarf_check_from_buffers(&dc, a, bytebuf_data(&out.debug_info), bytebuf_len(&out.debug_info),
+                             bytebuf_data(&out.debug_abbrev), bytebuf_len(&out.debug_abbrev),
+                             bytebuf_data(&out.debug_line), bytebuf_len(&out.debug_line),
+                             bytebuf_data(&out.debug_loc), bytebuf_len(&out.debug_loc), NULL, 0,
+                             bytebuf_data(&out.debug_str), bytebuf_len(&out.debug_str),
+                             norm_relas(a, out.rela_info, 0), norm_relas(a, out.rela_line, 0),
+                             NULL);
+
+    DwarfCheckInfo *info = dwarf_check_info(&dc, a);
+    show_dwarf_out("info", &dc);
+    EXPECT_NOTNULL(info);
+
     size_t nglobals = vec_size(cm->globals);
     ByteBuf ro, da, ia, fa;
     bytebuf_init(&ro, a);
@@ -371,7 +409,6 @@ TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
             EXPECT_NOTNULL(loc);
             if (loc && loc->kind == DW_ATTR_LOC && loc->loc_len == 9 && loc->loc[0] == DW_OP_addr)
             {
-                /* The slot's addend equals the computed global section offset. */
                 u32 slot = (u32) (loc->loc - out.debug_info.data) + 1;
                 bool seen = false;
                 for (size_t r = 0; r < vec_size(out.rela_info); r++)
@@ -388,7 +425,6 @@ TEST(dwarf_out, subprograms_params_and_globals_cross_checked)
         }
     }
 
-    /* The self-referential struct terminates: Node's `next` ref lands on a pointer_type DIE. */
     EXPECT_EQ(vec_size(dwarf_check_dies_by_tag(info, DW_TAG_structure_type)), 1);
     DwarfCheckDie *node = dwarf_check_die_named(info, "Node");
     EXPECT_NOTNULL(node);
@@ -450,7 +486,6 @@ TEST(dwarf_out, eh_fdes_match_codegen)
         EXPECT_FALSE(e->is_cie);
         EXPECT_EQ(e->fde_begin, cf->offset);
         EXPECT_EQ(e->fde_range, bytebuf_len(cf->bytes));
-        /* Every initial_location slot has a reloc whose addend is the offset. */
         bool covered = false;
         for (size_t r = 0; r < vec_size(cfi->relocs); r++)
         {
@@ -463,7 +498,6 @@ TEST(dwarf_out, eh_fdes_match_codegen)
         }
         EXPECT_TRUE(covered);
     }
-    /* The FDE pc ranges tile the whole .text. */
     u64 total = 0;
     for (size_t f = 0; f < nfuncs; f++)
     {
@@ -528,8 +562,6 @@ TEST(dwarf_out, scalar_locals_get_segment_location_lists)
     CodegenFunc *add = cf_by_name(cm, "add");
     EXPECT_NOTNULL(add);
 
-    /* add()'s `t` is an SSA scalar local: a DW_TAG_variable whose location list
-       stays inside add()'s body and names a register or spill slot. */
     DwarfCheckDie *t = dwarf_check_die_named(info, "t");
     EXPECT_NOTNULL(t);
     if (t && add)
@@ -552,7 +584,6 @@ TEST(dwarf_out, scalar_locals_get_segment_location_lists)
         }
     }
 
-    /* main()'s `x` receives a call result: still a named local with a list. */
     DwarfCheckDie *x = dwarf_check_die_named(info, "x");
     EXPECT_NOTNULL(x);
     EXPECT_TRUE(x && x->tag == DW_TAG_variable);

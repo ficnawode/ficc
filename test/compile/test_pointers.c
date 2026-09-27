@@ -56,9 +56,7 @@ TEST(pointers, interp_sizeof_char)
 
 TEST(pointers, interp_sizeof_array_ident)
 {
-    /* Regression: array-to-pointer decay is suppressed for the direct operand
-       of sizeof (§6.3.2.1p3), so `sizeof(a)` is the whole array, not the
-       pointer size. */
+    /* Array-to-pointer decay is suppressed for the operand of sizeof (§6.3.2.1p3). */
     EXPECT_EQ(tc_run_interp("int main(void) {\n"
                             "    int a[10];\n"
                             "    return sizeof(a);\n"
@@ -144,6 +142,36 @@ TEST(pointers, interp_addr_deref)
                             "    return *(&arr[0]);\n"
                             "}\n"),
               9);
+}
+
+TEST(pointers, interp_pointer_relational_compare)
+{
+    EXPECT_EQ(tc_run_interp("int main(void) {\n"
+                            "    int a[4] = {0, 1, 2, 3};\n"
+                            "    int *p = a;\n"
+                            "    int *q = a + 3;\n"
+                            "    if (!(p < q)) return 1;\n"
+                            "    if (!(q > p)) return 2;\n"
+                            "    if (!(p <= q)) return 3;\n"
+                            "    if (!(q >= p)) return 4;\n"
+                            "    if (p >= q) return 5;\n"
+                            "    return 0;\n"
+                            "}\n"),
+              0);
+}
+
+TEST(pointers, interp_pointer_equality)
+{
+    EXPECT_EQ(tc_run_interp("int main(void) {\n"
+                            "    int a[4] = {0, 1, 2, 3};\n"
+                            "    int *p = a;\n"
+                            "    int *q = a + 2;\n"
+                            "    if (p == q) return 1;\n"
+                            "    if (p != a) return 2;\n"
+                            "    if (q != a + 2) return 3;\n"
+                            "    return 0;\n"
+                            "}\n"),
+              0);
 }
 
 static const char *array_param_src = "int sum(int a[], int n) {\n"
@@ -269,6 +297,36 @@ TEST(pointers, elf_ptr_arithmetic)
               30);
 }
 
+TEST(pointers, elf_pointer_relational_compare)
+{
+    EXPECT_EQ(tc_run_elf("int main(void) {\n"
+                         "    int a[4] = {0, 1, 2, 3};\n"
+                         "    int *p = a;\n"
+                         "    int *q = a + 3;\n"
+                         "    if (!(p < q)) return 1;\n"
+                         "    if (!(q > p)) return 2;\n"
+                         "    if (!(p <= q)) return 3;\n"
+                         "    if (!(q >= p)) return 4;\n"
+                         "    if (p >= q) return 5;\n"
+                         "    return 0;\n"
+                         "}\n"),
+              0);
+}
+
+TEST(pointers, elf_pointer_equality)
+{
+    EXPECT_EQ(tc_run_elf("int main(void) {\n"
+                         "    int a[4] = {0, 1, 2, 3};\n"
+                         "    int *p = a;\n"
+                         "    int *q = a + 2;\n"
+                         "    if (p == q) return 1;\n"
+                         "    if (p != a) return 2;\n"
+                         "    if (q != a + 2) return 3;\n"
+                         "    return 0;\n"
+                         "}\n"),
+              0);
+}
+
 TEST(pointers, elf_array_param)
 {
     EXPECT_EQ(tc_run_elf(array_param_src), 6);
@@ -319,8 +377,7 @@ TEST(pointers, negative_incompatible_ptr_assign)
                       "}\n");
 }
 
-/* --- void* parameters (C11 §6.7.6.3p10: only a lone `void` is the empty
-   parameter-list marker) --- */
+/* void* parameters (C11 §6.7.6.3p10: only a lone `void` is the empty parameter-list marker) */
 
 TEST(pointers, void_ptr_param_deref)
 {
@@ -381,8 +438,6 @@ TEST(pointers, void_ptr_return)
 
 TEST(pointers, void_ptr_struct_member)
 {
-    /* `void *` members always worked (record types don't route through
-       parse_param_list); here they interoperate with void* params. */
     EXPECT_INTERP_AND_ELF("struct box { void *p; int tag; };\n"
                           "struct box make(int *p) {\n"
                           "    struct box b;\n"

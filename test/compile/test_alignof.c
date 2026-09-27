@@ -3,8 +3,6 @@
 
 #include "util/arena.h"
 
-/* Phase 14a: _Alignof — alignment queries folded to size_t constants. */
-
 TEST(alignof, type_forms)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -32,8 +30,8 @@ TEST(alignof, pointer_and_array_forms)
 
 TEST(alignof, array_direct_operand_no_decay)
 {
-    /* `_Alignof(a[4])` is the element alignment (4), not the decayed-pointer
-       alignment (8) — §6.3.2.1p3 decay suppression, mirroring sizeof. */
+    /* C11 §6.3.2.1p3: array-to-pointer decay is suppressed for _Alignof, so
+       this is the element alignment. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int a[4];\n"
                           "    if (_Alignof(a) != 4) return 1;\n"
@@ -71,8 +69,8 @@ TEST(alignof, typedef_type_name)
 
 TEST(alignof, const_qualified_forms)
 {
-    /* const is layout-neutral: alignment is identical to the unqualified
-       type (steering §Phase 9 interplay obligation). */
+    /* C11 §6.2.5p26: qualified and unqualified versions have the same
+       alignment. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    if (_Alignof(const int) != _Alignof(int)) return 1;\n"
                           "    if (_Alignof(const long) != 8) return 2;\n"
@@ -81,16 +79,25 @@ TEST(alignof, const_qualified_forms)
                           0);
 }
 
-TEST(alignof, expression_form_and_case_label)
+TEST(alignof, expression_form)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    long x;\n"
                           "    int y = 4;\n"
                           "    if (_Alignof(x) != 8) return 1;\n"
                           "    if (_Alignof(y) != 4) return 2;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(alignof, case_label_constant)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long x;\n"
                           "    switch (8) {\n"
                           "        case _Alignof(x): return 0;\n"
-                          "        default: return 3;\n"
+                          "        default: return 1;\n"
                           "    }\n"
                           "}\n",
                           0);
@@ -108,14 +115,33 @@ TEST(alignof, folds_in_file_scope_initializer)
                           0);
 }
 
-TEST(alignof, folds_in_arithmetic_and_cast)
+TEST(alignof, folds_in_arithmetic)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int a = _Alignof(long) / _Alignof(char);\n"
-                          "    char c = (char) _Alignof(long);\n"
                           "    if (a != 8) return 1;\n"
-                          "    if (c != 8) return 2;\n"
-                          "    if ((int) _Alignof(short) != 2) return 3;\n"
+                          "    if ((int) _Alignof(short) != 2) return 2;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(alignof, folds_in_cast)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    char c = (char) _Alignof(long);\n"
+                          "    if (c != 8) return 1;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(alignof, floating_type_forms)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    if (_Alignof(float) != 4) return 1;\n"
+                          "    if (_Alignof(double) != 8) return 2;\n"
+                          "    if (_Alignof(long double) != 16) return 3;\n"
                           "    return 0;\n"
                           "}\n",
                           0);

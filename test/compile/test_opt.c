@@ -6,8 +6,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Drives the real ficc binary at each -O level, asserting the same exit value. */
-
 static unsigned int opt_seq;
 
 static void opt_path(char *buf, size_t sz, const char *tag, const char *ext)
@@ -54,7 +52,6 @@ static void opt_run_level(const char *src, const char *level, int expected)
     }
 }
 
-/* A loop-heavy program: any mis-stepping pass diverges across levels. */
 static const char *loop_sum_src = "int main(void) {\n"
                                   "    int s = 0;\n"
                                   "    for (int i = 0; i < 10; i = i + 1) s = s + i;\n"
@@ -93,8 +90,6 @@ TEST(opt, level2_if_returns)
     opt_run_level(expr_src, "-O2", 42);
 }
 
-/* The canonicalize passes fold, copy-eliminate, and prune at every level. */
-
 static const char *fold_src = "double f(void) { return 2.0 + 3.0; }\n"
                               "int main(void) { return (int) f(); }\n";
 
@@ -120,7 +115,7 @@ static const char *cast_src = "int main(void) {\n"
 
 TEST(opt, level1_cast_preserves_sign)
 {
-    opt_run_level(cast_src, "-O1", 200); /* -56 as an 8-bit process status */
+    opt_run_level(cast_src, "-O1", 200);
 }
 
 TEST(opt, level2_cast_preserves_sign)
@@ -193,8 +188,6 @@ TEST(opt, level2_long_double)
     opt_run_level(long_double_src, "-O2", 1);
 }
 
-/* The optimize passes (GVN/LICM/mem_fwd) must preserve the oracle at every level. */
-
 static const char *gvn_src = "int f(int x, int y) {\n"
                              "    int a = x + y;\n"
                              "    int b = x + y;\n"
@@ -234,8 +227,18 @@ TEST(opt, level2_licm_hoists)
     opt_run_level(licm_src, "-O2", 1);
 }
 
+TEST(opt, level3_licm_hoists)
+{
+    opt_run_level(licm_src, "-O3", 1);
+}
+
 static const char *mem_fwd_src = "int g;\n"
                                  "int main(void) { g = 40; return g; }\n";
+
+TEST(opt, level1_mem_fwd_store_to_load)
+{
+    opt_run_level(mem_fwd_src, "-O1", 40);
+}
 
 TEST(opt, level2_mem_fwd_store_to_load)
 {
@@ -268,8 +271,6 @@ TEST(opt, level2_mem_fwd_redundant_load)
     opt_run_level(redundant_load_src, "-O2", 40);
 }
 
-/* inline suite (F1): tier 1 user-directed, size filter, negatives */
-
 static const char *inline_leaf_src = "static inline int sq(int x) { return x * x; }\n"
                                      "int main(void) { return sq(7) == 49 ? 0 : 1; }\n";
 
@@ -288,6 +289,11 @@ TEST(opt, level2_inline_static_leaf)
     opt_run_level(inline_leaf_src, "-O2", 0);
 }
 
+TEST(opt, level3_inline_static_leaf)
+{
+    opt_run_level(inline_leaf_src, "-O3", 0);
+}
+
 static const char *inline_chain_src = "static inline int seven(void) { return 7; }\n"
                                       "static inline int plus(int x) { return x + seven(); }\n"
                                       "int main(void) { return plus(10) == 17 ? 0 : 1; }\n";
@@ -297,8 +303,6 @@ TEST(opt, level1_inline_transitive_leaf)
     opt_run_level(inline_chain_src, "-O1", 0);
 }
 
-/* Taking &f routes the call through a pointer: the indirect site must not be
-   inlined away, and the addressable copy must survive. */
 static const char *inline_address_taken_src = "static inline int dbl(int v) { return v * 2; }\n"
                                               "int main(void)\n"
                                               "{\n"
@@ -311,7 +315,6 @@ TEST(opt, level1_inline_address_taken_negative)
     opt_run_level(inline_address_taken_src, "-O1", 0);
 }
 
-/* Recursion is never expanded: the self-call stays a real call. */
 static const char *inline_recursion_src = "static inline int down(int n)\n"
                                           "{\n"
                                           "    return n <= 0 ? n : down(n - 1) + 1;\n"
@@ -323,8 +326,6 @@ TEST(opt, level1_inline_recursion_negative)
     opt_run_level(inline_recursion_src, "-O1", 0);
 }
 
-/* A call inside a loop amortizes its overhead, so a mid-size callee that the
-   tier-2 threshold would reject still holds under the loop discount. */
 static const char *inline_loop_leaf_src = "int sq(int x) { return x * x; }\n"
                                           "int main(void)\n"
                                           "{\n"
@@ -343,7 +344,6 @@ TEST(opt, level2_inline_loop_discount)
     opt_run_level(inline_loop_leaf_src, "-O2", 0);
 }
 
-/* The back-edge write shares a block with the branch testing b. */
 static const char *dowhile_postdec_src = "int main(void)\n"
                                          "{\n"
                                          "    int b = 3;\n"
@@ -369,7 +369,6 @@ TEST(opt, level3_dowhile_postdec)
     opt_run_level(dowhile_postdec_src, "-O3", 4);
 }
 
-/* Inlining a callee with an alloca into a loop must not leak stack per step. */
 static const char *inline_alloca_loop_src =
     "struct big { int a[64]; };\n"
     "static int leaf(int x) { struct big s; s.a[0] = x; return s.a[0]; }\n"
@@ -390,8 +389,6 @@ TEST(opt, level2_inline_alloca_loop)
     opt_run_level(inline_alloca_loop_src, "-O2", 0);
 }
 
-/* Constant folding must evaluate at the operand width: `(unsigned)-1 >> 2` is
-   0x3fffffff, not a 64-bit shift truncated back to 0xffffffff. */
 static const char *fold_unsigned_shift_src =
     "int main(void)\n"
     "{\n"
@@ -415,8 +412,7 @@ TEST(opt, level3_fold_unsigned_shift_width)
     opt_run_level(fold_unsigned_shift_src, "-O3", 0);
 }
 
-/* A shift's result type is the promoted left operand (§6.5.7p3); the right
-   operand must not turn a signed comparison unsigned. */
+/* A shift's result type is the promoted left operand (§6.5.7p3). */
 static const char *shift_result_type_src =
     "int main(void)\n"
     "{\n"

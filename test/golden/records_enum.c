@@ -37,5 +37,5 @@ int main(void)
     struct Pixel p;
     p.c = GREEN;
     p.value = 5;
-    return c + m + p.c * 10 + p.value; /* 2 + 6 + 10 + 5 = 23 */
+    return c + m + p.c * 10 + p.value;
 }

@@ -112,7 +112,7 @@ TEST(records, union_size_align)
     arena_free(a);
 }
 
-TEST(records, union_nested_layout)
+TEST(records, union_nested_struct_layout)
 {
     Arena *a = arena_new();
     Type *pt = type_record(TYPE_STRUCT, "P7UPoint");
@@ -129,6 +129,17 @@ TEST(records, union_nested_layout)
     EXPECT_EQ(u->size, 8);
     EXPECT_EQ(u->align, 8);
     EXPECT_EQ(type_record_field_offset(u, "p"), 0);
+    arena_free(a);
+}
+
+TEST(records, struct_nested_union_layout)
+{
+    Arena *a = arena_new();
+    Type *u = type_record(TYPE_UNION, "P7UWrapInner");
+    Vec *u_fields = vec_new(a);
+    vec_push(u_fields, make_field(a, "l", type_long()));
+    vec_push(u_fields, make_field(a, "c", type_char()));
+    type_record_complete(u, u_fields);
 
     Type *s = type_record(TYPE_STRUCT, "P7UWrap");
     Vec *s_fields = vec_new(a);
@@ -213,6 +224,17 @@ TEST(records, interp_nested_member)
               15);
 }
 
+TEST(records, interp_nested_struct_init)
+{
+    EXPECT_EQ(tc_run_interp("struct In { int x; int y; };\n"
+                            "struct Out { struct In in; int z; };\n"
+                            "int main(void) {\n"
+                            "    struct Out o = {{4, 5}, 6};\n"
+                            "    return o.in.x + o.in.y + o.z;\n"
+                            "}\n"),
+              15);
+}
+
 TEST(records, interp_struct_array_member)
 {
     EXPECT_EQ(tc_run_interp("struct Rec { int a[3]; };\n"
@@ -253,6 +275,22 @@ TEST(records, interp_struct_assign)
                             "    return a.x + a.y;\n"
                             "}\n"),
               3);
+}
+
+TEST(records, interp_deref_struct_assign)
+{
+    EXPECT_EQ(tc_run_interp("struct Pt { int x; int y; };\n"
+                            "int main(void) {\n"
+                            "    struct Pt a;\n"
+                            "    struct Pt b;\n"
+                            "    struct Pt *p = &a;\n"
+                            "    struct Pt *q = &b;\n"
+                            "    q->x = 7;\n"
+                            "    q->y = 8;\n"
+                            "    *p = *q;\n"
+                            "    return p->x + p->y;\n"
+                            "}\n"),
+              15);
 }
 
 TEST(records, interp_struct_byval_arg)
@@ -789,14 +827,16 @@ TEST(records, negative_enum_duplicate_const)
                       "}\n");
 }
 
-TEST(records, negative_enum_value_range)
+TEST(records, enum_value_uint_max_ok)
 {
-    /* GCC (and C23) allow enumerators up to `unsigned int`; beyond that is
-       still an error. */
     EXPECT_BUILD_SUCCEED("enum { A = 4294967295u };\n"
                          "int main(void) {\n"
                          "    return 0;\n"
                          "}\n");
+}
+
+TEST(records, negative_enum_value_overflow)
+{
     EXPECT_BUILD_FAIL("enum { A = 4294967296 };\n"
                       "int main(void) {\n"
                       "    return 0;\n"
@@ -821,8 +861,7 @@ TEST(records, negative_enum_div_zero)
 
 TEST(records, anonymous_union_members)
 {
-    /* C11 §6.7.2.1p13: an unnamed union member's members are accessed as if
-       they were members of the enclosing struct, with nested offsets. */
+    /* C11 §6.7.2.1p13: anonymous union members share the enclosing layout. */
     EXPECT_INTERP_AND_ELF("struct V {\n"
                           "    int tag;\n"
                           "    union {\n"
@@ -840,10 +879,25 @@ TEST(records, anonymous_union_members)
                           42);
 }
 
+TEST(records, anonymous_struct_member)
+{
+    /* C11 §6.7.2.1p13: anonymous struct members share the enclosing layout. */
+    EXPECT_INTERP_AND_ELF("struct S {\n"
+                          "    int tag;\n"
+                          "    struct { int x; int y; };\n"
+                          "};\n"
+                          "int main(void) {\n"
+                          "    struct S s;\n"
+                          "    s.tag = 1;\n"
+                          "    s.x = 2;\n"
+                          "    s.y = 3;\n"
+                          "    return s.tag + s.x + s.y;\n"
+                          "}\n",
+                          6);
+}
+
 TEST(records, anonymous_struct_in_union_layout)
 {
-    /* The magic union in type.h: an anonymous union of anonymous structs; all
-       inner member offsets start at the union base. */
     EXPECT_INTERP_AND_ELF("typedef unsigned long u64;\n"
                           "typedef struct Type Type;\n"
                           "struct Type {\n"
@@ -892,8 +946,6 @@ TEST(records, anonymous_member_offset_query)
 
 TEST(records, many_same_shape_function_types_do_not_conflict)
 {
-    /* func_key_mix used to cancel to 0 for `T *f(T *)` signatures, making every
-       such prototype collide on one interning slot. */
     EXPECT_BUILD_SUCCEED("typedef struct N N;\n"
                          "struct N { int x; };\n"
                          "N *f1(N *p);\n"
@@ -906,8 +958,7 @@ TEST(records, many_same_shape_function_types_do_not_conflict)
 
 TEST(records, bitfield_layout_pack_ordinary)
 {
-    /* int a:3, int b (ordinary), int c:5: the two bit-fields each sit in their
-       own int storage unit; the ordinary member breaks the pack (§6.7.2.1). */
+    /* C11 §6.7.2.1: an ordinary member breaks a bit-field's storage unit. */
     Arena *a = arena_new();
     Type *s = type_record(TYPE_STRUCT, "P17BitPack");
     Vec *fields = vec_new(a);
@@ -932,8 +983,6 @@ TEST(records, bitfield_layout_pack_ordinary)
 
 TEST(records, bitfield_layout_unit_after_char)
 {
-    /* gcc (and ficc) place `int x:1` after a char into the 4-byte unit at
-       offset 0, bit 8 — the field must fit one aligned unit of its type. */
     Arena *a = arena_new();
     Type *s = type_record(TYPE_STRUCT, "P17BitAfterChar");
     Vec *fields = vec_new(a);
@@ -953,7 +1002,6 @@ TEST(records, bitfield_layout_unit_after_char)
 
 TEST(records, bitfield_layout_split_storage_unit)
 {
-    /* int a:1, int b:31 fill one unit; int c:1 starts a second. */
     Arena *a = arena_new();
     Type *s = type_record(TYPE_STRUCT, "P17BitSplit");
     Vec *fields = vec_new(a);
@@ -979,8 +1027,6 @@ TEST(records, bitfield_layout_split_storage_unit)
 
 TEST(records, bitfield_layout_mixed_bases)
 {
-    /* The `int_suffix` pattern from ficc's own lexer.h/ast.h: _Bool:1, enum:2,
-       _Bool:1 pack into one 4-byte unit because the enum raises the align. */
     Arena *a = arena_new();
     Type *s = type_record(TYPE_STRUCT, "P17BitMixed");
     Vec *fields = vec_new(a);
@@ -1010,8 +1056,6 @@ TEST(records, bitfield_layout_mixed_bases)
 
 TEST(records, bitfield_signed_roundtrip)
 {
-    /* Signed fields: 7 in a 3-bit `int` reads -1; -4 and -16 round-trip.
-       Mixes bit-fields with an ordinary member and checks sizeof. */
     EXPECT_INTERP_AND_ELF("struct S {\n"
                           "    int a:3;\n"
                           "    int b;\n"
@@ -1037,8 +1081,6 @@ TEST(records, bitfield_signed_roundtrip)
 
 TEST(records, bitfield_unsigned_overflow_wraps)
 {
-    /* Unsigned fields wrap on overflow (99 -> 3 in 3 bits), _Bool set/clear,
-       and an ordinary member trails the pack (§6.7.2.1p12 rounding). */
     EXPECT_INTERP_AND_ELF("typedef _Bool bool;\n"
                           "struct F {\n"
                           "    bool f:1;\n"
@@ -1064,8 +1106,6 @@ TEST(records, bitfield_unsigned_overflow_wraps)
 
 TEST(records, bitfield_padding_and_named_members)
 {
-    /* Unnamed padding `:5` between two named fields occupies bits 3..7 of the
-       first unit; the second field lands at bit 8. */
     EXPECT_INTERP_AND_ELF("struct S { int a:3; int :5; int b:4; };\n"
                           "int main(void) {\n"
                           "    struct S s;\n"
@@ -1080,9 +1120,6 @@ TEST(records, bitfield_padding_and_named_members)
 
 TEST(records, bitfield_token_style_stats)
 {
-    /* Mirrors the Token int-suffix trio from ficc's own lexer.h/ast.h plus the
-       trailing length member; the bit-field reads must reproduce the stored
-       values and sizeof must stay gcc-compatible. */
     EXPECT_INTERP_AND_ELF(
         "typedef _Bool bool;\n"
         "typedef enum { LEN_I, LEN_L, LEN_LL } Suffix;\n"
@@ -1165,9 +1202,34 @@ TEST(records, negative_bitfield_take_address)
                       "}\n");
 }
 
-/* Regression: bit-field members initialize via read-modify-write of their
-   storage unit (positional, designated, and later assignment with width
-   wrap). */
+TEST(records, negative_incompatible_struct_assign)
+{
+    EXPECT_BUILD_FAIL("struct A { int x; };\n"
+                      "struct B { int x; };\n"
+                      "int main(void) {\n"
+                      "    struct A a;\n"
+                      "    struct B b;\n"
+                      "    a = b;\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(records, negative_struct_equality)
+{
+    EXPECT_BUILD_FAIL("struct A { int x; };\n"
+                      "int main(void) {\n"
+                      "    struct A a;\n"
+                      "    struct A b;\n"
+                      "    return a == b;\n"
+                      "}\n");
+}
+
+TEST(records, negative_bitfield_negative_width)
+{
+    EXPECT_BUILD_FAIL("struct S { int x : -1; };\n"
+                      "int main(void) { return 0; }\n");
+}
+
 static const char *bitfield_init_src =
     "struct S { unsigned a:1; unsigned b:2; unsigned c:1; unsigned d:3; };\n"
     "int main(void) {\n"
@@ -1185,8 +1247,6 @@ TEST(records, bitfield_init)
     EXPECT_INTERP_AND_ELF(bitfield_init_src, 0);
 }
 
-/* Regression: ordinary union members must not be mistaken for bit-fields: the
-   payload write is a full-width store, and a bit-field sibling keeps its RMW. */
 static const char *union_payload_src =
     "typedef struct {\n"
     "    int kind;\n"
@@ -1208,6 +1268,17 @@ TEST(records, union_payload_not_bitfield)
     EXPECT_INTERP_AND_ELF(union_payload_src, 0);
 }
 
+TEST(records, union_bitfield_share_base)
+{
+    EXPECT_INTERP_AND_ELF("union U { unsigned a:3; unsigned b:5; };\n"
+                          "int main(void) {\n"
+                          "    union U u;\n"
+                          "    u.b = 5;\n"
+                          "    return (int) u.a;\n"
+                          "}\n",
+                          5);
+}
+
 TEST(records, sizeof_member_array)
 {
     /* §6.5.3.4p1: sizeof suppresses decay, so a member array keeps its extent. */
@@ -1223,8 +1294,6 @@ TEST(records, sizeof_member_array)
 
 TEST(records, copy16_round_trip)
 {
-    /* A 16-byte struct copies as one movups pair, so the value must survive
-       both the return-by-value slot and repeated assignment. */
     EXPECT_INTERP_AND_ELF("struct Quad { int a; int b; int c; int d; };\n"
                           "struct Quad make(int x)\n"
                           "{\n"
@@ -1242,11 +1311,9 @@ TEST(records, copy16_round_trip)
                           10);
 }
 
-TEST(records, copy24_32_round_trip)
+TEST(records, copy24_round_trip)
 {
-    /* The two wide block-copy shapes: 24 (16 + 8 tail) and 32 (two 16s). */
     EXPECT_INTERP_AND_ELF("struct S24 { int a, b, c, d, e, f; };\n"
-                          "struct S32 { int a, b, c, d, e, f, g, h; };\n"
                           "struct S24 make24(int x)\n"
                           "{\n"
                           "    struct S24 s;\n"
@@ -1254,6 +1321,19 @@ TEST(records, copy24_32_round_trip)
                           "    s.d = x + 3; s.e = x + 4; s.f = x + 5;\n"
                           "    return s;\n"
                           "}\n"
+                          "int main(void)\n"
+                          "{\n"
+                          "    struct S24 p = make24(10);\n"
+                          "    struct S24 q = p;\n"
+                          "    if (q.a != 10 || q.c != 12 || q.f != 15) { return 1; }\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(records, copy32_round_trip)
+{
+    EXPECT_INTERP_AND_ELF("struct S32 { int a, b, c, d, e, f, g, h; };\n"
                           "struct S32 make32(int x)\n"
                           "{\n"
                           "    struct S32 s;\n"
@@ -1263,13 +1343,10 @@ TEST(records, copy24_32_round_trip)
                           "}\n"
                           "int main(void)\n"
                           "{\n"
-                          "    struct S24 p = make24(10);\n"
-                          "    struct S24 q = p;\n"
                           "    struct S32 r = make32(20);\n"
                           "    struct S32 s = r;\n"
-                          "    if (q.a != 10 || q.c != 12 || q.f != 15) { return 1; }\n"
                           "    if (s.a != 20 || s.e != 24 || s.h != 27) { return 2; }\n"
-                          "    return q.f + s.h - 42;\n"
+                          "    return 0;\n"
                           "}\n",
                           0);
 }

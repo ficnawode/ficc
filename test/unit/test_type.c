@@ -3,11 +3,6 @@
 #include "util/arena.h"
 #include "util/vec.h"
 
-/* Phase 15a (D15.1): the interned function Type. Equal signatures must be
-   pointer-equal within a translation unit; the variadic bit and the parameter
-   set are part of the identity; the layout is the pointer-face (align/size 8,
-   width 0 — a function type has no value width). */
-
 static Vec *params_int(Arena *a, size_t n)
 {
     Vec *v = vec_new(a);
@@ -75,9 +70,6 @@ TEST(type, func_type_layout)
 
 TEST(type, va_list_shape)
 {
-    /* D15.2: `va_list` is glibc's x86-64 shape — an array of one 24-byte
-       struct `{u32 gp_offset; u32 fp_offset; void *overflow; void *regs}`,
-       decaying to a plain pointer on use. */
     Type *vl = type_va_list();
     EXPECT_EQ(vl->kind, TYPE_ARRAY);
     EXPECT_EQ(type_array_len(vl), 1);
@@ -98,12 +90,15 @@ TEST(type, va_list_shape)
     RecordField *regs = (RecordField *) vec_get(e->record.fields, 3);
     EXPECT_EQ(regs->offset, 16);
     EXPECT_TRUE(type_is_ptr(regs->type));
+}
 
-    /* An identifier of type va_list decays to a pointer to the struct. */
+TEST(type, va_list_decays_to_pointer)
+{
+    Type *vl = type_va_list();
+    Type *e = type_array_elem(vl);
     EXPECT_TRUE(type_decay(vl)->kind == TYPE_PTR);
     EXPECT_TRUE(type_deref(type_decay(vl)) == e);
 }
-/* Phase 16b (D16.1): pointer-to-function composition */
 
 TEST(type, fn_ptr_is_ptr_of_interned_func)
 {
@@ -111,7 +106,6 @@ TEST(type, fn_ptr_is_ptr_of_interned_func)
     Type *ft = type_func(type_int(), params_int(a, 1), false);
     Type *fp1 = type_ptr(ft);
     Type *fp2 = type_ptr(ft);
-    /* Pointer interning: the same pointee is the same pointer type. */
     EXPECT_TRUE(fp1 == fp2);
     EXPECT_EQ(fp1->kind, TYPE_PTR);
     EXPECT_EQ(sizeof(void *), 8);
@@ -124,13 +118,16 @@ TEST(type, fn_ptr_decay_from_designator)
 {
     Arena *a = arena_new();
     Type *ft = type_func(type_int(), params_int(a, 1), false);
-    /* A function designator decays to a pointer to the function (§6.3.2.1p4). */
+    /* C11 §6.3.2.1p4: a function designator decays to a pointer to it. */
     Type *decayed = type_decay(ft);
     EXPECT_EQ(decayed->kind, TYPE_PTR);
     EXPECT_EQ(type_deref(decayed), ft);
-    /* Decay of a non-function type is identity. */
-    EXPECT_TRUE(type_decay(type_int()) == type_int());
     arena_free(a);
+}
+
+TEST(type, scalar_decay_is_identity)
+{
+    EXPECT_TRUE(type_decay(type_int()) == type_int());
 }
 
 TEST(type, type_is_function)
@@ -140,5 +137,30 @@ TEST(type, type_is_function)
     EXPECT_TRUE(type_is_function(ft));
     EXPECT_FALSE(type_is_function(type_ptr(ft)));
     EXPECT_FALSE(type_is_function(type_int()));
+    arena_free(a);
+}
+
+TEST(type, type_compatible_identical_types)
+{
+    Arena *a = arena_new();
+    EXPECT_TRUE(type_compatible(type_int(), type_int()));
+    EXPECT_TRUE(type_compatible(type_ptr(type_int()), type_ptr(type_int())));
+    EXPECT_TRUE(type_compatible(type_array(type_int(), 3), type_array(type_int(), 3)));
+    EXPECT_TRUE(type_compatible(type_func(type_int(), params_int(a, 1), false),
+                                type_func(type_int(), params_int(a, 1), false)));
+    arena_free(a);
+}
+
+TEST(type, type_compatible_distinct_types_rejected)
+{
+    Arena *a = arena_new();
+    Vec *one = params_int(a, 1);
+    EXPECT_FALSE(type_compatible(type_int(), type_long()));
+    EXPECT_FALSE(type_compatible(type_ptr(type_int()), type_ptr(type_long())));
+    EXPECT_FALSE(type_compatible(type_array(type_int(), 3), type_array(type_int(), 4)));
+    EXPECT_FALSE(
+        type_compatible(type_func(type_int(), one, false), type_func(type_long(), one, false)));
+    EXPECT_FALSE(
+        type_compatible(type_func(type_int(), one, false), type_func(type_int(), one, true)));
     arena_free(a);
 }

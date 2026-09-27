@@ -4,8 +4,6 @@
 #include <stdio.h>
 #include <unistd.h>
 
-/* glibc printf interop, ELF-only: variadic doubles ride xmm and %al reports the count. */
-
 static int drv_seq;
 
 static void drv_path(char *buf, size_t sz, const char *tag, const char *ext)
@@ -85,7 +83,6 @@ TEST(float_abi, printf_many_doubles_overflow)
 
 TEST(float_abi, printf_long_double_via_glibc)
 {
-    /* A stack-passed ld variadic argument that glibc's va_arg walk reads back. */
     char src[256], obj[256], bin[256];
     const char *prog = "int printf(const char *fmt, ...);\n"
                        "int main(void) {\n"

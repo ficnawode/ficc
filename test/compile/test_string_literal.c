@@ -1,9 +1,8 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* String-literal array semantics: `sizeof("ab")` is the array length
-   including NUL (§6.4.5p5, §6.5.3.4p2), and the fold is available both at
-   compile time (array sizes / static inits) and runtime. */
+/* String-literal array semantics: sizeof includes the NUL (C11 §6.4.5p5,
+   §6.5.3.4p2). */
 
 TEST(string_literal, sizeof_is_array_length)
 {
@@ -28,7 +27,7 @@ TEST(string_literal, sizeof_not_pointer_size)
 
 TEST(string_literal, sizeof_in_static_array_size)
 {
-    EXPECT_INTERP_AND_ELF("static char buf[sizeof(\"lua\")]; /* 4 bytes */\n"
+    EXPECT_INTERP_AND_ELF("static char buf[sizeof(\"lua\")];\n"
                           "int main(void) {\n"
                           "    if (sizeof(buf) != 4) return 1;\n"
                           "    buf[3] = 'Z';\n"
@@ -51,8 +50,7 @@ TEST(string_literal, string_init_fills_array)
 }
 TEST(string_literal, func_identifier)
 {
-    /* C11 §6.4.2.2: `__func__` is the enclosing function name as a static
-       const char array. */
+    /* C11 §6.4.2.2: `__func__`. */
     EXPECT_INTERP_AND_ELF("static int len(void) { return (int) sizeof(__func__); }\n"
                           "int main(void) {\n"
                           "    if (len() != 4) return 1;\n"
@@ -64,9 +62,18 @@ TEST(string_literal, func_identifier)
 
 TEST(string_literal, unsigned_char_array_init)
 {
-    /* C11 §6.7.9p14: a string literal initializes an array of unsigned char
-       too (Git's object_id hash buffers). */
+    /* C11 §6.7.9p14: a string literal initializes an unsigned char array. */
     EXPECT_INTERP_AND_ELF("static unsigned char h[4] = \"ab\";\n"
                           "int main(void) { return h[0] + h[1] - 195; }\n",
+                          0);
+}
+
+TEST(string_literal, u8_prefix_is_char_array)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    if (sizeof(u8\"abc\") != 4) return 1;\n"
+                          "    if (u8\"abc\"[1] != 'b') return 2;\n"
+                          "    return 0;\n"
+                          "}\n",
                           0);
 }

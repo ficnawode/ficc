@@ -1,6 +1,3 @@
-/* Phase 14a: _Alignof — end-to-end golden test.
-   _Alignof folds to a size_t constant in both backends. */
-
 struct P
 {
     char c;

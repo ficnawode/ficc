@@ -109,6 +109,16 @@ TEST(pp_prepare, empty_and_plain_source)
     arena_free(a);
 }
 
+TEST(pp_lex, empty_source_is_just_eof)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", "", a);
+    EXPECT_NOTNULL(toks);
+    EXPECT_EQ(vec_size(toks), 1);
+    EXPECT_EQ(tok(toks, 0)->kind, TOK_PP_EOF);
+    arena_free(a);
+}
+
 TEST(pp_lex, horizontal_ws_run)
 {
     Arena *a = arena_new();
@@ -451,14 +461,22 @@ TEST(pp_lex, pp_numbers)
     arena_free(a);
 }
 
-TEST(pp_lex, dot_is_punct_but_dot_digit_is_number)
+TEST(pp_lex, dot_and_ellipsis_are_punct)
 {
     Arena *a = arena_new();
-    Vec *toks = pp_lex("<test>", ". ... .5", a);
+    Vec *toks = pp_lex("<test>", ". ...", a);
     EXPECT_NOTNULL(toks);
     expect_token(toks, 0, TOK_PP_PUNCT, ".");
     expect_token(toks, 2, TOK_PP_PUNCT, "...");
-    expect_token(toks, 4, TOK_PP_NUMBER, ".5");
+    arena_free(a);
+}
+
+TEST(pp_lex, leading_dot_number)
+{
+    Arena *a = arena_new();
+    Vec *toks = pp_lex("<test>", ".5", a);
+    EXPECT_NOTNULL(toks);
+    expect_token(toks, 0, TOK_PP_NUMBER, ".5");
     arena_free(a);
 }
 

@@ -16,5 +16,5 @@ int main(void)
     l.c = 1;
     l.i = 200;
     l.d = 3;
-    return l.c + l.i + l.d; /* 204 */
+    return l.c + l.i + l.d;
 }

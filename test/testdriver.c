@@ -67,8 +67,6 @@ IrModule *tc_build_module(const char *src, Arena *arena)
     return mod;
 }
 
-/* tc_build_module over a concrete file path with -I-style include dirs, so
-   self-compile sources (`#include "util/sbuf.h"` from src/...) resolve. */
 IrModule *tc_build_module_with_dirs(const char *src, const char *file, const char *const *dirs,
                                     size_t ndirs, Arena *arena)
 {
@@ -182,8 +180,6 @@ int tc_run_elf(const char *src)
     return tc_run_elf_cfg(src);
 }
 
-/* Compile and link `src` with the real ficc binary (its own linker), then run
-   the result; returns the exit status. */
 int tc_link_filc(const char *src)
 {
     char cpath[256], bin[256];
@@ -230,8 +226,6 @@ int tc_run_elf_with_extra_tu(const char *src, const char *extra_src)
         return -1;
     }
 
-    /* The test's own TUs live here; the ficc-compiled unit links against
-       symbols they define. All files are unique per call and removed below. */
     char main_o[256], extra_c[256], extra_o[256], bin[256];
     tc_temp_path(main_o, sizeof(main_o), "main.o");
     tc_temp_path(extra_c, sizeof(extra_c), "extra.c");

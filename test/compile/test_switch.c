@@ -61,7 +61,6 @@ TEST(switch, no_default)
 
 TEST(switch, fall_through)
 {
-    /* case 1 falls into case 2 (no break); x=2 skips case 1 entirely. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int r = 0;\n"
                           "    int x = 2;\n"
@@ -81,7 +80,6 @@ TEST(switch, fall_through)
 
 TEST(switch, fall_through_all)
 {
-    /* A matched case with no break falls through every later label. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int r = 0;\n"
                           "    switch (1) {\n"
@@ -114,9 +112,19 @@ TEST(switch, default_in_middle)
                           77);
 }
 
+TEST(switch, default_only)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (9) {\n"
+                          "    default:\n"
+                          "        return 42;\n"
+                          "    }\n"
+                          "}\n",
+                          42);
+}
+
 TEST(switch, in_loop_with_continue)
 {
-    /* i=0 -> default s+=0; 1 -> +10; 2 -> +2; 3 -> continue; 4 -> +4 => 16 */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int s = 0;\n"
                           "    int i;\n"
@@ -134,6 +142,25 @@ TEST(switch, in_loop_with_continue)
                           "    return s;\n"
                           "}\n",
                           16);
+}
+
+TEST(switch, continue_in_switch_in_while)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int i = 0;\n"
+                          "    int s = 0;\n"
+                          "    while (i < 4) {\n"
+                          "        i = i + 1;\n"
+                          "        switch (i) {\n"
+                          "        case 2:\n"
+                          "            continue;\n"
+                          "        default:\n"
+                          "            s = s + i;\n"
+                          "        }\n"
+                          "    }\n"
+                          "    return s;\n"
+                          "}\n",
+                          8);
 }
 
 TEST(switch, nested_switch)
@@ -166,10 +193,6 @@ TEST(switch, nested_switch)
 
 TEST(switch, nested_switch_with_grouped_labels)
 {
-    /* A nested switch inside a case whose values collide with the outer
-       switch's, with grouped labels in the inner body. Regression: the inner
-       switch's labels must bind to the inner switch, never leak into the
-       outer dispatch payload. */
     EXPECT_INTERP_AND_ELF("int nest(int outer, int inner) {\n"
                           "    switch (outer) {\n"
                           "    case 0:\n"
@@ -221,6 +244,21 @@ TEST(switch, enum_case_values)
                           3);
 }
 
+TEST(switch, char_literal_cases)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch ('b') {\n"
+                          "    case 'a':\n"
+                          "        return 1;\n"
+                          "    case 'b':\n"
+                          "        return 2;\n"
+                          "    default:\n"
+                          "        return 3;\n"
+                          "    }\n"
+                          "}\n",
+                          2);
+}
+
 TEST(switch, constant_expr_cases)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -238,8 +276,6 @@ TEST(switch, constant_expr_cases)
 
 TEST(switch, assignment_after_switch)
 {
-    /* A variable written in every case and read after the switch needs a
-       merge PHI. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int r;\n"
                           "    switch (3) {\n"
@@ -259,7 +295,6 @@ TEST(switch, assignment_after_switch)
 
 TEST(switch, bare_single_case)
 {
-    /* Non-compound switch body. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    switch (1) {\n"
                           "    case 1:\n"
@@ -390,10 +425,24 @@ TEST(switch, case_logical_constant)
                           42);
 }
 
+TEST(switch, case_cast_constant)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    switch (1) {\n"
+                          "    case (int) 2:\n"
+                          "        return 1;\n"
+                          "    case (int) 1:\n"
+                          "        return 42;\n"
+                          "    default:\n"
+                          "        return 0;\n"
+                          "    }\n"
+                          "}\n",
+                          42);
+}
+
 TEST(switch, case_sizeof_variable)
 {
-    /* `sizeof(variable)` is an integer constant expression (§6.6p6); its
-       type is only known after parsing, so it folds during semantic. */
+    /* sizeof(variable) is an integer constant expression (§6.6p6). */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int x;\n"
                           "    switch (4) {\n"
@@ -423,8 +472,8 @@ TEST(switch, case_sizeof_array)
 
 TEST(switch, case_converted_to_promoted_type)
 {
-    /* The case constant is converted to the promoted controlling-expression
-       type (§6.8.4.2p5): 2147483648 becomes -2147483648 in a 32-bit int. */
+    /* A case constant converts to the promoted controlling-expression type
+       (§6.8.4.2p5). */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int x = -2147483648;\n"
                           "    switch (x) {\n"
@@ -439,8 +488,8 @@ TEST(switch, case_converted_to_promoted_type)
 
 TEST(switch, negative_duplicate_after_conversion)
 {
-    /* After conversion to int, `4294967295` equals `-1`, so this is a
-       duplicate case value (§6.8.4.2p3). */
+    /* Duplicate case values are checked after conversion to the promoted
+       type (§6.8.4.2p3). */
     EXPECT_BUILD_FAIL("int main(void) {\n"
                       "    switch (1) {\n"
                       "    case -1:\n"
@@ -453,8 +502,6 @@ TEST(switch, negative_duplicate_after_conversion)
 
 TEST(switch, case_label_in_if_body)
 {
-    /* A case label nested inside the body of an if statement; trailing
-       statements under the label (including ones outside the if) run. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int x = 1;\n"
                           "    int s = 0;\n"
@@ -529,8 +576,8 @@ TEST(switch, negative_duplicate_via_expression)
 
 TEST(switch, nested_switch_may_reuse_values)
 {
-    /* C11 §6.8.4.2p3: an enclosed switch may duplicate case constant
-       expressions of an enclosing switch. */
+    /* An enclosed switch may duplicate case constants of an enclosing switch
+       (§6.8.4.2p3). */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    switch (2) {\n"
                           "    case 5:\n"
@@ -561,8 +608,6 @@ TEST(switch, empty_body_falls_through)
 
 TEST(switch, break_exits_switch_in_loop)
 {
-    /* `break` inside the switch (itself inside a loop) exits the switch,
-       not the loop. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int i;\n"
                           "    int n = 0;\n"
@@ -582,6 +627,27 @@ TEST(switch, break_exits_switch_in_loop)
                           103);
 }
 
+TEST(switch, break_in_loop_inside_case)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int i;\n"
+                          "    int n = 0;\n"
+                          "    switch (1) {\n"
+                          "    case 1:\n"
+                          "        for (i = 0; i < 5; i = i + 1) {\n"
+                          "            if (i == 2) break;\n"
+                          "            n = n + 1;\n"
+                          "        }\n"
+                          "        n = n + 10;\n"
+                          "        break;\n"
+                          "    default:\n"
+                          "        n = 99;\n"
+                          "    }\n"
+                          "    return n;\n"
+                          "}\n",
+                          12);
+}
+
 TEST(switch, negative_case_value_matches)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -595,9 +661,6 @@ TEST(switch, negative_case_value_matches)
                           42);
 }
 
-/* The jump-table backend is value-indexed (value − min) with gap entries
-   routed to default: a value that falls between two case constants must not
-   hit either case's handler. */
 TEST(switch, gap_value_routes_to_default)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -615,7 +678,6 @@ TEST(switch, gap_value_routes_to_default)
 
 TEST(switch, table_cases_out_of_source_order)
 {
-    /* Cases not in ascending source order still map by value in the table. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    switch (8) {\n"
                           "    case sizeof(long):\n"
@@ -642,8 +704,6 @@ TEST(switch, table_cases_out_of_source_order)
 
 TEST(switch, sparse_range_uses_compare_chain)
 {
-    /* Range far beyond the jump-table cutoff exercises the compare-chain
-       fallback, including against large (non-imm32) case constants. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    switch (1) {\n"
                           "    case 1:\n"
@@ -666,6 +726,10 @@ TEST(switch, sparse_range_uses_compare_chain)
                           "    }\n"
                           "}\n",
                           22);
+}
+
+TEST(switch, sparse_range_wide_long_constants)
+{
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    long v = 7;\n"
                           "    switch (v) {\n"
@@ -680,11 +744,22 @@ TEST(switch, sparse_range_uses_compare_chain)
                           33);
 }
 
+TEST(switch, long_long_cond_value)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long long v = 5000000000LL;\n"
+                          "    switch (v) {\n"
+                          "    case 5000000000LL:\n"
+                          "        return 42;\n"
+                          "    default:\n"
+                          "        return 0;\n"
+                          "    }\n"
+                          "}\n",
+                          42);
+}
+
 TEST(switch, grouped_labels_shared_body)
 {
-    /* `case 1: case 2:` with no statement between — consecutive labels
-       sharing one body. The second label parses as a nested ASTCaseStmt
-       inside the first's body and must still be dispatched to. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    switch (1) {\n"
                           "    case 1:\n"
@@ -713,8 +788,6 @@ TEST(switch, grouped_labels_shared_body)
 
 TEST(switch, negative_min_table_range)
 {
-    /* A range crossing zero: index = value − min must stay exact under
-       the u64 wrap-around the backend uses. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    switch (-2) {\n"
                           "    case -2:\n"
@@ -758,8 +831,6 @@ TEST(switch, negative_min_table_range)
 
 TEST(switch, unsigned_char_cond_zero_extends)
 {
-    /* unsigned char 255 promotes to unsigned int; the backend must not
-       sign-extend the controlling value before the 64-bit range math. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    unsigned char c = 255;\n"
                           "    switch (c) {\n"

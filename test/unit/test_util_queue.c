@@ -133,3 +133,30 @@ TEST(queue, growth_with_items_still_queued)
     EXPECT_TRUE(queue_is_empty(q));
     arena_free(a);
 }
+
+TEST(queue, wraparound_preserves_fifo)
+{
+    Arena *a = arena_new();
+    Queue *q = queue_new(a);
+    int vals[10];
+    for (int i = 0; i < 6; i++)
+    {
+        vals[i] = i;
+        queue_push(q, &vals[i]);
+    }
+    for (int i = 0; i < 4; i++)
+    {
+        EXPECT_TRUE(queue_pop(q) == &vals[i]);
+    }
+    for (int i = 6; i < 10; i++)
+    {
+        vals[i] = i;
+        queue_push(q, &vals[i]);
+    }
+    for (int i = 4; i < 10; i++)
+    {
+        EXPECT_TRUE(queue_pop(q) == &vals[i]);
+    }
+    EXPECT_TRUE(queue_is_empty(q));
+    arena_free(a);
+}

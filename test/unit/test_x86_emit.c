@@ -53,11 +53,18 @@ TEST(x86_emit, mov_zero_stays_a_move_for_flag_safety)
     arena_free(a);
 }
 
-TEST(x86_emit, movl_imml_immw)
+TEST(x86_emit, movl_imm_uses_imm32)
 {
     Arena *a = arena_new();
     ByteBuf b;
     mov_imm(&b, a, 4, R_ECX, 0x1234, (const u8[]) {0xb9, 0x34, 0x12, 0x00, 0x00}, 5);
+    arena_free(a);
+}
+
+TEST(x86_emit, movw_imm_uses_imm16)
+{
+    Arena *a = arena_new();
+    ByteBuf b;
     mov_imm(&b, a, 2, R_EAX, 0x1234, (const u8[]) {0x66, 0xb8, 0x34, 0x12}, 4);
     arena_free(a);
 }
@@ -175,6 +182,22 @@ TEST(x86_emit, shift_immediate_forms)
     bytebuf_init(&b, a);
     emit_shift_imm(&b, 1, 4, 4, 1); /* spl needs a REX prefix */
     expect_bytes(&b, (const u8[]) {0x40, 0xc0, 0xe4, 0x01}, 4);
+
+    bytebuf_init(&b, a);
+    emit_shift_imm(&b, 8, R_EAX, 7, 3); /* C1 /7 is SAR */
+    expect_bytes(&b, (const u8[]) {0x48, 0xc1, 0xf8, 0x03}, 4);
+
+    arena_free(a);
+}
+
+TEST(x86_emit, shift_by_cl_uses_the_count_register)
+{
+    Arena *a = arena_new();
+    ByteBuf b;
+
+    bytebuf_init(&b, a);
+    emit_shift_cl(&b, 8, R_EAX, 4);
+    expect_bytes(&b, (const u8[]) {0x48, 0xd3, 0xe0}, 3);
 
     arena_free(a);
 }

@@ -1,13 +1,5 @@
-/* Phase 11: casting — end-to-end golden test.
-   Compile with ficc, link the object with gcc -no-pie, and expect exit status 42.
-   Exercises every row of the §6.3 cast matrix: integer narrowing (signed and
-   unsigned wraps), widening, signedness flips, integer↔pointer↔integer round
-   trips, pointer↔pointer reinterprets, `(void)` discards, enum casts, casts in
-   case labels and struct-pointer member access, and pointee-const add/drop
-   (read-only). Each guard returns a distinct small code so a regression names
-   its area. */
+/* Expect exit 42. */
 
-/* Narrowing wraps modulo 2^width (signed input, signed output). */
 int narrow(void)
 {
     if ((char) 300 != 44)
@@ -33,7 +25,6 @@ int narrow(void)
     return 42;
 }
 
-/* Widening sign/zero-extends by the source's signedness. */
 int widen(void)
 {
     int neg = -7;
@@ -71,7 +62,6 @@ int int_ptr_int(void)
     return 42;
 }
 
-/* Pointer↔pointer reinterprets, including through void*. */
 struct point
 {
     int x;
@@ -106,7 +96,6 @@ int ptr_cast(void)
     return 42;
 }
 
-/* `(void)` discards any operand; the cast node yields no value. */
 void nop(void)
 {
 }
@@ -122,7 +111,6 @@ int discards(void)
     return 42;
 }
 
-/* Enums are integer scalars: castable both directions. */
 enum mode
 {
     MO_A,

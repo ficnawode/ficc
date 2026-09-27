@@ -10,24 +10,17 @@
 
 IrModule *tc_build_module(const char *src, Arena *arena);
 
-/* tc_build_module with a concrete file path and -I-style include dirs. */
 IrModule *tc_build_module_with_dirs(const char *src, const char *file, const char *const *dirs,
                                     size_t ndirs, Arena *arena);
 
-/* lex + parse only (front-end check; no semantic or IR stages). */
 ASTNode *tc_parse(const char *src, Arena *arena);
 
 i64 tc_run_interp(const char *src);
 
 int tc_run_elf(const char *src);
 
-/* Compile and link with the real ficc binary's own linker, then run. */
 int tc_link_filc(const char *src);
 
-/* Like tc_run_elf, but links the ficc-compiled unit against an extra
-   translation unit, written from `extra_src` and compiled by the host gcc.
-   Used for extern-linkage tests where the referenced symbols live in a
-   second object file. */
 int tc_run_elf_with_extra_tu(const char *src, const char *extra_src);
 
 int tc_run_shell(const char *cmd);
@@ -64,9 +57,6 @@ int tc_run_shell(const char *cmd);
         arena_free(tc_arena);                                                                      \
     } while (0)
 
-/* Run the program through both the interpreter and the x86 ELF backend and
-   require both to produce `expected`. Failing either reports which backend
-   diverged. */
 #define EXPECT_INTERP_AND_ELF(src, expected)                                                       \
     do                                                                                             \
     {                                                                                              \
@@ -84,8 +74,6 @@ int tc_run_shell(const char *cmd);
         }                                                                                          \
     } while (0)
 
-/* Three-way oracle: the interpreter, the gcc-linked ELF, and the ficc-linked
-   ELF must agree on the exit value. */
 #define EXPECT_INTERP_AND_ELF_FILC(src, expected)                                                  \
     do                                                                                             \
     {                                                                                              \

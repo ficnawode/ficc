@@ -1,10 +1,7 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Phase 12e: compound literals `(type){ ... }` (C11 §6.5.2.5, D12.9). Every
-   program must produce the same result through the interpreter and through
-   the compiled ELF (including the file-scope anonymous-global relocation
-   path). Elevated checks return 42 on success and a distinct code per guard. */
+/* Compound literals (C11 §6.5.2.5). */
 
 TEST(compound_literal, block_scalar_value)
 {
@@ -81,6 +78,17 @@ TEST(compound_literal, array_literal)
                           "    if (((int[4]){1, 2, 3, 4})[3] != 4) return 2;\n"
                           "    if (sizeof((int[]){1, 2, 3}) != 12) return 3;\n"
                           "    if (sizeof((int[2]){9, 9}) != 8) return 4;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(compound_literal, array_designated_initializers)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int *p = (int[]){[2] = 5, [0] = 1};\n"
+                          "    if (p[0] != 1) return 1;\n"
+                          "    if (p[2] != 5) return 2;\n"
                           "    return 42;\n"
                           "}\n",
                           42);

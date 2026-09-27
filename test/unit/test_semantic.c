@@ -147,17 +147,23 @@ TEST(semantic, param_body_redeclaration_error)
                       "}");
 }
 
-/* Phase 11: cast legality */
-
-TEST(semantic, cast_ok)
+TEST(semantic, cast_between_scalar_types_ok)
 {
     EXPECT_BUILD_SUCCEED("int main(void) {\n"
                          "    int x = 300;\n"
                          "    char c = (char)x;\n"
                          "    unsigned long u = (unsigned long)x;\n"
+                         "    return c + (int)u;\n"
+                         "}\n");
+}
+
+TEST(semantic, cast_between_pointer_types_ok)
+{
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    unsigned long u = 0;\n"
                          "    void *v = (void *)u;\n"
                          "    int *p = (int *)v;\n"
-                         "    return *p + c;\n"
+                         "    return p == (int *)0;\n"
                          "}\n");
 }
 
@@ -204,8 +210,6 @@ TEST(semantic, cast_of_struct_rejected)
 
 TEST(semantic, cast_target_array_rejected)
 {
-    /* `(int[3])` disambiguates as `(int)` + subscript-to-cast in the parser;
-       the cast's type-name can never name an array. */
     EXPECT_BUILD_FAIL("int main(void) {\n"
                       "    int i;\n"
                       "    return (int[3])i;\n"
@@ -272,8 +276,7 @@ TEST(semantic, void_named_param_rejected)
 
 TEST(semantic, void_ptr_param_wrong_deep_pointer_rejected)
 {
-    /* `int **` is not implicitly convertible to `void **` (only one pointee
-       level converts; §6.5.16.1) — matches gcc. */
+    /* C11 §6.5.16.1: int ** is not implicitly convertible to void **. */
     EXPECT_BUILD_FAIL("void **dbl(void **pp) { return pp; }\n"
                       "int main(void) {\n"
                       "    int *p = 0;\n"
@@ -282,12 +285,8 @@ TEST(semantic, void_ptr_param_wrong_deep_pointer_rejected)
                       "}\n");
 }
 
-/* Phase 12a: typedef */
-
 TEST(semantic, typedef_void_pointer)
 {
-    /* `typedef void V; V *p;` is the legal "opaque handle" idiom; the void
-       check fires only at the point of a V *variable*. */
     EXPECT_BUILD_SUCCEED("typedef void V;\n"
                          "int main(void) {\n"
                          "    V *p = 0;\n"
@@ -304,7 +303,6 @@ TEST(semantic, typedef_void_variable_rejected)
 
 TEST(semantic, typedef_incomplete_record_ok)
 {
-    /* A typedef to a forward-declared record is the ficc coding style. */
     EXPECT_BUILD_SUCCEED("typedef struct Foo Foo;\n"
                          "struct Foo { int x; };\n"
                          "int main(void) {\n"
@@ -558,8 +556,7 @@ TEST(semantic, variadic_call_named_only)
 
 TEST(semantic, variadic_call_extra_args)
 {
-    /* Extra trailing args are legal (C11 §6.5.2.2p6) and flow through the
-       fixed-arg path in the IR builder, which guards callee param indexing. */
+    /* Extra trailing args are legal (C11 §6.5.2.2p6). */
     EXPECT_BUILD_SUCCEED("int f(int a, ...) {\n"
                          "    return a;\n"
                          "}\n"
@@ -590,9 +587,6 @@ TEST(semantic, variadic_multi_named_call)
 
 TEST(semantic, variadic_only_named_args_matched)
 {
-    /* The named parameters must still be assignability-checked; the trailing
-       arg is not (it has no declared type yet — default promotions land in
-       the IR builder). */
     EXPECT_BUILD_SUCCEED("int f(int a, ...) {\n"
                          "    return a;\n"
                          "}\n"
@@ -688,9 +682,6 @@ TEST(semantic, va_end_bad_arity)
 
 TEST(semantic, raw_names_are_free_identifiers)
 {
-    /* Phase 15 does not reserve the raw names: `va_start` is a plain
-       identifier until the Phase 17 <stdarg.h> shim provides it. A user
-       function called va_start is ordinary code, not a builtin. */
     EXPECT_BUILD_SUCCEED("int va_start(int a) {\n"
                          "    return a;\n"
                          "}\n"
@@ -701,9 +692,6 @@ TEST(semantic, raw_names_are_free_identifiers)
 
 TEST(semantic, raw_va_start_call_is_undeclared)
 {
-    /* Without the shim (Phase 17), a call to the raw name is just an
-       undeclared function — the diagnostic a user relies on when they forget
-       <stdarg.h>. */
     EXPECT_BUILD_FAIL("int f(int a, ...) {\n"
                       "    __builtin_va_list ap;\n"
                       "    va_start(ap, a);\n"
@@ -780,8 +768,6 @@ TEST(semantic, va_arg_first_arg_not_va_list)
                       "    return f(1);\n"
                       "}\n");
 }
-
-/* Phase 16a: function prototypes / forward declarations */
 
 TEST(semantic, prototype_then_definition)
 {
@@ -969,8 +955,6 @@ TEST(semantic, prototype_collides_with_global_var)
                       "}");
 }
 
-/* Phase 16b: function designators / function-pointer semantics */
-
 TEST(semantic, function_designator_in_expression)
 {
     EXPECT_BUILD_SUCCEED("int f(int x) {\n"
@@ -1013,8 +997,6 @@ TEST(semantic, incompatible_function_pointer_assign)
 
 TEST(semantic, file_scope_fn_ptr_init_referencing_function)
 {
-    /* The function must resolve even though globals are planned before
-       function bodies are checked (D16.1 pass order). */
     EXPECT_BUILD_SUCCEED("int f(int x);\n"
                          "int main(void) {\n"
                          "    return f(0) + 1;\n"
@@ -1022,4 +1004,25 @@ TEST(semantic, file_scope_fn_ptr_init_referencing_function)
                          "int f(int x) {\n"
                          "    return x;\n"
                          "}");
+}
+
+TEST(semantic, void_ptr_implicit_object_conversion_ok)
+{
+    /* C11 §6.5.16.1p1: a pointer to void converts implicitly to an object
+       pointer. */
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
+                         "    void *v = 0;\n"
+                         "    int *p = v;\n"
+                         "    return p == 0;\n"
+                         "}");
+}
+
+TEST(semantic, incompatible_object_pointer_init_rejected)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    long x = 0;\n"
+                      "    long *lp = &x;\n"
+                      "    int *p = lp;\n"
+                      "    return p == 0;\n"
+                      "}");
 }

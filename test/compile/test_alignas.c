@@ -3,9 +3,6 @@
 
 #include "util/arena.h"
 
-/* --- Phase 14d: _Alignas — alignment specifier (accepted + validated;
-   honored up to the object's natural alignment, D14.6). --- */
-
 TEST(alignas, file_scope_positions)
 {
     EXPECT_INTERP_AND_ELF("_Alignas(16) int g1 = 5;\n"
@@ -54,7 +51,6 @@ TEST(alignas, type_name_form)
 
 TEST(alignas, struct_member_accepted)
 {
-    /* Members accept _Alignas (recorded, natural-alignment layout only). */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    struct S { _Alignas(16) int f; };\n"
                           "    struct S s = {7};\n"
@@ -71,6 +67,16 @@ TEST(alignas, repeated_specifiers_combine)
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    _Alignas(8) _Alignas(16) int x = 3;\n"
                           "    if (x != 3) return 1;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(alignas, over_natural_alignment_accepted)
+{
+    EXPECT_INTERP_AND_ELF("_Alignas(64) int g = 7;\n"
+                          "int main(void) {\n"
+                          "    if (g != 7) return 1;\n"
                           "    return 0;\n"
                           "}\n",
                           0);

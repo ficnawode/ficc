@@ -24,7 +24,18 @@ TEST(ir_lines, statement_line_stamped)
     IrModule *m = lines_module("int f(void)\n{\n  return 7;\n}\n", a);
     IrInstr *ret = first_instr(m, 0);
     EXPECT_EQ(ret->opcode, OP_RET);
-    EXPECT_EQ(ret->line, 3); /* `return 7;` sits on line 3 */
+    EXPECT_EQ(ret->line, 3);
+
+    arena_free(a);
+}
+
+TEST(ir_lines, statement_line_after_blank_lines)
+{
+    Arena *a = arena_new();
+    IrModule *m = lines_module("int f(void)\n{\n\n\n  return 7;\n}\n", a);
+    IrInstr *ret = first_instr(m, 0);
+    EXPECT_EQ(ret->opcode, OP_RET);
+    EXPECT_EQ(ret->line, 5);
 
     arena_free(a);
 }
@@ -47,7 +58,6 @@ TEST(ir_lines, function_boundary_resets_line)
 TEST(ir_lines, distinct_statements_get_distinct_lines)
 {
     Arena *a = arena_new();
-    /* Two pointer stores each emit one real instruction. */
     IrModule *m = lines_module("void f(int *p)\n{\n  *p = 1;\n  *p = 2;\n}\n", a);
     EXPECT_NOTNULL(m);
 
@@ -67,8 +77,8 @@ TEST(ir_lines, distinct_statements_get_distinct_lines)
             saw_line4 = true;
         }
     }
-    EXPECT_TRUE(saw_line3); /* `*p = 1;` */
-    EXPECT_TRUE(saw_line4); /* `*p = 2;` */
+    EXPECT_TRUE(saw_line3);
+    EXPECT_TRUE(saw_line4);
 
     arena_free(a);
 }

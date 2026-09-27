@@ -11,9 +11,6 @@
 #include <stdint.h>
 #include <string.h>
 
-/* Exercised one invariant per TEST on hand-built, then corrupted, modules. */
-
-/* A fully-formed if/else merge carrying a phi; each corruption mutates this. */
 static IrModule *build_if_else(Arena *a)
 {
     IrModule *m = ir_module_new(a);
@@ -70,8 +67,6 @@ TEST(opt, builder_fixtures_verify)
                                            a)));
     arena_free(a);
 }
-
-/* invariant 1: SSA (single def; every operand has one; params def'd at entry) */
 
 TEST(opt, double_def_rejected)
 {
@@ -138,8 +133,6 @@ TEST(opt, param_redefined_rejected)
     arena_free(a);
 }
 
-/* invariant 2: block shape */
-
 TEST(opt, missing_terminator_rejected)
 {
     Arena *a = arena_new();
@@ -190,8 +183,6 @@ TEST(opt, phi_not_at_start_rejected)
     EXPECT_FALSE(opt_verify(m));
     arena_free(a);
 }
-
-/* invariant 3: CFG coherence */
 
 TEST(opt, brcond_unknown_target_rejected)
 {
@@ -254,8 +245,6 @@ TEST(opt, succ_not_recorded_pred_rejected)
     arena_free(a);
 }
 
-/* invariant 4: labels unique per function */
-
 TEST(opt, duplicate_label_rejected)
 {
     Arena *a = arena_new();
@@ -265,8 +254,6 @@ TEST(opt, duplicate_label_rejected)
     EXPECT_FALSE(opt_verify(m));
     arena_free(a);
 }
-
-/* invariant 5: operands */
 
 TEST(opt, arity_mismatch_rejected)
 {
@@ -304,7 +291,6 @@ TEST(opt, operand_bounds_rejected)
     arena_free(a);
 }
 
-/* A well-formed width-16 merge: only the wide-operand rule varies below. */
 static IrModule *build_wide_phi(Arena *a)
 {
     IrModule *m = ir_module_new(a);
@@ -347,8 +333,6 @@ TEST(opt, wide_phi_nonzero_immediate_rejected)
     arena_free(a);
 }
 
-/* invariant 6: module value tables */
-
 TEST(opt, width_count_mismatch_rejected)
 {
     Arena *a = arena_new();
@@ -380,9 +364,6 @@ TEST(opt, width_zero_result_rejected)
     arena_free(a);
 }
 
-/* invariant 7: volatile as a memory-op barrier */
-
-/* OP_LOAD/OP_STORE counts from an inspected module, split by the volatile flag. */
 typedef struct
 {
     u32 volatile_count;
@@ -434,7 +415,7 @@ TEST(opt, volatile_global_increment_flags)
                                   a);
     EXPECT_TRUE(m != NULL);
     MemopCounts counts = count_memops(m);
-    EXPECT_TRUE(counts.volatile_count >= 2); /* the load and the store in the loop */
+    EXPECT_TRUE(counts.volatile_count >= 2);
     EXPECT_TRUE(counts.plain_count == 0);
     arena_free(a);
 }
@@ -451,7 +432,7 @@ TEST(opt, volatile_deref_in_loop_flags)
                                   a);
     EXPECT_TRUE(m != NULL);
     MemopCounts counts = count_memops(m);
-    EXPECT_TRUE(counts.volatile_count >= 2); /* deref load + deref store inside the loop */
+    EXPECT_TRUE(counts.volatile_count >= 2);
     arena_free(a);
 }
 
@@ -472,14 +453,11 @@ TEST(opt, plain_global_ops_unflagged)
     arena_free(a);
 }
 
-/* CFG base, dominators, natural loops, canonical shape */
-
 static IrFunction *opt_main_fn(IrModule *m)
 {
     return (IrFunction *) vec_get(m->funcs, 0);
 }
 
-/* Block whose label starts with `prefix`; the builder suffixes `_N`. */
 static IrBlock *block_with_prefix(IrFunction *f, const char *prefix)
 {
     size_t n = vec_size(f->blocks);
@@ -529,8 +507,7 @@ TEST(opt, cfg_successors_of_control)
     IrBlock *else_bb = block_with_prefix(f, "else");
     EXPECT_TRUE(succ_contains(cfg, f, "entry", then_bb));
     EXPECT_TRUE(succ_contains(cfg, f, "entry", else_bb));
-    EXPECT_TRUE(vec_size(cfg->succs[opt_block_index(f, then_bb)]) ==
-                0); /* `ret` has no successors */
+    EXPECT_TRUE(vec_size(cfg->succs[opt_block_index(f, then_bb)]) == 0);
     arena_free(a);
 }
 
@@ -546,11 +523,11 @@ TEST(opt, cfg_successors_of_switch)
     IrFunction *f = opt_main_fn(m);
     CfgInfo *cfg = opt_cfg_build(f, a);
     size_t nsucc = vec_size(cfg->succs[0]);
-    EXPECT_TRUE(nsucc == 3); /* two cases + default */
+    EXPECT_TRUE(nsucc == 3);
     arena_free(a);
 }
 
-TEST(opt, rpo_entry_first_and_dead_block_excluded)
+TEST(opt, rpo_entry_first)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int main(void) {\n"
@@ -563,7 +540,20 @@ TEST(opt, rpo_entry_first_and_dead_block_excluded)
     CfgInfo *cfg = opt_cfg_build(f, a);
     EXPECT_TRUE(cfg->rpo[0] == (IrBlock *) vec_get(f->blocks, 0));
     EXPECT_TRUE(cfg->rpo_index[0] == 0);
-    /* the dead second block stays out of the RPO */
+    arena_free(a);
+}
+
+TEST(opt, rpo_dead_block_excluded)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    return 0;\n"
+                                  "    return 1;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    IrFunction *f = opt_main_fn(m);
+    CfgInfo *cfg = opt_cfg_build(f, a);
     EXPECT_TRUE(cfg->rpo_index[1] == UINT32_MAX);
     arena_free(a);
 }
@@ -655,12 +645,8 @@ TEST(opt, nested_loops_nest)
     }
     EXPECT_NOTNULL(outer);
     EXPECT_NOTNULL(inner);
-    if (opt_doms_dominates(doms, opt_block_index(f, outer->header),
-                           opt_block_index(f, inner->header)))
-    {
-        /* outer already wraps inner */
-    }
-    else
+    if (!opt_doms_dominates(doms, opt_block_index(f, outer->header),
+                            opt_block_index(f, inner->header)))
     {
         Loop *tmp = outer;
         outer = inner;
@@ -698,8 +684,6 @@ TEST(opt, do_while_latch_shape)
     arena_free(a);
 }
 
-/* A continue in a while loop sends the body end and the continue block
-   both back into the header: a multi-latch loop to canonicalize. */
 TEST(opt, canonicalize_multi_latch_preserves_semantics)
 {
     Arena *a = arena_new();
@@ -841,8 +825,6 @@ TEST(opt, for_loop_preheader_is_entry)
     arena_free(a);
 }
 
-/* optimize() shell, mode tables, shared magic */
-
 static OptimizerContext make_ctx(IrModule *m, Arena *a)
 {
     OptimizerContext ctx;
@@ -868,7 +850,20 @@ TEST(opt, optimize_preserves_with_empty_tables)
     optimize(m, OPT_LEVEL_0, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_EQ(ir_interp_run(m), before);
+    arena_free(a);
+}
 
+TEST(opt, optimize_preserves_at_level_2)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 6; i = i + 1) s = s + i;\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    i64 before = ir_interp_run(m);
     optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_EQ(ir_interp_run(m), before);
@@ -882,7 +877,23 @@ TEST(opt, optimize_tolerates_null_module)
     arena_free(a);
 }
 
-TEST(opt, cfg_cache_reused_and_rebuilt_per_function)
+TEST(opt, cfg_cache_reused_same_function)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int a(void) { return 1; }\n"
+                                  "int b(void) { return 2; }\n"
+                                  "int main(void) { return a() + b(); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    OptimizerContext ctx = make_ctx(m, a);
+    IrFunction *f0 = (IrFunction *) vec_get(m->funcs, 0);
+    CfgInfo *c0 = opt_get_cfg(&ctx, f0);
+    EXPECT_TRUE(c0->func == f0);
+    EXPECT_TRUE(opt_get_cfg(&ctx, f0) == c0);
+    arena_free(a);
+}
+
+TEST(opt, cfg_cache_rebuilt_per_function)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int a(void) { return 1; }\n"
@@ -894,8 +905,6 @@ TEST(opt, cfg_cache_reused_and_rebuilt_per_function)
     IrFunction *f0 = (IrFunction *) vec_get(m->funcs, 0);
     IrFunction *f1 = (IrFunction *) vec_get(m->funcs, 1);
     CfgInfo *c0 = opt_get_cfg(&ctx, f0);
-    EXPECT_TRUE(c0->func == f0);
-    EXPECT_TRUE(opt_get_cfg(&ctx, f0) == c0); /* same function, same epoch: cached */
     CfgInfo *c1 = opt_get_cfg(&ctx, f1);
     EXPECT_TRUE(c1 != c0);
     EXPECT_TRUE(c1->func == f1);
@@ -938,7 +947,7 @@ TEST(opt, rpo_order_matches_cfg)
     arena_free(a);
 }
 
-TEST(opt, value_analysis_defs_and_uses)
+TEST(opt, value_analysis_defs)
 {
     Arena *a = arena_new();
     IrModule *m = build_if_else(a);
@@ -947,20 +956,37 @@ TEST(opt, value_analysis_defs_and_uses)
     opt_make_value_analysis(&ctx, f);
 
     IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
-    IrInstr *binc = (IrInstr *) vec_get(entry->instrs, 0); /* icmp_slt -> cond */
+    IrInstr *binc = (IrInstr *) vec_get(entry->instrs, 0);
     u32 cond = binc->result;
     EXPECT_TRUE(ctx.def_vreg[cond] == binc);
-    EXPECT_EQ(ctx.use_count[cond], 1); /* the brcond consumes it */
 
     IrBlock *merge = (IrBlock *) vec_get(f->blocks, 3);
     IrInstr *phi = (IrInstr *) vec_get(merge->instrs, 0);
     u32 val = phi->result;
     EXPECT_TRUE(ctx.def_vreg[val] == phi);
-    EXPECT_EQ(ctx.use_count[val], 1); /* the ret consumes it */
     arena_free(a);
 }
 
-/* Whether the current terminator of `bb` leaves for `target`. */
+TEST(opt, value_analysis_uses)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_if_else(a);
+    OptimizerContext ctx = make_ctx(m, a);
+    IrFunction *f = opt_main_fn(m);
+    opt_make_value_analysis(&ctx, f);
+
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrInstr *binc = (IrInstr *) vec_get(entry->instrs, 0);
+    u32 cond = binc->result;
+    EXPECT_EQ(ctx.use_count[cond], 1);
+
+    IrBlock *merge = (IrBlock *) vec_get(f->blocks, 3);
+    IrInstr *phi = (IrInstr *) vec_get(merge->instrs, 0);
+    u32 val = phi->result;
+    EXPECT_EQ(ctx.use_count[val], 1);
+    arena_free(a);
+}
+
 static bool succ_contains_bb(IrBlock *bb, IrBlock *target)
 {
     if (vec_size(bb->instrs) == 0)
@@ -998,7 +1024,6 @@ TEST(opt, insert_empty_block_splits_ifelse_merge)
     EXPECT_TRUE(opt_verify(m));
     EXPECT_EQ(ir_interp_run(m), 10);
 
-    /* both original edges now land on the splice; merge's phi has one entry */
     EXPECT_TRUE(succ_contains_bb(then_bb, spliced));
     EXPECT_TRUE(succ_contains_bb(else_bb, spliced));
     IrInstr *phi = (IrInstr *) vec_get(merge->instrs, 0);
@@ -1059,15 +1084,13 @@ TEST(opt, erase_and_reinsert_instr)
 
     opt_erase_instr(entry, brcond);
     EXPECT_TRUE(opt_instr_index(entry, brcond) == UINT32_MAX);
-    EXPECT_FALSE(opt_verify(m)); /* the entry block lost its terminator */
+    EXPECT_FALSE(opt_verify(m));
 
     opt_insert_instr(entry, (u32) vec_size(entry->instrs), brcond);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_EQ(ir_interp_run(m), 10);
     arena_free(a);
 }
-
-/* canonicalize passes */
 
 static u32 count_opcode(IrModule *m, IrOpcode op)
 {
@@ -1267,7 +1290,7 @@ TEST(opt, identity_neutral_elements)
     optimize(m, OPT_LEVEL_1, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_EQ(count_add_mul_or_sub(m), 0);
-    EXPECT_EQ(count_all_instrs(m), 1); /* just the ret */
+    EXPECT_EQ(count_all_instrs(m), 1);
     EXPECT_EQ(ir_interp_run(m), 0);
     arena_free(a);
 }
@@ -1287,6 +1310,24 @@ TEST(opt, identity_mul_by_zero)
     EXPECT_TRUE(opt_verify(m));
     EXPECT_EQ(count_opcode(m, OP_MUL), 0);
     EXPECT_EQ(ir_interp_run(m), 0);
+    arena_free(a);
+}
+
+TEST(opt, identity_shift_by_zero)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = add_int_param(m, "x", 4, true);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    IrParam *p = (IrParam *) vec_get(f->params, 0);
+    u32 v0 = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(entry, OP_SHL, v0, ir_operand_vreg(p->vreg), ir_operand_imm(0));
+    ir_emit_ret(entry, ir_operand_vreg(v0));
+    i64 before = ir_interp_run(m);
+    optimize(m, OPT_LEVEL_1, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode(m, OP_SHL), 0);
+    EXPECT_EQ(ir_interp_run(m), before);
     arena_free(a);
 }
 
@@ -1493,7 +1534,7 @@ TEST(opt, dce_removes_unused_arithmetic)
     i64 before = ir_interp_run(m);
     optimize(m, OPT_LEVEL_1, a);
     EXPECT_TRUE(opt_verify(m));
-    EXPECT_EQ(count_opcode(m, OP_ADD), 1); /* a0 (via a1) and a1 are gone */
+    EXPECT_EQ(count_opcode(m, OP_ADD), 1);
     EXPECT_EQ(count_opcode(m, OP_MUL), 0);
     EXPECT_EQ(ir_interp_run(m), before);
     arena_free(a);
@@ -1550,8 +1591,6 @@ TEST(opt, preheader_canonical_shape_after_optimize)
     arena_free(a);
 }
 
-/* optimize passes (GVN, LICM, mem_fwd) */
-
 static IrModule *build_add_add(Arena *a)
 {
     IrModule *m = ir_module_new(a);
@@ -1586,7 +1625,7 @@ TEST(opt, gvn_merges_equal_defs)
     EXPECT_EQ(count_opcode(m, OP_ADD), 3);
     optimize(m, OPT_LEVEL_1, a);
     EXPECT_TRUE(opt_verify(m));
-    EXPECT_EQ(count_opcode(m, OP_ADD), 2); /* the second a+b folds into the first */
+    EXPECT_EQ(count_opcode(m, OP_ADD), 2);
     arena_free(a);
 }
 
@@ -1663,7 +1702,6 @@ TEST(opt, gvn_skips_sibling_defs)
     arena_free(a);
 }
 
-/* The block that owns the sole surviving MUL is the loop's preheader. */
 static IrBlock *block_of_instr(IrFunction *f, IrInstr *in)
 {
     size_t nblocks = vec_size(f->blocks);
@@ -1692,7 +1730,7 @@ TEST(opt, licm_hoists_invariant_mul)
     EXPECT_EQ(ir_interp_run(m), 1);
     optimize(m, OPT_LEVEL_1, a);
     EXPECT_TRUE(opt_verify(m));
-    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0); /* helper */
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     EXPECT_EQ(count_opcode(m, OP_MUL), 1);
     IrInstr *mul = NULL;
     size_t nblocks = vec_size(f->blocks);
@@ -1710,7 +1748,6 @@ TEST(opt, licm_hoists_invariant_mul)
         }
     }
     EXPECT_TRUE(mul != NULL);
-    /* the invariant k*3 lands in blocks[0] (the preheader) */
     EXPECT_TRUE(block_of_instr(f, mul) == (IrBlock *) vec_get(f->blocks, 0));
     EXPECT_EQ(ir_interp_run(m), 1);
     arena_free(a);
@@ -1916,8 +1953,6 @@ TEST(opt, cfg_clean_keeps_latch_for_header_phi_copy)
     arena_free(a);
 }
 
-/* inline pass (F1: tier 1 user-directed + tier 2 size filter) */
-
 static u32 count_calls_to(IrModule *m, const char *fname)
 {
     u32 n = 0;
@@ -1986,7 +2021,6 @@ static IrFunction *fn_by_name(IrModule *m, const char *name)
     return NULL;
 }
 
-/* Tier 1: a `static inline` leaf disappears entirely at -O1. */
 TEST(opt, inline_tier1_removes_call)
 {
     Arena *a = arena_new();
@@ -2034,7 +2068,7 @@ TEST(opt, inline_recursion_not_expanded)
     EXPECT_EQ(ir_interp_run(m), 5);
     optimize(m, OPT_LEVEL_1, a);
     EXPECT_TRUE(opt_verify(m));
-    EXPECT_TRUE(count_calls_to(m, "down") >= 1); /* the recursion remains */
+    EXPECT_TRUE(count_calls_to(m, "down") >= 1);
     EXPECT_EQ(ir_interp_run(m), 5);
     arena_free(a);
 }
@@ -2063,7 +2097,6 @@ TEST(opt, inline_transitive_recursion_blocked)
     arena_free(a);
 }
 
-/* Tier 2: a non-inline helper that is too cheap to stay a call inlines too. */
 TEST(opt, inline_tier2_small_callee)
 {
     Arena *a = arena_new();
@@ -2098,7 +2131,7 @@ TEST(opt, inline_tier2_big_callee_kept)
     EXPECT_TRUE(m != NULL);
     optimize(m, OPT_LEVEL_1, a);
     EXPECT_TRUE(opt_verify(m));
-    EXPECT_TRUE(count_calls_to(m, "many") >= 1); /* over the size cap */
+    EXPECT_TRUE(count_calls_to(m, "many") >= 1);
     EXPECT_EQ(ir_interp_run(m), 0);
     arena_free(a);
 }
@@ -2124,7 +2157,6 @@ TEST(opt, inline_multi_ret_phi)
     arena_free(a);
 }
 
-/* A void inline with a loop-local alloca and a pointer param. */
 TEST(opt, inline_void_alloca)
 {
     Arena *a = arena_new();
@@ -2176,8 +2208,8 @@ TEST(opt, inline_indirect_stays)
     EXPECT_TRUE(m != NULL);
     optimize(m, OPT_LEVEL_1, a);
     EXPECT_TRUE(opt_verify(m));
-    EXPECT_TRUE(count_calls_to(m, "sel") == 0);               /* no direct calls remain */
-    EXPECT_TRUE(count_opcode_in_fn(m, "main", OP_CALL) >= 1); /* the fp() */
+    EXPECT_TRUE(count_calls_to(m, "sel") == 0);
+    EXPECT_TRUE(count_opcode_in_fn(m, "main", OP_CALL) >= 1);
     EXPECT_EQ(ir_interp_run(m), 0);
     arena_free(a);
 }
@@ -2204,8 +2236,6 @@ TEST(opt, inline_sret_record)
     EXPECT_EQ(ir_interp_run(m), 42);
     arena_free(a);
 }
-
-/* Phase 25 J: strength reduction, reassociation, and dead-store elimination. */
 
 static IrInstr *def_of(IrModule *m, u32 vreg)
 {
@@ -2276,6 +2306,25 @@ TEST(opt, strength_rewrites_unsigned_modulo_by_power_of_two)
     EXPECT_TRUE(opt_pass_strength(&ctx));
     EXPECT_EQ(def_of(m, r)->opcode, OP_AND);
     EXPECT_EQ(def_of(m, r)->ops[1].u.imm, 15);
+    EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+TEST(opt, strength_rewrites_unsigned_div_by_power_of_two)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+    u32 x = ir_alloc_vreg(m, 4, false, false);
+    u32 r = ir_alloc_vreg(m, 4, false, false);
+    ir_emit_binop(bb, OP_UDIV, x, ir_operand_imm(9), ir_operand_imm(1));
+    ir_emit_binop(bb, OP_UDIV, r, ir_operand_vreg(x), ir_operand_imm(16));
+    ir_emit_ret(bb, ir_operand_vreg(r));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_TRUE(opt_pass_strength(&ctx));
+    EXPECT_EQ(def_of(m, r)->opcode, OP_LSHR);
+    EXPECT_EQ(def_of(m, r)->ops[1].u.imm, 4);
     EXPECT_TRUE(opt_verify(m));
     arena_free(a);
 }
@@ -2430,7 +2479,7 @@ TEST(opt, dfe_removes_inlined_static)
     optimize(m, OPT_LEVEL_1, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_TRUE(count_calls_to(m, "twice") == 0);
-    EXPECT_TRUE(fn_by_name(m, "twice") == NULL); /* body dropped */
+    EXPECT_TRUE(fn_by_name(m, "twice") == NULL);
     EXPECT_EQ(ir_interp_run(m), 42);
     arena_free(a);
 }

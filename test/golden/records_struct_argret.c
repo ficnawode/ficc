@@ -17,5 +17,5 @@ int main(void)
     x.a = 10;
     x.b = 20;
     struct Pair y = bump(x);
-    return x.a + x.b + y.a + y.b; /* 10 + 20 + 11 + 21 = 62 */
+    return x.a + x.b + y.a + y.b;
 }

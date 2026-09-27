@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Opt-in static-linkage certificate (`make golden-static`): link the
-# freestanding golden corpus with ficc's own linker and run each binary,
-# asserting interp == filc. Also links one program twice and requires
-# byte-identical output (determinism). Not part of `make test && make selftest`;
-# run it when the static linker is in doubt.
-#
 # Usage: test/golden_static.sh <path-to-ficc-binary>
 
 set -eu

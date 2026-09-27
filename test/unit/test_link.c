@@ -284,9 +284,7 @@ TEST(link, deterministic_output)
     arena_free(arena);
 }
 
-/* A versioned import must bind to the DSO's default definition. memcpy's
-   compat symbol is memcpy@GLIBC_2.2.5; the default is memcpy@GLIBC_2.14, so
-   the linked .dynstr has to name the latter. */
+/* Versioned imports bind the DSO default (memcpy@GLIBC_2.14), not its compat symbol. */
 TEST(link, versioned_import_default)
 {
     Arena *arena = arena_new();

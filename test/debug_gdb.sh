@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Opt-in real-debugger certificate (`make test-gdb`); self-skips if gdb/readelf are absent.
-#
-# `make test` never touches binutils/gdb; this script additionally drives gdb
-# in batch mode over a ficc -g program and asserts bt frames, statement
-# breakpoints, and DW_OP_fbreg / DW_OP_addr values.
-#
 # Usage: test/debug_gdb.sh <path-to-ficc-binary>
 
 set -eu
@@ -91,8 +85,6 @@ fail()
 
 "$FICC_BIN" -g -c "$SRC" -o "$OBJ" >/dev/null 2>&1 || fail "ficc -g -c"
 
-# readelf sanity: sections present, no parse Warning, rows map the fixture's
-# statement lines.
 readelf -SW "$OBJ" | grep -q '\.debug_line' || fail "no .debug_line section"
 readelf -SW "$OBJ" | grep -q '\.eh_frame' || fail "no .eh_frame section"
 if readelf --debug-dump=info "$OBJ" 2>&1 | grep -q 'Warning'; then
@@ -104,13 +96,8 @@ if [ "$LINES" != "30 36 37 38 39 40 41 46 47 48 50 51 " ]; then
     exit 1
 fi
 
-# Link with ficc's own linker (phase 24): the -g pass-through must survive the
-# link so gdb sees relocated addresses, not object offsets. The fixture uses no
-# libc, so the freestanding -nostdlib path is the certificate's link.
 "$FICC_BIN" -nostdlib "$OBJ" -o "$BIN" || fail "filc link"
 
-# The full rich-type value surface, as gdb resolves it after stepping three
-# statements into drawn (fl->a and fl->b executed, u->i not yet).
 if ! gdb -batch -ex 'set debuginfod enabled off' -ex 'set pagination off' \
     -ex 'break cert.c:36' -ex run -ex next -ex next -ex next \
     -ex 'print n->value' -ex 'print c' -ex 'print fl->a' -ex 'print fl->b' \
@@ -140,7 +127,6 @@ if ! gdb -batch -ex 'set debuginfod enabled off' -ex 'set pagination off' \
     fail "gdb rich-type values/backtrace assertions"
 fi
 
-# Three-frame backtrace through the CFI (nodal <- drawn <- main).
 if ! gdb -batch -ex 'set pagination off' -ex 'break cert.c:30' -ex run -ex bt -ex quit \
     --args "$BIN" \
     | awk '/^#0 / && /nodal/ {n=1} /^#1 / && /drawn/ {d=1} /^#2 / && /main/ {m=1} END { exit !(n && d && m) }'; then

@@ -1,6 +1,3 @@
-/* Phase 14c: _Bool — end-to-end golden test.
-   _Bool is a 1-byte unsigned integer; stores and casts normalize to 0/1. */
-
 _Bool g1 = 42;
 _Bool g2 = 0;
 struct S

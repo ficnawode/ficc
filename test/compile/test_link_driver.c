@@ -80,8 +80,6 @@ TEST(link_driver, object_only_link)
     ld_cleanup(paths, 5);
 }
 
-/* Hosted: the default link pulls crt1.o and -lc implicitly, producing a
-   dynamic executable that calls printf. */
 TEST(link_driver, hosted_printf)
 {
     char src[128], bin[192], out[192];
@@ -163,8 +161,6 @@ static bool have_gcc(void)
     return tc_run_shell("command -v gcc >/dev/null 2>&1") == 0;
 }
 
-/* The plugin's reference to host_value resolves only when the executable
-   exports its own globals. */
 TEST(link_driver, export_dynamic_plugin)
 {
     if (!have_gcc())

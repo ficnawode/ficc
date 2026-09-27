@@ -1,12 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Loop conditions with side effects on loop variables (`while (i--)`, `do
-   { } while (--n > 0)`) and short-circuited conditions that assign inside
-   the `&&`/`||` RHS (`while (len > 0 && (p = f()) != NULL)`). The body's
-   reads must resolve to the post-condition value, and phi copies on the back
-   edge must observe the update. */
-
 TEST(loop_cond, while_post_decrement_cond)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -90,7 +84,6 @@ TEST(loop_cond, side_effect_in_cond_then_body_break)
                           0);
 }
 
-/* After a break, the loop counter keeps its value at loop entry. */
 TEST(loop_cond, break_keeps_loop_var_from_latched_value)
 {
     EXPECT_INTERP_AND_ELF("static unsigned char data[8];\n"
@@ -109,4 +102,40 @@ TEST(loop_cond, break_keeps_loop_var_from_latched_value)
                           "    return ok ? 0 : 1;\n"
                           "}\n",
                           0);
+}
+
+TEST(loop_cond, or_short_circuit_condition)
+{
+    EXPECT_INTERP_AND_ELF("int calls;\n"
+                          "int rhs(void) { calls = calls + 1; return 5; }\n"
+                          "int main(void) {\n"
+                          "    int n = 0;\n"
+                          "    int total = 0;\n"
+                          "    while (n < 3 || rhs() < 4) {\n"
+                          "        total = total + n;\n"
+                          "        n = n + 1;\n"
+                          "    }\n"
+                          "    if (total != 3) return 1;\n"
+                          "    if (calls != 1) return 2;\n"
+                          "    if (n != 3) return 3;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(loop_cond, do_while_continue_rechecks_condition)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int n = 0;\n"
+                          "    int sum = 0;\n"
+                          "    do {\n"
+                          "        n++;\n"
+                          "        if (n == 2) continue;\n"
+                          "        sum = sum + n;\n"
+                          "    } while (n < 4 && sum < 100);\n"
+                          "    if (sum != 8) return 1;\n"
+                          "    if (n != 4) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
 }

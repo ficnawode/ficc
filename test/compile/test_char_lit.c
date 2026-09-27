@@ -1,14 +1,20 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Phase 13a: character literals and escape sequences (§6.4.4.4). A char
-   literal is an int constant, so it must fold everywhere an integer constant
-   does. Every program must produce the same result through the interpreter
-   and through the compiled ELF. */
+/* C11 §6.4.4.4: a character constant has type int. */
 
 TEST(char_lit, plain_value)
 {
     EXPECT_INTERP_AND_ELF("int main(void) { int c = 'A'; return c - 23; }\n", 42);
+}
+
+TEST(char_lit, constant_has_type_int)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    if (sizeof('A') != sizeof(int)) return 1;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
 }
 
 TEST(char_lit, octal_value)
@@ -116,8 +122,6 @@ TEST(char_lit, string_escapes_share_decoder)
                           "}\n",
                           42);
 }
-
-/* negatives (all must fail to build) */
 
 TEST(char_lit, negative_empty)
 {

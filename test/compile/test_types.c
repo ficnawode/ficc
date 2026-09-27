@@ -46,9 +46,7 @@ TEST(types, type_is_signed_int)
 
 TEST(types, type_is_signed_is_unsigned_complement)
 {
-    /* type_is_signed reports signed-integer kinds. Pointers are unsigned:
-       relational operators on them compare addresses and must use the
-       unsigned opcodes. */
+    /* Pointer comparisons are unsigned and must use unsigned opcodes. */
     EXPECT_TRUE(type_is_signed(type_int()));
     EXPECT_TRUE(!type_is_signed(type_uint()));
     EXPECT_TRUE(!type_is_signed(type_ptr(type_int())));
@@ -246,6 +244,29 @@ TEST(types, interp_unsigned_rem)
               1);
 }
 
+TEST(types, interp_negative_modulo)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    if (-7 % 2 != -1) return 1;\n"
+                          "    if (7 % -2 != 1) return 2;\n"
+                          "    if (-7 / 2 != -3) return 3;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(types, interp_unsigned_int_wrap)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    unsigned a = 4294967295U;\n"
+                          "    if (a + 1 != 0) return 1;\n"
+                          "    unsigned b = 0;\n"
+                          "    if (b - 1 != 4294967295U) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
 TEST(types, interp_mixed_signedness_comparison)
 {
     EXPECT_EQ(tc_run_interp("int main(void) {\n"
@@ -355,8 +376,7 @@ TEST(types, elf_long_return)
               99);
 }
 
-/* Regression: big decimal literals (> 2^63) with UL/ULL suffixes must be typed
-   unsigned end to end — the lexer's suffix bit-field must survive compilation. */
+/* Decimal literals > 2^63 with a UL/ULL suffix are typed unsigned. */
 static const char *big_literal_src =
     "int main(void) {\n"
     "    unsigned long big = 18446744073709551615UL;\n"

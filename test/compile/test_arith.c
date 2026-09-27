@@ -44,8 +44,6 @@ TEST(arith, elf_mixed)
     EXPECT_EQ(tc_run_elf(arith_prog), 55);
 }
 
-/* Regression: unsigned division/remainder must use `div`, not `idiv`: a
-   dividend with the top bit set must not be sign-extended. */
 static const char *unsigned_div_src =
     "int main(void) {\n"
     "    unsigned long m = 0xFFFFFFFFFFFFFFFFUL;\n"
@@ -60,8 +58,6 @@ TEST(arith, unsigned_div_remainder)
     EXPECT_INTERP_AND_ELF(unsigned_div_src, 0);
 }
 
-/* Regression: constant folding must honor unsigned DIV/REM/SHR and relations;
-   folding `SIZE_MAX / 16` or `>> 4` with signed semantics yields 0/-1. */
 static const char *unsigned_fold_src =
     "static const unsigned long Q = 0xFFFFFFFFFFFFFFFFUL / 16;\n"
     "static const int P = 0xFFFFFFFFFFFFFFFFUL > 0x1000000000000000UL;\n"
@@ -75,4 +71,16 @@ static const char *unsigned_fold_src =
 TEST(arith, unsigned_constant_fold)
 {
     EXPECT_INTERP_AND_ELF(unsigned_fold_src, 0);
+}
+
+TEST(arith, signed_division_truncates_toward_zero)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    if (-7 / 2 != -3) return 1;\n"
+                          "    if (-7 % 2 != -1) return 2;\n"
+                          "    if (7 / -2 != -3) return 3;\n"
+                          "    if (7 % -2 != 1) return 4;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
 }

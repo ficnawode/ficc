@@ -1,20 +1,9 @@
-/* Phase 19f: x87 long-double arithmetic, compares, and converts. End-to-end
-   golden. Compile with ficc (`ficc -run float_long_double_arith.c` for the
-   interpreter, `ficc -c` + `gcc -no-pie` for the ELF), and expect exit 42.
-
-   Exercises the width-16 surface on the x87 stack: add/sub/mul/div (with the
-   exact 80-bit patterns of `0.1L + 0.2L`, `3.0L / 7.0L`, and a 10-term
-   `0.1L` chain — gcc-verified constants), every predicate incl. NaN, -0.0L
-   boolify, unary minus, `++`/`--`/compound assignment, the i/d/f ↔ ld cast
-   matrix with the u64 ≥ 2^63 recovery plus the truncation brands, and the
-   2^-16445 subnormal literal. All checks compare byte patterns of the first
-   ten value bytes (fstpt fills only those; the 6 padding bytes are not read).*/
+/* Expect exit 42. */
 
 long double res;
 
 int main(void)
 {
-    /* arithmetic, bit-exact against the host x87 */
     long double s = 0.0L;
     s = 0.1L + 0.2L;
     if (*(unsigned long long *) &s != 0x999999999999999aULL)
@@ -61,7 +50,6 @@ int main(void)
         return 8; /* the chain lands a hair above 1.0 */
     }
 
-    /* compares incl. NaN */
     if (!(a < b) || !(a <= 2.0L) || !(b > a) || !(b >= 2.5L))
     {
         return 9;
@@ -77,7 +65,6 @@ int main(void)
         return 11;
     }
 
-    /* boolify / conditions / unary / mutators */
     long double nz = -0.0L;
     if (nz)
     {
@@ -119,7 +106,6 @@ int main(void)
         return 21;
     }
 
-    /* converts: i/d/f ↔ ld */
     if ((long double) 3 != 3.0L)
     {
         return 22;
@@ -146,7 +132,6 @@ int main(void)
         return 27;
     }
 
-    /* the u64 ≥ 2^63 add-back dance and the truncation brands */
     long double big = (long double) 0xFFFFFFFFFFFFFFFFULL;
     if (*(unsigned long long *) &big != 0xFFFFFFFFFFFFFFFFULL)
     {
@@ -189,8 +174,6 @@ int main(void)
         return 36;
     }
 
-    /* --- a width-16 phi and a 16-byte global store; a = 3.5, b = 2.5, so the ternary picks 4.5L
-     * --- */
     res = a < b ? 1.5L : 4.5L;
     if (*(unsigned long long *) &res != 0x9000000000000000ULL)
     {

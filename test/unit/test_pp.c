@@ -1134,11 +1134,47 @@ TEST(pp, else_without_if_is_error)
     arena_free(a);
 }
 
+TEST(pp, elif_without_if_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#elif 1\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, multiple_else_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#if 0\n#else\n#else\n#endif\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, elif_after_else_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#if 0\n#else\n#elif 1\n#endif\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
 TEST(pp, ifdef_missing_name_is_error)
 {
     Arena *a = arena_new();
     Pp *pp = pp_new(a);
     EXPECT_NULL(pp_preprocess(pp, "<test>", "#ifdef\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, ifndef_missing_name_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#ifndef\n"));
     EXPECT_EQ(pp->error_count, 1);
     arena_free(a);
 }
@@ -1251,18 +1287,21 @@ TEST(pp, isystem_header_warnings_suppressed)
     EXPECT_EQ(pp->error_count, 0);
     EXPECT_EQ(pp->warning_count, 0);
     arena_free(a);
+}
 
-    Arena *a2 = arena_new();
-    const char *user = pp_test_mkdir(a2, "iuserwarn");
+TEST(pp, user_header_warnings_visible)
+{
+    Arena *a = arena_new();
+    const char *user = pp_test_mkdir(a, "iuserwarn");
     char upath[200];
     snprintf(upath, sizeof(upath), "%s/h.h", user);
     pp_test_write_at(upath, "#warning visible_here\n");
-    Pp *pp2 = pp_new(a2);
-    vec_push(pp2->cfg.include_paths, (void *) user);
-    EXPECT_NOTNULL(pp_preprocess(pp2, "<test>", "#include <h.h>\n"));
-    EXPECT_EQ(pp2->error_count, 0);
-    EXPECT_EQ(pp2->warning_count, 1);
-    arena_free(a2);
+    Pp *pp = pp_new(a);
+    vec_push(pp->cfg.include_paths, (void *) user);
+    EXPECT_NOTNULL(pp_preprocess(pp, "<test>", "#include <h.h>\n"));
+    EXPECT_EQ(pp->error_count, 0);
+    EXPECT_EQ(pp->warning_count, 1);
+    arena_free(a);
 }
 
 TEST(pp, include_builtin_shim_resolves)
@@ -1280,6 +1319,15 @@ TEST(pp, include_missing_is_error)
     Arena *a = arena_new();
     Pp *pp = pp_new(a);
     EXPECT_NULL(pp_preprocess(pp, "<test>", "#include <ficcinc_zz_missing.h>\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, include_missing_operand_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#include\n"));
     EXPECT_EQ(pp->error_count, 1);
     arena_free(a);
 }
@@ -1340,11 +1388,19 @@ static void expect_if_taken_has(Pp *pp, const char *ident)
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, ident));
 }
 
-TEST(pp, if_true_and_false)
+TEST(pp, if_true_taken)
 {
     Arena *a = arena_new();
-    Pp *pp = pp_run_text(a, "#if 1\nint a;\n#endif\n#if 0\nint gone;\n#endif\nint b;\n");
+    Pp *pp = pp_run_text(a, "#if 1\nint a;\n#endif\n");
     expect_if_taken_has(pp, "a");
+    arena_free(a);
+}
+
+TEST(pp, if_false_not_taken)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#if 0\nint gone;\n#endif\nint b;\n");
+    EXPECT_EQ(pp->error_count, 0);
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "b"));
     EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "gone"));
     arena_free(a);
@@ -1358,12 +1414,21 @@ TEST(pp, if_arithmetic_and_precedence)
     arena_free(a);
 }
 
-TEST(pp, if_short_circuit_avoids_errors)
+TEST(pp, if_logical_short_circuit_avoids_error)
 {
     Arena *a = arena_new();
-    Pp *pp = pp_run_text(a, "#if 0 && 1/0\nint gone;\n#endif\n#if 1 ? 2 : 1/0\nint a;\n#endif\n");
-    expect_if_taken_has(pp, "a");
+    Pp *pp = pp_run_text(a, "#if 0 && 1/0\nint gone;\n#endif\nint ok;\n");
+    EXPECT_EQ(pp->error_count, 0);
     EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "gone"));
+    EXPECT_TRUE(soup_has_token(pp, TOK_PP_IDENT, "ok"));
+    arena_free(a);
+}
+
+TEST(pp, if_conditional_short_circuit_avoids_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#if 1 ? 2 : 1/0\nint a;\n#endif\n");
+    expect_if_taken_has(pp, "a");
     arena_free(a);
 }
 
@@ -1383,6 +1448,14 @@ TEST(pp, if_defined_and_elif)
                             "#else\nint c;\n#endif\n");
     expect_if_taken_has(pp, "a");
     EXPECT_FALSE(soup_has_token(pp, TOK_PP_IDENT, "b"));
+    arena_free(a);
+}
+
+TEST(pp, if_defined_without_parens)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_run_text(a, "#define X 1\n#if defined X\nint a;\n#endif\n");
+    expect_if_taken_has(pp, "a");
     arena_free(a);
 }
 
@@ -1417,6 +1490,15 @@ TEST(pp, if_div_by_zero_is_error)
     Arena *a = arena_new();
     Pp *pp = pp_new(a);
     EXPECT_NULL(pp_preprocess(pp, "<test>", "#if 1/0\n"));
+    EXPECT_EQ(pp->error_count, 1);
+    arena_free(a);
+}
+
+TEST(pp, if_missing_expression_is_error)
+{
+    Arena *a = arena_new();
+    Pp *pp = pp_new(a);
+    EXPECT_NULL(pp_preprocess(pp, "<test>", "#if\n"));
     EXPECT_EQ(pp->error_count, 1);
     arena_free(a);
 }
@@ -1698,6 +1780,7 @@ TEST(pp, pragma_operator_once_via_macro)
     EXPECT_TRUE(soup_has_token(pp, TOK_PP_NUMBER, "7"));
     arena_free(a);
 }
+
 TEST(pp, pragma_operator_escapes_not_decoded)
 {
     Arena *a = arena_new();
@@ -1751,8 +1834,6 @@ static char *pp_file_read(Arena *a, const char *path)
     return buf;
 }
 
-/* Two soups are the same if every token shares kind, spelling and presumed
-   loc; the -E round-trip restores exactly these. */
 static void expect_soups_equal(Pp *a, Pp *b)
 {
     EXPECT_EQ(vec_size(a->out), vec_size(b->out));
@@ -1843,6 +1924,21 @@ TEST(pp, emit_trivia_fidelity)
     char *plain = pp_emit_str(pp, (PpEmitOptions) {.no_markers = true});
     EXPECT_STR_EQ("\n\nint x = ((1)+(2));\n\nchar *s = \"a b\";\n", plain);
     EXPECT_TRUE(strstr(plain, "/* lead */") == NULL);
+    arena_free(a);
+}
+
+TEST(pp, emit_trivia_keeps_comments)
+{
+    Arena *a = arena_new();
+    const char *src = "/* lead */\n"
+                      "#define ADD(a, b) ((a) + (b))\n"
+                      "\n"
+                      "int x = ADD(1, 2);\n"
+                      "\n"
+                      "#define STR(x) #x\n"
+                      "char *s = STR(a   b);\n";
+    Pp *pp = pp_run_text(a, src);
+    EXPECT_EQ(pp->error_count, 0);
 
     char *kept = pp_emit_str(pp, (PpEmitOptions) {.keep_comments = true, .no_markers = true});
     EXPECT_TRUE(strstr(kept, "/* lead */") != NULL);
@@ -1850,10 +1946,6 @@ TEST(pp, emit_trivia_fidelity)
     arena_free(a);
 }
 
-/* Preprocess a program, emit it with line markers, and feed that back through
-   the whole pipeline; the interpreter's exit value must not change. Pure
-   in-process (no files, no external compiler) — the delta check the golden
-   suite exists to protect. */
 static void expect_roundtrip_exit(const char *src)
 {
     Arena *a = arena_new();
@@ -2045,13 +2137,6 @@ TEST(pp, pedantic_warns_on_gnu_pragma)
     arena_free(a);
 }
 
-/* Phase 17x: hostile-input hardening corpus (in-process, D17.14)
-   Every row below is a corner that a naive preprocessor gets wrong: the
-   rescan/disable-during boundary, empty-argument placemarkers, paste
-   validity, intmax arithmetic in `#if`, and the diagnostic pragmas. */
-
-/* Nested stringize/paste lattices. */
-
 TEST(pp, hostile_stringize_of_paste)
 {
     Arena *a = arena_new();
@@ -2104,8 +2189,6 @@ TEST(pp, hostile_stringize_prescans_keep_arg_spacing)
     expect_out(pp, 0, TOK_PP_STRING, "\"a b\"");
     arena_free(a);
 }
-
-/* Empty-argument and GNU comma-deletion corners. */
 
 TEST(pp, hostile_two_empty_arguments)
 {
@@ -2166,8 +2249,6 @@ TEST(pp, hostile_paste_both_empty_is_nothing)
     expect_out(pp, 0, TOK_PP_TRIVIA_NL, "\n");
     arena_free(a);
 }
-
-/* Paste validity failures (re-lexed spelling must be one pp-token). */
 
 TEST(pp, hostile_paste_semicolons_invalid)
 {
@@ -2233,8 +2314,6 @@ TEST(pp, hostile_paste_ident_dot_invalid)
     EXPECT_EQ(pp->error_count, 1);
     arena_free(a);
 }
-
-/* `#if` arithmetic: intmax_t typing, wraparound, and diagnostics. */
 
 TEST(pp, hostile_if_hex_unsigned_exceeds_int)
 {
@@ -2311,8 +2390,6 @@ TEST(pp, hostile_if_modulo_and_shift)
     arena_free(a);
 }
 
-/* Include-guard and `#pragma once` double-inclusion (nested). */
-
 TEST(pp, hostile_nested_include_guards)
 {
     Arena *a = arena_new();
@@ -2354,8 +2431,6 @@ TEST(pp, hostile_pragma_once_beats_guardless_double_include)
     arena_free(a);
 }
 
-/* `#line` + marker round-trips. */
-
 TEST(pp, hostile_line_markers_roundtrip_through_emit)
 {
     Arena *a = arena_new();
@@ -2367,8 +2442,6 @@ TEST(pp, hostile_line_markers_roundtrip_through_emit)
     expect_soups_equal(pp, again);
     arena_free(a);
 }
-
-/* Macro redefinition conflicts. */
 
 TEST(pp, hostile_redefinition_whitespace_only_is_ok)
 {
@@ -2397,8 +2470,6 @@ TEST(pp, hostile_redefinition_object_body_change_is_error)
     arena_free(a);
 }
 
-/* `_Pragma` weaves. */
-
 TEST(pp, hostile_pragma_weave_through_macro)
 {
     Arena *a = arena_new();
@@ -2419,8 +2490,6 @@ TEST(pp, hostile_two_pragmas_in_one_expansion)
     EXPECT_EQ(pp->error_count, 0);
     arena_free(a);
 }
-
-/* Poison / system_header interplay. */
 
 TEST(pp, hostile_poison_not_fired_from_skipped_branch)
 {

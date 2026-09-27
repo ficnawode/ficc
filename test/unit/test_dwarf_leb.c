@@ -31,6 +31,8 @@ TEST(dwarf_leb, uleb128_known_encodings)
     lebs(&b, a, 128, (const u8[]) {0x80, 0x01}, 2);
     lebs(&b, a, 624485, (const u8[]) {0xe5, 0x8e, 0x26}, 3);
     lebs(&b, a, 0xffffffffu, (const u8[]) {0xff, 0xff, 0xff, 0xff, 0x0f}, 5);
+    lebs(&b, a, 0xffffffffffffffffULL,
+         (const u8[]) {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01}, 10);
 
     arena_free(a);
 }
@@ -72,10 +74,21 @@ TEST(dwarf_leb, sleb128_known_encodings)
     dwarf_sleb128(&b, -123456);
     expect_bytes(&b, (const u8[]) {0xc0, 0xbb, 0x78}, 3);
 
+    bytebuf_init(&b, a);
+    dwarf_sleb128(&b, 127);
+    expect_bytes(&b, (const u8[]) {0xff, 0x00}, 2);
+
+    bytebuf_init(&b, a);
+    dwarf_sleb128(&b, -128);
+    expect_bytes(&b, (const u8[]) {0x80, 0x7f}, 2);
+
+    bytebuf_init(&b, a);
+    dwarf_sleb128(&b, (-9223372036854775807LL - 1));
+    expect_bytes(&b, (const u8[]) {0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f}, 10);
+
     arena_free(a);
 }
 
-/* The line unit is one version-2 header plus one set_address RELA per function. */
 TEST(dwarf_leb, build_line_unit_shape)
 {
     Arena *a = arena_new();
@@ -91,9 +104,9 @@ TEST(dwarf_leb, build_line_unit_shape)
     dwarf_build(cm, "unit.c", "/tmp", &out, a);
 
     const u8 *line = bytebuf_data(&out.debug_line);
-    EXPECT_EQ(line[4], 2); /* version */
+    EXPECT_EQ(line[4], 2);
     EXPECT_EQ(line[5], 0);
-    EXPECT_EQ(vec_size(out.rela_line), 2); /* one address slot per function */
+    EXPECT_EQ(vec_size(out.rela_line), 2);
 
     u32 unit_len =
         (u32) line[0] | ((u32) line[1] << 8) | ((u32) line[2] << 16) | ((u32) line[3] << 24);

@@ -1,6 +1,15 @@
 #include "harness.h"
 #include "util/bytebuf.h"
 
+TEST(bytebuf, empty_initial_len)
+{
+    Arena *a = arena_new();
+    ByteBuf buf;
+    bytebuf_init(&buf, a);
+    EXPECT_EQ(bytebuf_len(&buf), 0);
+    arena_free(a);
+}
+
 TEST(bytebuf, append_bytes)
 {
     Arena *a = arena_new();
@@ -11,6 +20,17 @@ TEST(bytebuf, append_bytes)
     EXPECT_EQ(bytebuf_len(&buf), 2);
     EXPECT_EQ(bytebuf_data(&buf)[0], 0xDE);
     EXPECT_EQ(bytebuf_data(&buf)[1], 0xAD);
+    arena_free(a);
+}
+
+TEST(bytebuf, append_i8)
+{
+    Arena *a = arena_new();
+    ByteBuf buf;
+    bytebuf_init(&buf, a);
+    bytebuf_append_i8(&buf, -1);
+    EXPECT_EQ(bytebuf_len(&buf), 1);
+    EXPECT_EQ(bytebuf_data(&buf)[0], 0xFF);
     arena_free(a);
 }
 
@@ -72,7 +92,7 @@ TEST(bytebuf, align_pads_with_zeros)
     {
         EXPECT_EQ(bytebuf_data(&buf)[i], 0);
     }
-    bytebuf_align(&buf, 8); /* already aligned: no-op */
+    bytebuf_align(&buf, 8);
     EXPECT_EQ(bytebuf_len(&buf), 8);
     arena_free(a);
 }

@@ -5,9 +5,6 @@
 #include "util/types.h"
 #include "util/vec.h"
 
-/* In-process structural DWARF verifier for the ficc test suite. */
-
-/* DWARF4 tag/attribute/opcode values (mirror src/dwarf.c & src/cfi.c). */
 enum
 {
     DW_TAG_array_type = 0x01,
@@ -52,16 +49,16 @@ enum
 
 typedef struct
 {
-    u64 offset; /* byte position of an 8-byte address slot inside its section */
-    i64 addend; /* relocation addend */
-    u32 sym;    /* symtab index of the section symbol the slot points at */
+    u64 offset;
+    i64 addend;
+    u32 sym;
 } DwarfCheckReloc;
 
 typedef struct
 {
     Arena *arena;
-    const char *err; /* set on parse failure; NULL while clean */
-    bool linked;     /* ET_EXEC: address slots hold linked values, not reloc addends */
+    const char *err;
+    bool linked; /* ET_EXEC: address slots hold linked values, not reloc addends */
 
     /* section contents; NULL/0 when the section is absent */
     const u8 *debug_info;
@@ -79,56 +76,49 @@ typedef struct
     const u8 *text;
     size_t text_len;
 
-    /* parsed .rela.debug_info / .rela.debug_line / .rela.eh_frame lists */
-    Vec *rela_info; /* Vec<DwarfCheckReloc*> */
+    Vec *rela_info;
     Vec *rela_line;
     Vec *rela_eh;
 } DwarfCheck;
 
-/* Fill from a ficc-produced ET_REL object file (missing sections stay NULL). */
 void dwarf_check_load(const char *path, DwarfCheck *out, Arena *arena);
 
-/* Fill from raw section buffers; the reloc vectors are taken over, not copied. */
+/* Reloc vectors are taken over, not copied. */
 void dwarf_check_from_buffers(DwarfCheck *out, Arena *arena, const u8 *info, size_t info_len,
                               const u8 *abbrev, size_t abbrev_len, const u8 *line, size_t line_len,
                               const u8 *loc, size_t loc_len, const u8 *eh, size_t eh_len,
                               const u8 *text, size_t text_len, Vec *rela_info, Vec *rela_line,
                               Vec *rela_eh);
 
-/* .debug_line */
-
 typedef struct
 {
-    u64 addr; /* row address; functions sit at their .text offset */
-    i64 line; /* source line (end-of-sequence rows keep the last line) */
-    u32 file; /* file index, 1-based */
+    u64 addr;
+    i64 line;
+    u32 file;
     bool end_seq;
 } DwarfCheckRow;
 
 typedef struct
 {
-    u64 slot;  /* byte position of the 8-byte address field in .debug_line */
-    u64 value; /* the resolved address (a function's .text offset) */
+    u64 slot;
+    u64 value;
 } DwarfCheckSetAddr;
 
 typedef struct
 {
-    Vec *rows;          /* Vec<DwarfCheckRow*> in program order */
-    Vec *set_addresses; /* Vec<DwarfCheckSetAddr*>, in program order */
+    Vec *rows;
+    Vec *set_addresses;
 } DwarfCheckLines;
 
-/* Decode the single-CU line program; NULL (with out->err) on malformed input. */
 DwarfCheckLines *dwarf_check_lines(DwarfCheck *out, Arena *arena);
-
-/* .debug_info / .debug_abbrev */
 
 enum DWAttrKind
 {
-    DW_ATTR_NUM,  /* data1/data2/data4/udata/flag; value in `num` */
-    DW_ATTR_REF,  /* ref4; target DIE offset in `ref` */
-    DW_ATTR_STR,  /* DW_FORM_string; NUL-terminated, points into the info buf */
-    DW_ATTR_LOC,  /* exprloc; `loc`/`loc_len`, `value_off` = pos of the length byte */
-    DW_ATTR_ADDR, /* DW_FORM_addr; `addr` (le64), `value_off` = pos of the 8 bytes */
+    DW_ATTR_NUM,
+    DW_ATTR_REF,
+    DW_ATTR_STR,
+    DW_ATTR_LOC,
+    DW_ATTR_ADDR,
 };
 
 typedef struct
@@ -141,15 +131,15 @@ typedef struct
     const u8 *loc;
     u32 loc_len;
     u64 addr;
-    u32 value_off; /* absolute .debug_info position of the form value */
+    u32 value_off;
 } DwarfCheckAttr;
 
 typedef struct
 {
-    u32 off; /* DIE offset within .debug_info */
+    u32 off;
     u32 tag;
     bool has_children;
-    Vec *attrs; /* Vec<DwarfCheckAttr*> */
+    Vec *attrs;
 } DwarfCheckDie;
 
 typedef struct
@@ -158,44 +148,35 @@ typedef struct
     u32 abbrev_off;
     u8 addr_size;
     Arena *arena;
-    Vec *dies; /* Vec<DwarfCheckDie*>, tree order, children follow parents */
-    Vec *refs; /* Vec<u64*>: every ref4 attribute value seen */
+    Vec *dies; /* tree order, children follow parents */
+    Vec *refs;
 } DwarfCheckInfo;
 
-/* Walk the first CU's DIE tree and resolve every ref4; NULL on malformed input. */
 DwarfCheckInfo *dwarf_check_info(DwarfCheck *out, Arena *arena);
-
-/* .eh_frame */
 
 typedef struct
 {
     bool is_cie;
-    u32 offset;          /* byte offset of the entry's length field */
-    u32 cie_fde_pointer; /* CIE: 0; FDE: back-distance to its CIE */
-    u32 initial_slot;    /* FDE: pos of the 8-byte initial_location field */
-    u64 fde_begin;       /* FDE: resolved start address (reloc addend) */
-    u64 fde_range;       /* FDE: address_range */
+    u32 offset;
+    u32 cie_fde_pointer;
+    u32 initial_slot;
+    u64 fde_begin;
+    u64 fde_range;
 } DwarfCheckEhEntry;
 
 typedef struct
 {
-    Vec *entries; /* Vec<DwarfCheckEhEntry*>, CIE first */
-    Vec *cfa_ops; /* Vec<u64*>, one opcode value per decoded CFA instruction */
+    Vec *entries; /* CIE first */
+    Vec *cfa_ops;
     size_t nfde;
 } DwarfCheckEh;
 
-/* Parse .eh_frame (CIE + one FDE per function); NULL on wrong shape. */
 DwarfCheckEh *dwarf_check_eh(DwarfCheck *out, Arena *arena);
 
-/* helpers shared by the tests */
-
-/* Decode a signed LEB128; returns bytes consumed (0 when truncated). */
 size_t dwarf_check_sleb128(const u8 *buf, size_t len, i64 *out);
 
-/* One attr of a DIE, or NULL. */
 DwarfCheckAttr *dwarf_check_attr(const DwarfCheckDie *die, u32 attr);
 
-/* A decoded .debug_loc range; addresses are CU-relative (DWARF4 base default). */
 typedef struct
 {
     u64 begin;
@@ -204,20 +185,15 @@ typedef struct
     u32 expr_len;
 } DwarfCheckLocRange;
 
-/* Decode the location list at `off` in .debug_loc; NULL on malformed input. */
 Vec *dwarf_check_locs(DwarfCheck *out, u64 off, Arena *arena);
 
-/* All DIEs with `tag`, in tree order (empty when none). */
 Vec *dwarf_check_dies_by_tag(const DwarfCheckInfo *info, u32 tag);
 
-/* The single DIE whose name string equals `name`, or NULL. */
 DwarfCheckDie *dwarf_check_die_named(const DwarfCheckInfo *info, const char *name);
 
-/* Every address slot (DW_FORM_addr, DW_OP_addr) has one reloc with sym in range. */
 bool dwarf_check_info_relocs_covered(DwarfCheck *out, const DwarfCheckInfo *info, u32 sym_lo,
                                      u32 sym_hi);
 
-/* Every set_address slot has one reloc with sym in range and a valid .text offset. */
 bool dwarf_check_line_relocs_covered(DwarfCheck *out, const DwarfCheckLines *lines, u32 sym_lo,
                                      u32 sym_hi);
 

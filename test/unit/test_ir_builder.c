@@ -67,7 +67,6 @@ TEST(ir_builder, empty_body_gets_unreachable)
 TEST(ir_builder, wrong_toplevel_returns_null)
 {
     Arena *a = arena_new();
-    /* Build an int literal AST directly, bypass parser */
     ASTNode *lit = ast_int_literal(42, false, SUFFIX_NONE, false, (Loc) {"t", 1, 1}, a);
     IRConfig ir_cfg;
     IrModule *m = ir_build_module(lit, &ir_cfg, a);
@@ -174,15 +173,13 @@ TEST(ir_builder, while_loop_structure)
     EXPECT_NOTNULL(m);
 
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
-    /* entry + while_header + while_body + while_exit */
     EXPECT_EQ(vec_size(f->blocks), 4);
 
     IrBlock *header = (IrBlock *) vec_get(f->blocks, 1);
     EXPECT_STR_EQ(header->label, "while_header_1");
     EXPECT_TRUE(header->is_loop_header);
 
-    /* The loop header is the merge point (entry + back edge): its PHI carries
-       the loop-carried value of i. */
+    /* The loop header is the merge point (entry + back edge): its PHI carries i. */
     IrInstr *first = (IrInstr *) vec_get(header->instrs, 0);
     EXPECT_EQ(first->opcode, OP_PHI);
 
@@ -207,7 +204,6 @@ TEST(ir_builder, for_loop_structure)
     EXPECT_NOTNULL(m);
 
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
-    /* entry + for_header + for_body + for_latch + for_exit */
     EXPECT_EQ(vec_size(f->blocks), 5);
 
     IrBlock *header = (IrBlock *) vec_get(f->blocks, 1);
@@ -217,28 +213,32 @@ TEST(ir_builder, for_loop_structure)
     EXPECT_EQ(last->opcode, OP_BRCOND);
 
     EXPECT_EQ(ir_interp_run(m), 6);
+    arena_free(a);
+}
 
-    /* No-cond form: the header falls through to the body with a plain BR. */
-    IrModule *m2 = tc_build_module("int main(void) {\n"
-                                   "    int i = 0;\n"
-                                   "    for (;;) {\n"
-                                   "        i = i + 1;\n"
-                                   "        if (i > 2) {\n"
-                                   "            break;\n"
-                                   "        }\n"
-                                   "    }\n"
-                                   "    return i;\n"
-                                   "}\n",
-                                   a);
-    EXPECT_NOTNULL(m2);
+TEST(ir_builder, for_loop_without_condition_falls_through)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int i = 0;\n"
+                                  "    for (;;) {\n"
+                                  "        i = i + 1;\n"
+                                  "        if (i > 2) {\n"
+                                  "            break;\n"
+                                  "        }\n"
+                                  "    }\n"
+                                  "    return i;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
 
-    IrFunction *f2 = (IrFunction *) vec_get(m2->funcs, 0);
-    IrBlock *hdr2 = (IrBlock *) vec_get(f2->blocks, 1);
-    EXPECT_STR_EQ(hdr2->label, "for_header_1");
-    IrInstr *last2 = (IrInstr *) vec_last(hdr2->instrs);
-    EXPECT_EQ(last2->opcode, OP_BR);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    IrBlock *header = (IrBlock *) vec_get(f->blocks, 1);
+    EXPECT_STR_EQ(header->label, "for_header_1");
+    IrInstr *last = (IrInstr *) vec_last(header->instrs);
+    EXPECT_EQ(last->opcode, OP_BR);
 
-    EXPECT_EQ(ir_interp_run(m2), 3);
+    EXPECT_EQ(ir_interp_run(m), 3);
     arena_free(a);
 }
 
@@ -388,7 +388,7 @@ TEST(ir_builder, global_string_literal)
     EXPECT_TRUE(strncmp(g->name, "__str_", 6) == 0);
     EXPECT_EQ(g->type->kind, TYPE_ARRAY);
     EXPECT_EQ(type_array_elem(g->type), type_char());
-    EXPECT_EQ(type_array_len(g->type), 4); /* "abc" + NUL */
+    EXPECT_EQ(type_array_len(g->type), 4);
     EXPECT_EQ(g->init_len, 4);
     EXPECT_NOTNULL(g->init_data);
     EXPECT_TRUE(memcmp(g->init_data, "abc", 4) == 0);
@@ -413,15 +413,13 @@ TEST(ir_builder, multiple_string_literals)
 
     IrGlobal *g0 = (IrGlobal *) vec_get(m->globals, 0);
     IrGlobal *g1 = (IrGlobal *) vec_get(m->globals, 1);
-    EXPECT_STR_NE(g0->name, g1->name); /* distinct names */
+    EXPECT_STR_NE(g0->name, g1->name);
     EXPECT_EQ(g0->section, IR_SECTION_RODATA);
     EXPECT_EQ(g1->section, IR_SECTION_RODATA);
 
     EXPECT_EQ(ir_interp_run(m), 'h' + 'w');
     arena_free(a);
 }
-
-/* Phase 11: cast lowering shape */
 
 TEST(ir_builder, cast_narrowing_emits_trunc)
 {
@@ -733,7 +731,7 @@ TEST(ir_builder, va_start_six_named_params_full_gp)
     arena_free(a);
 }
 
-TEST(ir_builder, va_arg_and_end_emit_opcodes)
+TEST(ir_builder, va_arg_emits_op_and_width)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int f(int a, ...) {\n"
@@ -751,7 +749,6 @@ TEST(ir_builder, va_arg_and_end_emit_opcodes)
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     EXPECT_STR_EQ(f->name, "f");
     bool saw_arg = false;
-    bool saw_end = false;
     size_t nblocks = vec_size(f->blocks);
     for (size_t bi = 0; bi < nblocks; bi++)
     {
@@ -766,13 +763,44 @@ TEST(ir_builder, va_arg_and_end_emit_opcodes)
                 EXPECT_EQ(m->widths[in->result], 8);
                 saw_arg = true;
             }
+        }
+    }
+    EXPECT_TRUE(saw_arg);
+    arena_free(a);
+}
+
+TEST(ir_builder, va_end_emits_op)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int f(int a, ...) {\n"
+                                  "    __builtin_va_list ap;\n"
+                                  "    __builtin_va_start(ap, a);\n"
+                                  "    int v = __builtin_va_arg(ap, int);\n"
+                                  "    __builtin_va_end(ap);\n"
+                                  "    return v;\n"
+                                  "}\n"
+                                  "int main(void) {\n"
+                                  "    return 0;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    EXPECT_STR_EQ(f->name, "f");
+    bool saw_end = false;
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t bi = 0; bi < nblocks; bi++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, bi);
+        size_t ninstr = vec_size(bb->instrs);
+        for (size_t ii = 0; ii < ninstr; ii++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, ii);
             if (in->opcode == OP_VA_END)
             {
                 saw_end = true;
             }
         }
     }
-    EXPECT_TRUE(saw_arg);
     EXPECT_TRUE(saw_end);
     arena_free(a);
 }
@@ -825,14 +853,26 @@ TEST(ir_builder, direct_call_carries_arg_and_return_types)
     arena_free(a);
 }
 
-TEST(ir_builder, indirect_and_variadic_calls_carry_types)
+TEST(ir_builder, indirect_call_carries_types)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int (*fp)(int) = 0;\n"
+                                  "    return fp ? fp(2) : 0;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_NOTNULL(m);
+    expect_call_types(m);
+    arena_free(a);
+}
+
+TEST(ir_builder, variadic_call_carries_types)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int printf(const char *fmt, ...);\n"
                                   "int main(void) {\n"
-                                  "    int (*fp)(int) = 0;\n"
                                   "    printf(\"%d\\n\", 1);\n"
-                                  "    return fp ? fp(2) : 0;\n"
+                                  "    return 0;\n"
                                   "}\n",
                                   a);
     EXPECT_NOTNULL(m);

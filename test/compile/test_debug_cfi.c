@@ -6,8 +6,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Structural .eh_frame verification via the in-process decoder (no readelf). */
-
 static unsigned int cfi_seq;
 
 static void cfi_path(char *buf, size_t sz, const char *tag, const char *ext)
@@ -64,22 +62,20 @@ TEST(debug_cfi, eh_frame_present_and_parseable)
     DwarfCheck *out = (DwarfCheck *) arena_alloc(a, sizeof(DwarfCheck), sizeof(void *));
     DwarfCheckEh *eh = cfi_parse(obj, out, a);
 
-    /* Exactly one CIE (the first entry), then one FDE per function. */
     size_t nentries = vec_size(eh->entries);
-    EXPECT_EQ(nentries, 4); /* 1 CIE + 3 FDEs */
+    EXPECT_EQ(nentries, 4);
     DwarfCheckEhEntry *cie = (DwarfCheckEhEntry *) vec_get(eh->entries, 0);
     EXPECT_TRUE(cie->is_cie);
     EXPECT_EQ(eh->nfde, 3);
 
-    /* Each FDE's CIE pointer targets the CIE at 0; its slot has a matching reloc. */
     u64 text_len = out->text_len;
     u64 expected_begin = 0;
     for (size_t i = 1; i < nentries; i++)
     {
         DwarfCheckEhEntry *e = (DwarfCheckEhEntry *) vec_get(eh->entries, i);
         EXPECT_FALSE(e->is_cie);
-        EXPECT_EQ(e->cie_fde_pointer, e->offset + 4); /* back to the CIE at 0 */
-        EXPECT_EQ(e->fde_begin, expected_begin);      /* ranges tile .text */
+        EXPECT_EQ(e->cie_fde_pointer, e->offset + 4);
+        EXPECT_EQ(e->fde_begin, expected_begin);
         EXPECT_TRUE(e->fde_range > 0);
 
         bool covered = false;
@@ -89,17 +85,14 @@ TEST(debug_cfi, eh_frame_present_and_parseable)
             if (r->offset == e->initial_slot)
             {
                 covered = true;
-                EXPECT_EQ(r->sym, 1); /* .text section symbol */
+                EXPECT_EQ(r->sym, 1);
                 EXPECT_EQ(r->addend, (i64) e->fde_begin);
             }
         }
         EXPECT_TRUE(covered);
         expected_begin = e->fde_begin + e->fde_range;
     }
-    /* The union of the FDE ranges is exactly .text. */
     EXPECT_EQ(expected_begin, text_len);
-
-    /* The CIE carries real unwind rules, not an empty instruction stream. */
     EXPECT_TRUE(vec_size(eh->cfa_ops) > 0);
 
     char *paths[] = {src, obj};

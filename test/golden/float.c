@@ -1,12 +1,4 @@
-/* Phase 19c: FP arithmetic and comparisons — end-to-end golden. Compile with
-   ficc (`ficc -run float.c` for the interpreter, `ficc -c` + `gcc -no-pie`
-   for the ELF), and expect exit status 42.
-
-   Exercises the 19c surface together: float/double add/sub/mul/div (including
-   the per-op float re-rounding of `0.1f` chains), every ordered predicate,
-   NaN semantics (`x == NaN` is 0, `x != NaN` is 1), `-0.0` truthiness, `_Bool`
-   storage via boolify, `++`/`--` on floats, unary minus/logical-not, and
-   ternaries mixing int/float branches. */
+/* Expect exit 42. */
 
 int main(void)
 {
@@ -41,7 +33,6 @@ int main(void)
         return 5;
     }
 
-    /* The 0.1f chain re-rounds to float at every step (interp == ELF). */
     f = 0.0f;
     for (i = 0; i < 200; i++)
     {
@@ -52,7 +43,6 @@ int main(void)
         return 6;
     }
 
-    /* Every predicate, positive and negative. */
     if (!(x < y) || !(y > x) || !(x <= x) || !(x >= x))
     {
         return 7;
@@ -62,21 +52,20 @@ int main(void)
         return 8;
     }
 
-    /* NaN: only != is true. */
+    /* IEEE-754: only != is true when comparing with NaN. */
     double n = 0.0 / 0.0;
     if (n == n || !(n != n) || n < 1.0 || n > 1.0 || n <= 1.0 || n >= 1.0)
     {
         return 9;
     }
 
-    /* -0.0 is falsy but equals 0.0; its sign survives negation. */
+    /* IEEE-754: -0.0 is falsy but equals 0.0; sign survives negation. */
     double z = -0.0;
     if (z != 0.0 || z || -z != 0.0)
     {
         return 10;
     }
 
-    /* boolify: _Bool and conditions go through FCMP_NE, never a bit test. */
     _Bool b = 1e-300;
     if (!b)
     {
@@ -88,7 +77,6 @@ int main(void)
         return 12;
     }
 
-    /* ++/-- step in the FP class. */
     x++;
     if (x != 2.5)
     {
@@ -100,7 +88,6 @@ int main(void)
         return 14;
     }
 
-    /* Mixed-typed ternaries convert the int branch to the FP common type. */
     int c = 0;
     if ((c ? 1 : 1.5) != 1.5)
     {
@@ -111,6 +98,5 @@ int main(void)
         return 16;
     }
 
-    /* Accumulate to a clean 42. */
     return 42;
 }

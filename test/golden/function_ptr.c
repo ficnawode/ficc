@@ -1,12 +1,4 @@
-/* Phase 16: function pointers + indirect calls — end-to-end golden. Compile
-   with ficc (`ficc -run function_ptr.c` for the interpreter, `ficc -c` +
-   `gcc -no-pie` for the ELF), and expect exit status 42.
-
-   Exercises the Phase 16b/16c surface together: typedef'd function-pointer
-   types, a statically-initialized dispatch *table* of pointers to distinct
-   functions, indirect calls through a table slot selected at runtime (the
-   ficc `lower_fns` dispatch pattern), redundant `&f`/`f` equality, and
-   passing/receiving function pointers across calls. */
+/* Expect exit 42. */
 
 typedef int (*Op)(int);
 
@@ -42,9 +34,7 @@ int main(void)
 {
     int acc = 0;
 
-    /* 32 -> add10 -> 42 */
     acc += run_slot(0, 32);
-    /* 21 -> mul2 -> 42; 49 -> sub7 -> 42, and a redundant indirect call */
     acc += run_slot(1, 21);
     acc += run_slot(2, 49);
 
@@ -61,6 +51,5 @@ int main(void)
         return 3;
     }
 
-    /* acc = 42 + 42 + 42 = 126 = 3 * 42; scale to 42. */
     return acc / 3;
 }

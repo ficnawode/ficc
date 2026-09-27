@@ -8,8 +8,6 @@
 
 #include <unistd.h>
 
-/* positive: reading const lvalues */
-
 TEST(const, const_local_read)
 {
     EXPECT_EQ(tc_run_interp("int main(void) {\n"
@@ -67,6 +65,16 @@ TEST(const, const_global_string_pointer)
                           'i');
 }
 
+TEST(const, const_global_array_of_structs)
+{
+    EXPECT_INTERP_AND_ELF("struct S { int x; int y; };\n"
+                          "const struct S a[2] = {{1, 2}, {3, 4}};\n"
+                          "int main(void) {\n"
+                          "    return a[0].x + a[1].y;\n"
+                          "}\n",
+                          5);
+}
+
 TEST(const, const_array_elements)
 {
     EXPECT_EQ(tc_run_interp("const int a[3];\n"
@@ -119,6 +127,16 @@ TEST(const, const_pointer_to_scalar_global)
                           50);
 }
 
+TEST(const, const_pointer_to_const_global)
+{
+    EXPECT_INTERP_AND_ELF("const int g = 8;\n"
+                          "const int * const p = &g;\n"
+                          "int main(void) {\n"
+                          "    return *p;\n"
+                          "}\n",
+                          8);
+}
+
 TEST(const, add_qualifier_is_allowed)
 {
     EXPECT_EQ(tc_run_interp("int g = 7;\n"
@@ -155,8 +173,6 @@ TEST(const, const_char_ptr_from_string_literal)
 
 TEST(const, const_param_qualifiers_ignored_not_prototypes)
 {
-    /* Top-level param const is enforced in the body but does not change the
-       signature; no prototypes exist yet so a single definition is tested. */
     EXPECT_EQ(tc_run_interp("int f(const int x) {\n"
                             "    return x * 2;\n"
                             "}\n"
@@ -165,8 +181,6 @@ TEST(const, const_param_qualifiers_ignored_not_prototypes)
                             "}\n"),
               42);
 }
-
-/* positive: .rodata placement (no SHF_WRITE) */
 
 TEST(const, const_global_in_rodata)
 {
@@ -229,8 +243,6 @@ TEST(const, const_global_elf_rodata_no_write_flag)
     unlink("/tmp/ficc_p9_rd.o");
 }
 
-/* negative: writes through const lvalues */
-
 TEST(const, negative_assign_const_var)
 {
     EXPECT_BUILD_FAIL("int main(void) {\n"
@@ -246,6 +258,16 @@ TEST(const, negative_assign_via_const_ptr)
                       "int main(void) {\n"
                       "    const int *p = &g;\n"
                       "    *p = 6;\n"
+                      "    return g;\n"
+                      "}\n");
+}
+
+TEST(const, negative_compound_assign_via_const_ptr)
+{
+    EXPECT_BUILD_FAIL("int g = 5;\n"
+                      "int main(void) {\n"
+                      "    const int *p = &g;\n"
+                      "    *p += 1;\n"
                       "    return g;\n"
                       "}\n");
 }
@@ -313,8 +335,7 @@ TEST(const, negative_write_const_local_param)
                       "}\n");
 }
 
-/* negative: discarding qualifiers (C11 §6.5.16.1) */
-
+/* C11 §6.5.16.1: the left pointer type must carry every qualifier of the right. */
 TEST(const, negative_discard_in_initializer)
 {
     EXPECT_BUILD_FAIL("int g = 5;\n"
@@ -374,7 +395,6 @@ TEST(const, negative_multi_level_discard)
 
 TEST(const, negative_int_ptr_to_char_ptr)
 {
-    /* Different pointee types are still incompatible even unqualified. */
     EXPECT_BUILD_FAIL("int g;\n"
                       "char *cp;\n"
                       "int main(void) {\n"
@@ -394,15 +414,12 @@ TEST(const, negative_conflicting_qualifiers_file_scope)
 
 TEST(const, negative_consistency_ok_same_qualifiers)
 {
-    /* Same qualifiers merge fine (tentative definitions). */
     EXPECT_BUILD_SUCCEED("const int x = 5;\n"
                          "const int x;\n"
                          "int main(void) {\n"
                          "    return x;\n"
                          "}\n");
 }
-
-/* Part 9b: scalar address-of (`&x`) */
 
 TEST(const, addr_of_scalar_write_through)
 {
@@ -564,12 +581,8 @@ TEST(const, addr_of_spills_to_alloca)
     arena_free(arena);
 }
 
-/* narrow integer memory semantics (signedness-aware extension) */
-
 TEST(const, narrow_unsigned_char_load_no_sext)
 {
-    /* Regression: the interpreter used to sign-extend every narrow load, so
-       unsigned char glob=200 read back as -56 instead of 200. */
     EXPECT_INTERP_AND_ELF("unsigned char g;\n"
                           "int main(void) {\n"
                           "    g = 200;\n"
@@ -580,7 +593,6 @@ TEST(const, narrow_unsigned_char_load_no_sext)
 
 TEST(const, narrow_unsigned_short_memory_exact)
 {
-    /* 0xFFFF stored and reloaded must compare equal as 65535 (not -1). */
     EXPECT_INTERP_AND_ELF("unsigned short g;\n"
                           "int main(void) {\n"
                           "    unsigned short *p = &g;\n"
@@ -592,8 +604,6 @@ TEST(const, narrow_unsigned_short_memory_exact)
 
 TEST(const, narrow_signed_short_return)
 {
-    /* Signed narrow values must still sign-extend, so comparing against a
-       negative literal holds. */
     EXPECT_INTERP_AND_ELF("short g;\n"
                           "int main(void) {\n"
                           "    g = -7;\n"
@@ -617,7 +627,6 @@ TEST(const, narrow_unsigned_member_load)
 
 TEST(const, narrow_unsigned_param_preserves_value)
 {
-    /* A narrow unsigned value passed as an argument must arrive whole. */
     EXPECT_INTERP_AND_ELF("int f(unsigned char a) {\n"
                           "    return a == 200 ? 42 : 0;\n"
                           "}\n"
@@ -629,8 +638,6 @@ TEST(const, narrow_unsigned_param_preserves_value)
 
 TEST(const, narrow_signed_load_in_memory_vars)
 {
-    /* Address-of spilled locals: signed char/ short must sign-extend on the
-       way back out of memory. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    char c = -7;\n"
                           "    char *cp = &c;\n"

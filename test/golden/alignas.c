@@ -1,7 +1,3 @@
-/* Phase 14d: _Alignas — end-to-end golden test.
-   Alignment specifiers parse, fold, and validate; the requested alignment is
-   honored up to the object's natural alignment (D14.6). */
-
 _Alignas(16) int g1 = 5;
 static _Alignas(8) int g2 = 6;
 _Alignas(16) const int g3 = 7;

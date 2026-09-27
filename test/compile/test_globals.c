@@ -94,6 +94,26 @@ TEST(globals, interp_tentative_defs_merge)
               9);
 }
 
+TEST(globals, extern_then_definition)
+{
+    EXPECT_INTERP_AND_ELF("extern int e;\n"
+                          "int e;\n"
+                          "int main(void) {\n"
+                          "    e = 7;\n"
+                          "    return e;\n"
+                          "}\n",
+                          7);
+}
+
+TEST(globals, global_double)
+{
+    EXPECT_INTERP_AND_ELF("double d = 3.5;\n"
+                          "int main(void) {\n"
+                          "    return (int) (d * 2.0);\n"
+                          "}\n",
+                          7);
+}
+
 TEST(globals, interp_zero_init)
 {
     EXPECT_EQ(tc_run_interp("int z;\n"
@@ -132,8 +152,6 @@ TEST(globals, elf_pointer_global_string)
 
 TEST(globals, elf_extern_two_tu)
 {
-    /* A ficc-compiled unit can reference extern symbols that are defined in a
-       second, host-compiled translation unit. */
     EXPECT_EQ(tc_run_elf_with_extra_tu("extern int shared;\n"
                                        "extern int other_ext;\n"
                                        "int main(void) {\n"
@@ -239,13 +257,17 @@ TEST(globals, extern_with_init_is_definition)
                           5);
 }
 
-TEST(globals, negative_linkage_mixing)
+TEST(globals, negative_var_linkage_mixing)
 {
     EXPECT_BUILD_FAIL("int x;\n"
                       "static int x;\n"
                       "int main(void) {\n"
                       "    return 0;\n"
                       "}\n");
+}
+
+TEST(globals, negative_func_linkage_mixing)
+{
     EXPECT_BUILD_FAIL("static int f(void) {\n"
                       "    return 0;\n"
                       "}\n"
@@ -430,8 +452,6 @@ TEST(globals, elf_shadow_in_loop)
     EXPECT_EQ(tc_run_elf(shadow_in_loop_src), 0);
 }
 
-/* Phase 12c: file-scope & block-static initializer lists + relocs */
-
 TEST(globals, file_scope_array_list)
 {
     EXPECT_INTERP_AND_ELF("int g[3] = {10, 20, 30};\n"
@@ -518,7 +538,6 @@ TEST(globals, file_scope_const_aggregate_rodata)
 
 TEST(globals, file_scope_ptr_member_reloc)
 {
-    /* `int a` then `int *g[2] = {&a, 0}` — reloc at offset 0, zero at 8. */
     EXPECT_INTERP_AND_ELF("int a = 1;\n"
                           "int *g[2] = {&a, 0};\n"
                           "int main(void) {\n"
@@ -564,6 +583,18 @@ TEST(globals, block_static_list)
                           25);
 }
 
+TEST(globals, block_static_short_list_zero_fills)
+{
+    EXPECT_INTERP_AND_ELF("int f(void) {\n"
+                          "    static int a[4] = {1, 2};\n"
+                          "    return a[0] + a[1] + a[2] + a[3];\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    return f();\n"
+                          "}\n",
+                          3);
+}
+
 TEST(globals, block_static_struct_list)
 {
     EXPECT_INTERP_AND_ELF("struct S { int a[2]; int x; };\n"
@@ -594,8 +625,6 @@ TEST(globals, block_static_ptr_member_reloc)
 
 TEST(globals, block_static_char_array_from_string)
 {
-    /* Static char array byte-filled from a string incl. NUL; the value
-       mutates across calls, and the trailing NUL stays zero. */
     EXPECT_INTERP_AND_ELF("int f(void) {\n"
                           "    static char s[4] = \"hi\";\n"
                           "    s[0] = s[0] + 1;\n"
@@ -671,6 +700,10 @@ TEST(globals, negative_file_scope_nonconst_element)
                       "int main(void) {\n"
                       "    return 0;\n"
                       "}\n");
+}
+
+TEST(globals, negative_block_static_nonconst_element)
+{
     EXPECT_BUILD_FAIL("int main(void) {\n"
                       "    int y = 5;\n"
                       "    static int g[2] = {y, 0};\n"
@@ -688,7 +721,6 @@ TEST(globals, negative_file_scope_overlong_list)
 
 TEST(globals, file_scope_incomplete_array_infers)
 {
-    /* Phase 12d: file-scope `[]` is completed from its initializer. */
     EXPECT_INTERP_AND_ELF("int g[] = {1, 2, 3};\n"
                           "int main(void) {\n"
                           "    return g[0] + g[1] + g[2];\n"
@@ -734,10 +766,9 @@ TEST(globals, negative_file_scope_bare_incomplete_array)
                       "}\n");
 }
 
+/* C11 §6.7.9p14: an exact-fit string initializer drops the NUL, braced or not. */
 TEST(globals, file_scope_char_array_string_drops_nul)
 {
-    /* §6.7.9p14 at file scope: a string filling the array exactly drops the
-       NUL (`char g[2] = "hi"`), braced or not (relaxed-fit rule). */
     EXPECT_INTERP_AND_ELF("char g[2] = \"hi\";\n"
                           "char h[2] = {\"hi\"};\n"
                           "int main(void) {\n"
@@ -751,7 +782,7 @@ TEST(globals, file_scope_char_array_string_drops_nul)
 
 TEST(globals, file_scope_empty_braces)
 {
-    /* Documented `{}` zero-init extension (D12.11), file-scope path. */
+    /* `{}` zero-init is a ficc extension, not C11. */
     EXPECT_INTERP_AND_ELF("int g[5] = {};\n"
                           "struct S { int a; int b; };\n"
                           "struct S s = {};\n"
@@ -763,9 +794,6 @@ TEST(globals, file_scope_empty_braces)
                           0);
 }
 
-/* Regression: a pointer static initialized by an integer constant cast
-   (`(const char *)-1`) keeps its bit pattern; it must not fold to a null
-   pointer (Git uses this sentinel in builtin/commit.c). */
 TEST(globals, pointer_constant_cast)
 {
     EXPECT_INTERP_AND_ELF("#include <stdint.h>\n"

@@ -4,8 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* In-process structural readers for ficc's DWARF output (test-only). */
-
 enum
 {
     LEB_CONT = 0x80,
@@ -14,10 +12,9 @@ enum
 
 enum
 {
-    ADDR_BYTES = 8, /* ELF64 address slots inside the debug sections */
+    ADDR_BYTES = 8,
 };
 
-/* DWARF2 line-program standard/extended opcodes. */
 enum
 {
     LNS_copy = 1,
@@ -42,7 +39,7 @@ enum
 
 enum
 {
-    LINE_HDR_FIELDS = 5, /* min_inst, is_stmt, line_base, line_range, opcode_base */
+    LINE_HDR_FIELDS = 5,
     LINE_LAST_OPCODE = 255,
     LINE_OP_MIN = 0,
     LINE_IS_STMT = 1,
@@ -51,7 +48,6 @@ enum
     LINE_OPCODE_BASE = 4,
 };
 
-/* DWARF4 attribute forms the abbrev walker knows. */
 enum
 {
     FORM_addr = 0x01,
@@ -89,7 +85,6 @@ enum
     CFA_OFFSET_MASK = 0x80,
 };
 
-/* Fixed ELF64 header/section-header/rela field offsets (little-endian). */
 enum
 {
     ELF_EI_CLASS = 4,
@@ -128,14 +123,11 @@ static void *dc_alloc(DwarfCheck *out, size_t sz)
     return arena_alloc(out->arena, sz, sizeof(void *));
 }
 
-/* Record an error and return the bad-position sentinel. */
 static size_t fail_pos(DwarfCheck *out, const char *msg)
 {
     dc_err(out, msg);
     return (size_t) -1;
 }
-
-/* little-endian word reads (the only endianness elf.c emits) */
 
 static u16 rd16(const u8 *p)
 {
@@ -151,8 +143,6 @@ static u64 rd64(const u8 *p)
 {
     return (u64) rd32(p) | (u64) rd32(p + 4) << 32;
 }
-
-/* LEB128 readers */
 
 static bool read_uleb(const u8 *p, size_t len, size_t *pos, u64 *out)
 {
@@ -217,7 +207,6 @@ static bool skip_cstr(const u8 *p, size_t end, size_t *pos)
     return true;
 }
 
-/* The single relocation whose `offset` matches `slot`, if any. */
 static bool reloc_at(Vec *relas, u64 slot, i64 *addend)
 {
     for (size_t i = 0; i < vec_size(relas); i++)
@@ -232,7 +221,6 @@ static bool reloc_at(Vec *relas, u64 slot, i64 *addend)
     return false;
 }
 
-/* True when a relocation covers `slot` with a symbol index in [lo, hi]. */
 static bool reloc_covers(Vec *relas, u64 slot, u32 lo, u32 hi)
 {
     for (size_t i = 0; i < vec_size(relas); i++)
@@ -245,8 +233,6 @@ static bool reloc_covers(Vec *relas, u64 slot, u32 lo, u32 hi)
     }
     return false;
 }
-
-/* ELF object loading */
 
 typedef struct
 {
@@ -442,9 +428,6 @@ void dwarf_check_from_buffers(DwarfCheck *out, Arena *arena, const u8 *info, siz
     out->rela_eh = rela_eh;
 }
 
-/* .debug_line */
-
-/* Program registers plus the header fields the decoder advances. */
 typedef struct
 {
     u64 addr;
@@ -460,9 +443,9 @@ typedef struct
 {
     DwarfCheck *out;
     Arena *arena;
-    const u8 *p; /* .debug_line bytes */
+    const u8 *p;
     size_t unit_end;
-    size_t prog; /* first program byte after the header */
+    size_t prog;
     DwarfCheckLines *l;
     LineRegs regs;
 } LineCtx;
@@ -485,7 +468,7 @@ static bool line_files(const u8 *p, size_t prog, size_t *pos)
         {
             return false;
         }
-        if (p[*pos] == 0) /* empty name terminates the list */
+        if (p[*pos] == 0)
         {
             (*pos)++;
             return true;
@@ -554,7 +537,6 @@ static bool line_read_header(LineCtx *c)
     return true;
 }
 
-/* One DW_LNE_* extended opcode at `pos` (its sub-opcode byte). */
 static size_t line_extended(LineCtx *c, size_t pos)
 {
     u64 elen;
@@ -571,7 +553,6 @@ static size_t line_extended(LineCtx *c, size_t pos)
     if (ext == LNE_end_sequence)
     {
         push_row(c->l, c->arena, &c->regs, true);
-        /* end_sequence restores the initial state, resetting each function's line numbers. */
         c->regs.line = 1;
         c->regs.file = 1;
     }
@@ -615,7 +596,6 @@ static size_t line_extended(LineCtx *c, size_t pos)
     return end;
 }
 
-/* One DW_LNS_* standard opcode; returns the next position. */
 static size_t line_standard(LineCtx *c, size_t pos, u8 op)
 {
     const u8 *p = c->p;
@@ -691,7 +671,6 @@ static size_t line_standard(LineCtx *c, size_t pos, u8 op)
     return pos;
 }
 
-/* Adjust the line registers via the special-opcode delta and emit a row. */
 static void line_special(LineCtx *c, u8 op)
 {
     LineRegs *r = &c->regs;
@@ -772,8 +751,6 @@ bool dwarf_check_line_relocs_covered(DwarfCheck *out, const DwarfCheckLines *lin
     return true;
 }
 
-/* .debug_info: abbrev table + DIE tree */
-
 typedef struct
 {
     u32 attr;
@@ -785,7 +762,7 @@ typedef struct
     u32 code;
     u32 tag;
     u8 children;
-    Vec *specs; /* Vec<AttrSpec*> */
+    Vec *specs;
 } Abbrev;
 
 typedef struct
@@ -827,7 +804,7 @@ Vec *dwarf_check_locs(DwarfCheck *out, u64 off, Arena *arena)
         q += 2 * ADDR_BYTES;
         if (begin == 0 && end == 0)
         {
-            break; /* end-of-list marker */
+            break;
         }
         u16 elen = rd16(p + q);
         q += 2;
@@ -847,7 +824,6 @@ Vec *dwarf_check_locs(DwarfCheck *out, u64 off, Arena *arena)
     return ranges;
 }
 
-/* Resolve a .debug_loc offset to the first entry's expression bytes. */
 static bool loc_first_expr(DwarfCheck *out, u64 off, const u8 **expr, u32 *expr_len)
 {
     Vec *ranges = dwarf_check_locs(out, off, out->arena);
@@ -861,7 +837,6 @@ static bool loc_first_expr(DwarfCheck *out, u64 off, const u8 **expr, u32 *expr_
     return true;
 }
 
-/* Read one attribute value into *attr; *next advances past it. False on error. */
 static bool info_read_attr(InfoCtx *ctx, AttrSpec *spec, size_t pos, DwarfCheckAttr **attr,
                            size_t *next)
 {
@@ -974,7 +949,6 @@ static bool info_read_attr(InfoCtx *ctx, AttrSpec *spec, size_t pos, DwarfCheckA
             pos += sizeof(u32);
             a->kind = DW_ATTR_NUM;
             a->num = off;
-            /* A location attr is a .debug_loc offset; expose its first entry's expr. */
             const u8 *expr;
             u32 expr_len;
             if (a->attr == DW_AT_location && loc_first_expr(ctx->out, off, &expr, &expr_len))
@@ -1013,7 +987,7 @@ static size_t info_children(InfoCtx *ctx, size_t pos, u32 depth)
             dc_err(ctx->out, "DIE abbrev code trashed");
             return (size_t) -1;
         }
-        if (code == 0) /* null DIE ends the enclosing children list */
+        if (code == 0)
         {
             return pos;
         }
@@ -1052,7 +1026,6 @@ static size_t info_children(InfoCtx *ctx, size_t pos, u32 depth)
     return pos;
 }
 
-/* Parse the whole .debug_abbrev table; NULL (with err) on a bad stream. */
 static Vec *abbrev_table(DwarfCheck *out, const u8 *p, size_t len, Arena *a)
 {
     Vec *abbrevs = vec_new(a);
@@ -1222,8 +1195,6 @@ bool dwarf_check_info_relocs_covered(DwarfCheck *out, const DwarfCheckInfo *info
     return true;
 }
 
-/* helpers the tests share */
-
 size_t dwarf_check_sleb128(const u8 *buf, size_t len, i64 *out)
 {
     i64 v = 0;
@@ -1293,9 +1264,6 @@ DwarfCheckDie *dwarf_check_die_named(const DwarfCheckInfo *info, const char *nam
     return NULL;
 }
 
-/* .eh_frame */
-
-/* Skip a 'z' augmentation: uleb length followed by that many bytes. */
 static bool skip_aug_data(DwarfCheck *out, const u8 *p, size_t end, size_t *pos)
 {
     u64 len;
@@ -1320,7 +1288,7 @@ static bool eh_decode_ops(DwarfCheck *out, const u8 *p, size_t from, size_t to, 
 
         if (op == CFA_nop || (op & CFA_ADVANCE_LOC_MASK) == CFA_ADVANCE_LOC_MASK)
         {
-            continue; /* no operand */
+            continue;
         }
         if ((op & CFA_OFFSET_MASK) == CFA_OFFSET_MASK)
         {
@@ -1379,7 +1347,6 @@ static bool eh_decode_ops(DwarfCheck *out, const u8 *p, size_t from, size_t to, 
     return true;
 }
 
-/* CIE header fields; returns the first CFA instruction or -1. */
 static size_t cie_fields(DwarfCheck *out, const u8 *p, size_t q, size_t end, bool *has_z)
 {
     if (q >= end || p[q] != EH_VERSION)
@@ -1411,7 +1378,6 @@ static size_t cie_fields(DwarfCheck *out, const u8 *p, size_t q, size_t end, boo
     return q;
 }
 
-/* FDE pc fields; fills `e` and returns the first CFA instruction or -1. */
 static size_t fde_fields(DwarfCheck *out, const u8 *p, size_t content, size_t end, bool has_z,
                          DwarfCheckEhEntry *e)
 {
@@ -1480,7 +1446,7 @@ DwarfCheckEh *dwarf_check_eh(DwarfCheck *out, Arena *arena)
         u32 id = rd32(p + content);
         DwarfCheckEhEntry *e = arena_alloc(arena, sizeof(DwarfCheckEhEntry), sizeof(void *));
         e->offset = (u32) off;
-        size_t inst; /* first CFA instruction */
+        size_t inst;
         if (id == EH_CIE_ID)
         {
             inst = cie_fields(out, p, content + sizeof(u32), end, &has_z);

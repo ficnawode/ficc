@@ -1,9 +1,8 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Array bounds that cannot be folded by the parser (they need expression
-   types) are recorded on the type and resolved by semantic as integer
-   constant expressions (C11 §6.7.6.2, §6.6). */
+/* Array bounds needing expression types are resolved as integer constant
+   expressions (C11 §6.7.6.2, §6.6). */
 
 TEST(deferred_bounds, sizeof_identifier)
 {
@@ -90,12 +89,27 @@ TEST(deferred_bounds, file_scope_bound)
 
 TEST(deferred_bounds, file_scope_scalar_init)
 {
-    /* A file-scope scalar whose initializer needs expression types (here
-       sizeof of an earlier array) is folded in semantic, not the parser. */
     EXPECT_INTERP_AND_ELF("static const int arr[3] = { 1, 2, 3 };\n"
                           "const int n = sizeof(arr) / sizeof(arr[0]);\n"
                           "int main(void) { return n * 14; }\n",
                           42);
+}
+
+TEST(deferred_bounds, alignof_bound)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a[_Alignof(int)];\n"
+                          "    return (int) sizeof(a);\n"
+                          "}\n",
+                          16);
+}
+
+TEST(deferred_bounds, negative_zero_length)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int a[0];\n"
+                      "    return (int) sizeof(a);\n"
+                      "}\n");
 }
 
 TEST(deferred_bounds, negative_variable_length)

@@ -1,11 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Declarator-grammar micro-phase: long long / signed specifiers,
-   init-declarator lists, block-scope + combined tag definitions, anonymous
-   struct/enum typedefs. Every program must produce the same result through
-   the interpreter and the compiled ELF. */
-
 TEST(declarators, llong_basic)
 {
     EXPECT_INTERP_AND_ELF("long long f(long long v) {\n"
@@ -20,24 +15,44 @@ TEST(declarators, llong_basic)
 
 TEST(declarators, llong_signed_combos)
 {
-    /* long, long long, signed forms all lower through the existing
-       integer machinery; LP64 makes long and long long the same width. */
+    /* LP64: long and long long are both 64-bit. */
     EXPECT_INTERP_AND_ELF("typedef unsigned long ul;\n"
                           "typedef unsigned long long ull;\n"
                           "typedef long long ll;\n"
                           "typedef signed long s_l;\n"
                           "int main(void) {\n"
                           "    ll a = 1000000000LL;\n"
-                          "    ll b = a * a;\n"
                           "    ull u = 42ULL;\n"
                           "    s_l s = -21;\n"
                           "    ul w = 7;\n"
+                          "    if (u != 42) return 1;\n"
+                          "    if (s != -21) return 2;\n"
+                          "    if (w != 7) return 3;\n"
+                          "    if (sizeof(ll) != 8) return 4;\n"
+                          "    return (*&a == 1000000000LL ? 42 : 5);\n"
+                          "}\n",
+                          42);
+}
+
+TEST(declarators, llong_multiply)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long long a = 1000000000LL;\n"
+                          "    long long b = a * a;\n"
                           "    if (b != 1000000000000000000LL) return 1;\n"
-                          "    if (u != 42) return 2;\n"
-                          "    if (s != -21) return 3;\n"
-                          "    if (w != 7) return 4;\n"
-                          "    if (sizeof(ll) != 8) return 5;\n"
-                          "    return (*&a == 1000000000LL ? 42 : 6);\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(declarators, integer_specifier_int_suffix)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long long int a = 42;\n"
+                          "    unsigned long long int b = 42ULL;\n"
+                          "    if ((int)a != 42) return 1;\n"
+                          "    if ((int)b != 42) return 2;\n"
+                          "    return 42;\n"
                           "}\n",
                           42);
 }
@@ -86,6 +101,17 @@ TEST(declarators, multi_block_scope)
                           42);
 }
 
+TEST(declarators, multi_pointer_declarators)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 20, y = 22;\n"
+                          "    void *p, *q;\n"
+                          "    p = &x; q = &y;\n"
+                          "    return *(int *)p + *(int *)q;\n"
+                          "}\n",
+                          42);
+}
+
 TEST(declarators, multi_file_scope)
 {
     EXPECT_INTERP_AND_ELF("static int g1 = 1, g2 = 2, g3 = 3;\n"
@@ -102,7 +128,6 @@ TEST(declarators, multi_file_scope)
 
 TEST(declarators, multi_arrays_share_base)
 {
-    /* `int a[2], b[3];` — each declarator gets its own size. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int a[2], b[3];\n"
                           "    a[0] = 10; a[1] = 12;\n"
@@ -110,6 +135,29 @@ TEST(declarators, multi_arrays_share_base)
                           "    if (sizeof(a) != 8) return 1;\n"
                           "    if (sizeof(b) != 12) return 2;\n"
                           "    return a[0] + a[1] + b[0];\n"
+                          "}\n",
+                          42);
+}
+
+TEST(declarators, multi_dim_array_declarator)
+{
+    EXPECT_INTERP_AND_ELF(
+        "int main(void) {\n"
+        "    int a[2][3];\n"
+        "    a[0][0] = 1; a[0][1] = 2; a[0][2] = 3;\n"
+        "    a[1][0] = 4; a[1][1] = 5; a[1][2] = 6;\n"
+        "    return a[0][0] + a[0][1] + a[0][2] + a[1][0] + a[1][1] + a[1][2] + 21;\n"
+        "}\n",
+        42);
+}
+
+TEST(declarators, array_of_pointer_declarators)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 1, y = 2, z = 3;\n"
+                          "    int *a[3];\n"
+                          "    a[0] = &x; a[1] = &y; a[2] = &z;\n"
+                          "    return *a[0] + *a[1] + *a[2] + 36;\n"
                           "}\n",
                           42);
 }
@@ -156,39 +204,64 @@ TEST(declarators, struct_field_list)
                           42);
 }
 
-TEST(declarators, combined_struct_definition_declarator)
+TEST(declarators, struct_definition_with_declarator)
 {
-    /* `struct S { ... } v;` — the definition and the declarator in one
-       declaration. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    struct Pair { int lo; int hi; } pr;\n"
                           "    pr.lo = 20;\n"
                           "    pr.hi = 22;\n"
                           "    if (pr.lo + pr.hi != 42) return 1;\n"
-                          "    struct { int v; } av;\n"
-                          "    av.v = pr.lo;\n"
-                          "    return av.v + pr.hi;\n"
+                          "    return 42;\n"
                           "}\n",
                           42);
 }
 
-TEST(declarators, block_scope_tag_definition)
+TEST(declarators, anon_struct_definition_with_declarator)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    struct { int v; } av;\n"
+                          "    av.v = 42;\n"
+                          "    return av.v;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(declarators, tag_definition_pointer_declarator)
+{
+    EXPECT_INTERP_AND_ELF("struct P { int x; int y; } *pp;\n"
+                          "int main(void) {\n"
+                          "    struct P v;\n"
+                          "    v.x = 20; v.y = 22;\n"
+                          "    pp = &v;\n"
+                          "    return pp->x + pp->y;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(declarators, block_scope_struct_definition)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    struct Local { int v; };\n"
                           "    struct Local l;\n"
-                          "    l.v = 40;\n"
+                          "    l.v = 42;\n"
+                          "    return l.v;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(declarators, block_scope_enum_definition)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    enum Mood { HAPPY, SAD };\n"
                           "    enum Mood m = SAD;\n"
                           "    if (m != 1) return 1;\n"
-                          "    return l.v + m + 1;\n"
+                          "    return m + 41;\n"
                           "}\n",
                           42);
 }
 
 TEST(declarators, anonymous_struct_typedef)
 {
-    /* The ficc source idiom: `typedef struct { ... } Name;`. */
     EXPECT_INTERP_AND_ELF("typedef struct {\n"
                           "    int x;\n"
                           "    int y;\n"
@@ -210,7 +283,6 @@ TEST(declarators, anonymous_struct_typedef)
 
 TEST(declarators, anonymous_enum_typedef)
 {
-    /* ficc source idiom: `typedef enum { ... } Name;`. */
     EXPECT_INTERP_AND_ELF("typedef enum {\n"
                           "    TOK_INT,\n"
                           "    TOK_CHAR,\n"
@@ -227,8 +299,6 @@ TEST(declarators, anonymous_enum_typedef)
 
 TEST(declarators, enum_pointer_declarator)
 {
-    /* A tagged enum var + pointer to it (the pointer declarator derives
-       from the same specifier). */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    enum E { A, B } e = B;\n"
                           "    enum E *p = &e;\n"
@@ -241,8 +311,7 @@ TEST(declarators, enum_pointer_declarator)
 
 TEST(declarators, negative_anon_enum_pointer_mismatch)
 {
-    /* Two distinct anonymous enum definitions are two distinct types, so
-       the pointer-to-the-second cannot alias a var of the first. */
+    /* Distinct anonymous enum definitions are distinct types. */
     EXPECT_BUILD_FAIL("int main(void) {\n"
                       "    enum { A, B } e = B;\n"
                       "    enum { C } *p = &e;\n"
@@ -268,15 +337,22 @@ TEST(declarators, nested_inline_definitions)
                           42);
 }
 
-TEST(declarators, anonymous_struct_in_union_style)
+TEST(declarators, union_member_alias)
 {
-    /* `struct { int lo; int hi; } u;` plus union spelling. */
     EXPECT_INTERP_AND_ELF("union U { int i; unsigned u; };\n"
                           "int main(void) {\n"
                           "    union U un;\n"
-                          "    struct { int lo; int hi; } pair;\n"
                           "    un.i = 42;\n"
                           "    if (un.u != un.i) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(declarators, anon_struct_variable)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    struct { int lo; int hi; } pair;\n"
                           "    pair.lo = 20;\n"
                           "    pair.hi = 22;\n"
                           "    return pair.lo + pair.hi;\n"
@@ -298,8 +374,6 @@ TEST(declarators, const_static_multi)
 
 TEST(declarators, pointer_param_and_return_types)
 {
-    /* `*` decorators on params/returns survive the specifier/declarator
-       split. */
     EXPECT_INTERP_AND_ELF("int *add(int *p, int *q, int n) {\n"
                           "    p[0] = *q + n;\n"
                           "    return p;\n"
@@ -315,9 +389,7 @@ TEST(declarators, pointer_param_and_return_types)
 
 TEST(declarators, array_param_qualifiers)
 {
-    /* §6.7.6.3p7: an array parameter may carry `restrict`/`static`/`const`
-       between the brackets; they qualify the adjusted pointer, not the
-       element. */
+    /* §6.7.6.3p7: qualifiers between `[]` adjust the parameter's pointer type. */
     EXPECT_INTERP_AND_ELF("int sum(int n, const int a[restrict], int b[static 1]) {\n"
                           "    int s = 0;\n"
                           "    for (int i = 0; i < n; i++)\n"
@@ -334,8 +406,7 @@ TEST(declarators, array_param_qualifiers)
 
 TEST(declarators, array_param_unspecified_bound)
 {
-    /* §6.7.6.3p4: `T a[*]` is only allowed in a prototype and declares an
-       adjusted pointer. */
+    /* §6.7.6.3p4: `T a[*]` is a prototype-only adjusted pointer. */
     EXPECT_INTERP_AND_ELF("int first(int a[*]);\n"
                           "int first(int a[4]) { return a[0]; }\n"
                           "int main(void) {\n"
@@ -344,8 +415,6 @@ TEST(declarators, array_param_unspecified_bound)
                           "}\n",
                           42);
 }
-
-/* negatives (all must fail to build) */
 
 TEST(declarators, negative_char_with_long)
 {
@@ -421,8 +490,7 @@ TEST(declarators, negative_forward_enum)
 
 TEST(declarators, negative_datatype_redefinition_list)
 {
-    /* The shared specifier type still gets one scrutineer per declarator:
-       a second var may not reuse the same name. */
+    /* A second declarator may not redeclare the same name. */
     EXPECT_BUILD_FAIL("int main(void) {\n"
                       "    int x = 1, x = 2;\n"
                       "    return 0;\n"
@@ -467,8 +535,7 @@ TEST(declarators, array_of_function_pointers)
 
 TEST(declarators, pointer_qualifiers_per_level)
 {
-    /* §6.7.6: `const char * const *` is a pointer to a const pointer to const
-       char; the qualifier after a `*` binds to that pointer level. */
+    /* §6.7.6: a qualifier after `*` binds to that pointer level. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    const char *s = \"x\";\n"
                           "    const char * const p = s;\n"
@@ -480,7 +547,6 @@ TEST(declarators, pointer_qualifiers_per_level)
 
 TEST(declarators, function_returning_function_pointer)
 {
-    /* The inner `(int)` suffix makes `get` return a function pointer. */
     EXPECT_INTERP_AND_ELF("int add1(int x) { return x + 1; }\n"
                           "int (*get(int tag))(int) { return tag == 1 ? add1 : 0; }\n"
                           "int main(void) { return get(1)(41); }\n",
@@ -498,10 +564,9 @@ TEST(declarators, typedef_multiple_declarators)
                           "}\n",
                           42);
 }
+
 TEST(declarators, abstract_function_pointer_cast)
 {
-    /* A function-pointer type-name with a pointer return and no name:
-       `(void *(*)(long))`. */
     EXPECT_INTERP_AND_ELF("typedef void *(*Alloc)(long);\n"
                           "static void *impl(long n) { (void) n; return 0; }\n"
                           "int main(void) {\n"

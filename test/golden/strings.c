@@ -6,5 +6,5 @@ int main(void)
     {
         i = i + 1;
     }
-    return i; /* length of "hello" = 5 */
+    return i;
 }

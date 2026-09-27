@@ -165,6 +165,32 @@ TEST(ir, operand_imm)
     EXPECT_EQ(o.u.imm, -123);
 }
 
+TEST(ir, operand_global)
+{
+    IrOperand o = ir_operand_global(3);
+    EXPECT_FALSE(o.is_imm);
+    EXPECT_TRUE(o.is_global);
+    EXPECT_FALSE(o.is_func);
+    EXPECT_EQ(o.u.global_index, 3);
+}
+
+TEST(ir, operand_func)
+{
+    IrOperand o = ir_operand_func("f");
+    EXPECT_FALSE(o.is_imm);
+    EXPECT_FALSE(o.is_global);
+    EXPECT_TRUE(o.is_func);
+    EXPECT_STR_EQ(o.u.func_name, "f");
+}
+
+TEST(ir, operand_is_vreg_distinguishes_kinds)
+{
+    EXPECT_TRUE(ir_operand_is_vreg(ir_operand_vreg(0)));
+    EXPECT_FALSE(ir_operand_is_vreg(ir_operand_imm(0)));
+    EXPECT_FALSE(ir_operand_is_vreg(ir_operand_global(0)));
+    EXPECT_FALSE(ir_operand_is_vreg(ir_operand_func("f")));
+}
+
 TEST(ir, opcode_names)
 {
     EXPECT_STR_EQ(ir_opcode_name(OP_RET), "OP_RET");

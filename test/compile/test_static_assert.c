@@ -3,8 +3,6 @@
 
 #include "util/arena.h"
 
-/* Phase 14b: _Static_assert — compile-time constant-expression check. */
-
 TEST(static_assert, file_scope_pass)
 {
     EXPECT_BUILD_SUCCEED("_Static_assert(1, \"true\");\n"
@@ -39,10 +37,17 @@ TEST(static_assert, alignof_expr)
                          "}\n");
 }
 
-TEST(static_assert, arithmetic_and_cast_ice)
+TEST(static_assert, arithmetic_ice)
 {
     EXPECT_BUILD_SUCCEED("int main(void) {\n"
                          "    _Static_assert((1 + 2) * 3 == 9, \"arith\");\n"
+                         "    return 0;\n"
+                         "}\n");
+}
+
+TEST(static_assert, cast_ice)
+{
+    EXPECT_BUILD_SUCCEED("int main(void) {\n"
                          "    _Static_assert((char)300 == 44, \"wraps\");\n"
                          "    return 0;\n"
                          "}\n");
@@ -107,4 +112,20 @@ TEST(static_assert, empty_message_ok)
                          "int main(void) {\n"
                          "    return 0;\n"
                          "}\n");
+}
+
+TEST(static_assert, message_string_concatenation)
+{
+    EXPECT_BUILD_SUCCEED("_Static_assert(1, \"a\" \"b\");\n"
+                         "int main(void) {\n"
+                         "    return 0;\n"
+                         "}\n");
+}
+
+TEST(static_assert, missing_message_rejected)
+{
+    EXPECT_BUILD_FAIL("_Static_assert(1);\n"
+                      "int main(void) {\n"
+                      "    return 0;\n"
+                      "}\n");
 }

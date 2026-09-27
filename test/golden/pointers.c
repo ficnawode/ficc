@@ -18,5 +18,5 @@ int main(void)
     arr[3] = 40;
     int *p = &arr[1];
     int deref = *p + *(p - 1) + *(p + 2);
-    return sum(arr, 4) + deref; /* 100 + 70 = 170 */
+    return sum(arr, 4) + deref;
 }

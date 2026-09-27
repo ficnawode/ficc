@@ -13,5 +13,5 @@ int main(void)
     int x;
     x = add(10, 3);
     x = sub(x, 2);
-    return x * 5; /* (10+3-2)*5 = 55 */
+    return x * 5;
 }

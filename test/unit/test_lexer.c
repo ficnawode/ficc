@@ -5,8 +5,6 @@
 
 #include <string.h>
 
-/* Runs the real frontend (pp -> lex_finalize) so these rows exercise the
-   production token path. */
 static LexResult lex_text(const char *src, Arena *a)
 {
     Pp *pp = pp_new(a);
@@ -83,7 +81,7 @@ TEST(lexer, tab_advances_col)
     LexResult res = lex_text("int\tmain", a);
     Token *t = res.tokens;
     EXPECT_NOTNULL(t);
-    EXPECT_EQ(t[1].loc.col, 8); /* tab from col 4 -> col 9 */
+    EXPECT_EQ(t[1].loc.col, 8);
     arena_free(a);
 }
 
@@ -164,8 +162,7 @@ TEST(lexer, ellipsis)
 
 TEST(lexer, dot_is_not_ellipsis)
 {
-    /* A lone `.` and a `..` pair stay TOK_DOT (member access / GNU ranges
-       stay lexable); only three consecutive dots are TOK_ELLIPSIS. */
+    /* Max-munch: only `...` is TOK_ELLIPSIS. */
     Arena *a = arena_new();
     LexResult res = lex_text("..", a);
     Token *t = res.tokens;
@@ -228,7 +225,6 @@ TEST(lexer, line_comment)
 
 TEST(lexer, line_comment_to_eof)
 {
-    /* A `//` comment runs to the end of input (no trailing newline). */
     Arena *a = arena_new();
     LexResult res = lex_text("int x // trailing", a);
     Token *t = res.tokens;
@@ -242,8 +238,6 @@ TEST(lexer, line_comment_to_eof)
 
 TEST(lexer, line_comment_does_not_swallow_newline)
 {
-    /* The comment ends at (and does not consume) the newline, so a token on
-       the next line is located on line 2. */
     Arena *a = arena_new();
     LexResult res = lex_text("// c\nx", a);
     Token *t = res.tokens;
@@ -257,7 +251,6 @@ TEST(lexer, line_comment_does_not_swallow_newline)
 
 TEST(lexer, slash_is_not_comment)
 {
-    /* A lone `/` stays a division operator. */
     Arena *a = arena_new();
     LexResult res = lex_text("a / b", a);
     Token *t = res.tokens;
@@ -422,6 +415,14 @@ TEST(lexer, string_literal_unterminated)
     arena_free(a);
 }
 
+TEST(lexer, string_literal_hex_no_digits_is_error)
+{
+    Arena *a = arena_new();
+    LexResult res = lex_text("\"\\x\"", a);
+    EXPECT_NULL(res.tokens);
+    arena_free(a);
+}
+
 TEST(lexer, sizeof_keyword)
 {
     Arena *a = arena_new();
@@ -484,8 +485,6 @@ TEST(lexer, bool_keyword)
 
 TEST(lexer, bool_keyword_is_exact)
 {
-    /* `bool` (without the underscore prefix) is not yet a keyword — it arrives
-       via <stdbool.h> in Phase 17. */
     Arena *a = arena_new();
     LexResult res = lex_text("bool", a);
     Token *t = res.tokens;
@@ -556,8 +555,8 @@ TEST(lexer, char_literal_octal_escapes)
     EXPECT_EQ(t[0].payload.int_val, 0);
     EXPECT_EQ(t[1].payload.int_val, 1);
     EXPECT_EQ(t[2].payload.int_val, 7);
-    EXPECT_EQ(t[3].payload.int_val, 65);  /* \101 octal == 'A' */
-    EXPECT_EQ(t[4].payload.int_val, 255); /* \377 octal == 0xFF */
+    EXPECT_EQ(t[3].payload.int_val, 65);
+    EXPECT_EQ(t[4].payload.int_val, 255);
     EXPECT_EQ(t[5].kind, TOK_EOF);
     arena_free(a);
 }
@@ -579,9 +578,7 @@ TEST(lexer, char_literal_hex_escapes)
 
 TEST(lexer, octal_escape_digit_boundary)
 {
-    /* Octal escapes consume at most three octal digits; a following digit in
-       a *string* is a separate byte ("\0123" == {10, '3'}). In a char
-       constant the same sequence is a multi-char constant (rejected). */
+    /* Octal escapes take at most three digits (C11 §6.4.4.4). */
     Arena *a = arena_new();
     LexResult res = lex_text("\"\\0123\"", a);
     Token *t = res.tokens;
@@ -589,7 +586,7 @@ TEST(lexer, octal_escape_digit_boundary)
     EXPECT_EQ(res.count, 2);
     EXPECT_EQ(t[0].kind, TOK_STRING_LIT);
     EXPECT_EQ(t[0].str_len, 2);
-    EXPECT_EQ(t[0].payload.str[0], 10); /* \012 octal == newline */
+    EXPECT_EQ(t[0].payload.str[0], 10);
     EXPECT_EQ(t[0].payload.str[1], '3');
     EXPECT_EQ(t[1].kind, TOK_EOF);
     arena_free(a);
@@ -597,8 +594,7 @@ TEST(lexer, octal_escape_digit_boundary)
 
 TEST(lexer, string_literal_octal_and_hex_escapes)
 {
-    /* The shared escape decoder gives strings the full §6.4.4.4 table:
-       "\01" is octal 1 (not NUL then '1'), "\x41" is 'A' (not 'x','4','1'). */
+    /* Strings use the shared escape table (C11 §6.4.4.4). */
     Arena *a = arena_new();
     LexResult res = lex_text("\"\\01\\x41\"", a);
     Token *t = res.tokens;
@@ -644,6 +640,14 @@ TEST(lexer, char_literal_out_of_range_is_error)
     arena_free(a);
 }
 
+TEST(lexer, char_literal_hex_out_of_range_is_error)
+{
+    Arena *a = arena_new();
+    LexResult res = lex_text("'\\x100'", a);
+    EXPECT_NULL(res.tokens);
+    arena_free(a);
+}
+
 TEST(lexer, char_literal_unterminated_is_error)
 {
     Arena *a = arena_new();
@@ -677,8 +681,7 @@ TEST(lexer, increment_decrement_tokens)
 
 TEST(lexer, arrow_and_decrement_max_munch)
 {
-    /* `p->x` lexes the arrow; `p-->y` is maximal-munched as `p -- > y` (a
-       comparison of a decremented pointer), not `p -- -> y`. */
+    /* Max-munch: `p-->y` is `p -- > y`, not `p -- -> y`. */
     Arena *a = arena_new();
     LexResult res = lex_text("p->x p-->y", a);
     Token *t = res.tokens;
@@ -869,25 +872,50 @@ TEST(finalize, wide_and_utf_chars_lex)
     arena_free(a);
 }
 
-TEST(finalize, float_literals_lex)
+TEST(finalize, decimal_float_literals)
 {
     Arena *a = arena_new();
-    LexResult res = lex_text("1.5 .5 1e5 0x1p3 2f", a);
+    LexResult res = lex_text("1.5 .5 1e5 5.", a);
     Token *t = res.tokens;
     EXPECT_NOTNULL(t);
-    EXPECT_EQ(res.count, 6);
+    EXPECT_EQ(res.count, 5);
     EXPECT_EQ(t[0].kind, TOK_FLOAT_LIT);
     EXPECT_EQ(t[0].float_kind, FK_DOUBLE);
     EXPECT_EQ(t[1].kind, TOK_FLOAT_LIT);
-    EXPECT_EQ(t[1].payload.float_pat, 0x3FE0000000000000ULL); /* .5 */
+    EXPECT_EQ(t[1].payload.float_pat, 0x3FE0000000000000ULL);
     EXPECT_EQ(t[2].kind, TOK_FLOAT_LIT);
-    EXPECT_EQ(t[2].payload.float_pat, 0x40F86A0000000000ULL); /* 1e5 */
+    EXPECT_EQ(t[2].payload.float_pat, 0x40F86A0000000000ULL);
     EXPECT_EQ(t[3].kind, TOK_FLOAT_LIT);
-    EXPECT_EQ(t[3].payload.float_pat, 0x4020000000000000ULL); /* 0x1p3 == 8.0 */
-    EXPECT_EQ(t[3].int_suffix.is_hex, false);
-    EXPECT_EQ(t[4].kind, TOK_FLOAT_LIT);
-    EXPECT_EQ(t[4].float_kind, FK_FLOAT);
-    EXPECT_EQ(t[5].kind, TOK_EOF);
+    EXPECT_EQ(t[3].float_kind, FK_DOUBLE);
+    EXPECT_EQ(t[3].payload.float_pat, 0x4014000000000000ULL);
+    EXPECT_EQ(t[4].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(finalize, hex_float_literal)
+{
+    Arena *a = arena_new();
+    LexResult res = lex_text("0x1p3", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_FLOAT_LIT);
+    EXPECT_EQ(t[0].payload.float_pat, 0x4020000000000000ULL);
+    EXPECT_EQ(t[0].int_suffix.is_hex, false);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
+    arena_free(a);
+}
+
+TEST(finalize, integer_f_suffix_is_float)
+{
+    Arena *a = arena_new();
+    LexResult res = lex_text("2f", a);
+    Token *t = res.tokens;
+    EXPECT_NOTNULL(t);
+    EXPECT_EQ(res.count, 2);
+    EXPECT_EQ(t[0].kind, TOK_FLOAT_LIT);
+    EXPECT_EQ(t[0].float_kind, FK_FLOAT);
+    EXPECT_EQ(t[1].kind, TOK_EOF);
     arena_free(a);
 }
 
@@ -918,7 +946,7 @@ TEST(finalize, float_long_malformed_rejected)
     Arena *a = arena_new();
     EXPECT_NULL(lex_text("1.5j", a).tokens);
     EXPECT_NULL(lex_text(".5Lz", a).tokens);
-    EXPECT_NULL(lex_text("0x1.5L", a).tokens); /* hex long double needs p */
+    EXPECT_NULL(lex_text("0x1.5L", a).tokens);
     arena_free(a);
 }
 
@@ -954,11 +982,20 @@ TEST(finalize, octal_int_literals)
     EXPECT_NOTNULL(t);
     EXPECT_EQ(res.count, 5);
     EXPECT_EQ(t[0].kind, TOK_INT_LIT);
-    EXPECT_EQ(t[0].payload.int_val, 420); /* 0644 octal */
-    EXPECT_EQ(t[1].payload.int_val, 8);   /* 010 octal */
-    EXPECT_EQ(t[2].payload.int_val, 511); /* 0777 octal */
+    EXPECT_EQ(t[0].payload.int_val, 420);
+    EXPECT_EQ(t[1].payload.int_val, 8);
+    EXPECT_EQ(t[2].payload.int_val, 511);
     EXPECT_EQ(t[3].payload.int_val, 0);
-    EXPECT_TRUE(t[0].int_suffix.is_hex); /* non-decimal: unsigned-capable */
+    /* Non-decimal literals may widen to unsigned (C11 §6.4.4.1). */
+    EXPECT_TRUE(t[0].int_suffix.is_hex);
+    arena_free(a);
+}
+
+TEST(finalize, octal_invalid_digit_rejected)
+{
+    Arena *a = arena_new();
+    EXPECT_NULL(lex_text("08", a).tokens);
+    EXPECT_NULL(lex_text("09", a).tokens);
     arena_free(a);
 }
 

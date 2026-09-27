@@ -1,16 +1,7 @@
-/* Phase 12: "sugar" — typedef + designated initializers + compound
-   literals — end-to-end golden test.
-   Compile with ficc (`ficc -run sugar.c` for the interpreter, `ficc -c` +
-   `gcc -no-pie` for the ELF), and expect exit status 42.
-
-   This exercises the three Phase-12 features together: ordinary-name
-   typedefs (D12.1), the §6.7.9 cursor planner (designators, elision,
-   char-array strings, array-length inference), and compound literals as
-   anonymous static (file scope) / automatic (block scope) lvalues (D12.9),
-   including addresses taken of those lvalues. */
+/* Expect exit 42. */
 
 typedef int Count;
-typedef struct Point Point; /* incomplete record through a typedef name */
+typedef struct Point Point;
 
 struct Point
 {
@@ -24,7 +15,7 @@ struct Line
     Point *b;
 };
 
-Point *units = &(Point) {1, 2}; /* file-scope compound literal -> anonymous static */
+Point *units = &(Point) {1, 2};
 
 int sum_pair(Point *p)
 {
@@ -33,7 +24,6 @@ int sum_pair(Point *p)
 
 int main(void)
 {
-    /* Incomplete-array completion from a designated initializer. */
     int elems[] = {[2] = 10, [4] = 7};
     if (sizeof(elems) != 20)
     {
@@ -44,7 +34,6 @@ int main(void)
         return 2;
     }
 
-    /* Block-scope compound literals: value, member access, address-in-arg. */
     if ((Point) {3, 4}.y != 4)
     {
         return 3;
@@ -54,13 +43,11 @@ int main(void)
         return 4;
     }
 
-    /* The file-scope anonymous static survives both executions. */
     if (units->x != 1 || units->y != 2)
     {
         return 5;
     }
 
-    /* Sew compound literals into a designated list via struct pointers. */
     Point pa = (Point) {.y = 6, .x = 9};
     Point pb = (Point) {.x = 1};
     struct Line ln = (struct Line) {.a = &pa, .b = &pb};
@@ -69,7 +56,6 @@ int main(void)
         return 6;
     }
 
-    /* typedef Count throughout, incl. array-length inference. */
     Count scores[] = {1, 2, 3};
     if (scores[0] + scores[1] + scores[2] != 6)
     {

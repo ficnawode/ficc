@@ -4,9 +4,6 @@
 #include <stdio.h>
 #include <unistd.h>
 
-/* Compiles each fixture through the register-allocating backend and requires the
-   linked program to produce the expected exit code at -O0 and -O1. */
-
 static unsigned int backend_seq;
 
 static void backend_path(char *buf, size_t sz, const char *backend, const char *ext)
@@ -76,6 +73,14 @@ TEST(backend, local_arithmetic)
     backend_run("int main(void) { int a = 20; int b = 3; return a * b + a / b + a % b; }\n", 68);
 }
 
+TEST(backend, compound_assignment_operators)
+{
+    backend_run("int main(void) { int x = 40; x += 2; x -= 5; x *= 2; x /= 2; x %= 30;\n"
+                "                x &= 15; x |= 0x20; x ^= 0x10; x <<= 1; x >>= 1;\n"
+                "                return x; }\n",
+                55);
+}
+
 TEST(backend, division_and_remainder)
 {
     backend_run("int main(void) { int a = 100; int b = 7; return a / b * 7 + a % b; }\n", 100);
@@ -88,11 +93,21 @@ TEST(backend, unsigned_division)
                 219);
 }
 
-TEST(backend, shifts_signed_and_unsigned)
+TEST(backend, shifts_signed_right)
 {
-    backend_run("int main(void) { int a = -16; int b = a >> 2;\n"
-                "                int c = (int) ((unsigned) a >> 1); return b + c; }\n",
-                244);
+    backend_run("int main(void) { int a = -256; return (a >> 4) == -16 ? 42 : 1; }\n", 42);
+}
+
+TEST(backend, shifts_unsigned_right)
+{
+    backend_run("int main(void) { unsigned a = 0xFFFFFF00u;\n"
+                "                return (a >> 4) == 0x0FFFFFF0u ? 42 : 1; }\n",
+                42);
+}
+
+TEST(backend, left_shift)
+{
+    backend_run("int main(void) { int x = 1; return (x << 5) | 10; }\n", 42);
 }
 
 TEST(backend, char_truncation_preserves_sign)
@@ -114,6 +129,14 @@ TEST(backend, comparisons)
                 43);
 }
 
+TEST(backend, comparisons_remaining_operators)
+{
+    backend_run("int main(void) { unsigned a = 100; unsigned b = 200;\n"
+                "                return (a <= b) + (a >= b) * 10 + (a != b) * 20 +\n"
+                "                       (a == b) * 30 + 11; }\n",
+                32);
+}
+
 TEST(backend, long_arithmetic)
 {
     backend_run("int main(void) { long a = 1234567890123L; long b = 7; return (int) (a % b); }\n",
@@ -132,17 +155,26 @@ TEST(backend, long_immediate_shift_keeps_sign_bits)
                 15);
 }
 
-TEST(backend, narrow_unsigned_and_signed_loads)
+TEST(backend, narrow_unsigned_load)
 {
-    backend_run("int main(void) { unsigned char c = 200; int x = c + 56;\n"
-                "                signed char d = -2; return x + d * 3 + 8; }\n",
-                2);
+    backend_run("int main(void) { unsigned char c = 200; return (int) c / 4 - 8; }\n", 42);
+}
+
+TEST(backend, narrow_signed_load)
+{
+    backend_run("int main(void) { signed char d = -2; return (int) d / 2 + 43; }\n", 42);
+}
+
+TEST(backend, short_load_sign_and_zero_extension)
+{
+    backend_run("int main(void) { short s = -300; unsigned short u = 40000;\n"
+                "                return (int) s / 3 + (int) u / 1000 + 140; }\n",
+                80);
 }
 
 TEST(backend, narrow_byte_ops_under_pressure)
 {
-    /* Byte-width and/or/xor on values that spill into the high GP registers:
-       a byte reg 4-7 needs a REX prefix, and r8-15 needs REX.B. */
+    /* A byte reg 4-7 needs a REX prefix; r8-15 needs REX.B. */
     backend_run("int main(void) {\n"
                 "  unsigned char a = 0x11, b = 0x22, c = 0x44, d = 0x88;\n"
                 "  unsigned char e = 0x0F, f = 0xF0, g = 0x3C, h = 0x55;\n"
@@ -161,6 +193,14 @@ TEST(backend, array_alloca_gep_load_store)
 TEST(backend, global_load_store)
 {
     backend_run("int g;\nint main(void) { g = 21; int x = g; return x * 2; }\n", 42);
+}
+
+TEST(backend, global_array_load_store)
+{
+    backend_run("int g[3];\n"
+                "int main(void) { g[0] = 10; g[1] = 20; g[2] = 12;\n"
+                "                return g[0] + g[1] + g[2]; }\n",
+                42);
 }
 
 TEST(backend, pointer_arithmetic)
@@ -326,7 +366,14 @@ TEST(backend, control_flow_in_process_oracle)
                        16);
 }
 
-TEST(backend, call_direct_and_live_across)
+TEST(backend, call_direct)
+{
+    backend_run("int add(int a, int b) { return a + b; }\n"
+                "int main(void) { return add(40, 2); }\n",
+                42);
+}
+
+TEST(backend, call_live_across)
 {
     backend_run("int add(int a, int b) { return a + b; }\n"
                 "int main(void) { int x = 10; int y = add(20, 30); return x + y; }\n",
@@ -445,6 +492,14 @@ TEST(backend, struct_arg_and_return_with_scalar)
                 42);
 }
 
+TEST(backend, struct_pointer_member_access)
+{
+    backend_run("struct P { int a; int b; };\n"
+                "int main(void) { struct P p; struct P *q = &p; q->a = 40; q->b = 2;\n"
+                "                return q->a + q->b; }\n",
+                42);
+}
+
 /* Caller-side SysV aggregate placement must match gcc, which is the ABI oracle. */
 static void backend_run_gcc_tu(const char *ficc_src, const char *gcc_src, int expected)
 {
@@ -535,19 +590,23 @@ TEST(backend, gcc_interop_printf)
 {
     backend_run_gcc_tu("int printf(const char *fmt, ...);\n"
                        "int main(void) { printf(\"%d\\n\", 42); return 0; }\n",
-                       "/* libc provides printf; this TU only anchors the link. */\n", 0);
+                       "", 0);
 }
 
 TEST(backend, fp_double_arithmetic)
 {
     backend_run("double muladd(double a, double b) { return a * b + 1.5; }\n"
-                "double sum(double a, double b, double c, double d, double e, double f, double g,\n"
+                "int main(void) { double r = muladd(2.0, 3.0); return (int) r; }\n",
+                7);
+}
+
+TEST(backend, fp_double_stack_arguments)
+{
+    backend_run("double sum(double a, double b, double c, double d, double e, double f, double g,\n"
                 "           double h, double i, double j) {\n"
                 "    return a + b + c + d + e + f + g + h + i + j; }\n"
-                "int main(void) { double r = muladd(2.0, 3.0);\n"
-                "                double s = sum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);\n"
-                "                return (int) (r + s); }\n",
-                62);
+                "int main(void) { return (int) sum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10); }\n",
+                55);
 }
 
 TEST(backend, fp_float_arithmetic)
@@ -568,17 +627,24 @@ TEST(backend, fp_compares_including_nan)
                 42);
 }
 
-TEST(backend, fp_casts_and_u64_threshold)
+TEST(backend, fp_casts)
+{
+    backend_run("int main(void) { double d = 3.75; int i = (int) d; float f = (float) d;\n"
+                "  double e = (double) i;\n"
+                "  if (i != 3 || f != 3.75f || e != 3.0) return 1;\n"
+                "  if ((long long) (-4.5) != -4) return 2;\n"
+                "  if ((unsigned) 4.25 != 4) return 3;\n"
+                "  return 42; }\n",
+                42);
+}
+
+TEST(backend, fp_u64_threshold)
 {
     backend_run(
-        "int main(void) { double d = 3.75; int i = (int) d; float f = (float) d;\n"
-        "  double e = (double) i;\n"
-        "  if (i != 3 || f != 3.75f || e != 3.0) return 1;\n"
-        "  if ((long long) (-4.5) != -4) return 2;\n"
-        "  if ((unsigned) 4.25 != 4) return 3;\n"
-        "  if ((unsigned long long) 9223372036854775808.0 != 0x8000000000000000ULL) return 4;\n"
+        "int main(void) {\n"
+        "  if ((unsigned long long) 9223372036854775808.0 != 0x8000000000000000ULL) return 1;\n"
         "  double big = (double) 0xFFFFFFFFFFFFFFFFULL;\n"
-        "  if (big < 1.8e19) return 5;\n"
+        "  if (big < 1.8e19) return 2;\n"
         "  return 42; }\n",
         42);
 }
@@ -598,10 +664,23 @@ TEST(backend, fp_long_double_arithmetic)
                 "  long double s = 0.1L + 0.2L;\n"
                 "  if (*(unsigned long long *) &s != 0x999999999999999aULL) return 1;\n"
                 "  if (lmul(1.5L, 2.5L) != 4.75L) return 2;\n"
-                "  long double a = 1.5L, b = 2.5L;\n"
-                "  if (!(a < b) || !(b > a) || a == b) return 3;\n"
-                "  if ((long double) 3 != 3.0L) return 4;\n"
-                "  if ((int) 4.25L != 4 || (long long) -4.5L != -4) return 5;\n"
+                "  return 42; }\n",
+                42);
+}
+
+TEST(backend, fp_long_double_compares)
+{
+    backend_run("int main(void) { long double a = 1.5L, b = 2.5L;\n"
+                "  if (!(a < b) || !(b > a) || a == b) return 1;\n"
+                "  return 42; }\n",
+                42);
+}
+
+TEST(backend, fp_long_double_casts)
+{
+    backend_run("int main(void) {\n"
+                "  if ((long double) 3 != 3.0L) return 1;\n"
+                "  if ((int) 4.25L != 4 || (long long) -4.5L != -4) return 2;\n"
                 "  return 42; }\n",
                 42);
 }

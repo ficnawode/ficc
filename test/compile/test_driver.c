@@ -8,8 +8,6 @@
 
 static unsigned int drv_seq;
 
-/* Replaces the extension of `src` (….<ext>) with `new_ext` (as the driver's
-   replace_ext does for the derived object default), into `out`. */
 static void drv_replace_ext(const char *src, const char *new_ext, char *out, size_t out_len)
 {
     const char *dot = strrchr(src, '.');
@@ -22,7 +20,6 @@ static void drv_path(char *buf, size_t sz, const char *tag, const char *ext)
     snprintf(buf, sz, "/tmp/ficc_18e_%u_%s.%s", drv_seq++, tag, ext);
 }
 
-/* Writes src to a fresh temp .c and returns its path in `out`. */
 static void drv_write_src(char *out, size_t sz, const char *tag, const char *src)
 {
     snprintf(out, sz, "/tmp/ficc_18e_%u_%s.c", drv_seq++, tag);
@@ -43,8 +40,6 @@ static void drv_cleanup(char *paths[], size_t n)
     }
 }
 
-/* Link a ficc-produced object with gcc and run it; expect `expected` as exit
-   status (sign-extended from int). */
 static void drv_run_obj(const char *obj, int expected)
 {
     char bin[256];
@@ -104,7 +99,6 @@ TEST(driver, no_o_derives_default_object)
     drv_write_src(src, sizeof(src), "derived", "int main(void) { return 7 * 6; }\n");
     drv_replace_ext(src, ".o", defo, sizeof(defo));
 
-    /* With no -o, the object lands next to the source as <base>.o. */
     char cmd[2048];
     snprintf(cmd, sizeof(cmd), "%s -c %s >/dev/null 2>&1", FICC_BIN, src);
     int rc = tc_run_shell(cmd);
@@ -150,9 +144,26 @@ TEST(driver, multi_input_c_emits_many_objects)
         fclose(fb);
     }
 
-    /* Link both objects: cross-file references must resolve for -c parity. */
+    char *paths[] = {a_src, b_src, a_o, b_o};
+    drv_cleanup(paths, 4);
+}
+
+TEST(driver, multi_input_c_links_cross_file)
+{
+    char a_src[128], b_src[128], a_o[192], b_o[192];
+    drv_write_src(a_src, sizeof(a_src), "xlink_a", "int add(int a, int b) { return a + b; }\n");
+    drv_write_src(b_src, sizeof(b_src), "xlink_b",
+                  "int add(int, int);\nint main(void) { return add(20, 22); }\n");
+    drv_replace_ext(a_src, ".o", a_o, sizeof(a_o));
+    drv_replace_ext(b_src, ".o", b_o, sizeof(b_o));
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "%s -c %s %s >/dev/null 2>&1", FICC_BIN, a_src, b_src);
+    int rc = tc_run_shell(cmd);
+    EXPECT_EQ(rc, 0);
+
     char bin[256];
-    drv_path(bin, sizeof(bin), "multi_bin", "bin");
+    drv_path(bin, sizeof(bin), "xlink_bin", "bin");
     snprintf(cmd, sizeof(cmd), "gcc -no-pie %s %s -o %s >/dev/null 2>&1 && %s", a_o, b_o, bin, bin);
     rc = tc_run_shell(cmd);
     EXPECT_EQ(rc, 42);
@@ -182,4 +193,27 @@ TEST(driver, o_rejected_with_multiple_inputs)
 
     char *paths[] = {a_src, b_src, obj};
     drv_cleanup(paths, 3);
+}
+
+TEST(driver, c_rejects_missing_input)
+{
+    char src[128], obj[192];
+    drv_path(src, sizeof(src), "absent", "c");
+    drv_path(obj, sizeof(obj), "absent_obj", "o");
+    unlink(src);
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "%s -c %s -o %s >/dev/null 2>&1", FICC_BIN, src, obj);
+    int rc = tc_run_shell(cmd);
+    EXPECT_TRUE(rc != 0);
+
+    FILE *f = fopen(obj, "rb");
+    EXPECT_NULL(f);
+    if (f)
+    {
+        fclose(f);
+    }
+
+    char *paths[] = {src, obj};
+    drv_cleanup(paths, 2);
 }

@@ -60,7 +60,6 @@ TEST(strmap, collision_handling)
 {
     Arena *a = arena_new();
     StrMap *m = strmap_new(a);
-    /* Keys that may collide or probe same slots */
     strmap_set(m, "a", (void *) 1);
     strmap_set(m, "b", (void *) 2);
     strmap_set(m, "c", (void *) 3);
@@ -77,6 +76,13 @@ TEST(u64map, basic_set_get)
     int x = 42;
     u64map_set(m, 7, &x);
     EXPECT_TRUE(u64map_get(m, 7) == &x);
+    arena_free(a);
+}
+
+TEST(u64map, missing_key)
+{
+    Arena *a = arena_new();
+    U64Map *m = u64map_new(a);
     EXPECT_NULL(u64map_get(m, 99));
     arena_free(a);
 }
@@ -128,7 +134,6 @@ TEST(u64map, same_slot_collision_chain)
     {
         EXPECT_TRUE(u64map_get(m, keys[i]) == &vals[i]);
     }
-    /* a key hashing to another slot is unaffected */
     int other = 99;
     u64map_set(m, 1000, &other);
     EXPECT_TRUE(u64map_get(m, 1000) == &other);

@@ -42,7 +42,6 @@ static IrModule *build_linear(Arena *a)
     return m;
 }
 
-/* if/else diamond whose merge consumes a two-entry phi. */
 static IrModule *build_merge(Arena *a)
 {
     IrModule *m = ir_module_new(a);
@@ -141,7 +140,7 @@ TEST(liveinterval, dead_def_still_occupies_its_position)
     arena_free(a);
 }
 
-TEST(liveinterval, width_and_class_inference)
+TEST(liveinterval, class_inference_for_fp_and_int_vregs)
 {
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
@@ -160,6 +159,24 @@ TEST(liveinterval, width_and_class_inference)
     EXPECT_EQ(find_iv(&set, flt)->cls, RC_XMM);
     EXPECT_EQ(find_iv(&set, ld)->cls, RC_X87);
     EXPECT_EQ(find_iv(&set, i)->cls, RC_GPR);
+    arena_free(a);
+}
+
+TEST(liveinterval, width_inference_for_long_double)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    u32 d = ir_alloc_fp_vreg(m, 8);
+    u32 flt = ir_alloc_fp_vreg(m, 4);
+    u32 ld = ir_alloc_fp_vreg(m, 16);
+    u32 i = ir_alloc_vreg(m, 8, true, false);
+    add_param(f, a, type_double(), d, "d");
+    add_param(f, a, type_float(), flt, "f");
+    add_param(f, a, type_long_double(), ld, "ld");
+    add_param(f, a, type_int(), i, "i");
+    ir_func_add_block(f, "entry");
+    LiveIntervals set = liveinterval_compute(f, m, a);
     EXPECT_EQ(find_iv(&set, ld)->width, 16);
     arena_free(a);
 }
@@ -199,7 +216,22 @@ TEST(liveinterval, disjoint_ranges_reuse_the_slot)
     arena_free(a);
 }
 
-TEST(liveinterval, loc_at_resolves_vregs_and_immediates)
+TEST(liveinterval, spill_pack_reuses_disjoint_slots)
+{
+    Arena *a = arena_new();
+    SlotRange ranges[2] = {
+        {.start = 0, .end = 2, .vreg = 0, .is16 = false},
+        {.start = 3, .end = 5, .vreg = 1, .is16 = false},
+    };
+    u32 slot_off[2] = {0, 0};
+    u32 size = spill_pack_slots(x86_64_target(), ranges, 2, slot_off, a);
+    EXPECT_EQ(size, 8);
+    EXPECT_EQ(slot_off[0], 8);
+    EXPECT_EQ(slot_off[1], 8);
+    arena_free(a);
+}
+
+TEST(liveinterval, loc_at_resolves_vreg)
 {
     Arena *a = arena_new();
     IrModule *m = build_linear(a);
@@ -208,6 +240,15 @@ TEST(liveinterval, loc_at_resolves_vregs_and_immediates)
     RegLoc lx = loc_at(alloc, ir_operand_vreg(0), 0);
     EXPECT_EQ(lx.kind, LOC_MEM);
     EXPECT_EQ(lx.disp, -8);
+    arena_free(a);
+}
+
+TEST(liveinterval, loc_at_resolves_immediate)
+{
+    Arena *a = arena_new();
+    IrModule *m = build_linear(a);
+    LiveIntervals set = liveinterval_compute((IrFunction *) vec_get(m->funcs, 0), m, a);
+    RegAllocation *alloc = regalloc_all_spilled((IrFunction *) vec_get(m->funcs, 0), &set, a);
     RegLoc li = loc_at(alloc, ir_operand_imm(5), 0);
     EXPECT_EQ(li.kind, LOC_IMM);
     arena_free(a);

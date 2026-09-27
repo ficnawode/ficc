@@ -1,9 +1,8 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Discarded-value expressions and void-void conditionals (§6.5.17p3,
-   §6.5.15p3). Lua's barrier/audit macros spell `cond ? (void)f() : (void)0`
-   and `((void)L, (void)0)`; these must parse, type-check, and run. */
+/* Discarded-value expressions and void-void conditionals (C11 §6.5.17p3,
+   §6.5.15p3). */
 
 TEST(discarded_values, void_void_ternary_statement)
 {
@@ -65,4 +64,20 @@ TEST(discarded_values, real_operand_is_void_not_skipped)
                           "    return calls == 1 ? 0 : 2;\n"
                           "}\n",
                           0);
+}
+
+TEST(discarded_values, negative_void_initializer)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int x = (void) 0;\n"
+                      "    return x;\n"
+                      "}\n");
+}
+
+TEST(discarded_values, negative_void_mixed_ternary)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int c = 1;\n"
+                      "    return c ? (void) 1 : 2;\n"
+                      "}\n");
 }

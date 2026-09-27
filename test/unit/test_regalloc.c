@@ -63,7 +63,6 @@ static IrModule *build_chain(Arena *a, u32 *x, u32 *y, u32 *z)
     return m;
 }
 
-/* A value defined before a call and read after it spans the clobber. */
 static IrModule *build_crossing_call(Arena *a, u32 *live, u32 *call_result)
 {
     IrModule *m = ir_module_new(a);
@@ -100,7 +99,6 @@ static IrModule *build_pressure(Arena *a)
     return m;
 }
 
-/* body defines v and hands it to a merge-block phi; v dies at the copy. */
 static IrModule *build_phi_chain(Arena *a, u32 *v, u32 *p)
 {
     IrModule *m = ir_module_new(a);
@@ -121,8 +119,6 @@ static IrModule *build_phi_chain(Arena *a, u32 *v, u32 *p)
     return m;
 }
 
-/* `n` values defined in one block, all read after a call in that same block;
-   more than the callee-saved bank forces the excess to split at the call. */
 static IrModule *build_many_crossing_call(Arena *a, u32 *vals, u32 n)
 {
     IrModule *m = ir_module_new(a);
@@ -148,10 +144,6 @@ static IrModule *build_many_crossing_call(Arena *a, u32 *vals, u32 n)
     return m;
 }
 
-/* A value defined in the entry block and read twice after a call in a
-   successor.  Five dummy values fill the callee-saved bank so the crossing
-   value cannot ride one whole-range and must split at the call across the
-   block boundary. */
 static IrModule *build_cross_block_crossing(Arena *a, u32 *v)
 {
     IrModule *m = ir_module_new(a);
@@ -185,9 +177,6 @@ static IrModule *build_cross_block_crossing(Arena *a, u32 *v)
     return m;
 }
 
-/* A value defined before a loop and read twice per iteration after a call in
-   the loop header.  The header's back edge straddles the call, so the home
-   cannot change at the call: the value must not split. */
 static IrModule *build_loop_crossing(Arena *a, u32 *v)
 {
     IrModule *m = ir_module_new(a);
@@ -227,8 +216,6 @@ static IrModule *build_loop_crossing(Arena *a, u32 *v)
     return m;
 }
 
-/* A value read twice before a call and twice after it, with the callee-saved
-   bank already full, so the value must split at the call. */
 static IrModule *build_two_sided_split(Arena *a, u32 *target)
 {
     IrModule *m = ir_module_new(a);
@@ -263,8 +250,6 @@ static IrModule *build_two_sided_split(Arena *a, u32 *target)
     return m;
 }
 
-/* A hot long-lived value (`hot`) and a cold later value (`cold`) compete for a
-   full bank.  Eviction must take a colder active value, never the hot one. */
 static IrModule *build_hot_eviction(Arena *a, u32 *hot, u32 *cold)
 {
     IrModule *m = ir_module_new(a);
@@ -343,7 +328,21 @@ TEST(regalloc, overlapping_intervals_never_share_a_register)
     arena_free(a);
 }
 
-TEST(regalloc, assigns_lowest_free_and_reuses_disjoint_registers)
+TEST(regalloc, assigns_the_lowest_free_register)
+{
+    Arena *a = arena_new();
+    u32 x, y, z;
+    IrModule *m = build_chain(a, &x, &y, &z);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
+    EXPECT_EQ(alloc->phys_map[x], R_ECX);
+    EXPECT_EQ(alloc->frame_size, 0);
+    EXPECT_EQ(alloc->saved_mask, 0);
+    arena_free(a);
+}
+
+TEST(regalloc, coalesces_a_dying_operand_register)
 {
     Arena *a = arena_new();
     u32 x, y, z;
@@ -352,16 +351,13 @@ TEST(regalloc, assigns_lowest_free_and_reuses_disjoint_registers)
     LiveIntervals set = liveinterval_compute(f, m, a);
     RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
     /* The def-use chain coalesces: each value reuses the register of the operand
-       that dies at its definition, so x, y, z all ride the lowest register. */
-    EXPECT_EQ(alloc->phys_map[x], R_ECX);
-    EXPECT_EQ(alloc->phys_map[y], R_ECX);
-    EXPECT_EQ(alloc->phys_map[z], R_ECX);
-    EXPECT_EQ(alloc->frame_size, 0);
-    EXPECT_EQ(alloc->saved_mask, 0); /* only caller-saved registers were used */
+       that dies at its definition. */
+    EXPECT_EQ(alloc->phys_map[y], alloc->phys_map[x]);
+    EXPECT_EQ(alloc->phys_map[z], alloc->phys_map[y]);
     arena_free(a);
 }
 
-TEST(regalloc, loc_at_reports_registers_and_slots)
+TEST(regalloc, loc_at_reports_a_register)
 {
     Arena *a = arena_new();
     u32 x, y, z;
@@ -372,6 +368,17 @@ TEST(regalloc, loc_at_reports_registers_and_slots)
     RegLoc lx = loc_at(alloc, ir_operand_vreg(x), 0);
     EXPECT_EQ(lx.kind, LOC_REG);
     EXPECT_EQ(lx.reg, R_ECX);
+    arena_free(a);
+}
+
+TEST(regalloc, loc_at_reports_an_immediate)
+{
+    Arena *a = arena_new();
+    u32 x, y, z;
+    IrModule *m = build_chain(a, &x, &y, &z);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_linear(f, &set, x86_64_target(), a);
     RegLoc li = loc_at(alloc, ir_operand_imm(7), 0);
     EXPECT_EQ(li.kind, LOC_IMM);
     arena_free(a);
@@ -516,9 +523,7 @@ TEST(regalloc, overfull_callee_saved_bank_splits_the_excess)
     arena_free(a);
 }
 
-/* A crossing value whose range spans blocks keeps one whole-range home: a cut
-   changes the value's home at the call, and instruction positions do not order
-   blocks by execution, so the post-call home has no sound definition. */
+/* Instruction positions do not order blocks, so a cross-block value cannot split at a call. */
 TEST(regalloc, cross_block_crossing_value_keeps_one_home)
 {
     Arena *a = arena_new();
@@ -973,4 +978,26 @@ TEST(regalloc, allocation_is_deterministic)
     }
     arena_free(a1);
     arena_free(a2);
+}
+
+TEST(regalloc, all_spilled_puts_every_value_in_a_slot)
+{
+    Arena *a = arena_new();
+    u32 x, y, z;
+    IrModule *m = build_chain(a, &x, &y, &z);
+    IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
+    LiveIntervals set = liveinterval_compute(f, m, a);
+    RegAllocation *alloc = regalloc_all_spilled(f, &set, a);
+    for (u32 i = 0; i < set.n; i++)
+    {
+        u32 v = set.ivs[i].vreg;
+        EXPECT_EQ(alloc->phys_map[v], -1);
+        EXPECT_TRUE(alloc->has_slot[v]);
+        for (u32 s = alloc->seg_begin[v]; s < alloc->seg_begin[v + 1]; s++)
+        {
+            EXPECT_EQ(alloc->segments[s].kind, SEG_MEM);
+        }
+    }
+    EXPECT_TRUE(alloc->frame_size > 0);
+    arena_free(a);
 }

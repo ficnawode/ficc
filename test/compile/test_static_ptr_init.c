@@ -1,10 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* File-scope pointer initializers added for the Lua build: a null pointer
-   constant spelled `(void *)0`, an object/array designator decaying to its
-   address, and pointer arrays whose elements are array objects. */
-
 TEST(static_ptr_init, cast_null_pointer_constant)
 {
     EXPECT_INTERP_AND_ELF("static int *p0 = (void *) 0;\n"
@@ -37,8 +33,6 @@ TEST(static_ptr_init, array_of_string_pointer_const)
                           0);
 }
 
-/* A cast of a string literal to a pointer type is still an address constant
-   (zlib's `z_errmsg[] = { (z_const char *)"need dictionary", ... }`). */
 TEST(static_ptr_init, cast_string_literal_pointer_array)
 {
     EXPECT_INTERP_AND_ELF("static const char *const msgs[3] = {\n"
@@ -83,10 +77,25 @@ TEST(static_ptr_init, const_object_decay_in_pointer_array)
                           0);
 }
 
+TEST(static_ptr_init, function_pointer_initializer)
+{
+    EXPECT_INTERP_AND_ELF("static int seven(void) { return 7; }\n"
+                          "static int (*fp)(void) = seven;\n"
+                          "int main(void) { return fp() == 7 ? 0 : 1; }\n",
+                          0);
+}
+
+TEST(static_ptr_init, function_pointer_array_initializer)
+{
+    EXPECT_INTERP_AND_ELF("static int one(void) { return 1; }\n"
+                          "static int two(void) { return 2; }\n"
+                          "static int (*ops[2])(void) = { one, two };\n"
+                          "int main(void) { return ops[0]() + ops[1]() == 3 ? 0 : 1; }\n",
+                          0);
+}
+
 TEST(static_ptr_init, address_of_member)
 {
-    /* `&obj.member` is a constant address: the object symbol plus the member
-       offset (Git's option tables use this). */
     EXPECT_INTERP_AND_ELF("struct opts { int a; int b; };\n"
                           "static struct opts o = { 1, 2 };\n"
                           "static int *pb = &o.b;\n"

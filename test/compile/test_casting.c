@@ -1,13 +1,8 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Phase 11 casting: every program must produce the same result through the
-   interpreter and through the compiled ELF. Checks return 42 on success and a
-   distinct small code per guard, so a divergence names its area. */
-
 TEST(casting, narrow_signed_positive_wrap)
 {
-    /* 300 fits neither byte: signed wrap to 44 (mod 256). */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    if ((char)300 != 44) return 1;\n"
                           "    if ((int)(char)300 != 44) return 2;\n"
@@ -18,7 +13,6 @@ TEST(casting, narrow_signed_positive_wrap)
 
 TEST(casting, narrow_signed_negative)
 {
-    /* Two's-complement wrap into the signed range. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    if ((char)255 != -1) return 1;\n"
                           "    if ((char)128 != -128) return 2;\n"
@@ -39,11 +33,29 @@ TEST(casting, narrow_unsigned)
                           42);
 }
 
-TEST(casting, narrow_short)
+TEST(casting, narrow_signed_short)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    if ((short)70000 != 4464) return 1;\n"
-                          "    if ((unsigned short)-1 != 65535) return 2;\n"
+                          "    if ((short)-70000 != -4464) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(casting, narrow_unsigned_short)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    if ((unsigned short)-1 != 65535) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(casting, narrow_long_long_to_int)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    if ((int)4294967297LL != 1) return 1;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
@@ -51,7 +63,6 @@ TEST(casting, narrow_short)
 
 TEST(casting, same_width_signedness_flip)
 {
-    /* (unsigned)-1 is 4294967295; cast then read the unsigned value. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    unsigned int u = (unsigned int)-1;\n"
                           "    if (u != 4294967295) return 1;\n"
@@ -65,7 +76,15 @@ TEST(casting, widen_signed)
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int neg = -7;\n"
                           "    if ((long)neg != -7) return 1;\n"
-                          "    if ((unsigned long)-1 < 1000000) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(casting, widen_negative_to_unsigned)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    if ((unsigned long)-1 < 1000000) return 1;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
@@ -96,8 +115,6 @@ TEST(casting, char_roundtrip_expression)
 
 TEST(casting, int_to_void_roundtrip)
 {
-    /* Integer → pointer → integer round trip (implementation-defined, LP64:
-       sign/zero-extend by source signedness, truncate going back). */
     EXPECT_INTERP_AND_ELF(
         "int main(void) {\n"
         "    if ((unsigned long)(void *)(unsigned long)0x1234 != 0x1234) return 1;\n"
@@ -106,9 +123,20 @@ TEST(casting, int_to_void_roundtrip)
         42);
 }
 
+TEST(casting, pointer_integer_pointer_roundtrip)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    unsigned long p = (unsigned long)(char *)&x;\n"
+                          "    char *q = (char *)p;\n"
+                          "    if (*(int *)q != 5) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
 TEST(casting, deref_of_null_cast)
 {
-    /* `&*(int *)0` is the null-pointer idiom; the cast feeds a dereference. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int *p = &*(int *)0;\n"
                           "    if (p != 0) return 1;\n"
@@ -131,9 +159,22 @@ TEST(casting, ptr_to_ptr_reinterpret)
                           42);
 }
 
+TEST(casting, function_pointer_void_pointer_cast)
+{
+    EXPECT_INTERP_AND_ELF("int add(int a, int b) {\n"
+                          "    return a + b;\n"
+                          "}\n"
+                          "int main(void) {\n"
+                          "    void *v = (void *)add;\n"
+                          "    int (*fp)(int, int) = (int (*)(int, int))v;\n"
+                          "    if (fp(20, 22) != 42) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
 TEST(casting, ptr_int_reinterpret_bytes)
 {
-    /* Byte-wise write, integer read back: exercises int↔ptr reinterprets. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    char arr[4];\n"
                           "    arr[0] = 1; arr[1] = 2; arr[2] = 3; arr[3] = 4;\n"
@@ -148,7 +189,6 @@ TEST(casting, ptr_int_reinterpret_bytes)
 
 TEST(casting, spill_interplay)
 {
-    /* `&x` spills x to a slot; the cast chain writes through it. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int x = 5;\n"
                           "    *(int *)(void *)&x = 9;\n"
@@ -182,7 +222,6 @@ TEST(casting, cast_of_const_rvalue)
 
 TEST(casting, const_pointer_cast_add)
 {
-    /* Adding pointee const via a cast is a legal conversion. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int x = 5;\n"
                           "    int *q = &x;\n"
@@ -195,8 +234,7 @@ TEST(casting, const_pointer_cast_add)
 
 TEST(casting, cast_away_const_reads)
 {
-    /* Dropping pointee const is a legal conversion; UB only if the object is
-       then *modified* — this test only reads, so it is well-defined C. */
+    /* Dropping pointee const is legal; modifying the object through it is UB. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    const int ci = 7;\n"
                           "    const int *cp = &ci;\n"
@@ -220,7 +258,7 @@ TEST(casting, void_cast_statement)
 
 TEST(casting, void_cast_of_struct)
 {
-    /* `(void)` accepts any operand (§6.5.4p2); the value is discarded. */
+    /* (void) accepts any operand (§6.5.4p2). */
     EXPECT_INTERP_AND_ELF("struct s { int a; int b; };\n"
                           "int main(void) {\n"
                           "    struct s v;\n"
@@ -258,6 +296,17 @@ TEST(casting, enum_cast)
                           42);
 }
 
+TEST(casting, enum_to_unsigned_cast)
+{
+    EXPECT_INTERP_AND_ELF("enum e { A, B, C };\n"
+                          "int main(void) {\n"
+                          "    enum e v = B;\n"
+                          "    if ((unsigned)v != 1u) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
 TEST(casting, enum_cast_in_call_arg)
 {
     EXPECT_INTERP_AND_ELF("enum mode { MO_A, MO_B };\n"
@@ -287,7 +336,6 @@ TEST(casting, struct_ptr_cast_member_access)
 
 TEST(casting, sizeof_of_cast)
 {
-    /* sizeof's operand is not evaluated; `(int)y` is fine there. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int y = 42;\n"
                           "    if (sizeof((int)y) != 4) return 1;\n"
@@ -299,7 +347,6 @@ TEST(casting, sizeof_of_cast)
 
 TEST(casting, array_decay_cast)
 {
-    /* `(unsigned long)arr` casts the decayed pointer. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int arr[4];\n"
                           "    unsigned long base = (unsigned long)arr;\n"
@@ -327,7 +374,6 @@ TEST(casting, cast_in_ternary)
 
 TEST(casting, cast_case_labels)
 {
-    /* Casts are legal inside case-label integer constant expressions. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int r = 0;\n"
                           "    switch ((char)300) {\n"
@@ -346,7 +392,6 @@ TEST(casting, cast_case_labels)
 
 TEST(casting, cast_case_sizeof_local)
 {
-    /* `(int)sizeof(arr)` needs a type known only at semantic time. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int arr[10];\n"
                           "    int r = 0;\n"
@@ -382,25 +427,41 @@ TEST(casting, cast_in_loop)
                           42);
 }
 
-TEST(casting, cast_of_global)
+TEST(casting, cast_unsigned_global_to_int)
 {
     EXPECT_INTERP_AND_ELF("unsigned char g = 200;\n"
                           "int main(void) {\n"
                           "    if ((int)g != 200) return 1;\n"
-                          "    if ((char)g == 200) return 2;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
 }
 
-TEST(casting, static_init_with_cast_constant)
+TEST(casting, cast_unsigned_global_to_signed_char)
 {
-    /* Casts fold in static/file-scope scalar constant initializers. */
+    EXPECT_INTERP_AND_ELF("unsigned char g = 200;\n"
+                          "int main(void) {\n"
+                          "    if ((char)g == 200) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(casting, static_file_scope_cast_initializer)
+{
     EXPECT_INTERP_AND_ELF("static int s = (char)300;\n"
                           "int main(void) {\n"
                           "    if (s != 44) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(casting, static_block_scope_cast_initializer)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    static int t = (unsigned char)-1;\n"
-                          "    if (t != 255) return 2;\n"
+                          "    if (t != 255) return 1;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
@@ -432,8 +493,6 @@ TEST(casting, double_pointer_cast)
                           "}\n",
                           42);
 }
-
-/* negative: casts that must not compile */
 
 TEST(casting, negative_cast_to_struct)
 {
@@ -477,7 +536,6 @@ TEST(casting, negative_void_value_in_unary)
                       "}\n");
 }
 
-/* A negative immediate keeps its sign when widened to a wider parameter. */
 TEST(casting, negative_imm_sextended_into_wide_param)
 {
     EXPECT_INTERP_AND_ELF("unsigned long long as_ull(long long v)\n"
@@ -490,7 +548,6 @@ TEST(casting, negative_imm_sextended_into_wide_param)
                           0);
 }
 
-/* Constant casts fold at build time without changing the value in any direction. */
 TEST(casting, constant_casts_fold_across_widths)
 {
     EXPECT_INTERP_AND_ELF(
@@ -510,7 +567,6 @@ TEST(casting, constant_casts_fold_across_widths)
         0);
 }
 
-/* A pointer-typed constant is still an integer at its own width when cast back. */
 TEST(casting, constant_pointer_to_integer_cast)
 {
     EXPECT_INTERP_AND_ELF("int main(void) { return (int)(void *)0; }\n", 0);

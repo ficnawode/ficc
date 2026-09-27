@@ -41,5 +41,5 @@ int main(void)
     union Wrap w;
     w.p.x = 5;
     w.p.y = 6;
-    return w.p.x * 10 + w.p.y; /* 56 */
+    return w.p.x * 10 + w.p.y;
 }

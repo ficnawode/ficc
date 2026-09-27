@@ -1,8 +1,8 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* A flexible array member (C11 §6.7.2.1p18) is the last member of a struct and
-   contributes no bytes: sizeof stops at its aligned offset. */
+/* A flexible array member (C11 §6.7.2.1p18) contributes no bytes: sizeof
+   stops at its aligned offset. */
 
 TEST(flexible_array, sizeof_excludes_member)
 {
@@ -53,9 +53,6 @@ TEST(flexible_array, negative_in_union)
 
 TEST(flexible_array, member_with_fam_is_allowed)
 {
-    /* GCC accepts embedding a struct that has a flexible array member; only an
-       array of such a struct is ill-formed. The embedded FAM contributes no
-       bytes, so sizeof(B) == sizeof(A) == 4. */
     EXPECT_INTERP_AND_ELF("struct A { int n; char d[]; };\n"
                           "struct B { struct A a; };\n"
                           "int main(void) {\n"
@@ -68,6 +65,13 @@ TEST(flexible_array, member_with_fam_is_allowed)
 TEST(flexible_array, negative_only_member)
 {
     EXPECT_BUILD_FAIL("struct S { char d[]; };\n"
+                      "int main(void) { return 0; }\n");
+}
+
+TEST(flexible_array, negative_array_of_struct_with_member)
+{
+    EXPECT_BUILD_FAIL("struct A { int n; char d[]; };\n"
+                      "struct A arr[2];\n"
                       "int main(void) { return 0; }\n");
 }
 

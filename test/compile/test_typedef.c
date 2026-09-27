@@ -1,10 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Phase 12a: typedef. Every program must produce the same result through the
-   interpreter and through the compiled ELF. Checks return 42 on success and a
-   distinct small code per guard, so a divergence names its area. */
-
 TEST(typedef, basic_file_scope)
 {
     EXPECT_INTERP_AND_ELF("typedef int Int;\n"
@@ -75,6 +71,31 @@ TEST(typedef, sizeof_through_typedef)
                           42);
 }
 
+TEST(typedef, array_type)
+{
+    EXPECT_INTERP_AND_ELF("typedef int Vec3[3];\n"
+                          "int main(void) {\n"
+                          "    Vec3 v;\n"
+                          "    v[0] = 40;\n"
+                          "    v[1] = 1;\n"
+                          "    v[2] = 1;\n"
+                          "    if (v[0] + v[1] + v[2] != 42) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(typedef, alias_of_alias)
+{
+    EXPECT_INTERP_AND_ELF("typedef int A;\n"
+                          "typedef A B;\n"
+                          "int main(void) {\n"
+                          "    B x = 42;\n"
+                          "    return x;\n"
+                          "}\n",
+                          42);
+}
+
 TEST(typedef, block_scope_alias)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -108,8 +129,6 @@ TEST(typedef, shadowed_by_local_var)
 
 TEST(typedef, forward_record_style)
 {
-    /* ficc's own coding style: typedef struct Tag Tag; then complete it;
-       fields and expressions use the aliased name. */
     EXPECT_INTERP_AND_ELF("typedef struct Cell Cell;\n"
                           "struct Cell { int v; Cell *next; };\n"
                           "static int sumc(Cell *c) {\n"
@@ -144,7 +163,6 @@ TEST(typedef, enum_and_typedef_coexist)
 
 TEST(typedef, typedef_after_tag)
 {
-    /* `typedef enum Color Color;` may also follow the tag definition. */
     EXPECT_INTERP_AND_ELF("typedef enum Color Color;\n"
                           "enum Color { RED, GREEN, BLUE };\n"
                           "Color f(Color c) {\n"
@@ -156,8 +174,7 @@ TEST(typedef, typedef_after_tag)
 
 TEST(typedef, const_pointer_alias)
 {
-    /* `const IP` is `int * const`: the pointer itself is readonly, the
-       pointee is writable through it. */
+    /* `const IP` is `int *const`: the pointer is readonly, not the pointee. */
     EXPECT_INTERP_AND_ELF("typedef int *IP;\n"
                           "int main(void) {\n"
                           "    int x = 5;\n"
@@ -171,13 +188,21 @@ TEST(typedef, const_pointer_alias)
                           42);
 }
 
-TEST(typedef, char_ptr_and_array_of_alias)
+TEST(typedef, char_ptr_alias)
 {
     EXPECT_INTERP_AND_ELF("typedef char *Str;\n"
-                          "typedef int Int;\n"
                           "int main(void) {\n"
                           "    Str s = \"hello\";\n"
                           "    if (s[0] - 104 != 0) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(typedef, array_element_alias)
+{
+    EXPECT_INTERP_AND_ELF("typedef int Int;\n"
+                          "int main(void) {\n"
                           "    Int a[2];\n"
                           "    a[0] = 40;\n"
                           "    a[1] = 2;\n"
@@ -189,8 +214,7 @@ TEST(typedef, char_ptr_and_array_of_alias)
 
 TEST(typedef, same_type_redecl_allowed)
 {
-    /* C11 §6.7: a typedef may be redeclared in the same scope as long as it
-       refers to the same type. (gcc accepts this silently.) */
+    /* C11 §6.7: a typedef may be redeclared in the same scope if it names the same type. */
     EXPECT_INTERP_AND_ELF("typedef int T;\n"
                           "typedef int T;\n"
                           "int main(void) { T x = 42; return x; }\n",
@@ -211,7 +235,6 @@ TEST(typedef, ternary_and_arith_through_alias)
 
 TEST(typedef, for_init_declaration)
 {
-    /* The for-init clause recognizes a typedef name as a declaration. */
     EXPECT_INTERP_AND_ELF("typedef int Int;\n"
                           "int main(void) {\n"
                           "    int sum = 0;\n"
@@ -222,8 +245,6 @@ TEST(typedef, for_init_declaration)
                           "}\n",
                           42);
 }
-
-/* negatives (all must fail to build) */
 
 TEST(typedef, negative_same_scope_var_clash)
 {
@@ -293,9 +314,7 @@ TEST(typedef, negative_void_alias_variable)
 
 TEST(typedef, const_qualified_cast_target)
 {
-    /* C11 §6.5.4: a cast may open with `const` applied to a typedef name —
-       `(const T)x` and `(const T *)&x` take the typedef-aware type-name
-       grammar (D12.3). */
+    /* C11 §6.5.4: a cast may open with `const` applied to a typedef name. */
     EXPECT_INTERP_AND_ELF("typedef int T;\n"
                           "int main(void) {\n"
                           "    int x = 42;\n"
@@ -309,8 +328,6 @@ TEST(typedef, const_qualified_cast_target)
 
 TEST(typedef, negative_cast_discards_const_then_write)
 {
-    /* Casting away const is legal, but storing *through* the const pointer
-       writes to a const object — rejected by the §9 write gate. */
     EXPECT_BUILD_FAIL("typedef int T;\n"
                       "int main(void) {\n"
                       "    int x = 5;\n"

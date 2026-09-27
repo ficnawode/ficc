@@ -6,10 +6,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Phase 24 I: -g pass-through. Linking a -g object with filc carries the
-   .debug_* and .eh_frame sections into the executable and relocates their
-   address slots to the linked image (no .rela.* survives). */
-
 static unsigned int ld_seq;
 
 static void ld_path(char *buf, size_t sz, const char *tag, const char *ext)
@@ -48,7 +44,6 @@ TEST(link_debug, sections_relocated_into_image)
     ld_path(bin, sizeof(bin), "dbg", "bin");
 
     char cmd[2048];
-    /* Freestanding link: debug pass-through is independent of libc. */
     snprintf(cmd, sizeof(cmd), "%s -g -nostdlib %s -o %s >/dev/null 2>&1", FICC_BIN, src, bin);
     EXPECT_EQ(tc_run_shell(cmd), 0);
 
@@ -61,7 +56,6 @@ TEST(link_debug, sections_relocated_into_image)
     EXPECT_NOTNULL(out->debug_abbrev);
     EXPECT_NOTNULL(out->eh_frame);
 
-    /* .debug_line set_address slots hold the linked .text addresses. */
     DwarfCheckLines *lines = dwarf_check_lines(out, a);
     EXPECT_NOTNULL(lines);
     EXPECT_TRUE(vec_size(lines->set_addresses) > 0);
@@ -71,7 +65,6 @@ TEST(link_debug, sections_relocated_into_image)
         EXPECT_TRUE(sa->value >= 0x400000);
     }
 
-    /* Subprogram low_pc is a linked address, and the DIEs survive the merge. */
     DwarfCheckInfo *info = dwarf_check_info(out, a);
     EXPECT_NOTNULL(info);
     DwarfCheckDie *add3 = dwarf_check_die_named(info, "add3");
@@ -80,7 +73,6 @@ TEST(link_debug, sections_relocated_into_image)
     EXPECT_NOTNULL(low);
     EXPECT_TRUE(low->addr >= 0x400000);
 
-    /* .eh_frame FDEs cover the linked functions. */
     DwarfCheckEh *eh = dwarf_check_eh(out, a);
     EXPECT_NOTNULL(eh);
     EXPECT_TRUE(eh->nfde >= 2);

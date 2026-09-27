@@ -46,7 +46,6 @@ TEST(sbuf, appendf_growth)
         sbuf_appendf(sb, "%d ", i);
     }
     EXPECT_TRUE(sbuf_len(sb) > 64);
-    /* last few chars should be "99 " */
     const char *s = sbuf_cstr(sb);
     size_t n = sbuf_len(sb);
     EXPECT_TRUE(n >= 3);
@@ -95,5 +94,16 @@ TEST(sbuf, single_append_larger_than_cap)
     sbuf_append(sb, big);
     EXPECT_EQ(sbuf_len(sb), 299);
     EXPECT_STR_EQ(sbuf_cstr(sb), big);
+    arena_free(a);
+}
+
+TEST(sbuf, append_empty_string)
+{
+    Arena *a = arena_new();
+    Sbuf *sb = sbuf_new(a);
+    sbuf_append(sb, "have");
+    sbuf_append(sb, "");
+    EXPECT_EQ(sbuf_len(sb), 4);
+    EXPECT_STR_EQ(sbuf_cstr(sb), "have");
     arena_free(a);
 }

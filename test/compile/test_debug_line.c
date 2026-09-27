@@ -6,8 +6,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Structural .debug_line verification via the in-process decoder (no readelf). */
-
 static unsigned int dl_seq;
 
 static void dl_path(char *buf, size_t sz, const char *tag, const char *ext)
@@ -50,7 +48,6 @@ static char dl_src[] = "static int mul(int a, int b)\n"
                        "    return q + mul(q, 0) == 42;\n"
                        "}\n";
 
-/* Expected statement rows: mul return (3), add3 (7, 8), main (12, 13). */
 static DwarfCheckLines *dl_parse(const char *obj, DwarfCheck *out, Arena *a)
 {
     dwarf_check_load(obj, out, a);
@@ -79,7 +76,7 @@ TEST(debug_line, gated_sections_present)
     EXPECT_NOTNULL(out->debug_info);
     EXPECT_NOTNULL(out->debug_abbrev);
     EXPECT_NOTNULL(out->rela_line);
-    EXPECT_EQ(vec_size(out->rela_line), 3); /* one set_address per function */
+    EXPECT_EQ(vec_size(out->rela_line), 3);
 
     char *paths[] = {src, obj};
     dl_cleanup(paths, 2);
@@ -109,7 +106,6 @@ TEST(debug_line, absent_without_dash_g)
     arena_free(a);
 }
 
-/* Rows map source lines to monotone .text offsets, with one EndOfSequence per function. */
 TEST(debug_line, decoded_rows_map_monotonic_offsets)
 {
     Arena *a = arena_new();
@@ -124,11 +120,10 @@ TEST(debug_line, decoded_rows_map_monotonic_offsets)
     DwarfCheck *out = (DwarfCheck *) arena_alloc(a, sizeof(DwarfCheck), sizeof(void *));
     DwarfCheckLines *lines = dl_parse(obj, out, a);
 
-    /* The statement rows, in order: one per distinct source statement. */
     const i64 want_lines[] = {3, 7, 8, 12, 13};
     size_t nwant = sizeof(want_lines) / sizeof(want_lines[0]);
     size_t nrows = vec_size(lines->rows);
-    EXPECT_EQ(nrows, nwant + 3); /* 5 statements + one EndOfSequence per function */
+    EXPECT_EQ(nrows, nwant + 3);
     size_t ri = 0;
     for (size_t i = 0; i < nrows; i++)
     {
@@ -146,7 +141,6 @@ TEST(debug_line, decoded_rows_map_monotonic_offsets)
     }
     EXPECT_EQ(ri, nwant);
 
-    /* Statement addresses increase monotonically across the whole file. */
     u64 prev = 0;
     bool first_row = true;
     for (size_t i = 0; i < nrows; i++)
@@ -168,7 +162,6 @@ TEST(debug_line, decoded_rows_map_monotonic_offsets)
         }
     }
 
-    /* One EndOfSequence per function, each closing inside .text. */
     size_t nend = 0;
     for (size_t i = 0; i < nrows; i++)
     {
@@ -181,16 +174,11 @@ TEST(debug_line, decoded_rows_map_monotonic_offsets)
     }
     EXPECT_EQ(nend, 3);
 
-    /* set_address count matches the functions; every slot's addend is a valid .text offset. */
-    EXPECT_EQ(vec_size(lines->set_addresses), 3);
-    EXPECT_TRUE(dwarf_check_line_relocs_covered(out, lines, 1, 4));
-
     char *paths[] = {src, obj};
     dl_cleanup(paths, 2);
     arena_free(a);
 }
 
-/* The set_address relocations carry the actual function .text offsets. */
 TEST(debug_line, set_address_slots_resolve_to_function_text)
 {
     Arena *a = arena_new();
@@ -205,7 +193,7 @@ TEST(debug_line, set_address_slots_resolve_to_function_text)
     DwarfCheck *out = (DwarfCheck *) arena_alloc(a, sizeof(DwarfCheck), sizeof(void *));
     DwarfCheckLines *lines = dl_parse(obj, out, a);
 
-    /* Function start offsets are monotone from 0; the last function ends at .text size. */
+    EXPECT_EQ(vec_size(lines->set_addresses), 3);
     u64 prev_off = 0;
     bool first = true;
     for (size_t i = 0; i < vec_size(lines->set_addresses); i++)
@@ -225,6 +213,7 @@ TEST(debug_line, set_address_slots_resolve_to_function_text)
     DwarfCheckRow *last = (DwarfCheckRow *) vec_get(lines->rows, vec_size(lines->rows) - 1);
     EXPECT_TRUE(last->end_seq);
     EXPECT_EQ(last->addr, out->text_len);
+    EXPECT_TRUE(dwarf_check_line_relocs_covered(out, lines, 1, 4));
 
     char *paths[] = {src, obj};
     dl_cleanup(paths, 2);

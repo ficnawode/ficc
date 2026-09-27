@@ -1,10 +1,8 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Extension into 16-bit destinations: `short`/`unsigned short` intermediate
-   results from a smaller operand must sign-/zero-extend into a 16-bit
-   register (66-prefixed movsx/movzx), then widen again to int without
-   corrupting the sign. */
+/* Storing to a 16-bit destination must extend the operand to 16 bits, then
+   widen to int without corrupting the sign. */
 
 TEST(short_promotions, char_zero_extends_to_ushort_then_int)
 {
@@ -43,6 +41,20 @@ TEST(short_promotions, short_through_function_and_back)
                           "    if (neg(42) != -42) return 1;\n"
                           "    if (cap(250) != 100) return 2;\n"
                           "    if (cap(7) != 7) return 3;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(short_promotions, unsigned_short_arithmetic_wraps_on_store)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    unsigned short x = 65535;\n"
+                          "    x = x + 1;\n"
+                          "    if (x != 0) return 1;\n"
+                          "    unsigned short y = 0;\n"
+                          "    y = y - 1;\n"
+                          "    if (y != 65535) return 2;\n"
                           "    return 0;\n"
                           "}\n",
                           0);

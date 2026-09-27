@@ -39,7 +39,6 @@ TEST(intern, many_strings)
         ptrs[i] = intern(pool, buf);
         EXPECT_STR_EQ(ptrs[i], buf);
     }
-    /* intern again, should get same pointers */
     for (int i = 0; i < 64; i++)
     {
         buf[0] = 'a' + (i % 26);

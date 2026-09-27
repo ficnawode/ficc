@@ -1,10 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Phase 12b: block-scope initializer lists. */
-
-/* 1-D arrays */
-
 TEST(init, one_d_simple)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -32,8 +28,6 @@ TEST(init, one_d_trailing_comma)
                           60);
 }
 
-/* Scalar unwrap */
-
 TEST(init, scalar_unwrap)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -42,8 +36,6 @@ TEST(init, scalar_unwrap)
                           "}\n",
                           42);
 }
-
-/* Structs */
 
 TEST(init, struct_simple)
 {
@@ -65,8 +57,6 @@ TEST(init, struct_nested)
                           "}\n",
                           6);
 }
-
-/* 2-D arrays */
 
 TEST(init, two_d_full)
 {
@@ -95,8 +85,6 @@ TEST(init, two_d_flattened)
                           10);
 }
 
-/* Brace elision */
-
 TEST(init, brace_elision_struct)
 {
     EXPECT_INTERP_AND_ELF("struct P { int x; int y; };\n"
@@ -117,8 +105,6 @@ TEST(init, brace_elision_nested_struct_array)
                           10);
 }
 
-/* Designated initializers */
-
 TEST(init, designator_index)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -126,6 +112,19 @@ TEST(init, designator_index)
                           "    return a[0] + a[2];\n"
                           "}\n",
                           40);
+}
+
+TEST(init, designated_gaps_zero_fill)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a[4] = {[1] = 7, [3] = 9};\n"
+                          "    if (a[0] != 0) return 1;\n"
+                          "    if (a[1] != 7) return 2;\n"
+                          "    if (a[2] != 0) return 3;\n"
+                          "    if (a[3] != 9) return 4;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
 }
 
 TEST(init, designator_field)
@@ -148,7 +147,56 @@ TEST(init, designator_chained)
                           50);
 }
 
-/* Char-array from string */
+TEST(init, designator_nested_field)
+{
+    EXPECT_INTERP_AND_ELF("struct Inner { int a; int b; };\n"
+                          "struct Outer { struct Inner in; int c; };\n"
+                          "int main(void) {\n"
+                          "    struct Outer o = {.in.b = 3, .c = 4};\n"
+                          "    if (o.in.a != 0) return 1;\n"
+                          "    if (o.in.b != 3) return 2;\n"
+                          "    if (o.c != 4) return 3;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(init, designator_two_d_subscripts)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int c[2][2] = {[0][1] = 5, [1][0] = 6};\n"
+                          "    if (c[0][0] != 0) return 1;\n"
+                          "    if (c[0][1] != 5) return 2;\n"
+                          "    if (c[1][0] != 6) return 3;\n"
+                          "    if (c[1][1] != 0) return 4;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(init, designator_then_positional)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a[3] = {[1] = 1, 5};\n"
+                          "    if (a[0] != 0) return 1;\n"
+                          "    if (a[1] != 1) return 2;\n"
+                          "    if (a[2] != 5) return 3;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(init, designator_field_then_positional)
+{
+    EXPECT_INTERP_AND_ELF("struct S { int a; int b; };\n"
+                          "int main(void) {\n"
+                          "    struct S s = {.b = 2, .a = 1, 3};\n"
+                          "    if (s.a != 1) return 1;\n"
+                          "    if (s.b != 3) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
 
 TEST(init, char_array_from_string)
 {
@@ -159,7 +207,16 @@ TEST(init, char_array_from_string)
                           'h' + 'i');
 }
 
-/* Empty init zero-fills */
+TEST(init, char_array_string_zero_pads_rest)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    char s[5] = \"hi\";\n"
+                          "    if (s[0] != 104 || s[1] != 105) return 1;\n"
+                          "    if (s[2] != 0 || s[3] != 0 || s[4] != 0) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
 
 TEST(init, array_zero_fill)
 {
@@ -169,8 +226,6 @@ TEST(init, array_zero_fill)
                           "}\n",
                           0);
 }
-
-/* negatives (all must fail to build) */
 
 TEST(init, negative_overlong_array)
 {
@@ -224,8 +279,8 @@ TEST(init, negative_index_on_struct)
 
 TEST(init, negative_string_too_long)
 {
-    /* §6.7.9p14: only `strlen > size` is an error — the NUL is dropped when
-       there is no room (`char s[2]="hi"` fits). */
+    /* §6.7.9p14: only strlen > size is an error; the NUL drops when there is
+       no room. */
     EXPECT_BUILD_FAIL("int main(void) {\n"
                       "    char s[1] = \"hi\";\n"
                       "    return 0;\n"
@@ -234,7 +289,6 @@ TEST(init, negative_string_too_long)
 
 TEST(init, incomplete_array_infers_length)
 {
-    /* Phase 12d: `[]` is completed from its initializer. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int a[] = {1, 2, 3};\n"
                           "    return a[0] + a[1] + a[2];\n"
@@ -337,11 +391,8 @@ TEST(init, negative_list_not_expression)
                       "}\n");
 }
 
-/* Phase 12 coverage completes: C11 §6.7.9 boundary rows */
-
 TEST(init, char_array_exact_fit_keeps_nul)
 {
-    /* `char s[3] = "hi"` stores the 3 bytes h,i,\0 — the NUL has room. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    char s[3] = \"hi\";\n"
                           "    if (s[0] != 104 || s[1] != 105) return 1;\n"
@@ -353,8 +404,7 @@ TEST(init, char_array_exact_fit_keeps_nul)
 
 TEST(init, char_array_string_drops_nul)
 {
-    /* §6.7.9p14: the NUL is stored only if there is room — `char s[2]="hi"`
-       fits both chars and drops the terminator (legal C11). */
+    /* §6.7.9p14: the NUL is stored only if there is room. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    char s[2] = \"hi\";\n"
                           "    if (s[0] != 104 || s[1] != 105) return 1;\n"
@@ -376,8 +426,7 @@ TEST(init, char_array_braced_string_drops_nul)
 
 TEST(init, empty_braces_array)
 {
-    /* `{}` zero-inits: documented gcc extension / C23 (D12.11) — the plan
-       pins acceptance, it is not a C11 constraint violation here. */
+    /* {} zero-inits: a gcc extension also adopted by C23. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int a[5] = {};\n"
                           "    return a[0] + a[1] + a[2] + a[3] + a[4];\n"
@@ -385,23 +434,30 @@ TEST(init, empty_braces_array)
                           0);
 }
 
-TEST(init, empty_braces_record_scalar)
+TEST(init, empty_braces_record)
 {
     EXPECT_INTERP_AND_ELF("struct S { int x; int y; };\n"
                           "union U { int i; };\n"
                           "int main(void) {\n"
                           "    struct S s = {};\n"
                           "    union U u = {};\n"
+                          "    return s.x + s.y + u.i;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(init, empty_braces_scalar)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int z = {};\n"
-                          "    return s.x + s.y + u.i + z;\n"
+                          "    return z;\n"
                           "}\n",
                           0);
 }
 
 TEST(init, designator_last_wins)
 {
-    /* §6.7.9p19: the last initializer for a designated subobject wins —
-       `[0]=1, [0]=2` yields `{2,0}`. */
+    /* §6.7.9p19: the last initializer for a designated subobject wins. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int a[2] = {[0] = 1, [0] = 2};\n"
                           "    if (a[0] != 2 || a[1] != 0) return 1;\n"
@@ -412,8 +468,7 @@ TEST(init, designator_last_wins)
 
 TEST(init, enum_scalar_braced)
 {
-    /* §6.7.9p11: a scalar may take a braced single-element list — an enum
-       initializes from its int underlay. */
+    /* §6.7.9p11: a scalar may take a braced single-element list. */
     EXPECT_INTERP_AND_ELF("enum E { A = 41, B };\n"
                           "int main(void) {\n"
                           "    enum E e = {A};\n"
@@ -426,7 +481,7 @@ TEST(init, enum_scalar_braced)
 TEST(init, const_member_via_list)
 {
     /* Initialization is not assignment (§6.7.9p4): a list may write a const
-       member; only post-construction stores hit the §9 write gate. */
+       member. */
     EXPECT_INTERP_AND_ELF("struct C { const int x; int y; };\n"
                           "int main(void) {\n"
                           "    struct C c = {.x = 40, .y = 2};\n"
@@ -449,8 +504,7 @@ TEST(init, negative_const_member_assign)
 
 TEST(init, union_first_member)
 {
-    /* §6.7.9p13: an undesignated union list initializes the first member at
-       the union's base; the rest of the union's bytes are zero. */
+    /* §6.7.9p13: an undesignated union list initializes the first member. */
     EXPECT_INTERP_AND_ELF("union U { char c; int i; };\n"
                           "int main(void) {\n"
                           "    union U u = {5};\n"
@@ -474,16 +528,14 @@ TEST(init, union_designated_member)
 TEST(init, negative_overlong_struct)
 {
     /* Excess elements past a known-size record are a constraint violation
-       (§6.7.9p2) — `struct S { int a, b; } s = {1,2,3};`. */
+       (§6.7.9p2). */
     EXPECT_BUILD_FAIL("struct S { int a; int b; };\n"
                       "int main(void) {\n"
                       "    struct S s = {1, 2, 3};\n"
                       "    return 0;\n"
                       "}\n");
 }
-/* Regression: a local aggregate may take its own address in its initializer
-   (`struct S s = { .self = &s }`); the slot must be published before the init
-   plan runs. */
+
 TEST(init, local_self_reference)
 {
     EXPECT_INTERP_AND_ELF("struct S { void *self; int x; };\n"

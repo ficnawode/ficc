@@ -1,10 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Pointer arithmetic (§6.5.6): scaling by pointee size works with the
-   pointer on either side of `+` (previously only `ptr + int`), plus
-   `ptr - int`, `ptr - ptr`, and mixed constant expressions. */
-
 TEST(pointer_arith, pointer_on_right_of_plus)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -43,12 +39,20 @@ TEST(pointer_arith, pointer_difference)
                           0);
 }
 
-TEST(pointer_arith, byte_and_short_arrays)
+TEST(pointer_arith, byte_array)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    char c[6] = {0, 1, 2, 3, 4, 5};\n"
-                          "    short s[4] = {10, 20, 30, 40};\n"
                           "    if (*(c + 5) != 5) return 1;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(pointer_arith, short_array)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    short s[4] = {10, 20, 30, 40};\n"
                           "    if (*(2 + s) != 30) return 2;\n"
                           "    if (s + 4 - s != 4) return 3;\n"
                           "    return 0;\n"
@@ -65,6 +69,18 @@ TEST(pointer_arith, pointers_to_records)
                           "    if ((p + 1)->b != 4) return 1;\n"
                           "    if ((*(1 + p)).a != p[1].a) return 2;\n"
                           "    if ((p + 2) - p != 2) return 3;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(pointer_arith, long_element_difference)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long a[4] = {0, 0, 0, 0};\n"
+                          "    long *p = a + 3;\n"
+                          "    if (p - a != 3) return 1;\n"
+                          "    if (a + 3 - p != 0) return 2;\n"
                           "    return 0;\n"
                           "}\n",
                           0);

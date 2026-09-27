@@ -38,27 +38,98 @@ TEST(cli, single_input)
     arena_free(a);
 }
 
-TEST(cli, flag_shapes)
+TEST(cli, e_flag_emits_pp)
 {
     Arena *a = arena_new();
-    char *argv[] = {"ficc", "-E",   "-c",  "-run",      "-tokens",
-                    "-pp",  "-ast", "-ir", "-nostdinc", "a.c"};
+    char *argv[] = {"ficc", "-E", "a.c"};
     CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
     EXPECT_NOTNULL(cfg);
     EXPECT_TRUE(cfg->emit_pp);
+    arena_free(a);
+}
+
+TEST(cli, c_flag_emits_obj)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-c", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
     EXPECT_TRUE(cfg->emit_obj);
+    arena_free(a);
+}
+
+TEST(cli, run_flag_runs_interp)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-run", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
     EXPECT_TRUE(cfg->run_interp);
+    arena_free(a);
+}
+
+TEST(cli, tokens_flag_dumps_tokens)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-tokens", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
     EXPECT_TRUE(cfg->dump_tokens);
+    arena_free(a);
+}
+
+TEST(cli, pp_flag_dumps_pp)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-pp", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
     EXPECT_TRUE(cfg->dump_pp);
+    arena_free(a);
+}
+
+TEST(cli, ast_flag_dumps_ast)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-ast", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
     EXPECT_TRUE(cfg->dump_ast);
+    arena_free(a);
+}
+
+TEST(cli, ir_flag_dumps_ir)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-ir", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
     EXPECT_TRUE(cfg->dump_ir);
+    arena_free(a);
+}
+
+TEST(cli, nostdinc_flag_sets_pp_nostdinc)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-nostdinc", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
     EXPECT_TRUE(cfg->pp.nostdinc);
+    arena_free(a);
+}
+
+TEST(cli, pp_flags_default_off)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
     EXPECT_FALSE(cfg->pp.keep_comments);
     EXPECT_FALSE(cfg->pp.no_markers);
     arena_free(a);
 }
 
-TEST(cli, cap_implies_emit)
+TEST(cli, cap_keeps_comments_and_implies_pp)
 {
     Arena *a = arena_new();
     char *argv[] = {"ficc", "-C", "a.c"};
@@ -68,15 +139,18 @@ TEST(cli, cap_implies_emit)
     EXPECT_TRUE(cfg->pp.keep_comments);
     EXPECT_FALSE(cfg->pp.no_markers);
     arena_free(a);
+}
 
-    Arena *a2 = arena_new();
-    char *argv2[] = {"ficc", "-P", "a.c"};
-    CompilerConfig *cfg2 = cli_parse(ARRAY_LEN(argv2), argv2, a2);
-    EXPECT_NOTNULL(cfg2);
-    EXPECT_TRUE(cfg2->emit_pp);
-    EXPECT_TRUE(cfg2->pp.no_markers);
-    EXPECT_FALSE(cfg2->pp.keep_comments);
-    arena_free(a2);
+TEST(cli, p_omits_markers_and_implies_pp)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-P", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_TRUE(cfg->emit_pp);
+    EXPECT_TRUE(cfg->pp.no_markers);
+    EXPECT_FALSE(cfg->pp.keep_comments);
+    arena_free(a);
 }
 
 TEST(cli, pedantic_tandem)
@@ -282,20 +356,86 @@ TEST(cli, output_multi_input_rejected_with_c)
     arena_free(a);
 }
 
-TEST(cli, link_lib_flags)
+TEST(cli, lib_path_flag_adds_path)
 {
     Arena *a = arena_new();
-    char *argv[] = {"ficc", "-L", "libdir", "-lm", "-nostdlib", "a.c", "-o", "out"};
+    char *argv[] = {"ficc", "-L", "libdir", "a.c"};
     CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
     EXPECT_NOTNULL(cfg);
-    if (cfg)
-    {
-        EXPECT_EQ(vec_size(cfg->link.lib_paths), 1);
-        EXPECT_STR_EQ((const char *) vec_get(cfg->link.lib_paths, 0), "libdir");
-        EXPECT_EQ(vec_size(cfg->link.libs), 1);
-        EXPECT_STR_EQ((const char *) vec_get(cfg->link.libs, 0), "m");
-        EXPECT_TRUE(cfg->link.nostdlib);
-    }
+    EXPECT_EQ(vec_size(cfg->link.lib_paths), 1);
+    EXPECT_STR_EQ((const char *) vec_get(cfg->link.lib_paths, 0), "libdir");
+    arena_free(a);
+}
+
+TEST(cli, lib_flag_adds_library)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-lm", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_EQ(vec_size(cfg->link.libs), 1);
+    EXPECT_STR_EQ((const char *) vec_get(cfg->link.libs, 0), "m");
+    arena_free(a);
+}
+
+TEST(cli, lib_flag_separate_value_adds_library)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-l", "m", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_EQ(vec_size(cfg->link.libs), 1);
+    EXPECT_STR_EQ((const char *) vec_get(cfg->link.libs, 0), "m");
+    arena_free(a);
+}
+
+TEST(cli, nostdlib_flag_sets_link_nostdlib)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-nostdlib", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_TRUE(cfg->link.nostdlib);
+    arena_free(a);
+}
+
+TEST(cli, g_flag_sets_codegen_debug)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-g", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_TRUE(cfg->codegen.debug);
+    arena_free(a);
+}
+
+TEST(cli, static_flag_sets_link_static)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-static", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_TRUE(cfg->link.static_);
+    arena_free(a);
+}
+
+TEST(cli, rdynamic_flag_sets_export_dynamic)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-rdynamic", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_TRUE(cfg->link.export_dynamic);
+    arena_free(a);
+}
+
+TEST(cli, export_dynamic_long_alias_sets_export_dynamic)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "--export-dynamic", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_TRUE(cfg->link.export_dynamic);
     arena_free(a);
 }
 
@@ -374,7 +514,7 @@ TEST(cli, missing_argument)
     arena_free(a3);
 }
 
-TEST(cli, empty_joint_value)
+TEST(cli, include_joint_value_accepted)
 {
     Arena *a = arena_new();
     char *argv[] = {"ficc", "-I=dir", "a.c"};
@@ -383,11 +523,14 @@ TEST(cli, empty_joint_value)
     EXPECT_EQ(vec_size(cfg->pp.include_paths), 1);
     EXPECT_STR_EQ(include_path_at(cfg, 0), "dir");
     arena_free(a);
+}
 
-    Arena *a2 = arena_new();
-    char *argv2[] = {"ficc", "-D=", "a.c"};
-    EXPECT_NULL(cli_parse(ARRAY_LEN(argv2), argv2, a2));
-    arena_free(a2);
+TEST(cli, define_empty_joint_value_rejected)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-D=", "a.c"};
+    EXPECT_NULL(cli_parse(ARRAY_LEN(argv), argv, a));
+    arena_free(a);
 }
 
 TEST(cli, no_inputs)
@@ -490,14 +633,16 @@ TEST(cli, opt_levels_explicit)
     EXPECT_NOTNULL(cfg4);
     EXPECT_EQ(cfg4->opt, OPT_LEVEL_3);
     arena_free(a4);
+}
 
-    /* bare -O is shorthand for -O2 */
-    Arena *a5 = arena_new();
-    char *argv5[] = {"ficc", "-O", "a.c"};
-    CompilerConfig *cfg5 = cli_parse(ARRAY_LEN(argv5), argv5, a5);
-    EXPECT_NOTNULL(cfg5);
-    EXPECT_EQ(cfg5->opt, OPT_LEVEL_2);
-    arena_free(a5);
+TEST(cli, opt_bare_is_level_two)
+{
+    Arena *a = arena_new();
+    char *argv[] = {"ficc", "-O", "a.c"};
+    CompilerConfig *cfg = cli_parse(ARRAY_LEN(argv), argv, a);
+    EXPECT_NOTNULL(cfg);
+    EXPECT_EQ(cfg->opt, OPT_LEVEL_2);
+    arena_free(a);
 }
 
 TEST(cli, opt_level_last_wins)

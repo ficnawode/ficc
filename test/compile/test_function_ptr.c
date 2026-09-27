@@ -1,8 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Phase 16b: function-pointer types + parenthesized declarators */
-
 TEST(function_ptr, assign_compare_designator)
 {
     const char *src = "int f(int x) {\n"
@@ -27,37 +25,61 @@ TEST(function_ptr, assign_compare_designator)
     EXPECT_EQ(tc_run_elf(src), 42);
 }
 
-TEST(function_ptr, address_of_and_deref)
+TEST(function_ptr, address_of_function)
 {
     const char *src = "int inc(int x) { return x + 1; }\n"
                       "int main(void) {\n"
                       "    int (*fp)(int) = &inc;\n"
                       "    if (fp != &inc)\n"
                       "        return 1;\n"
-                      "    if (*fp != inc)\n"
-                      "        return 2;\n"
                       "    return 42;\n"
                       "}\n";
     EXPECT_EQ(tc_run_interp(src), 42);
     EXPECT_EQ(tc_run_elf(src), 42);
 }
 
-TEST(function_ptr, passed_and_returned)
+TEST(function_ptr, deref_function_pointer)
 {
     const char *src = "int inc(int x) { return x + 1; }\n"
-                      "int dec(int x) { return x - 1; }\n"
+                      "int main(void) {\n"
+                      "    int (*fp)(int) = &inc;\n"
+                      "    if (*fp != inc)\n"
+                      "        return 1;\n"
+                      "    return 42;\n"
+                      "}\n";
+    EXPECT_EQ(tc_run_interp(src), 42);
+    EXPECT_EQ(tc_run_elf(src), 42);
+}
+
+TEST(function_ptr, passed_as_argument)
+{
+    const char *src = "int inc(int x) { return x + 1; }\n"
                       "typedef int (*Op)(int);\n"
                       "int is_inc(Op op) {\n"
                       "    return op == inc;\n"
                       "}\n"
+                      "int main(void) {\n"
+                      "    Op op = inc;\n"
+                      "    if (!is_inc(op))\n"
+                      "        return 1;\n"
+                      "    return 42;\n"
+                      "}\n";
+    EXPECT_EQ(tc_run_interp(src), 42);
+    EXPECT_EQ(tc_run_elf(src), 42);
+}
+
+TEST(function_ptr, returned_function_pointer)
+{
+    const char *src = "int inc(int x) { return x + 1; }\n"
+                      "int dec(int x) { return x - 1; }\n"
+                      "typedef int (*Op)(int);\n"
                       "Op pick(int which) {\n"
                       "    if (which == 0)\n"
                       "        return inc;\n"
                       "    return dec;\n"
                       "}\n"
                       "int main(void) {\n"
-                      "    Op op = pick(0);\n"
-                      "    if (!is_inc(op))\n"
+                      "    if (pick(0) != inc)\n"
                       "        return 1;\n"
                       "    if (pick(1) != dec)\n"
                       "        return 2;\n"
@@ -113,8 +135,6 @@ TEST(function_ptr, struct_fields)
 
 TEST(function_ptr, function_shape_smoke)
 {
-    /* Temporary: once file-scope fn-ptr initializers land (Phase 16c), this
-       becomes the ficc `lower_fns` self-compile pattern. */
     EXPECT_BUILD_SUCCEED("int f(int x);\n"
                          "int main(void) {\n"
                          "    return 0;\n"
@@ -139,6 +159,14 @@ TEST(function_ptr, negative_sizeof_function_type)
                       "}\n");
 }
 
+TEST(function_ptr, sizeof_function_pointer)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    return sizeof(int (*)(int)) == 8 ? 42 : 1;\n"
+                          "}\n",
+                          42);
+}
+
 TEST(function_ptr, negative_incompatible_assign)
 {
     EXPECT_BUILD_FAIL("int a(int);\n"
@@ -152,7 +180,6 @@ TEST(function_ptr, negative_incompatible_assign)
 
 TEST(function_ptr, negative_assign_constability)
 {
-    /* A const-qualified function pointer is not a modifiable lvalue. */
     EXPECT_BUILD_FAIL("typedef int (*FP)(int);\n"
                       "int f(int);\n"
                       "int main(void) {\n"
@@ -161,7 +188,6 @@ TEST(function_ptr, negative_assign_constability)
                       "    return 0;\n"
                       "}\n");
 }
-/* Phase 16c: indirect call lowering */
 
 TEST(function_ptr, indirect_call_through_variable)
 {
@@ -181,7 +207,7 @@ TEST(function_ptr, indirect_call_through_variable)
     EXPECT_EQ(tc_run_elf(src), 42);
 }
 
-TEST(function_ptr, indirect_call_through_deref_and_parens)
+TEST(function_ptr, indirect_call_through_deref)
 {
     const char *src = "typedef int (*Op)(int, int);\n"
                       "int add(int a, int b) { return a + b; }\n"
@@ -194,8 +220,18 @@ TEST(function_ptr, indirect_call_through_deref_and_parens)
                       "        return 1;\n"
                       "    if ((*op)(1, 41) != 42)\n"
                       "        return 2;\n"
+                      "    return 42;\n"
+                      "}\n";
+    EXPECT_EQ(tc_run_interp(src), 42);
+    EXPECT_EQ(tc_run_elf(src), 42);
+}
+
+TEST(function_ptr, indirect_call_through_parenthesized_name)
+{
+    const char *src = "int add(int a, int b) { return a + b; }\n"
+                      "int main(void) {\n"
                       "    if ((add)(20, 22) != 42)\n"
-                      "        return 3;\n"
+                      "        return 1;\n"
                       "    return 42;\n"
                       "}\n";
     EXPECT_EQ(tc_run_interp(src), 42);
@@ -261,8 +297,6 @@ TEST(function_ptr, variadic_indirect_call)
 
 TEST(function_ptr, elf_indirect_callback_two_tu)
 {
-    /* ficc passes a self-defined comparator to a host-compiled caller, which
-       invokes it through the pointer. */
     EXPECT_EQ(tc_run_elf_with_extra_tu("typedef int (*CmpFn)(const void *a, const void *b);\n"
                                        "int call_cmp(int a, int b, CmpFn cmp);\n"
                                        "int compare(const void *a, const void *b) {\n"
@@ -317,8 +351,6 @@ TEST(function_ptr, negative_indirect_missing_arity)
 
 TEST(function_ptr, file_scope_table_indirect)
 {
-    /* The ficc `lower_fns` dispatch pattern: a file-scope array of function
-       pointers, selected and called indirectly. */
     const char *src = "typedef int (*Op)(int);\n"
                       "int add10(int x) { return x + 10; }\n"
                       "int mul2(int x) { return x * 2; }\n"
@@ -356,8 +388,7 @@ TEST(function_ptr, file_scope_single_fp_init)
 
 TEST(function_ptr, enum_param_matches_unsigned)
 {
-    /* An enum is compatible with its underlying integer type, so a callback
-       declared with `enum E` and defined with `unsigned` still matches. */
+    /* §6.7.2.2p4: an enum is compatible with its underlying integer type. */
     EXPECT_INTERP_AND_ELF("enum flags { F_ONE = 1, F_TWO = 2 };\n"
                           "struct ops { int (*fn)(enum flags); };\n"
                           "static int impl(unsigned f) { return (int) f + 40; }\n"

@@ -3,27 +3,22 @@
 #include "ir_interp.h"
 #include "util/arena.h"
 
-TEST(ir_interp, arithmetic)
+TEST(ir_interp, add)
 {
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
     IrFunction *f = ir_module_add_func(m, "main", type_int());
     IrBlock *bb = ir_func_add_block(f, "entry");
 
-    u32 v2 = ir_alloc_vreg(m, 4, true, false);
-    u32 v3 = ir_alloc_vreg(m, 4, true, false);
+    u32 v0 = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(bb, OP_ADD, v0, ir_operand_imm(10), ir_operand_imm(3));
+    ir_emit_ret(bb, ir_operand_vreg(v0));
 
-    ir_emit_binop(bb, OP_ADD, v2, ir_operand_imm(10), ir_operand_imm(3));
-    ir_emit_binop(bb, OP_SUB, v3, ir_operand_vreg(v2), ir_operand_imm(2));
-    ir_emit_ret(bb, ir_operand_vreg(v3));
-
-    i64 result = ir_interp_run(m);
-    EXPECT_EQ(result, 11); /* 10 + 3 - 2 */
-
+    EXPECT_EQ(ir_interp_run(m), 13);
     arena_free(a);
 }
 
-TEST(ir_interp, multiply_and_divide)
+TEST(ir_interp, subtract)
 {
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
@@ -32,14 +27,75 @@ TEST(ir_interp, multiply_and_divide)
 
     u32 v1 = ir_alloc_vreg(m, 4, true, false);
     u32 v2 = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(bb, OP_ADD, v1, ir_operand_imm(10), ir_operand_imm(3));
+    ir_emit_binop(bb, OP_SUB, v2, ir_operand_vreg(v1), ir_operand_imm(2));
+    ir_emit_ret(bb, ir_operand_vreg(v2));
 
+    EXPECT_EQ(ir_interp_run(m), 11);
+    arena_free(a);
+}
+
+TEST(ir_interp, multiply)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+
+    u32 v0 = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(bb, OP_MUL, v0, ir_operand_imm(7), ir_operand_imm(3));
+    ir_emit_ret(bb, ir_operand_vreg(v0));
+
+    EXPECT_EQ(ir_interp_run(m), 21);
+    arena_free(a);
+}
+
+TEST(ir_interp, signed_divide)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+
+    u32 v1 = ir_alloc_vreg(m, 4, true, false);
+    u32 v2 = ir_alloc_vreg(m, 4, true, false);
     ir_emit_binop(bb, OP_MUL, v1, ir_operand_imm(7), ir_operand_imm(3));
     ir_emit_binop(bb, OP_SDIV, v2, ir_operand_vreg(v1), ir_operand_imm(3));
     ir_emit_ret(bb, ir_operand_vreg(v2));
 
-    i64 result = ir_interp_run(m);
-    EXPECT_EQ(result, 7); /* 7 * 3 / 3 */
+    EXPECT_EQ(ir_interp_run(m), 7);
+    arena_free(a);
+}
 
+TEST(ir_interp, signed_division_truncates_toward_zero)
+{
+    /* C11 §6.5.5: signed division truncates toward zero. */
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+
+    u32 q = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(bb, OP_SDIV, q, ir_operand_imm(-7), ir_operand_imm(2));
+    ir_emit_ret(bb, ir_operand_vreg(q));
+
+    EXPECT_EQ(ir_interp_run(m), -3);
+    arena_free(a);
+}
+
+TEST(ir_interp, signed_remainder_follows_dividend_sign)
+{
+    /* C11 §6.5.5: a % b has the sign of a. */
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+
+    u32 r = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(bb, OP_SREM, r, ir_operand_imm(-7), ir_operand_imm(2));
+    ir_emit_ret(bb, ir_operand_vreg(r));
+
+    EXPECT_EQ(ir_interp_run(m), -1);
     arena_free(a);
 }
 
@@ -65,7 +121,6 @@ TEST(ir_interp, function_call)
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
 
-    /* int add(int a, int b) { return a + b; } */
     IrFunction *add = ir_module_add_func(m, "add", type_int());
     IrBlock *add_bb = ir_func_add_block(add, "entry");
     u32 add_a = ir_alloc_vreg(m, 4, true, false);
@@ -84,7 +139,6 @@ TEST(ir_interp, function_call)
     ir_emit_binop(add_bb, OP_ADD, add_r, ir_operand_vreg(add_a), ir_operand_vreg(add_b));
     ir_emit_ret(add_bb, ir_operand_vreg(add_r));
 
-    /* int main(void) { return add(3, 4); } */
     IrFunction *main_fn = ir_module_add_func(m, "main", type_int());
     IrBlock *main_bb = ir_func_add_block(main_fn, "entry");
     u32 main_r = ir_alloc_vreg(m, 4, true, false);
@@ -155,9 +209,8 @@ TEST(ir_interp, brcond_false)
     arena_free(a);
 }
 
-TEST(ir_interp, fp_conversions_itof_ftoi_fconv)
+TEST(ir_interp, itof_ftoi_roundtrip)
 {
-    /* ITOF/FTOI/FCONV run on the hardware FP in the interpreter. */
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
     IrFunction *f = ir_module_add_func(m, "main", type_int());
@@ -174,12 +227,16 @@ TEST(ir_interp, fp_conversions_itof_ftoi_fconv)
 
     EXPECT_EQ(ir_interp_run(m), 5);
     arena_free(a);
+}
 
+TEST(ir_interp, fconv_rounds_double_to_float)
+{
     /* FCONV double→float: 2^24+1 rounds to exactly 2^24 in float precision. */
-    a = arena_new();
-    m = ir_module_new(a);
-    f = ir_module_add_func(m, "main", type_int());
-    bb = ir_func_add_block(f, "entry");
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+
     u32 ddbl = ir_alloc_fp_vreg(m, 8);
     u32 fl = ir_alloc_fp_vreg(m, 4);
     u32 out = ir_alloc_vreg(m, 4, true, false);
@@ -191,16 +248,12 @@ TEST(ir_interp, fp_conversions_itof_ftoi_fconv)
     arena_free(a);
 }
 
-/* A recursive function whose post-call merge block carries a phi: the nested
-   run_block for a callee must not clobber the caller's block-walk state. Old
-   interp walked with shared ctx->next_pred, so the caller's merge block was
-   entered with the *callee's* last block as its predecessor. */
+/* A callee's block walk must leave the caller's predecessor state intact. */
 TEST(ir_interp, recursion_through_phi_merge)
 {
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
 
-    /* int fib(int n) { return (n < 2) ? n : fib(n-1) + fib(n-2); } */
     IrFunction *fib = ir_module_add_func(m, "fib", type_int());
     IrBlock *entry = ir_func_add_block(fib, "entry");
     IrBlock *then_bb = ir_func_add_block(fib, "then");

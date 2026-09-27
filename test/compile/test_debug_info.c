@@ -6,8 +6,6 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Structural .debug_info verification via the in-process decoder (no readelf). */
-
 static unsigned int di_seq;
 
 static void di_path(char *buf, size_t sz, const char *tag, const char *ext)
@@ -63,7 +61,7 @@ static DwarfCheckInfo *di_parse(const char *obj, DwarfCheck *out, Arena *a)
     return info;
 }
 
-TEST(debug_info, program_surface_dies)
+TEST(debug_info, function_dies)
 {
     Arena *a = arena_new();
     char src[256], obj[256];
@@ -77,17 +75,14 @@ TEST(debug_info, program_surface_dies)
     DwarfCheck *out = (DwarfCheck *) arena_alloc(a, sizeof(DwarfCheck), sizeof(void *));
     DwarfCheckInfo *info = di_parse(obj, out, a);
 
-    /* One compile unit, three subprograms, four named formal parameters. */
     EXPECT_EQ(vec_size(dwarf_check_dies_by_tag(info, DW_TAG_compile_unit)), 1);
     EXPECT_EQ(vec_size(dwarf_check_dies_by_tag(info, DW_TAG_subprogram)), 3);
     EXPECT_EQ(vec_size(dwarf_check_dies_by_tag(info, DW_TAG_formal_parameter)), 4);
 
-    /* The defined functions arrive as named subprogram DIEs. */
     EXPECT_NOTNULL(dwarf_check_die_named(info, "add3"));
     EXPECT_NOTNULL(dwarf_check_die_named(info, "helper"));
     EXPECT_NOTNULL(dwarf_check_die_named(info, "main"));
 
-    /* Subprograms: low_pc addr, high_pc size, DW_OP_call_frame_cfa frame_base. */
     DwarfCheckDie *add3 = dwarf_check_die_named(info, "add3");
     DwarfCheckAttr *low = dwarf_check_attr(add3, DW_AT_low_pc);
     DwarfCheckAttr *high = dwarf_check_attr(add3, DW_AT_high_pc);
@@ -102,8 +97,6 @@ TEST(debug_info, program_surface_dies)
     EXPECT_EQ(fb->loc_len, 1);
     EXPECT_EQ(fb->loc[0], DW_OP_call_frame_cfa);
 
-    /* add3's three int parameters are named and located: a register home is a
-       GPR DW_OP_regN, a spill is DW_OP_fbreg. */
     DwarfCheckDie *params[] = {dwarf_check_die_named(info, "x"), dwarf_check_die_named(info, "y"),
                                dwarf_check_die_named(info, "z")};
     for (size_t i = 0; i < sizeof(params) / sizeof(params[0]); i++)
@@ -119,8 +112,25 @@ TEST(debug_info, program_surface_dies)
         EXPECT_TRUE(is_reg || is_fbreg);
     }
 
-    /* An address-not-taken SSA scalar local ships as a DW_TAG_variable whose
-       location list describes its home (register or spill slot). */
+    char *paths[] = {src, obj};
+    di_cleanup(paths, 2);
+    arena_free(a);
+}
+
+TEST(debug_info, variable_locations)
+{
+    Arena *a = arena_new();
+    char src[256], obj[256];
+    di_write_src(src, sizeof(src), di_src);
+    di_path(obj, sizeof(obj), "dbg", "o");
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "%s -g -c %s -o %s >/dev/null 2>&1", FICC_BIN, src, obj);
+    EXPECT_EQ(tc_run_shell(cmd), 0);
+
+    DwarfCheck *out = (DwarfCheck *) arena_alloc(a, sizeof(DwarfCheck), sizeof(void *));
+    DwarfCheckInfo *info = di_parse(obj, out, a);
+
     DwarfCheckDie *local_t = dwarf_check_die_named(info, "t");
     EXPECT_NOTNULL(local_t);
     EXPECT_TRUE(local_t->tag == DW_TAG_variable);
@@ -139,7 +149,6 @@ TEST(debug_info, program_surface_dies)
         EXPECT_TRUE(rreg || r->expr[0] == DW_OP_fbreg);
     }
 
-    /* Globals addressable via DW_OP_addr; the extern declares no location. */
     DwarfCheckDie *shelf = dwarf_check_die_named(info, "shelf");
     DwarfCheckDie *counter = dwarf_check_die_named(info, "counter");
     DwarfCheckDie *imported = dwarf_check_die_named(info, "imported");
@@ -150,7 +159,25 @@ TEST(debug_info, program_surface_dies)
     EXPECT_NOTNULL(dwarf_check_attr(counter, DW_AT_location));
     EXPECT_NULL(dwarf_check_attr(imported, DW_AT_location));
 
-    /* Every address slot is covered by a section-symbol relocation. */
+    char *paths[] = {src, obj};
+    di_cleanup(paths, 2);
+    arena_free(a);
+}
+
+TEST(debug_info, address_slots_relocated)
+{
+    Arena *a = arena_new();
+    char src[256], obj[256];
+    di_write_src(src, sizeof(src), di_src);
+    di_path(obj, sizeof(obj), "dbg", "o");
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "%s -g -c %s -o %s >/dev/null 2>&1", FICC_BIN, src, obj);
+    EXPECT_EQ(tc_run_shell(cmd), 0);
+
+    DwarfCheck *out = (DwarfCheck *) arena_alloc(a, sizeof(DwarfCheck), sizeof(void *));
+    DwarfCheckInfo *info = di_parse(obj, out, a);
+
     EXPECT_TRUE(dwarf_check_info_relocs_covered(out, info, 1, 4));
 
     char *paths[] = {src, obj};
@@ -175,7 +202,6 @@ TEST(debug_info, external_var_has_no_location)
     EXPECT_NOTNULL(imported);
     EXPECT_TRUE(imported->tag == DW_TAG_variable);
     EXPECT_NULL(dwarf_check_attr(imported, DW_AT_location));
-    /* Every non-extern variable carries DW_AT_location. */
     DwarfCheckDie *shelf = dwarf_check_die_named(info, "shelf");
     DwarfCheckDie *counter = dwarf_check_die_named(info, "counter");
     EXPECT_NOTNULL(dwarf_check_attr(shelf, DW_AT_location));
@@ -205,7 +231,7 @@ TEST(debug_info, non_debug_object_has_no_debug_sections)
     EXPECT_TRUE(out->debug_abbrev == NULL);
     EXPECT_TRUE(out->debug_loc == NULL);
     EXPECT_TRUE(out->eh_frame == NULL);
-    EXPECT_TRUE(out->text != NULL); /* the code itself compiled */
+    EXPECT_TRUE(out->text != NULL);
 
     char *paths[] = {src, obj};
     di_cleanup(paths, 2);

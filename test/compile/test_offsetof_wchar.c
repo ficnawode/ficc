@@ -1,9 +1,7 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* offsetof (§7.19p3) and wchar_t, added to stddef.h. offsetof folds to a
-   compile-time integer constant, so it is usable in array sizes and static
-   initializers, and computable at runtime. */
+/* offsetof (C11 §7.19p3) folds to a compile-time integer constant. */
 
 TEST(offsetof, fields_basic)
 {
@@ -36,7 +34,7 @@ TEST(offsetof, in_static_array_size)
 {
     EXPECT_INTERP_AND_ELF("#include <stddef.h>\n"
                           "struct S { char b; int c; long d; };\n"
-                          "static int idx[offsetof(struct S, d)]; /* 8 elements */\n"
+                          "static int idx[offsetof(struct S, d)];\n"
                           "int main(void) {\n"
                           "    idx[7] = 42;\n"
                           "    if (idx[7] != 42) return 1;\n"
@@ -72,6 +70,26 @@ TEST(offsetof, matches_address_arithmetic)
         "    return 0;\n"
         "}\n",
         0);
+}
+
+TEST(offsetof, array_member_subscript)
+{
+    EXPECT_INTERP_AND_ELF("#include <stddef.h>\n"
+                          "struct S { int a[4]; };\n"
+                          "int main(void) {\n"
+                          "    if (offsetof(struct S, a[2]) != 8) return 1;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(offsetof, negative_unknown_member)
+{
+    EXPECT_BUILD_FAIL("#include <stddef.h>\n"
+                      "struct S { int a; };\n"
+                      "int main(void) {\n"
+                      "    return (int) offsetof(struct S, z);\n"
+                      "}\n");
 }
 
 TEST(offsetof, wchar_t_typedef_and_store)

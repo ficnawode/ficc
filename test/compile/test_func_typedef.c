@@ -1,12 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Declaration and definition of functions wrapped in a parenthesized name,
-   where the declarator base is a pointer-to-function typedef:
-   `lua_CFunction (f)(lua_State *L)` makes `f` a function *returning*
-   lua_CFunction (§6.7.6p3). The parenthesized form must work for exactly
-   the same parser path as `PFn f(x)`. */
-
 TEST(func_typedef, parenthesized_name_definition)
 {
     EXPECT_INTERP_AND_ELF("typedef int (*PFn)(int);\n"
@@ -66,9 +60,16 @@ TEST(func_typedef, plain_name_form_unchanged)
                           42);
 }
 
-/* The function-pointer typedef's return type is itself a pointer typedef
-   (zlib's alloc_func); that pointer layer belongs to the return type, not to
-   the declarator's `*`. */
+TEST(func_typedef, returns_pointer_to_function_without_typedef)
+{
+    EXPECT_INTERP_AND_ELF("int add1(int y) { return y + 1; }\n"
+                          "int (*getf(int tag))(int) { return tag == 1 ? add1 : 0; }\n"
+                          "int main(void) {\n"
+                          "    return getf(1)(41);\n"
+                          "}\n",
+                          42);
+}
+
 TEST(func_typedef, pointer_typedef_return_type)
 {
     EXPECT_INTERP_AND_ELF("typedef void *VP;\n"

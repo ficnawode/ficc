@@ -1,6 +1,3 @@
-/* Phase 14b: _Static_assert — end-to-end golden test.
-   Compile-time constant-expression checks at both scopes. */
-
 _Static_assert(1, "always true");
 _Static_assert(sizeof(int) == 4, "int is 4 bytes");
 _Static_assert(sizeof(long) == 8, "long is 8 bytes");

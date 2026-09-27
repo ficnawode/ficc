@@ -5,9 +5,8 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Phase 23 E: selective `__attribute__` semantics. Constructors run before
-   `main`, so those cases assert on the compiled ELF only (the interpreter does
-   not model .init_array). */
+/* The interpreter does not model .init_array, so constructors are exercised
+   through the compiled ELF only. */
 
 TEST(attributes, constructor_runs_before_main)
 {
@@ -75,6 +74,27 @@ TEST(attributes, packed_member)
                           42);
 }
 
+TEST(attributes, packed_union_layout)
+{
+    EXPECT_INTERP_AND_ELF("union U { char c[5]; int i; } __attribute__((packed));\n"
+                          "int main(void) {\n"
+                          "    if (sizeof(union U) != 5) return 1;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(attributes, aligned_member)
+{
+    EXPECT_INTERP_AND_ELF("#include <stddef.h>\n"
+                          "struct S { char c; int i __attribute__((aligned(8))); };\n"
+                          "int main(void) {\n"
+                          "    if (offsetof(struct S, i) != 8) return 1;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
 TEST(attributes, aligned_record)
 {
     EXPECT_INTERP_AND_ELF("#include <stddef.h>\n"
@@ -94,7 +114,6 @@ TEST(attributes, aligned_variable_accepted)
                           42);
 }
 
-/* Runs ficc with -fpedantic and returns the captured diagnostics in `out`. */
 static void attr_run_pedantic(const char *src, char *out, size_t out_sz)
 {
     static unsigned int seq;

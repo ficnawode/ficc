@@ -14,6 +14,15 @@ TEST(bitset, create_all_clear)
     arena_free(a);
 }
 
+TEST(bitset, empty_bitset)
+{
+    Arena *a = arena_new();
+    Bitset *bs = bitset_new(a, 0);
+    EXPECT_EQ(bitset_count(bs), 0);
+    EXPECT_TRUE(bitset_test(bs, 0) == false);
+    arena_free(a);
+}
+
 TEST(bitset, set_and_test)
 {
     Arena *a = arena_new();
@@ -141,20 +150,32 @@ TEST(bitset, or_mismatched_size)
     arena_free(a);
 }
 
-TEST(bitset, src_larger_than_dst)
+TEST(bitset, and_src_larger_than_dst)
 {
     Arena *a = arena_new();
     Bitset *dst = bitset_new(a, 64);
     Bitset *src = bitset_new(a, 128);
     bitset_set(dst, 5);
-    bitset_set(src, 3);  /* shared word */
-    bitset_set(src, 70); /* beyond dst's width */
+    bitset_set(src, 3);
+    bitset_set(src, 70);
     bitset_and(dst, src);
-    /* src bit 70 is beyond dst's width: implicit zero, so and clears bit 5 */
+    /* src bits beyond dst's width read as implicit zero, so and clears bit 5 */
     EXPECT_TRUE(bitset_test(dst, 5) == false);
-    /* or touches the shared range only: bit 3 appears, bit 70 does not */
+    arena_free(a);
+}
+
+TEST(bitset, or_src_larger_than_dst)
+{
+    Arena *a = arena_new();
+    Bitset *dst = bitset_new(a, 64);
+    Bitset *src = bitset_new(a, 128);
+    bitset_set(dst, 5);
+    bitset_set(src, 3);
+    bitset_set(src, 70);
     bitset_or(dst, src);
+    /* or touches the shared range only: bit 3 appears, bit 70 does not */
     EXPECT_TRUE(bitset_test(dst, 3));
+    EXPECT_TRUE(bitset_test(dst, 5));
     EXPECT_TRUE(bitset_test(dst, 70) == false);
     arena_free(a);
 }
@@ -178,10 +199,9 @@ TEST(bitset, word_access_matches_bit_ops)
     bitset_set(bs, 64);
     bitset_set(bs, 129);
     u64 *w = bitset_words(bs);
-    /* v0 is bit 0 of word 0; v64 is bit 0 of word 1. */
     EXPECT_EQ(w[0], (1ULL << 0) | (1ULL << 63));
     EXPECT_EQ(w[1], 1ULL);
-    EXPECT_EQ(w[2], 1ULL << 1); /* v129 is bit 1 of word 2 */
+    EXPECT_EQ(w[2], 1ULL << 1);
     arena_free(a);
 }
 

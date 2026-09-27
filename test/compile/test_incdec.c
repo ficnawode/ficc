@@ -1,16 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Phase 13b: prefix/postfix ++ and -- (§6.5.2.4). Every program must produce
-   the same result through the interpreter and through the compiled ELF.
-   Checks return 42 on success and a distinct small code per guard, so a
-   divergence names its area. */
-
-enum E
-{
-    EA = 5
-};
-
 TEST(incdec, postfix_value)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -59,31 +49,46 @@ TEST(incdec, prefix_decrement)
                           42);
 }
 
-TEST(incdec, char_wraps)
+TEST(incdec, char_postfix_increment_wraps)
 {
-    /* Plain char is signed (D10): 127 + 1 = -128 via the convert-back. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    char c = 127;\n"
                           "    int r = c++;\n"
                           "    if (r != 127) return 1;\n"
                           "    if (c != -128) return 2;\n"
-                          "    c = 0;\n"
-                          "    --c;\n"
-                          "    if (c != -1) return 3;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
 }
 
-TEST(incdec, unsigned_char_wraps)
+TEST(incdec, char_prefix_decrement_wraps)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    char c = 0;\n"
+                          "    --c;\n"
+                          "    if (c != -1) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, uchar_postfix_increment_wraps)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    unsigned char c = 255;\n"
                           "    c++;\n"
                           "    if (c != 0) return 1;\n"
-                          "    c = 0;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, uchar_postfix_decrement_wraps)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    unsigned char c = 0;\n"
                           "    c--;\n"
-                          "    if (c != 255) return 2;\n"
+                          "    if (c != 255) return 1;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
@@ -100,15 +105,58 @@ TEST(incdec, short_wraps)
                           42);
 }
 
-TEST(incdec, enum_increment)
+TEST(incdec, enum_postfix_increment)
 {
     EXPECT_INTERP_AND_ELF("enum E { A = 5 };\n"
                           "int main(void) {\n"
                           "    enum E e = A;\n"
                           "    e++;\n"
                           "    if (e != 6) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, enum_prefix_decrement)
+{
+    EXPECT_INTERP_AND_ELF("enum E { A = 5 };\n"
+                          "int main(void) {\n"
+                          "    enum E e = A;\n"
                           "    --e;\n"
-                          "    if (e != 5) return 2;\n"
+                          "    if (e != 4) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, bool_increment)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    _Bool b = 0;\n"
+                          "    b++;\n"
+                          "    if (b != 1) return 1;\n"
+                          "    b++;\n"
+                          "    if (b != 1) return 2;\n"
+                          "    --b;\n"
+                          "    if (b != 0) return 3;\n"
+                          "    ++b;\n"
+                          "    if (b != 1) return 4;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, float_increment_decrement)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    float f = 1.5f;\n"
+                          "    f++;\n"
+                          "    if (f != 2.5f) return 1;\n"
+                          "    double d = 3.0;\n"
+                          "    d--;\n"
+                          "    if (d != 2.0) return 2;\n"
+                          "    f--;\n"
+                          "    if (f != 1.5f) return 3;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
@@ -128,6 +176,17 @@ TEST(incdec, ssa_scalar_roundtrip)
                           42);
 }
 
+TEST(incdec, unsigned_int_decrement_wraps)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    unsigned int u = 0;\n"
+                          "    u--;\n"
+                          "    if (u != 4294967295u) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
 TEST(incdec, pointer_increment_decrement)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -142,6 +201,19 @@ TEST(incdec, pointer_increment_decrement)
                           "    int *q = p++;\n"
                           "    if (q != &a[1]) return 4;\n"
                           "    if (p != &a[2]) return 5;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, pointer_to_pointer_increment)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a[4];\n"
+                          "    int *p = &a[0];\n"
+                          "    int **pp = &p;\n"
+                          "    (*pp)++;\n"
+                          "    if (p != &a[1]) return 1;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
@@ -175,40 +247,72 @@ TEST(incdec, member_access)
                           42);
 }
 
-TEST(incdec, arrow_access)
+TEST(incdec, arrow_prefix_increment)
 {
     EXPECT_INTERP_AND_ELF("struct S { int x; };\n"
                           "int main(void) {\n"
                           "    struct S s;\n"
                           "    struct S *p = &s;\n"
-                          "    s.x = 40;\n"
+                          "    s.x = 41;\n"
                           "    ++p->x;\n"
-                          "    if (s.x != 41) return 1;\n"
-                          "    (*p).x++;\n"
-                          "    if (s.x != 42) return 2;\n"
+                          "    if (s.x != 42) return 1;\n"
                           "    return s.x;\n"
                           "}\n",
                           42);
 }
 
-TEST(incdec, deref_access)
+TEST(incdec, deref_member_postfix_increment)
+{
+    EXPECT_INTERP_AND_ELF("struct S { int x; };\n"
+                          "int main(void) {\n"
+                          "    struct S s;\n"
+                          "    struct S *p = &s;\n"
+                          "    s.x = 41;\n"
+                          "    (*p).x++;\n"
+                          "    if (s.x != 42) return 1;\n"
+                          "    return s.x;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, deref_postfix_increment)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int a[3] = {1, 2, 3};\n"
                           "    int *p = &a[1];\n"
                           "    (*p)++;\n"
                           "    if (a[1] != 3) return 1;\n"
-                          "    ++*p;\n"
-                          "    if (a[1] != 4) return 2;\n"
-                          "    int old = *p--;\n"
-                          "    if (old != 4) return 3;\n"
-                          "    if (p != &a[0]) return 4;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
 }
 
-TEST(incdec, subscript_index_postfix)
+TEST(incdec, deref_prefix_increment)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a[3] = {1, 2, 3};\n"
+                          "    int *p = &a[1];\n"
+                          "    ++*p;\n"
+                          "    if (a[1] != 3) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, pointer_postfix_decrement)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a[3] = {1, 2, 3};\n"
+                          "    int *p = &a[1];\n"
+                          "    int old = *p--;\n"
+                          "    if (old != 2) return 1;\n"
+                          "    if (p != &a[0]) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, subscript_postfix_index)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int a[3] = {10, 20, 30};\n"
@@ -216,9 +320,31 @@ TEST(incdec, subscript_index_postfix)
                           "    int v = a[i++];\n"
                           "    if (v != 10) return 1;\n"
                           "    if (i != 1) return 2;\n"
-                          "    v = a[++i];\n"
-                          "    if (v != 30) return 3;\n"
-                          "    if (i != 2) return 4;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, subscript_prefix_index)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a[3] = {10, 20, 30};\n"
+                          "    int i = 0;\n"
+                          "    int v = a[++i];\n"
+                          "    if (v != 20) return 1;\n"
+                          "    if (i != 1) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, subscript_object_increment)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int a[3] = {1, 2, 3};\n"
+                          "    int old = a[0]++;\n"
+                          "    if (old != 1) return 1;\n"
+                          "    if (a[0] != 2) return 2;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
@@ -250,8 +376,6 @@ TEST(incdec, for_postfix_increment)
 
 TEST(incdec, spilled_scalar_increment)
 {
-    /* Taking the address spills `x`; ++ on a spilled variable must write
-       through the slot (and a later read sees it). */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int x = 0;\n"
                           "    int *p = &x;\n"
@@ -266,14 +390,24 @@ TEST(incdec, spilled_scalar_increment)
                           42);
 }
 
-TEST(incdec, global_increment)
+TEST(incdec, global_postfix_increment)
 {
     EXPECT_INTERP_AND_ELF("int g = 40;\n"
                           "int main(void) {\n"
                           "    g++;\n"
+                          "    if (g != 41) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, global_prefix_increment)
+{
+    EXPECT_INTERP_AND_ELF("int g = 40;\n"
+                          "int main(void) {\n"
                           "    ++g;\n"
-                          "    if (g != 42) return 1;\n"
-                          "    return g;\n"
+                          "    if (g != 41) return 1;\n"
+                          "    return 42;\n"
                           "}\n",
                           42);
 }
@@ -295,7 +429,7 @@ TEST(incdec, block_static_increment)
 
 TEST(incdec, compound_literal_lvalue)
 {
-    /* `(int){5}` is a modifiable lvalue (Phase 12e): ++ through it works. */
+    /* C11 §6.5.2.5: a compound literal is a modifiable lvalue. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int *p = &(int){5};\n"
                           "    (*p)++;\n"
@@ -321,8 +455,6 @@ TEST(incdec, postfix_old_value_chain)
                           "}\n",
                           42);
 }
-
-/* negatives (all must fail to build) */
 
 TEST(incdec, negative_const_scalar)
 {
@@ -375,60 +507,180 @@ TEST(incdec, negative_record_operand)
 
 TEST(incdec, negative_increment_of_binary)
 {
-    /* `a + b` is not an lvalue. */
     EXPECT_BUILD_FAIL("int main(void) { int a = 1; int b = 2; return (a + b)++; }\n");
 }
 
-/* Phase 13c: compound assignment (§6.5.16.2) */
-
-TEST(incdec, compound_all_ten_ops)
+TEST(incdec, compound_add)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int x = 5;\n"
-                          "    x += 3;\n"  /* 8 */
-                          "    x -= 2;\n"  /* 6 */
-                          "    x *= 7;\n"  /* 42 */
-                          "    x /= 2;\n"  /* 21 */
-                          "    x %= 5;\n"  /* 1 */
-                          "    x <<= 4;\n" /* 16 */
-                          "    x >>= 1;\n" /* 8 */
-                          "    x &= 12;\n" /* 8 */
-                          "    x |= 4;\n"  /* 12 */
-                          "    x ^= 2;\n"  /* 14 */
-                          "    if (x != 14) return 1;\n"
+                          "    x += 3;\n"
+                          "    if (x != 8) return 1;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
 }
 
-TEST(incdec, compound_unsigned_divrem)
+TEST(incdec, compound_sub)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    x -= 2;\n"
+                          "    if (x != 3) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_mul)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    x *= 7;\n"
+                          "    if (x != 35) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_div)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    x /= 2;\n"
+                          "    if (x != 2) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_mod)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    x %= 2;\n"
+                          "    if (x != 1) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_shl)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    x <<= 4;\n"
+                          "    if (x != 80) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_shr)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    x >>= 1;\n"
+                          "    if (x != 2) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_and)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    x &= 12;\n"
+                          "    if (x != 4) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_or)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    x |= 4;\n"
+                          "    if (x != 5) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_xor)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    x ^= 2;\n"
+                          "    if (x != 7) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_unsigned_div)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    unsigned u = 13;\n"
                           "    u /= 2;\n"
                           "    if (u != 6) return 1;\n"
-                          "    u %= 5;\n"
-                          "    if (u != 1) return 2;\n"
-                          "    unsigned v = 255;\n"
-                          "    v >>= 1;\n"
-                          "    if (v != 127) return 3;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
 }
 
-TEST(incdec, compound_signed_shift)
+TEST(incdec, compound_unsigned_mod)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    unsigned u = 13;\n"
+                          "    u %= 5;\n"
+                          "    if (u != 3) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_unsigned_shr)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    unsigned v = 255;\n"
+                          "    v >>= 1;\n"
+                          "    if (v != 127) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_char_ashr)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    char s = -8;\n"
-                          "    s >>= 1;\n" /* ASHR on the promoted value, back to char */
+                          "    s >>= 1;\n"
+                          "    if (s != -4) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_int_shr)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int r = 16;\n"
                           "    r >>= 2;\n"
+                          "    if (r != 4) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_int_shl)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int y = 15;\n"
                           "    y <<= 4;\n"
-                          "    if (s != -4) return 1;\n"
-                          "    if (r != 4) return 2;\n"
-                          "    if (y != 240) return 3;\n"
+                          "    if (y != 240) return 1;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
@@ -436,9 +688,7 @@ TEST(incdec, compound_signed_shift)
 
 TEST(incdec, narrow_shift_promotes_operands)
 {
-    /* Latent-codegen fix pinned: a narrow shift source must be integer
-       promoted before the op (`char -8 >> 1` was 124 in the ELF backend).
-       C11 §6.5.7 — both shift operands promote. */
+    /* C11 §6.5.7: the integer promotions are performed on each shift operand. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    char s = -8;\n"
                           "    if ((s >> 1) != -4) return 1;\n"
@@ -450,16 +700,24 @@ TEST(incdec, narrow_shift_promotes_operands)
                           42);
 }
 
-TEST(incdec, compound_char_wraps)
+TEST(incdec, compound_signed_char_wrap)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    char c = 120;\n"
                           "    int r = (c += 10);\n"
                           "    if (c != -126) return 1;\n"
                           "    if (r != -126) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_unsigned_char_wrap)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    unsigned char u = 250;\n"
                           "    u += 10;\n"
-                          "    if (u != 4) return 3;\n"
+                          "    if (u != 4) return 1;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
@@ -504,38 +762,84 @@ TEST(incdec, compound_single_eval)
                           42);
 }
 
-TEST(incdec, compound_self_reference)
+TEST(incdec, compound_add_self)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    int x = 3;\n"
                           "    x += x;\n"
                           "    if (x != 6) return 1;\n"
-                          "    x *= x;\n"
-                          "    if (x != 36) return 2;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
 }
 
-TEST(incdec, compound_lvalue_shapes)
+TEST(incdec, compound_mul_self)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 6;\n"
+                          "    x *= x;\n"
+                          "    if (x != 36) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_member_add)
 {
     EXPECT_INTERP_AND_ELF("struct S { int v; };\n"
-                          "int g = 40;\n"
                           "int main(void) {\n"
                           "    struct S s;\n"
                           "    s.v = 10;\n"
-                          "    s.v += 1;\n" /* member */
+                          "    s.v += 1;\n"
+                          "    if (s.v != 11) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_arrow_mul)
+{
+    EXPECT_INTERP_AND_ELF("struct S { int v; };\n"
+                          "int main(void) {\n"
+                          "    struct S s;\n"
                           "    struct S *p = &s;\n"
-                          "    p->v *= 2;\n" /* arrow: 22 */
-                          "    int arr[2] = {1, 2};\n"
-                          "    int *q = &arr[0];\n"
-                          "    (*q) += 41;\n" /* deref: 42 */
-                          "    q[1] |= 4;\n"  /* subscript: 6 */
-                          "    g += 2;\n"     /* global: 42 */
+                          "    s.v = 11;\n"
+                          "    p->v *= 2;\n"
                           "    if (s.v != 22) return 1;\n"
-                          "    if (arr[0] != 42) return 2;\n"
-                          "    if (q[1] != 6) return 3;\n"
-                          "    if (g != 42) return 4;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_deref_add)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int arr[1] = {1};\n"
+                          "    int *q = &arr[0];\n"
+                          "    (*q) += 41;\n"
+                          "    if (arr[0] != 42) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_subscript_or)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int arr[2] = {1, 2};\n"
+                          "    arr[1] |= 4;\n"
+                          "    if (arr[1] != 6) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(incdec, compound_global_add)
+{
+    EXPECT_INTERP_AND_ELF("int g = 40;\n"
+                          "int main(void) {\n"
+                          "    g += 2;\n"
+                          "    if (g != 42) return 1;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
@@ -550,7 +854,7 @@ TEST(incdec, compound_spilled_global_and_static)
                           "}\n"
                           "int main(void) {\n"
                           "    int x = 30;\n"
-                          "    int *p = &x;\n" /* spills x */
+                          "    int *p = &x;\n"
                           "    x += 10;\n"
                           "    if (x != 40) return 1;\n"
                           "    if (*p != 40) return 2;\n"
@@ -573,8 +877,6 @@ TEST(incdec, compound_rvalue_result)
                           "}\n",
                           42);
 }
-
-/* compound-assignment negatives */
 
 TEST(incdec, negative_compound_const)
 {

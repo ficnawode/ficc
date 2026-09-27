@@ -1,10 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* volatile and restrict qualifiers (§6.7.3). ficc accepts them in every
-   declarator position; volatile objects still store/load correctly and
-   restrict parameters behave like their unqualified counterparts. */
-
 TEST(qualifiers, volatile_local_write_read)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -75,8 +71,6 @@ TEST(qualifiers, restrict_local_pointers)
                           8);
 }
 
-/* Volatile accesses must behave identically in both backends, flag or not. */
-
 TEST(qualifiers, volatile_deref_in_loop)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -113,8 +107,7 @@ TEST(qualifiers, volatile_deref_pointer_casts)
                           0);
 }
 
-/* Declaration specifiers are unordered (§6.7.1p6): a qualifier may sit between
-   the signedness keyword and the base type, as in `unsigned const char`. */
+/* C11 §6.7.1p6: declaration specifiers are unordered, so a qualifier may precede the base type. */
 TEST(qualifiers, qualifier_between_type_specifiers)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -124,4 +117,27 @@ TEST(qualifiers, qualifier_between_type_specifiers)
                           "    return (c == 200 && i == 7 && l == 9) ? 0 : 1;\n"
                           "}\n",
                           0);
+}
+
+TEST(qualifiers, volatile_struct_field)
+{
+    EXPECT_INTERP_AND_ELF("struct S { volatile int v; };\n"
+                          "int main(void) {\n"
+                          "    struct S s;\n"
+                          "    s.v = 42;\n"
+                          "    return s.v;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(qualifiers, volatile_array_elements)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    volatile int a[2];\n"
+                          "    a[0] = 40;\n"
+                          "    a[1] = 2;\n"
+                          "    if (a[0] + a[1] != 42) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
 }

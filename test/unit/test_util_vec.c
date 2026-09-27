@@ -144,3 +144,43 @@ TEST(vec, set_on_last_growth_boundary)
     EXPECT_TRUE(vec_get(v, 8) == &vals[8]);
     arena_free(a);
 }
+
+TEST(vec, insert_shifts_elements)
+{
+    Arena *a = arena_new();
+    Vec *v = vec_new(a);
+    int x = 1, y = 2, z = 3, w = 4;
+    vec_push(v, &x);
+    vec_push(v, &z);
+    vec_insert(v, 1, &y);
+    EXPECT_EQ(vec_size(v), 3);
+    EXPECT_TRUE(vec_get(v, 0) == &x);
+    EXPECT_TRUE(vec_get(v, 1) == &y);
+    EXPECT_TRUE(vec_get(v, 2) == &z);
+    vec_insert(v, 0, &w);
+    EXPECT_EQ(vec_size(v), 4);
+    EXPECT_TRUE(vec_get(v, 0) == &w);
+    EXPECT_TRUE(vec_get(v, 1) == &x);
+    vec_insert(v, vec_size(v), &y);
+    EXPECT_EQ(vec_size(v), 5);
+    EXPECT_TRUE(vec_get(v, 4) == &y);
+    arena_free(a);
+}
+
+TEST(vec, insert_grows_capacity)
+{
+    Arena *a = arena_new();
+    Vec *v = vec_new(a);
+    int vals[9];
+    for (int i = 0; i < 8; i++)
+    {
+        vals[i] = i;
+        vec_push(v, &vals[i]);
+    }
+    vals[8] = 8;
+    vec_insert(v, 0, &vals[8]);
+    EXPECT_EQ(vec_size(v), 9);
+    EXPECT_TRUE(vec_get(v, 0) == &vals[8]);
+    EXPECT_TRUE(vec_get(v, 8) == &vals[7]);
+    arena_free(a);
+}

@@ -1,12 +1,5 @@
-/* Phase 10: switch / case / default — end-to-end golden test.
-   Compile with ficc, link the object with gcc -no-pie, and expect exit status 42.
-   Exercises the jump-table lowering (dense positive and negative case ranges),
-   the compare-chain fallback (sparse range far past the table cutoff),
-   fall-through via grouped labels, `default`, a nested switch, and a switch
-   nested in a loop. Each guard returns a distinct small code so a regression
-   names its area. */
+/* Expect exit 42. */
 
-/* Dense table 0..3: holes and out-of-range values route to `default`. */
 int tab(int v)
 {
     switch (v)
@@ -24,7 +17,6 @@ int tab(int v)
     }
 }
 
-/* Negative table range (signed bounds check): -1 and +1 are holes -> default. */
 int sgn(int v)
 {
     switch (v)
@@ -40,7 +32,6 @@ int sgn(int v)
     }
 }
 
-/* Sparse range far beyond the table cutoff: compare-chain fallback. */
 int far(int v)
 {
     switch (v)
@@ -54,7 +45,6 @@ int far(int v)
     }
 }
 
-/* Grouped fall-through labels. */
 int mode(int m)
 {
     switch (m)
@@ -95,7 +85,6 @@ int nest(int outer, int inner)
     }
 }
 
-/* Switch nested in a loop: weight = pointerdigitsum of i. */
 int sum(int n)
 {
     int s = 0;

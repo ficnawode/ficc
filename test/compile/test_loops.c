@@ -21,6 +21,19 @@ TEST(loops, elf_while)
     EXPECT_EQ(tc_run_elf(while_src), 10);
 }
 
+TEST(loops, while_false_skips_body)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 0;\n"
+                          "    while (0) {\n"
+                          "        x = 1;\n"
+                          "    }\n"
+                          "    if (x != 0) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
 static const char *for_src = "int main(void) {\n"
                              "    int s = 0;\n"
                              "    int i;\n"
@@ -38,6 +51,68 @@ TEST(loops, interp_for)
 TEST(loops, elf_for)
 {
     EXPECT_EQ(tc_run_elf(for_src), 10);
+}
+
+TEST(loops, for_false_skips_body)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 0;\n"
+                          "    for (int i = 7; i < 3; i++) {\n"
+                          "        x = 1;\n"
+                          "    }\n"
+                          "    if (x != 0) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(loops, for_continue_runs_post)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int sum = 0;\n"
+                          "    for (int i = 0; i < 6; i++) {\n"
+                          "        if (i == 2) continue;\n"
+                          "        if (i == 5) continue;\n"
+                          "        sum = sum + i;\n"
+                          "    }\n"
+                          "    if (sum != 8) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(loops, nested_break_continue_bind_inner)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int count = 0;\n"
+                          "    for (int i = 0; i < 3; i++) {\n"
+                          "        for (int j = 0; j < 3; j++) {\n"
+                          "            if (j == 1) continue;\n"
+                          "            if (i == 2) break;\n"
+                          "            count++;\n"
+                          "        }\n"
+                          "    }\n"
+                          "    if (count != 4) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(loops, switch_break_continue_in_loop)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int sum = 0;\n"
+                          "    for (int i = 0; i < 5; i++) {\n"
+                          "        switch (i) {\n"
+                          "        case 2: continue;\n"
+                          "        case 3: break;\n"
+                          "        default: sum = sum + i;\n"
+                          "        }\n"
+                          "    }\n"
+                          "    if (sum != 5) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
 }
 
 static const char *do_while_src = "int main(void) {\n"
@@ -60,32 +135,51 @@ TEST(loops, elf_do_while)
     EXPECT_EQ(tc_run_elf(do_while_src), 10);
 }
 
-static const char *break_continue_src = "int main(void) {\n"
-                                        "    int s = 0;\n"
-                                        "    int i = 0;\n"
-                                        "    while (i < 10) {\n"
-                                        "        if (i >= 5) {\n"
-                                        "            break;\n"
-                                        "        }\n"
-                                        "        if (i == 2) {\n"
-                                        "            i = i + 1;\n"
-                                        "            continue;\n"
-                                        "        }\n"
-                                        "        s = s + i;\n"
-                                        "        i = i + 1;\n"
-                                        "    }\n"
-                                        "    return s;\n"
-                                        "}\n";
+static const char *break_src = "int main(void) {\n"
+                               "    int s = 0;\n"
+                               "    int i = 0;\n"
+                               "    while (i < 10) {\n"
+                               "        if (i >= 5) {\n"
+                               "            break;\n"
+                               "        }\n"
+                               "        s = s + i;\n"
+                               "        i = i + 1;\n"
+                               "    }\n"
+                               "    return s;\n"
+                               "}\n";
 
-TEST(loops, interp_break_continue)
+TEST(loops, interp_break)
 {
-    /* 0 + 1 + 3 + 4 = 8 (skip 2 because of continue) */
-    EXPECT_EQ(tc_run_interp(break_continue_src), 8);
+    EXPECT_EQ(tc_run_interp(break_src), 10);
 }
 
-TEST(loops, elf_break_continue)
+TEST(loops, elf_break)
 {
-    EXPECT_EQ(tc_run_elf(break_continue_src), 8);
+    EXPECT_EQ(tc_run_elf(break_src), 10);
+}
+
+static const char *continue_src = "int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    int i = 0;\n"
+                                  "    while (i < 5) {\n"
+                                  "        if (i == 2) {\n"
+                                  "            i = i + 1;\n"
+                                  "            continue;\n"
+                                  "        }\n"
+                                  "        s = s + i;\n"
+                                  "        i = i + 1;\n"
+                                  "    }\n"
+                                  "    return s;\n"
+                                  "}\n";
+
+TEST(loops, interp_continue)
+{
+    EXPECT_EQ(tc_run_interp(continue_src), 8);
+}
+
+TEST(loops, elf_continue)
+{
+    EXPECT_EQ(tc_run_elf(continue_src), 8);
 }
 
 static const char *goto_src = "int main(void) {\n"
@@ -241,9 +335,6 @@ TEST(loops, semantic_duplicate_label)
                       "}\n");
 }
 
-/* Regression: `&&`/`||` guards sealed their enclosing do-while body too early,
-   turning loop-carried variables into undefined (0) — here `align` became 0
-   and the mask arithmetic collapsed. */
 static const char *short_circuit_guard_src =
     "int main(void) {\n"
     "    unsigned long align = 8;\n"
@@ -262,8 +353,6 @@ TEST(loops, short_circuit_guard)
     EXPECT_INTERP_AND_ELF(short_circuit_guard_src, 0);
 }
 
-/* Regression: a loop-carried VALUE_MAX sentinel is a PHI initialized with an
-   immediate; the copy must write the full 64-bit slot. */
 static const char *phi_width_src = "#include <stdint.h>\n"
                                    "int main(void) {\n"
                                    "    unsigned long first = SIZE_MAX;\n"
@@ -281,9 +370,6 @@ TEST(loops, phi_sized_sentinel)
     EXPECT_INTERP_AND_ELF(phi_width_src, 0);
 }
 
-/* Regression: a for-post comma cross-assignment (`i = j, j = i + 1`) makes one
-   PHI's incoming value another PHI of the same block. Phis are parallel, so the
-   copy of `i` must read the old `j` before `j` is overwritten. */
 static const char *phi_parallel_cross_src = "int main(void) {\n"
                                             "    int i, j, sum = 0;\n"
                                             "    for (i = 0, j = 1; i < 3; i = j, j = i + 1)\n"
@@ -296,8 +382,6 @@ TEST(loops, phi_parallel_cross_assignment)
     EXPECT_INTERP_AND_ELF(phi_parallel_cross_src, 12);
 }
 
-/* Regression: the list_for_each_safe pattern (`pos = tmp, tmp = pos->next`)
-   advances two loop-carried pointers through a parallel PHI copy. */
 static const char *phi_parallel_list_src =
     "struct node { int v; struct node *next; };\n"
     "int main(void) {\n"

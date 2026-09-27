@@ -89,7 +89,6 @@ static const char *bitwise_src = "int main(void) {\n"
 
 TEST(expr, interp_bitwise)
 {
-    /* 5 & 3 = 1; 1 | 8 = 9; 9 ^ 2 = 11; 11 << 1 = 22; 22 >> 1 = 11 */
     EXPECT_EQ(tc_run_interp(bitwise_src), 11);
 }
 
@@ -115,8 +114,6 @@ TEST(expr, elf_call_7_args)
     EXPECT_EQ(tc_run_elf(call7_src), 0);
 }
 
-/* Regression: conditions on char-typed values and 64-bit pointers/immediates
-   must be tested at their full width, not truncated to 32 bits. */
 static const char *wide_compare_src =
     "int main(void) {\n"
     "    const char *s = \"abcdefgh\";\n"
@@ -133,4 +130,35 @@ static const char *wide_compare_src =
 TEST(expr, wide_compare)
 {
     EXPECT_INTERP_AND_ELF(wide_compare_src, 0);
+}
+
+TEST(expr, logical_and_or_short_circuit)
+{
+    EXPECT_INTERP_AND_ELF("static int calls;\n"
+                          "static int hit(void) { calls++; return 1; }\n"
+                          "int main(void) {\n"
+                          "    calls = 0;\n"
+                          "    if (0 && hit()) return 1;\n"
+                          "    if (calls != 0) return 2;\n"
+                          "    calls = 0;\n"
+                          "    if (1 || hit()) { }\n"
+                          "    if (calls != 0) return 3;\n"
+                          "    if (0 || hit()) { }\n"
+                          "    if (calls != 1) return 4;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
+}
+
+TEST(expr, unary_operators_apply)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int x = 5;\n"
+                          "    if (-x != -5) return 1;\n"
+                          "    if (+x != 5) return 2;\n"
+                          "    if (~0 != -1) return 3;\n"
+                          "    if (!x != 0) return 4;\n"
+                          "    return 0;\n"
+                          "}\n",
+                          0);
 }

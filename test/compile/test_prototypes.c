@@ -1,8 +1,6 @@
 #include "harness.h"
 #include "testdriver.h"
 
-/* Phase 16a: function prototypes / forward declarations */
-
 TEST(prototypes, prototype_then_definition)
 {
     const char *src = "int add(int a, int b);\n"
@@ -79,9 +77,7 @@ TEST(prototypes, variadic_prototype_then_definition)
 
 TEST(prototypes, elf_direct_call_via_elf_extern)
 {
-    /* A declaration-only extern resolved at link time against a second,
-       host-compiled translation unit. The ficc TU emits an SHN_UNDEF symbol +
-       R_X86_64_PLT32. */
+    /* The call emits SHN_UNDEF + R_X86_64_PLT32, resolved by the linker. */
     EXPECT_EQ(tc_run_elf_with_extra_tu("int shared_add(int a, int b);\n"
                                        "int main(void) {\n"
                                        "    return shared_add(20, 22);\n"
@@ -94,8 +90,7 @@ TEST(prototypes, elf_direct_call_via_elf_extern)
 
 TEST(prototypes, elf_variadic_extern_two_tu)
 {
-    /* The caller zeroes %al for a variadic prototype even when the callee
-       lives in another translation unit. */
+    /* psABI §3.2.3: the caller zeroes %al for a variadic call. */
     EXPECT_EQ(tc_run_elf_with_extra_tu("int sum_vals(int count, ...);\n"
                                        "int main(void) {\n"
                                        "    return sum_vals(4, 1, 2, 3, 4);\n"
@@ -116,9 +111,6 @@ TEST(prototypes, elf_variadic_extern_two_tu)
 
 TEST(prototypes, elf_same_tu_prototype_and_call)
 {
-    /* Prototype-first, definition-in-TU, exercised through the ELF backend
-       too (interp covers it above; this row pins the external-call path stays
-       unused when the function is defined here). */
     const char *src = "int f(int a);\n"
                       "int f(int a) {\n"
                       "    return a;\n"
@@ -149,8 +141,8 @@ TEST(prototypes, negative_conflicting_return)
 
 TEST(prototypes, positive_static_then_plain_definition_inherits_linkage)
 {
-    /* §6.2.2p5: the later definition has no storage-class specifier, so it has
-       the linkage of `extern` and inherits the prior `static` declaration. */
+    /* §6.2.2p5: a later definition without a storage class inherits the prior
+       static declaration. */
     EXPECT_BUILD_SUCCEED("static int f(int a);\n"
                          "int f(int a) {\n"
                          "    return a;\n"
@@ -196,8 +188,8 @@ TEST(prototypes, negative_variadic_mismatch)
 
 TEST(prototypes, unnamed_prototype_params)
 {
-    /* §6.7.6.3: declaration parameters may omit their names; the definition
-       supplies them (§6.9.1p6). */
+    /* §6.7.6.3: declaration parameters may omit their names; §6.9.1p6 the
+       definition supplies them. */
     const char *src = "int add(int, int);\n"
                       "int add(int a, int b) {\n"
                       "    return a + b;\n"
@@ -225,7 +217,6 @@ TEST(prototypes, unnamed_pointer_prototype_params)
 
 TEST(prototypes, unnamed_prototype_param_mismatch_rejected)
 {
-    /* The unnamed-param prototype still type-checks each call argument. */
     EXPECT_BUILD_FAIL("int f(int);\n"
                       "int main(void) {\n"
                       "    return f(1, 2);\n"
@@ -260,4 +251,47 @@ TEST(prototypes, negative_prototype_collides_with_var)
                       "int main(void) {\n"
                       "    return 0;\n"
                       "}\n");
+}
+
+TEST(prototypes, void_param_prototype_then_definition)
+{
+    const char *src = "int f(void);\n"
+                      "int f(void) {\n"
+                      "    return 42;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return f();\n"
+                      "}\n";
+    EXPECT_EQ(tc_run_interp(src), 42);
+    EXPECT_EQ(tc_run_elf(src), 42);
+}
+
+TEST(prototypes, array_param_prototype_decays)
+{
+    const char *src = "int sum(int a[], int n);\n"
+                      "int sum(int *a, int n) {\n"
+                      "    int t = 0;\n"
+                      "    for (int i = 0; i < n; i++)\n"
+                      "        t += a[i];\n"
+                      "    return t;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    int a[3] = {10, 20, 12};\n"
+                      "    return sum(a, 3);\n"
+                      "}\n";
+    EXPECT_EQ(tc_run_interp(src), 42);
+    EXPECT_EQ(tc_run_elf(src), 42);
+}
+
+TEST(prototypes, extern_keyword_prototype)
+{
+    const char *src = "extern int add(int a, int b);\n"
+                      "int add(int a, int b) {\n"
+                      "    return a + b;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    return add(20, 22);\n"
+                      "}\n";
+    EXPECT_EQ(tc_run_interp(src), 42);
+    EXPECT_EQ(tc_run_elf(src), 42);
 }

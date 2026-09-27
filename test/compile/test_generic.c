@@ -21,11 +21,9 @@ TEST(generic, selects_default)
 
 TEST(generic, pointer_constness_distinguishes_associations)
 {
-    /* C11 §6.5.15p2: the controlling expression is converted (lvalue
-       conversion), then matched by compatibility. `const char *` and `char *`
-       are different types, so a `const char *` association selects only for
-       the const pointer. This is the property glibc's `__glibc_const_generic`
-       relies on. */
+    /* C11 §6.5.15p2: the controlling expression undergoes lvalue conversion and
+       is matched by type compatibility, so `const char *` and `char *` select
+       different associations. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    const char *cs = \"x\";\n"
                           "    char *us = (char *)\"y\";\n"
@@ -68,6 +66,37 @@ TEST(generic, only_selected_arm_evaluated)
                           "    int calls = 0;\n"
                           "    int v = _Generic(1, int: 42, default: (calls = 9));\n"
                           "    return v + calls;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(generic, controlling_expression_not_evaluated)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    int calls = 0;\n"
+                          "    (void)_Generic((calls = 5), int: 0, default: 0);\n"
+                          "    if (calls != 0) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(generic, lvalue_conversion_drops_const)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    const int x = 0;\n"
+                          "    if (_Generic(x, int: 42, default: 1) != 42) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(generic, unsigned_int_association_distinct)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    unsigned u = 1;\n"
+                          "    if (_Generic(u, unsigned int: 42, int: 0) != 42) return 1;\n"
+                          "    return 42;\n"
                           "}\n",
                           42);
 }

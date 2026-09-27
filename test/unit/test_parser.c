@@ -45,8 +45,7 @@ TEST(parser, empty_param_list)
 
 TEST(parser, void_ptr_param)
 {
-    /* `(void *p)` is an ordinary pointer-to-void parameter, not the empty
-       list marker: the `void` gate only fires on a following `)`. */
+    /* `(void *p)` is a pointer-to-void parameter, not the empty `(void)` marker. */
     Arena *a = arena_new();
     ASTNode *ast = tc_parse("int use(void *p) {\n"
                             "    return 0;\n"
@@ -162,8 +161,7 @@ TEST(parser, prototype_variadic)
     arena_free(a);
 }
 
-/* C11 §6.2.1p4: a parameter name has function-prototype scope, so it must not
-   collide with a file-scope typedef of the same spelling. */
+/* C11 §6.2.1p4: parameter names have function-prototype scope, not file scope. */
 TEST(parser, parenthesized_declarator_param_does_not_leak)
 {
     Arena *a = arena_new();
@@ -794,8 +792,6 @@ TEST(parser, array_declarator)
     arena_free(a);
 }
 
-/* Phase 11: cast parsing, disambiguation, and constant folding */
-
 TEST(parser, cast_node)
 {
     Arena *a = arena_new();
@@ -821,7 +817,6 @@ TEST(parser, paren_is_not_cast)
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
     ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
-    /* A parenthesized expression is transparent: no cast node is created. */
     EXPECT_EQ(ret->expr->kind, AST_INT_LITERAL);
     arena_free(a);
 }
@@ -861,7 +856,6 @@ TEST(parser, call_arg_cast)
 
 TEST(parser, cast_qualified_target)
 {
-    /* `(const int *)p` — the cast target keeps the pointee qualifier. */
     Arena *a = arena_new();
     ASTNode *ast = tc_parse("int main(void) {\n"
                             "    int x;\n"
@@ -900,7 +894,6 @@ TEST(parser, cast_enum_target)
     arena_free(a);
 }
 
-/* The first `case` label of the switch in the program under test. */
 static ASTCaseStmt *first_case_of(const char *src, Arena *a)
 {
     ASTNode *ast = tc_parse(src, a);
@@ -924,8 +917,7 @@ static ASTCaseStmt *first_case_of(const char *src, Arena *a)
 TEST(parser, cast_folds_in_case_label)
 {
     Arena *a = arena_new();
-    /* (char)300 folds to 44 at parse time (§6.6: casts are allowed in integer
-       constant expressions). */
+    /* (char)300 folds to 44 (C11 §6.6: casts are allowed in constant expressions). */
     ASTCaseStmt *cs = first_case_of("int main(void) {\n"
                                     "    switch (44) {\n"
                                     "    case (char)300:\n"
@@ -977,8 +969,6 @@ TEST(parser, cast_folds_unsigned_in_case_label)
     arena_free(a);
 }
 
-/* Phase 12a: typedef */
-
 TEST(parser, typedef_toplevel_decl_shape)
 {
     Arena *a = arena_new();
@@ -993,7 +983,6 @@ TEST(parser, typedef_toplevel_decl_shape)
     ASTTypedefDecl *td = ast_as(ASTTypedefDecl, (ASTNode *) vec_get(prog->decls, 0));
     EXPECT_STR_EQ(td->name, "Foo");
     EXPECT_EQ(td->type, type_int());
-    /* The declared variable uses the aliased (interned) type. */
     ASTVarDecl *vd = ast_as(ASTVarDecl, (ASTNode *) vec_get(prog->decls, 1));
     EXPECT_EQ(vd->type, type_int());
     arena_free(a);
@@ -1037,7 +1026,6 @@ TEST(parser, typedef_ptr_const_quals)
 
 TEST(parser, typedef_forward_record_cast_and_sizeof)
 {
-    /* The ficc coding style: typedef struct Tag Tag; then complete the tag. */
     Arena *a = arena_new();
     ASTNode *ast = tc_parse("typedef struct Block Block;\n"
                             "struct Block { int data; Block *next; };\n"
@@ -1053,7 +1041,6 @@ TEST(parser, typedef_forward_record_cast_and_sizeof)
     EXPECT_EQ(vec_size(prog->decls), 3);
     EXPECT_EQ(((ASTNode *) vec_get(prog->decls, 0))->kind, AST_TYPEDEF_DECL);
     EXPECT_EQ(((ASTNode *) vec_get(prog->decls, 1))->kind, AST_STRUCT_DECL);
-    /* Inside the struct, a field may itself use the typedef (`Block *next`). */
     ASTStructDecl *sd = ast_as(ASTStructDecl, (ASTNode *) vec_get(prog->decls, 1));
     ASTVarDecl *next_field = ast_as(ASTVarDecl, (ASTNode *) vec_get(sd->fields, 1));
     EXPECT_STR_EQ(next_field->name, "next");
@@ -1063,9 +1050,6 @@ TEST(parser, typedef_forward_record_cast_and_sizeof)
 
 TEST(parser, typedef_paren_not_cast)
 {
-    /* Disambiguation: a plain identifier that merely *shares* a letter with a
-       typedef is still a parenthesized expression, and a non-typedef
-       identifier never starts a cast. */
     Arena *a = arena_new();
     ASTNode *ast = tc_parse("int take(int x) { return x; }\n"
                             "int main(void) {\n"
@@ -1089,16 +1073,24 @@ TEST(parser, typedef_cast_target)
     arena_free(a);
 }
 
-TEST(parser, typedef_disallowed_combinations)
+TEST(parser, typedef_name_redeclared_as_var_rejected)
 {
     EXPECT_PARSE_FAIL("typedef int T;\n"
                       "int T;\n"
                       "int main(void) { return 0; }\n");
+}
+
+TEST(parser, typedef_name_redeclared_locally_rejected)
+{
     EXPECT_PARSE_FAIL("int main(void) {\n"
                       "    int T;\n"
                       "    typedef int T;\n"
                       "    return 0;\n"
                       "}\n");
+}
+
+TEST(parser, typedef_conflicting_redefinition_rejected)
+{
     EXPECT_PARSE_FAIL("typedef int T;\n"
                       "typedef long T;\n"
                       "int main(void) { return 0; }\n");
@@ -1140,7 +1132,6 @@ TEST(parser, typedef_param_use)
     arena_free(a);
 }
 
-/* Helper: the first statement of `int main(void) { <body> }`. */
 static ASTNode *first_main_stmt(const char *body, Arena *a)
 {
     ASTNode *ast = tc_parse(body, a);
@@ -1210,12 +1201,9 @@ TEST(parser, prefix_binds_looser_than_deref)
 
 TEST(parser, postfix_in_subscript_index)
 {
-    /* `a[i++]` — the postfix increment is part of the index expression. */
     Arena *a = arena_new();
-    ASTReturnStmt *ret = first_return("int main(void) { void *q = &a[i++]; return 0; }\n", a);
     ASTVarDecl *vd =
         ast_as(ASTVarDecl, first_main_stmt("int main(void) { void *q = &a[i++]; return 0; }\n", a));
-    (void) ret;
     ASTUnaryExpr *addr = ast_as(ASTUnaryExpr, vd->init);
     EXPECT_NOTNULL(addr);
     EXPECT_EQ(addr->op, UN_ADDR);
@@ -1229,12 +1217,10 @@ TEST(parser, postfix_in_subscript_index)
 
 TEST(parser, chained_postfix_ops)
 {
-    /* `p++->x` lower in the chain; `(++p).x` needs parens. */
+    /* `p++->x` groups as `(p++)->x`. */
     Arena *a = arena_new();
-    ASTReturnStmt *ret = first_return("int main(void) { void *q = &p++->x; return 0; }\n", a);
     ASTVarDecl *vd =
         ast_as(ASTVarDecl, first_main_stmt("int main(void) { void *q = &p++->x; return 0; }\n", a));
-    (void) ret;
     ASTUnaryExpr *addr = ast_as(ASTUnaryExpr, vd->init);
     EXPECT_NOTNULL(addr);
     ASTMemberAccess *ma = ast_as(ASTMemberAccess, addr->operand);
@@ -1346,8 +1332,7 @@ TEST(parser, llong_specifier_types)
 
 TEST(parser, multi_declarator_shape)
 {
-    /* Two or more declarators wrap in AST_DECL_LIST; the specifier type is
-       shared and each declarator's decorators are independent. */
+    /* Multiple declarators share the specifier type and wrap in AST_DECL_LIST. */
     Arena *a = arena_new();
     ASTNode *ast = tc_parse("int a = 1, b = 2;\n"
                             "int main(void) { return 0; }\n",
@@ -1368,7 +1353,6 @@ TEST(parser, multi_declarator_shape)
 
 TEST(parser, declarator_star_split)
 {
-    /* `int *a, b;` — a is a pointer, b stays int. */
     Arena *a = arena_new();
     ASTNode *ast = tc_parse("int *a, b;\n"
                             "int main(void) { return 0; }\n",
@@ -1421,8 +1405,7 @@ TEST(parser, anon_struct_typedef)
 
 TEST(parser, block_scope_tag_definition_statement)
 {
-    /* `struct S { ... };` inside a function is a no-op statement whose type
-       is complete and usable afterwards. */
+    /* A block-scope `struct S { ... };` defines a complete, usable type. */
     Arena *a = arena_new();
     ASTNode *ast = tc_parse("int main(void) {\n"
                             "    struct S { int v; };\n"
@@ -1442,8 +1425,6 @@ TEST(parser, block_scope_tag_definition_statement)
 
 TEST(parser, combined_definition_declarator)
 {
-    /* `struct S { int lo; } v;` — one declaration, complete type plus the
-       variable. */
     Arena *a = arena_new();
     ASTNode *ast = tc_parse("int main(void) {\n"
                             "    struct P { int lo; } pr;\n"
@@ -1544,9 +1525,6 @@ TEST(parser, builtin_va_list_is_builtin_typedef)
 
 TEST(parser, raw_va_list_not_a_type_before_shim)
 {
-    /* Phase 15 does not make `va_list` a builtin — the raw name only becomes
-       a type through the Phase 17 <stdarg.h> shim. Until then it is just an
-       undeclared identifier in a type position. */
     EXPECT_PARSE_FAIL("int main(void) {\n"
                       "    va_list ap;\n"
                       "    return 0;\n"
@@ -1606,8 +1584,6 @@ TEST(parser, builtin_va_arg_pointer_type)
     ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
     ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
     ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 2));
-    /* `*(char *)X`: the outer node is a unary deref over a cast over the
-       va_arg special form. */
     ASTUnaryExpr *deref = ast_as(ASTUnaryExpr, ret->expr);
     ASTCastExpr *cast = ast_as(ASTCastExpr, deref->operand);
     EXPECT_EQ(cast->target_type->kind, TYPE_PTR);
@@ -1616,8 +1592,6 @@ TEST(parser, builtin_va_arg_pointer_type)
     EXPECT_TRUE(type_is_ptr(va->type));
     arena_free(a);
 }
-
-/* Phase 16b: function-pointer declarator shapes */
 
 TEST(parser, fn_ptr_declarator)
 {
@@ -1650,9 +1624,7 @@ TEST(parser, fn_ptr_typedef)
 
 TEST(parser, fn_returning_pointer_stays_function)
 {
-    /* `int *f(int)` is a function returning int*, NOT a pointer to function
-       (the lone `*` precedes the name; the function suffix belongs to the
-       definition path). */
+    /* `int *f(int)` is a function returning `int *`, not a pointer to function. */
     Arena *a = arena_new();
     ASTNode *ast = tc_parse("int *f(int a) { return 0; }", a);
     EXPECT_NOTNULL(ast);
@@ -1718,4 +1690,194 @@ TEST(parser, generic_selection_requires_colon)
 TEST(parser, generic_selection_duplicate_default_fails)
 {
     EXPECT_PARSE_FAIL("int main(void) { return _Generic(1, default: 2, default: 3); }");
+}
+
+TEST(parser, while_loop_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { while (1) { } return 0; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTWhileStmt *ws = ast_as(ASTWhileStmt, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(ws->base.kind, AST_WHILE_STMT);
+    EXPECT_EQ(ws->cond->kind, AST_INT_LITERAL);
+    EXPECT_NOTNULL(ws->body);
+    arena_free(a);
+}
+
+TEST(parser, do_while_loop_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { do { } while (1); return 0; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTDoWhileStmt *dw = ast_as(ASTDoWhileStmt, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(dw->base.kind, AST_DO_WHILE_STMT);
+    EXPECT_EQ(dw->cond->kind, AST_INT_LITERAL);
+    EXPECT_NOTNULL(dw->body);
+    arena_free(a);
+}
+
+TEST(parser, for_loop_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { for (int i = 0; i < 3; i++) { } return 0; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTForStmt *fs = ast_as(ASTForStmt, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(fs->base.kind, AST_FOR_STMT);
+    EXPECT_EQ(fs->init->kind, AST_VAR_DECL);
+    EXPECT_EQ(fs->cond->kind, AST_BINARY_EXPR);
+    EXPECT_EQ(fs->post->kind, AST_INCDEC_EXPR);
+    EXPECT_NOTNULL(fs->body);
+    arena_free(a);
+}
+
+TEST(parser, break_stmt_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { while (1) { break; } return 0; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTWhileStmt *ws = ast_as(ASTWhileStmt, (ASTNode *) vec_get(body->stmts, 0));
+    ASTCompoundStmt *loop_body = ast_as(ASTCompoundStmt, ws->body);
+    EXPECT_EQ(((ASTNode *) vec_get(loop_body->stmts, 0))->kind, AST_BREAK_STMT);
+    arena_free(a);
+}
+
+TEST(parser, continue_stmt_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { while (1) { continue; } return 0; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTWhileStmt *ws = ast_as(ASTWhileStmt, (ASTNode *) vec_get(body->stmts, 0));
+    ASTCompoundStmt *loop_body = ast_as(ASTCompoundStmt, ws->body);
+    EXPECT_EQ(((ASTNode *) vec_get(loop_body->stmts, 0))->kind, AST_CONTINUE_STMT);
+    arena_free(a);
+}
+
+TEST(parser, goto_stmt_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { goto done; done: return 0; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTGotoStmt *gs = ast_as(ASTGotoStmt, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(gs->base.kind, AST_GOTO_STMT);
+    EXPECT_STR_EQ(gs->label, "done");
+    arena_free(a);
+}
+
+TEST(parser, label_stmt_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { done: return 0; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTLabelStmt *ls = ast_as(ASTLabelStmt, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(ls->base.kind, AST_LABEL_STMT);
+    EXPECT_STR_EQ(ls->label, "done");
+    EXPECT_EQ(ls->stmt->kind, AST_RETURN_STMT);
+    arena_free(a);
+}
+
+TEST(parser, goto_missing_label_rejected)
+{
+    EXPECT_PARSE_FAIL("int main(void) { goto ; }");
+}
+
+TEST(parser, do_missing_while_rejected)
+{
+    EXPECT_PARSE_FAIL("int main(void) { do { } return 0; }");
+}
+
+TEST(parser, switch_stmt_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) {\n"
+                            "    switch (x) {\n"
+                            "    case 1:\n"
+                            "        return 0;\n"
+                            "    default:\n"
+                            "        return 1;\n"
+                            "    }\n"
+                            "}\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTSwitchStmt *sw = ast_as(ASTSwitchStmt, (ASTNode *) vec_get(body->stmts, 0));
+    EXPECT_EQ(sw->base.kind, AST_SWITCH_STMT);
+    EXPECT_EQ(sw->cond->kind, AST_IDENT);
+    ASTCompoundStmt *sw_body = ast_as(ASTCompoundStmt, sw->body);
+    EXPECT_EQ(vec_size(sw_body->stmts), 2);
+    EXPECT_EQ(((ASTNode *) vec_get(sw_body->stmts, 0))->kind, AST_CASE_STMT);
+    EXPECT_EQ(((ASTNode *) vec_get(sw_body->stmts, 1))->kind, AST_DEFAULT_STMT);
+    arena_free(a);
+}
+
+TEST(parser, ternary_expr_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { return a ? b : c; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
+    ASTTernaryExpr *te = ast_as(ASTTernaryExpr, ret->expr);
+    EXPECT_EQ(te->base.kind, AST_TERNARY_EXPR);
+    EXPECT_EQ(te->cond->kind, AST_IDENT);
+    EXPECT_EQ(te->then_expr->kind, AST_IDENT);
+    EXPECT_EQ(te->else_expr->kind, AST_IDENT);
+    arena_free(a);
+}
+
+TEST(parser, char_literal_expr)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("int main(void) { return 'A'; }", a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTFuncDef *fn = ast_as(ASTFuncDef, (ASTNode *) vec_get(prog->decls, 0));
+    ASTCompoundStmt *body = ast_as(ASTCompoundStmt, fn->body);
+    ASTReturnStmt *ret = ast_as(ASTReturnStmt, (ASTNode *) vec_get(body->stmts, 0));
+    ASTIntLiteral *lit = ast_as(ASTIntLiteral, ret->expr);
+    EXPECT_EQ(lit->base.kind, AST_INT_LITERAL);
+    EXPECT_EQ(lit->value, 65);
+    arena_free(a);
+}
+
+TEST(parser, union_definition_shape)
+{
+    Arena *a = arena_new();
+    ASTNode *ast = tc_parse("union U {\n"
+                            "    int i;\n"
+                            "    char c;\n"
+                            "};\n"
+                            "int main(void) { return 0; }\n",
+                            a);
+    EXPECT_NOTNULL(ast);
+    ASTProgram *prog = ast_as(ASTProgram, ast);
+    ASTStructDecl *sd = ast_as(ASTStructDecl, (ASTNode *) vec_get(prog->decls, 0));
+    EXPECT_EQ(sd->base.kind, AST_STRUCT_DECL);
+    EXPECT_TRUE(sd->is_union);
+    EXPECT_EQ(vec_size(sd->fields), 2);
+    arena_free(a);
 }

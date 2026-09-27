@@ -72,8 +72,7 @@ TEST(abi, nine_byte_char_array_is_two_integer_lanes)
 
 TEST(abi, misaligned_three_eightbyte_struct_is_memory)
 {
-    /* char at 0, long at 1 (misaligned, unaligned-field rule), int at 16:
-       24 bytes still exceeds the two-eightbyte register payload (rule 5c). */
+    /* psABI §3.2.3 rule 5c: the 24-byte misaligned aggregate is MEMORY. */
     Arena *a = arena_new();
     Vec *fs = vec_new(a);
     vec_push(fs, field(a, "c", type_char()));
@@ -103,9 +102,7 @@ TEST(abi, double_then_char_struct_is_sse_plus_integer)
 
 TEST(abi, spanning_field_merges_into_both_lanes)
 {
-    /* int at 0, double at 4: the double straddles the eightbyte boundary, so
-       lane 0 folds INTEGER+SSE → INTEGER and lane 1 stays SSE.  gcc and clang
-       both pass this as RDI + XMM0, proving the split merges per lane. */
+    /* psABI §3.2.3: the field straddling the boundary folds lane 0 to INTEGER. */
     Arena *a = arena_new();
     Vec *fs = vec_new(a);
     vec_push(fs, field(a, "i", type_int()));
@@ -161,8 +158,7 @@ TEST(abi, empty_struct_takes_no_lanes)
 
 TEST(abi, union_takes_the_max_member_class)
 {
-    /* `union { long a; double b; }`: both members classify lane 0, folding
-       INTEGER (a) and SSE (b) → INTEGER; gcc passes it in %rdi. */
+    /* psABI §3.2.3: the union lanes fold to the max member class (INTEGER). */
     Arena *a = arena_new();
     Type *u = type_record(TYPE_UNION, "A22UnionLd");
     Vec *fs = vec_new(a);
@@ -178,8 +174,7 @@ TEST(abi, union_takes_the_max_member_class)
 
 TEST(abi, seventeen_byte_struct_is_memory)
 {
-    /* `{char a; double b; char c}`: 17 bytes exceed the two-eightbyte register
-       payload, so rule 5c drops it to memory even though lanes are clean. */
+    /* psABI §3.2.3 rule 5c: 17 bytes exceeds two eightbytes, so MEMORY. */
     Arena *a = arena_new();
     Vec *fs = vec_new(a);
     vec_push(fs, field(a, "a", type_char()));
@@ -284,6 +279,24 @@ TEST(abi, sysv_plan_long_double_rides_aligned_stack)
     EXPECT_TRUE(plans[0].on_stack);
     EXPECT_TRUE(plans[0].is_x87_stack);
     EXPECT_EQ(plans[0].stack_off, 0);
+}
+
+TEST(abi, sysv_plan_sse_overflow_rides_stack)
+{
+    Type *types[9];
+    for (int i = 0; i < 9; i++)
+    {
+        types[i] = type_double();
+    }
+    SysvArgPlan plans[9];
+    u32 fp_used = 0;
+    u32 stack = sysv_plan_args(types, 9, plans, &fp_used);
+    EXPECT_EQ(stack, 8);
+    EXPECT_EQ(fp_used, 8);
+    EXPECT_FALSE(plans[7].on_stack);
+    EXPECT_TRUE(plans[8].on_stack);
+    EXPECT_EQ(plans[8].stack_off, 0);
+    EXPECT_EQ(plans[8].stack_size, 8);
 }
 
 TEST(abi, sysv_plan_is_deterministic)

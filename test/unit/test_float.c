@@ -42,14 +42,20 @@ TEST(float, floats_are_not_integer)
     EXPECT_EQ(type_rank(type_double()), -1);
 }
 
-TEST(float, complete_and_promotion)
+TEST(float, complete)
 {
-    /* type_is_complete accepts them; integer promotion leaves them alone. */
     EXPECT_TRUE(type_is_complete(type_float()));
     EXPECT_TRUE(type_is_complete(type_double()));
+}
+
+TEST(float, promotion_preserves_fp)
+{
     EXPECT_TRUE(type_promote(type_float()) == type_float());
     EXPECT_TRUE(type_promote(type_double()) == type_double());
-    /* Casting to a qualified float keeps the singleton's identity shape. */
+}
+
+TEST(float, qualified_float_unqual)
+{
     EXPECT_EQ(type_unqual(type_const(type_double()))->kind, TYPE_DOUBLE);
 }
 
@@ -63,14 +69,12 @@ TEST(float, common_type_fp_precedence)
     EXPECT_TRUE(type_common(type_float(), type_int()) == type_float());
     EXPECT_TRUE(type_common(type_int(), type_float()) == type_float());
     EXPECT_TRUE(type_common(type_int(), type_double()) == type_double());
-    /* Integer pairs still take the integer chain (unchanged). */
     EXPECT_TRUE(type_common(type_int(), type_long()) == type_long());
     EXPECT_TRUE(type_common(type_uint(), type_int()) == type_uint());
 }
 
 TEST(float, array_and_record_layout)
 {
-    /* Arrays/records of float flow through the existing layout rules. */
     Arena *a = arena_new();
     Type *arr = type_array(type_float(), 3);
     EXPECT_EQ(type_sizeof(arr), 12);
@@ -81,11 +85,14 @@ TEST(float, array_and_record_layout)
     arena_free(a);
 }
 
-TEST(float, keywords_parse)
+TEST(float, float_keywords_parse)
 {
     EXPECT_PARSE_SUCCEED("float f;\n"
                          "double d;\n");
-    /* Block-scope FP initializers build. */
+}
+
+TEST(float, fp_initializers_build)
+{
     EXPECT_BUILD_SUCCEED("int main(void) {\n"
                          "    float f = 1.5f;\n"
                          "    double d = 1.5;\n"
@@ -96,7 +103,10 @@ TEST(float, keywords_parse)
                          "    float y = 0x1.8p3f;\n"
                          "    return 0;\n"
                          "}");
-    /* File-scope and static FP globals serialize through the init machinery. */
+}
+
+TEST(float, fp_file_scope_globals_build)
+{
     EXPECT_BUILD_SUCCEED("double g = 1.5;\n");
     EXPECT_BUILD_SUCCEED("static double s = 1.5;\n");
 }
@@ -120,12 +130,13 @@ TEST(float, long_double_type_layout)
     EXPECT_TRUE(type_is_fp(ld));
     EXPECT_FALSE(type_is_float(ld)); /* x87, not an SSE lane */
     EXPECT_FALSE(type_is_integer(ld));
+    EXPECT_EQ(type_sizeof(ld), 16);
+    EXPECT_EQ(type_alignof(ld), 16);
     EXPECT_TRUE(type_promote(ld) == ld);
 }
 
 TEST(float, long_double_literals_and_decls)
 {
-    /* `1.5L` is a long-double literal; `long double` parses as a type. */
     EXPECT_BUILD_SUCCEED("long double x;\n"
                          "int main(void) { return 0; }\n");
     EXPECT_BUILD_SUCCEED("long double x = 1.5L;\n"
@@ -136,7 +147,10 @@ TEST(float, long_double_literals_and_decls)
     EXPECT_BUILD_SUCCEED("const long double g = 2.5L;\n"
                          "static long double s = 1.5L;\n"
                          "int main(void) { return 0; }\n");
-    /* The usual arithmetic conversions put long double at the top. */
+}
+
+TEST(float, long_double_common_type_precedence)
+{
     EXPECT_TRUE(type_common(type_long_double(), type_double()) == type_long_double());
     EXPECT_TRUE(type_common(type_float(), type_long_double()) == type_long_double());
     EXPECT_TRUE(type_common(type_int(), type_long_double()) == type_long_double());
@@ -153,16 +167,11 @@ TEST(float, bogus_specifiers_rejected)
     EXPECT_PARSE_FAIL("float double x;\n");
     EXPECT_PARSE_FAIL("double int x;\n");
     EXPECT_PARSE_FAIL("unsigned long double x;\n");
-    /* `_Complex` is not a ficc keyword yet — rejected as a type specifier. */
     EXPECT_PARSE_FAIL("_Complex c;\n");
 }
 
 TEST(float, float_storage_through_both_backends)
 {
-    /* Exchange FP bit patterns through a union: pure storage (no FP
-       arithmetic), so it must run identically in the interpreter and the ELF
-       backend. 1.1 in double is 0x3FF199999999999A (top word 0x3FF19999 ->
-       0x99); 1.1f is 0x3F8CCCCD (low byte 0xCD). */
     EXPECT_INTERP_AND_ELF("union U { double d; long long i; };\n"
                           "int main(void) {\n"
                           "    union U u;\n"
@@ -179,9 +188,8 @@ TEST(float, float_storage_through_both_backends)
                           0xCD);
 }
 
-TEST(float, int_to_float_init_now_lowers)
+TEST(float, int_to_float_init_runs)
 {
-    /* int→double / double→float conversions build and run in both backends. */
     EXPECT_INTERP_AND_ELF("int main(void) { double d = 5; return (int) d; }", 5);
     EXPECT_INTERP_AND_ELF("int main(void) { float f = 7; return (int) f; }", 7);
     EXPECT_BUILD_SUCCEED("double wid(void) { return 1; }\n"
@@ -201,7 +209,6 @@ TEST(float, float_to_bool)
 
 TEST(float, fp_arithmetic_both_backends)
 {
-    /* FP binary arithmetic lands in both backends; exact values stay exact. */
     EXPECT_INTERP_AND_ELF("int main(void){ double a=1.5, b=2.5;"
                           " if (a+b != 4.0) return 1;"
                           " if (a*b != 3.75) return 2;"
@@ -219,10 +226,8 @@ TEST(float, fp_arithmetic_both_backends)
                           " if (!(b/a > 1.6666665f && b/a < 1.6666668f)) return 2;"
                           " return 42; }",
                           42);
-    /* A literal overload lands on the FP opcodes (the immediates carry bits). */
     EXPECT_INTERP_AND_ELF("int main(void){ return (int)(1.5 + 2.5); }", 4);
     EXPECT_INTERP_AND_ELF("int main(void){ return (int)(1.5f * 2.0f); }", 3);
-    /* int × float promotes to float via the usual arithmetic conversions. */
     EXPECT_INTERP_AND_ELF("int main(void){ double a = 1.5; return (int)(a * 2); }", 3);
     EXPECT_INTERP_AND_ELF("int main(void){ float a = 1.5f; return (int)(3 * a); }", 4);
 }
@@ -278,7 +283,6 @@ TEST(float, fp_conditions_allowed)
     EXPECT_INTERP_AND_ELF("int main(void){ double x = 1.0; while (x < 3.0) x += 0.5; "
                           " return (int)x; }",
                           3);
-    /* Ternary conditions boolify like if/while. */
     EXPECT_INTERP_AND_ELF("int main(void){ double x = 1.5; return x ? 7 : 9; }", 7);
     EXPECT_INTERP_AND_ELF("int main(void){ double x = -0.0; return x ? 7 : 9; }", 9);
 }
@@ -433,8 +437,6 @@ TEST(float, fp_arrays_stay_32bit)
 
 TEST(float, fp_integer_lane_ops_rejected)
 {
-    /* % / shifts / bitwise are integer-only: a float operand is a violation,
-       both plain and compound. */
     EXPECT_BUILD_FAIL("int main(void) { double a, b; return (int) (a % b); }");
     EXPECT_BUILD_FAIL("int main(void) { double a; return (int) (a & 1); }");
     EXPECT_BUILD_FAIL("int main(void) { double a; return (int) (a << 1); }");
@@ -442,7 +444,6 @@ TEST(float, fp_integer_lane_ops_rejected)
     EXPECT_BUILD_FAIL("int main(void) { double a; a %= 1.0; return 0; }");
     EXPECT_BUILD_FAIL("int main(void) { double a; a <<= 1; return 0; }");
     EXPECT_BUILD_FAIL("int main(void) { double a; float b; return (int) (a & b); }");
-    /* A float on either side of a shift/remainder/bitwise op is rejected. */
     EXPECT_BUILD_FAIL("int main(void) { int x = 4; return (int) (x << 1.5); }");
     EXPECT_BUILD_FAIL("int main(void) { return (int) (1.5 << 2); }");
     EXPECT_BUILD_FAIL("int main(void) { double d; return (int) (d % 2); }");
@@ -451,7 +452,6 @@ TEST(float, fp_integer_lane_ops_rejected)
 
 TEST(float, fp_integer_only_contexts_reject_floats)
 {
-    /* A float never satisfies an integer constant-expression slot. */
     EXPECT_BUILD_FAIL("int main(void) { switch (1) { case 1.5: break; } return 0; }");
     EXPECT_BUILD_FAIL("_Static_assert(1.5, \"nope\");\n"
                       "int main(void) { return 0; }");
@@ -626,8 +626,6 @@ TEST(float, float_subscript_rejected)
     EXPECT_BUILD_FAIL("int main(void) { int a[3]; return a[1.5]; }");
 }
 
-/* SysV FP ABI and file-scope FP globals */
-
 TEST(float, fp_args_mixed_and_overflow_both_backends)
 {
     /* Independent GP/SSE counters; >8 floats spill to the stack in argument order. */
@@ -795,7 +793,6 @@ TEST(float, variadic_fp_mixed_and_helper_reads)
 
 TEST(float, file_scope_fp_globals)
 {
-    /* .data/.rodata/.bss globals, folded const exprs, and the surviving -0.0 sign. */
     EXPECT_INTERP_AND_ELF("double g = 1.5;\n"
                           "double gsum = 1.5 + 2.5;\n"
                           "const double gc = 6.25;\n"
@@ -842,8 +839,6 @@ TEST(float, file_scope_fp_nonconstant_rejected)
                       "int main(void) { return 0; }\n");
 }
 
-/* long double: type, literals, constants, value model (storage-only) */
-
 TEST(float, long_double_sizeof_alignof_folded)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
@@ -889,7 +884,6 @@ TEST(float, long_double_global_init_bytes)
 
 TEST(float, long_double_block_scope_copy)
 {
-    /* Address-taken locals store/load the full 16-byte value. */
     EXPECT_INTERP_AND_ELF("long double g = 1.5L;\n"
                           "int main(void) {\n"
                           "    long double x = 0.0L;\n"
@@ -956,7 +950,6 @@ TEST(float, long_double_static_block_and_literal_typed_right)
 
 TEST(float, long_double_cast_matrix_builds)
 {
-    /* i/d/ld casts type correctly and build; their runtime lowering is idle. */
     EXPECT_BUILD_SUCCEED("int main(void) {\n"
                          "    long double a = (long double) 3;\n"
                          "    long double b = 1.5;\n"
@@ -970,8 +963,6 @@ TEST(float, long_double_cast_matrix_builds)
                          "long double h = 1.5f;\n"
                          "int main(void) { return 0; }\n");
 }
-
-/* 19f: x87 arithmetic / compares / converts (both backends) */
 
 TEST(float, long_double_arith_both_backends)
 {
@@ -992,7 +983,6 @@ TEST(float, long_double_arith_both_backends)
 
 TEST(float, long_double_arith_bit_exact)
 {
-    /* Independent gcc oracle: the 80-bit patterns these chains produce. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    long double s = 0.0L;\n"
                           "    s = 0.1L + 0.2L;\n"
@@ -1095,24 +1085,33 @@ TEST(float, long_double_boolify_and_conditions)
                           42);
 }
 
-TEST(float, long_double_unary_and_compound)
+TEST(float, long_double_unary_minus)
 {
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    long double a = 1.5L;\n"
                           "    if (-a != -1.5L) return 1;\n"
                           "    if (*(unsigned short *) ((char *) &a + 8) != 0x3FFF) return 2;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
+}
+
+TEST(float, long_double_compound_assign)
+{
+    EXPECT_INTERP_AND_ELF("int main(void) {\n"
+                          "    long double a = 1.5L;\n"
                           "    a += 2.5L;\n"
-                          "    if (a != 4.0L) return 3;\n"
+                          "    if (a != 4.0L) return 1;\n"
                           "    a *= 2.0L;\n"
-                          "    if (a != 8.0L) return 4;\n"
+                          "    if (a != 8.0L) return 2;\n"
                           "    a -= 1.0L;\n"
-                          "    if (a != 7.0L) return 5;\n"
+                          "    if (a != 7.0L) return 3;\n"
                           "    a /= 2.0L;\n"
-                          "    if (a != 3.5L) return 6;\n"
+                          "    if (a != 3.5L) return 4;\n"
                           "    a++;\n"
-                          "    if (a != 4.5L) return 7;\n"
+                          "    if (a != 4.5L) return 5;\n"
                           "    --a;\n"
-                          "    if (a != 3.5L) return 8;\n"
+                          "    if (a != 3.5L) return 6;\n"
                           "    return 42;\n"
                           "}\n",
                           42);
@@ -1120,7 +1119,6 @@ TEST(float, long_double_unary_and_compound)
 
 TEST(float, long_double_cast_matrix_runtime)
 {
-    /* The i/d/f ↔ ld cast matrix now lowers on x87. */
     EXPECT_INTERP_AND_ELF("int main(void) {\n"
                           "    long double a = (long double) 3;\n"
                           "    if (a != 3.0L) return 1;\n"
