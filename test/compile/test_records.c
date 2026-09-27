@@ -1241,3 +1241,35 @@ TEST(records, copy16_round_trip)
                           "}\n",
                           10);
 }
+
+TEST(records, copy24_32_round_trip)
+{
+    /* The two wide block-copy shapes: 24 (16 + 8 tail) and 32 (two 16s). */
+    EXPECT_INTERP_AND_ELF("struct S24 { int a, b, c, d, e, f; };\n"
+                          "struct S32 { int a, b, c, d, e, f, g, h; };\n"
+                          "struct S24 make24(int x)\n"
+                          "{\n"
+                          "    struct S24 s;\n"
+                          "    s.a = x; s.b = x + 1; s.c = x + 2;\n"
+                          "    s.d = x + 3; s.e = x + 4; s.f = x + 5;\n"
+                          "    return s;\n"
+                          "}\n"
+                          "struct S32 make32(int x)\n"
+                          "{\n"
+                          "    struct S32 s;\n"
+                          "    s.a = x; s.b = x + 1; s.c = x + 2; s.d = x + 3;\n"
+                          "    s.e = x + 4; s.f = x + 5; s.g = x + 6; s.h = x + 7;\n"
+                          "    return s;\n"
+                          "}\n"
+                          "int main(void)\n"
+                          "{\n"
+                          "    struct S24 p = make24(10);\n"
+                          "    struct S24 q = p;\n"
+                          "    struct S32 r = make32(20);\n"
+                          "    struct S32 s = r;\n"
+                          "    if (q.a != 10 || q.c != 12 || q.f != 15) { return 1; }\n"
+                          "    if (s.a != 20 || s.e != 24 || s.h != 27) { return 2; }\n"
+                          "    return q.f + s.h - 42;\n"
+                          "}\n",
+                          0);
+}

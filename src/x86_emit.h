@@ -349,6 +349,8 @@ void emit_sse_load(ByteBuf *buf, u8 mf, u8 xmm, X86Mem mem);
 void emit_sse_store(ByteBuf *buf, u8 mf, X86Mem mem, u8 xmm);
 void emit_mov16(ByteBuf *buf, X86Mem src, X86Mem dst);
 void emit_mov16_store(ByteBuf *buf, X86Mem dst);
+void emit_movups_load(ByteBuf *buf, u8 xmm, X86Mem src);
+void emit_movups_store(ByteBuf *buf, u8 xmm, X86Mem dst);
 void emit_sse_cvt(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_xmm);
 void emit_cvtsi2fp(ByteBuf *buf, u8 mf, u8 dst_xmm, u8 src_reg);
 void emit_cvtts2i(ByteBuf *buf, u8 mf, u8 dst_reg, u8 src_xmm, bool to_64);

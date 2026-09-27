@@ -647,6 +647,23 @@ void emit_mov16_store(ByteBuf *buf, X86Mem dst)
     emit_mem_operand(buf, R_XMM0, dst);
 }
 
+/* movups, which unlike movss/movsd carries no mandatory prefix. */
+void emit_movups_load(ByteBuf *buf, u8 xmm, X86Mem src)
+{
+    emit_rex_mem_if(buf, false, xmm >= 8, src);
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_MOV);
+    emit_mem_operand(buf, xmm, src);
+}
+
+void emit_movups_store(ByteBuf *buf, u8 xmm, X86Mem dst)
+{
+    emit_rex_mem_if(buf, false, xmm >= 8, dst);
+    bytebuf_append(buf, X86_TWO_BYTE_ESC);
+    bytebuf_append(buf, X86_SSE_MOV_RM);
+    emit_mem_operand(buf, xmm, dst);
+}
+
 /* REX.R/REX.B for an SSE reg, r/m pair; xmm0-7 need none (and stay byte-stable). */
 static void emit_sse_rex(ByteBuf *buf, u8 reg, u8 rm)
 {

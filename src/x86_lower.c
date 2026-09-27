@@ -1155,9 +1155,38 @@ static void lower_alloca(IrInstr *in, X86LowerCtx *ctx)
     (void) ctx;
 }
 
-/* A scalar- or 16-byte block is one load and one store; the read completes
-   before the write, so a self-overlapping copy is still correct.  This avoids
-   the %rsi/%rdi/%rcx setup and rep-movsb start-up a byte loop would pay. */
+/* 24 and 32 bytes are the largest blocks the reserved xmm0/xmm1 and %r11
+   scratch can cover.  24 ends with an 8-byte scalar tail; every load still
+   runs before any store. */
+static void lower_memcpy_wide(ByteBuf *buf, X86Mem src, X86Mem dst, u64 size)
+{
+    X86Mem src_hi = src;
+    src_hi.disp += 16;
+    X86Mem dst_hi = dst;
+    dst_hi.disp += 16;
+    emit_movups_load(buf, R_XMM0, src);
+    if (size == 32)
+    {
+        emit_movups_load(buf, R_XMM1, src_hi);
+    }
+    else
+    {
+        emit_mov(buf, W_QWORD, xop_reg(R_R11), xop_mem(src_hi));
+    }
+    emit_movups_store(buf, R_XMM0, dst);
+    if (size == 32)
+    {
+        emit_movups_store(buf, R_XMM1, dst_hi);
+    }
+    else
+    {
+        emit_mov(buf, W_QWORD, xop_mem(dst_hi), xop_reg(R_R11));
+    }
+}
+
+/* A small block is copied with movups chunks, and every load runs before any
+   store so a self-overlapping copy stays correct.  This avoids the
+   %rsi/%rdi/%rcx setup and rep-movsb start-up a byte loop would pay. */
 static bool lower_memcpy_block(IrInstr *in, X86LowerCtx *ctx)
 {
     u64 size = (u64) in->ops[2].u.imm;
@@ -1166,6 +1195,13 @@ static bool lower_memcpy_block(IrInstr *in, X86LowerCtx *ctx)
         X86Mem src = x86_lower_mem_for_ptr(ctx, in->ops[1], R_R11);
         X86Mem dst = x86_lower_mem_for_ptr(ctx, in->ops[0], R_EAX);
         emit_mov16(ctx->buf, src, dst);
+        return true;
+    }
+    if (size == 24 || size == 32)
+    {
+        X86Mem src = x86_lower_mem_for_ptr(ctx, in->ops[1], R_R11);
+        X86Mem dst = x86_lower_mem_for_ptr(ctx, in->ops[0], R_EAX);
+        lower_memcpy_wide(ctx->buf, src, dst, size);
         return true;
     }
     if (size != 1 && size != 2 && size != 4 && size != 8)
