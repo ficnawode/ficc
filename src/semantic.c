@@ -15,11 +15,12 @@ struct SemanticCtx
     StrMap *labels;      /* label name -> ASTLabelStmt (collected per function) */
     int loop_depth;
     int switch_depth;
-    Vec *switch_sem_stack;  /* Vec<SwitchSem*> — per-switch case-value sets */
-    Vec *fn_params;         /* enclosing function's ASTVarDecl* list (for builtin
-                               va_start validation), NULL outside function bodies */
-    Vec *resolving_records; /* Vec<Type*> — records on the type-resolution stack,
-                               to break self-referential cycles */
+    Vec *switch_sem_stack;    /* Vec<SwitchSem*> — per-switch case-value sets */
+    Vec *fn_params;           /* enclosing function's ASTVarDecl* list (for builtin
+                                 va_start validation), NULL outside function bodies */
+    Vec *resolving_records;   /* Vec<Type*> — records on the type-resolution stack,
+                                 to break self-referential cycles */
+    U64Map *resolved_records; /* records already fully resolved this unit (memo) */
     SemanticConfig cfg;
     bool error;
 };
@@ -1110,6 +1111,10 @@ static bool sem_resolve_type(Type **slot, SemanticCtx *ctx)
         {
             return true;
         }
+        if (u64map_get(ctx->resolved_records, (u64) (uintptr_t) type))
+        {
+            return true;
+        }
         for (size_t i = 0; i < vec_size(ctx->resolving_records); i++)
         {
             if (vec_get(ctx->resolving_records, i) == type)
@@ -1139,6 +1144,7 @@ static bool sem_resolve_type(Type **slot, SemanticCtx *ctx)
         {
             type_record_relayout(type);
         }
+        u64map_set(ctx->resolved_records, (u64) (uintptr_t) type, type);
         return true;
     }
     return true;
@@ -3299,6 +3305,7 @@ ASTNode *semantic_check(ASTNode *ast, const SemanticConfig *cfg, Arena *arena)
         .switch_depth = 0,
         .switch_sem_stack = vec_new(arena),
         .resolving_records = vec_new(arena),
+        .resolved_records = u64map_new(arena),
         .cfg = sc,
         .error = false,
     };
