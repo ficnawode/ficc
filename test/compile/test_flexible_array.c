@@ -51,11 +51,18 @@ TEST(flexible_array, negative_in_union)
                       "int main(void) { return 0; }\n");
 }
 
-TEST(flexible_array, negative_as_member)
+TEST(flexible_array, member_with_fam_is_allowed)
 {
-    EXPECT_BUILD_FAIL("struct A { int n; char d[]; };\n"
-                      "struct B { struct A a; };\n"
-                      "int main(void) { return 0; }\n");
+    /* GCC accepts embedding a struct that has a flexible array member; only an
+       array of such a struct is ill-formed. The embedded FAM contributes no
+       bytes, so sizeof(B) == sizeof(A) == 4. */
+    EXPECT_INTERP_AND_ELF("struct A { int n; char d[]; };\n"
+                          "struct B { struct A a; };\n"
+                          "int main(void) {\n"
+                          "    if (sizeof(struct B) != 4) return 1;\n"
+                          "    return 42;\n"
+                          "}\n",
+                          42);
 }
 
 TEST(flexible_array, negative_only_member)

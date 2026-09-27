@@ -122,11 +122,13 @@ static StrMap *current_scope(Parser *p)
 static void push_scope(Parser *p)
 {
     vec_push(p->name_scopes, strmap_new(p->arena));
+    type_tag_scope_push();
 }
 
 static void pop_scope(Parser *p)
 {
     (void) vec_pop(p->name_scopes);
+    type_tag_scope_pop();
 }
 
 static Binding *name_lookup(Parser *p, const char *name)
@@ -571,8 +573,12 @@ static bool validate_flexible_members(Parser *p, Type *rec, Vec *fields)
         RecordField *f = (RecordField *) vec_get(fields, i);
         if (type_is_record(f->type) && type_record_has_fam(f->type))
         {
-            parse_error(p, "record with a flexible array member cannot be a member");
-            return false;
+            /* C11 permits a record with a flexible array member as a member
+               (its size excludes the flexible tail); only arrays of such
+               records are ill-formed (checked in semantic). GCC accepts this
+               and warns only under -pedantic, so do the same. */
+            parse_warning(p, peek_token(p)->loc,
+                          "invalid use of structure with flexible array member");
         }
         if (!type_is_array(f->type) || f->type->arr.length != 0 || type_array_is_pending(f->type))
         {
@@ -736,6 +742,7 @@ static bool parse_tag_prefix(Parser *p, TypeKind kind, const char **tag, Type **
     }
     next_token(p);
 
+    bool is_def = peek_token(p)->kind == TOK_LBRACE;
     Type *existing = type_record_lookup(t->payload.str);
     if (existing && existing->kind != kind)
     {
@@ -744,7 +751,21 @@ static bool parse_tag_prefix(Parser *p, TypeKind kind, const char **tag, Type **
     }
 
     *tag = t->payload.str;
-    *out = kind == TYPE_ENUM ? type_enum(t->payload.str) : type_record(kind, t->payload.str);
+    if (is_def)
+    {
+        /* A definition: type_record/type_enum interns a fresh type when the
+           tag is not already bound in this scope, shadowing any outer type. */
+        *out = kind == TYPE_ENUM ? type_enum(t->payload.str) : type_record(kind, t->payload.str);
+    }
+    else if (existing)
+    {
+        *out = existing;
+    }
+    else
+    {
+        /* First sight of the tag (implicit forward declaration). */
+        *out = kind == TYPE_ENUM ? type_enum(t->payload.str) : type_record(kind, t->payload.str);
+    }
     return true;
 }
 
@@ -1283,23 +1304,18 @@ static Type *parse_group_suffixes(Parser *p, Type *t, u32 *nptr, Vec **captured_
     }
 }
 
-/* C11 §6.7.6.1: `[N]` binds tighter than `*`, so an outer suffix binds below
-   the declarator's own array layers. */
-static Type *collect_array_layers(Vec *arrays, Type *t, u32 dims)
-{
-    for (u32 i = 0; i < dims && t->kind == TYPE_ARRAY; i++)
-    {
-        vec_push(arrays, t);
-        t = t->arr.elem;
-    }
-    return t;
-}
-
 static bool parse_declarator_group(Parser *p, Type *base, u32 nptr, Declarator *out,
                                    bool name_optional)
 {
-    Declarator inner;
-    if (!parse_declarator_core(p, base, &inner, name_optional, true))
+    /* A parenthesized declarator is `( inner ) suffix*`. Both the enclosing
+       pointer layers (`nptr`, the stars before this `(`) and the suffixes wrap
+       the base type *before* the inner declarator is interpreted, so the base
+       must be transformed first. The suffixes, however, follow the inner text.
+       Parse the inner once to locate the matching `)`, compute the
+       suffix-wrapped base, then re-parse the inner against it. */
+    size_t inner_start = p->pos;
+    Declarator scratch;
+    if (!parse_declarator_core(p, base, &scratch, name_optional, true))
     {
         return false;
     }
@@ -1308,42 +1324,35 @@ static bool parse_declarator_group(Parser *p, Type *base, u32 nptr, Declarator *
         return false;
     }
 
-    Vec *arrays = vec_new(p->arena);
-    bool inner_is_func = inner.type->kind == TYPE_FUNC;
-    Type *core = inner_is_func ? inner.type->func.ret : inner.type;
-    core = collect_array_layers(arrays, core, inner.array_dims);
-    u32 inner_ptrs = 0;
-    /* Strip only the declarator's own `*` layers; pointer layers from the base
-       type (e.g. a pointer typedef return type) belong to the return type. */
-    while (inner_ptrs < inner.stars && core->kind == TYPE_PTR)
-    {
-        core = core->ptr.pointee;
-        inner_ptrs++;
-    }
-
+    u32 zero = 0;
     Vec *outer_params = NULL;
     bool outer_variadic = false;
-    Type *suffix = parse_group_suffixes(p, core, &nptr, &outer_params, &outer_variadic);
-    if (!suffix)
+    Type *wrapped = ptr_layers(base, nptr);
+    Type *group_base = parse_group_suffixes(p, wrapped, &zero, &outer_params, &outer_variadic);
+    if (!group_base)
     {
         return false;
     }
-    Type *result = ptr_layers(ptr_layers(suffix, nptr), inner_ptrs);
-    if (inner_is_func)
+    size_t after_suffix = p->pos;
+
+    p->pos = inner_start;
+    if (!parse_declarator_core(p, group_base, out, name_optional, true))
     {
-        result = type_func(result, inner.type->func.params, inner.type->func.is_variadic);
+        return false;
     }
-    for (size_t i = vec_size(arrays); i > 0; i--)
+    if (!expect_token(p, TOK_RPAREN, "')'"))
     {
-        Type *arr = (Type *) vec_get(arrays, i - 1);
-        result = type_array(result, arr->arr.length);
+        return false;
     }
-    out->type = result;
-    out->name = inner.name;
+    p->pos = after_suffix;
+    /* The stars and arrays are already folded into out->type by the re-parse. */
     out->stars = 0;
     out->array_dims = 0;
-    out->func_params = inner_is_func ? inner.func_params : outer_params;
-    out->func_variadic = inner_is_func ? inner.func_variadic : outer_variadic;
+    if (!out->func_params)
+    {
+        out->func_params = outer_params;
+        out->func_variadic = outer_variadic;
+    }
     return true;
 }
 
@@ -3602,6 +3611,14 @@ ASTNode *parse(Token *tokens, u64 count, const ParserConfig *cfg, Arena *arena)
     Vec *decls = vec_new(arena);
     while (peek_token(&p)->kind != TOK_EOF)
     {
+        /* An empty declaration (a stray `;`) is valid at file scope; GCC
+           diagnoses it only under -pedantic.  `SQLITE_EXTENSION_INIT1;` in the
+           SQLite shell expands to exactly this. */
+        if (peek_token(&p)->kind == TOK_SEMI)
+        {
+            next_token(&p);
+            continue;
+        }
         ASTNode *node = parse_toplevel_decl(&p);
         if (!node)
         {
