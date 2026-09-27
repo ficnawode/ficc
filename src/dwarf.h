@@ -7,7 +7,6 @@
 #include "util/types.h"
 #include "util/vec.h"
 
-/* R_X86_64_64 reloc for a .debug_* address slot; sym is text/rodata/data/bss. */
 typedef struct
 {
     u64 offset;
@@ -23,7 +22,6 @@ enum
     DWARF_SYM_BSS = 4,
 };
 
-/* Debug-section content plus the relocation lists elf_write consumes. */
 typedef struct
 {
     CfiOutput *cfi;
@@ -32,15 +30,13 @@ typedef struct
     ByteBuf debug_str;
     ByteBuf debug_line;
     ByteBuf debug_loc;
-    Vec *rela_info; /* Vec<DwarfReloc*> */
-    Vec *rela_line; /* Vec<DwarfReloc*> */
+    Vec *rela_info;
+    Vec *rela_line;
 } DwarfOutput;
 
-/* unsigned/signed LEB128 encoders; exported for unit tests. */
 void dwarf_uleb128(ByteBuf *b, u64 val);
 void dwarf_sleb128(ByteBuf *b, i64 val);
 
-/* Build .debug_line (+ .rela.debug_line) and a compile-unit DIE. */
 void dwarf_build(CodegenModule *cm, const char *compile_unit, const char *comp_dir,
                  DwarfOutput *out, Arena *arena);
 

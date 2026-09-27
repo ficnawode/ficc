@@ -6,25 +6,23 @@
 #include "util/types.h"
 #include "util/vec.h"
 
-/* Floating constant kinds (§6.4.4.2). */
+/* C11 §6.4.4.2 */
 typedef enum
 {
     FK_FLOAT,
     FK_DOUBLE,
-    FK_LONG, /* x87 80-bit long double */
+    FK_LONG,
 } FloatKind;
 
-/* String/char literal element kind (§6.4.5); `payload.str` holds decoded
-   little-endian elements, NUL-terminated by one element. */
+/* C11 §6.4.5 */
 typedef enum
 {
-    STRK_NARROW, /* "" or u8"" */
-    STRK_WIDE,   /* L""  */
-    STRK_UTF16,  /* u""  */
-    STRK_UTF32,  /* U""  */
+    STRK_NARROW,
+    STRK_WIDE,
+    STRK_UTF16,
+    STRK_UTF32,
 } StrKind;
 
-/* Element size in bytes for a string/char literal kind. */
 u32 str_kind_elem_size(StrKind kind);
 
 #define TOKEN_KINDS(X)                                                                             \
@@ -144,8 +142,8 @@ typedef struct
     {
         i64 int_val;
         const char *str;
-        u64 float_pat;      /* IEEE-754 bit pattern: low 32 = float, all 64 = double */
-        long double ld_val; /* host 80-bit value (FK_LONG) */
+        u64 float_pat;
+        long double ld_val;
     } payload;
     struct
     {
@@ -153,9 +151,9 @@ typedef struct
         IntSuffix length : 2;
         bool is_hex : 1;
     } int_suffix;
-    FloatKind float_kind; /* valid when kind == TOK_FLOAT_LIT */
+    FloatKind float_kind;
     u32 str_len;
-    StrKind str_kind; /* valid when kind == TOK_STRING_LIT / TOK_CHAR_LIT */
+    StrKind str_kind;
 } Token;
 
 typedef struct LexResult LexResult;
@@ -165,17 +163,10 @@ struct LexResult
     u64 count;
 };
 
-/* Translation phase 7: convert a preprocessing-token soup (trivia dropped)
-   into the parser's Token[]; merges adjacent string literals. On error,
-   tokens is NULL and count is 0. */
 LexResult lex_finalize(const Vec *soup, Arena *arena);
 
 const char *token_kind_name(TokenKind kind);
 
-/* Decodes one escape sequence (the leading backslash is already consumed);
-   end bounds the spelling, or is NULL for NUL-terminated input. Returns the
-   byte (numeric escapes accumulate greedily and may exceed 0xFF), or -1 on a
-   hex escape with no digits. Shared by the two string-value decoders. */
 int lex_escape_byte(const char **pp, const char *end);
 
 #endif

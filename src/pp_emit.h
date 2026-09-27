@@ -6,14 +6,10 @@
 
 typedef struct
 {
-    bool keep_comments; /* -C: print comment trivia */
-    bool no_markers;    /* -P: omit `#line NN "file"` markers */
+    bool keep_comments;
+    bool no_markers;
 } PpEmitOptions;
 
-/* Prints the phase-4 soup (pp->out) to f: each real token's spelling preceded
-   by its trivia, comment trivia only with -C. `#line NN "file"` pseudo-lines
-   are emitted on the first line and whenever the presumed line/file jumps
-   unless no_markers, so the output re-preprocesses to the identical soup. */
 void pp_emit(Pp *pp, FILE *f, PpEmitOptions opts);
 
 #endif

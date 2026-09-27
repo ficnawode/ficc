@@ -14,7 +14,6 @@ typedef int16_t i16;
 typedef int32_t i32;
 typedef int64_t i64;
 
-/* Evaluate arguments twice; use only with side-effect-free operands. */
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 

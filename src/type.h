@@ -11,7 +11,7 @@ typedef enum
     SUFFIX_LL,
 } IntSuffix;
 
-/* Type qualifiers (C11 §6.7.3). Bitmask; append-only. */
+/* C11 §6.7.3 */
 typedef enum
 {
     Q_NONE = 0,
@@ -20,7 +20,6 @@ typedef enum
     Q_RESTRICT = 1 << 2,
 } Qualifier;
 
-/* X-macro for type kinds. Append only. */
 #define TYPE_KINDS(X)                                                                              \
     X(TYPE_VOID)                                                                                   \
     X(TYPE_INT)                                                                                    \
@@ -57,24 +56,22 @@ typedef struct RecordField RecordField;
 
 struct RecordField
 {
-    const char *name; /* field name, compared by content (not interned) */
+    const char *name;
     Type *type;
-    u32 offset;         /* byte offset of the member (bit-field: of its storage unit) */
-    i32 bit_offset;     /* bit-field: bit position within the storage unit, else -1 */
-    i32 bit_width;      /* bit-field width, else -1 */
-    u32 align_override; /* explicit `_Alignas`/`aligned` member alignment, 0 = natural */
+    u32 offset;
+    i32 bit_offset;
+    i32 bit_width;
+    u32 align_override;
 };
 
 struct Type
 {
     TypeKind kind;
-    u8 width;          /* in bits */
-    u8 align;          /* in bytes */
-    u32 size;          /* in bytes */
-    u8 qualifiers;     /* V8 qualifier bitmask (Q_CONST) */
-    Type *unqual_base; /* the unqualified type this qualified variant wraps
-                          (NULL for unqualified types; arrays store no
-                          wrapper — const lives in the element type) */
+    u8 width;
+    u8 align;
+    u32 size;
+    u8 qualifiers;
+    Type *unqual_base;
     union
     {
         struct
@@ -85,38 +82,34 @@ struct Type
         {
             Type *elem;
             u64 length;
-            struct ASTNode *bound_expr; /* non-NULL: constant bound not yet folded
-                                           (§6.7.6.2); `length` is 0 until resolved */
+            struct ASTNode *bound_expr; /* C11 §6.7.6.2 */
         } arr;
         struct
         {
-            const char *tag; /* NULL only for anonymous (out of scope) */
-            Vec *fields;     /* Vec<RecordField*> */
+            const char *tag;
+            Vec *fields; /* Vec<RecordField*> */
             bool complete;
-            bool packed;        /* `__attribute__((packed))`: members align 1 */
-            u32 align_override; /* `__attribute__((aligned(n)))` on the record, 0 = natural */
-            Vec *qual_variants; /* Vec<Type*>: const variants of this record,
-                                   kept in sync by type_record_complete */
-        } record;               /* TYPE_STRUCT / TYPE_UNION */
+            bool packed;
+            u32 align_override;
+            Vec *qual_variants; /* Vec<Type*> */
+        } record;
         struct
         {
-            const char *tag; /* identity + diagnostics */
-            bool complete;   /* set by the enum definition */
-        } enumm;             /* TYPE_ENUM: underlying int, no members */
+            const char *tag;
+            bool complete;
+        } enumm;
         struct
         {
-            /* top-level qualifiers stripped (C11 §6.7.6.3p15) */
-            Type *ret;
-            /* Vec<Type*>, already type_unqual'd; empty for (void) */
-            Vec *params;
+            Type *ret;   /* C11 §6.7.6.3p15 */
+            Vec *params; /* Vec<Type*> */
             bool is_variadic;
-        } func; /* TYPE_FUNC */
+        } func;
     };
 };
 
 Type *type_void(void);
 Type *type_int(void);
-Type *type_cbool(void); /* C11 _Bool: 1 byte, unsigned semantics */
+Type *type_cbool(void);
 Type *type_char(void);
 Type *type_short(void);
 Type *type_long(void);
@@ -127,35 +120,30 @@ Type *type_uint(void);
 Type *type_ulong(void);
 Type *type_ullong(void);
 
-/* IEEE-754 single/double on SSE2 at their ABI sizes. */
 Type *type_float(void);
 Type *type_double(void);
 
-/* x87 80-bit double-extended in a 16-byte slot. */
 Type *type_long_double(void);
 
 bool type_is_signed_int(Type *t);
 bool type_is_signed(Type *t);
 bool type_is_unsigned(Type *t);
 bool type_is_integer(Type *t);
-bool type_is_float(Type *t); /* the two SSE float kinds */
-bool type_is_fp(Type *t);    /* any floating type (incl. long double) */
+bool type_is_float(Type *t);
+bool type_is_fp(Type *t);
 bool type_is_ptr(Type *t);
 bool type_is_array(Type *t);
 bool type_is_record(Type *t);
 bool type_is_struct(Type *t);
 bool type_is_union(Type *t);
 bool type_is_enum(Type *t);
-bool type_is_complete(Type *t); /* records + arrays (len-0 = `[]` unspecified) */
+bool type_is_complete(Type *t);
 bool type_is_const(Type *t);
 bool type_is_volatile(Type *t);
 
 Type *type_ptr(Type *pointee);
 Type *type_array(Type *elem, u64 length);
 
-/* An array whose bound is a constant expression not yet folded at parse time
-   (`T a[sizeof(x)]`). Semantic resolves it with type_array once the bound
-   folds to an integer constant; the pending type never escapes semantic. */
 Type *type_array_pending(Type *elem, struct ASTNode *bound_expr);
 Type *type_array_resolve(Type *pending, u64 length);
 bool type_array_is_pending(Type *t);
@@ -165,35 +153,20 @@ bool type_is_variadic(Type *t);
 Type *type_record(TypeKind kind, const char *tag);
 Type *type_record_anon(TypeKind kind);
 void type_record_complete(Type *t, Vec *fields);
-/* Recompute a completed record's layout from its (possibly re-resolved) member
-   types; used by semantic after deferring a member array bound. */
 void type_record_relayout(Type *t);
 
-/* The builtin `va_list`: glibc's x86-64 shape, a 24-byte struct
-   `{u32 gp_offset; u32 fp_offset; void *overflow_arg_area; void
-   *reg_save_area;}` used as an array of 1 so it decays to a pointer on use.
-   Interned singleton; reconstructed per compilation unit by type_reset. */
 Type *type_va_list(void);
 Type *type_enum(const char *tag);
 Type *type_enum_anon(void);
 Type *type_record_lookup(const char *tag);
-/* Block-scope tag scoping: push/pop a tag scope alongside the parser's name
-   scopes so a local struct/union/enum definition shadows an outer same-named
-   tag and is forgotten when the scope ends (C11 §6.2.1). */
 void type_tag_scope_push(void);
 void type_tag_scope_pop(void);
-bool type_record_has_fam(Type *t); /* last member is a flexible array `T x[]` */
+bool type_record_has_fam(Type *t);
 Type *type_record_field(Type *t, const char *name);
 u32 type_record_field_offset(Type *t, const char *name);
 
-/* Bit-field info for `name` (recursing through anonymous members): true when
-   the member is a bit-field, filling its position within the storage unit and
-   width; false fills nothing. */
 bool type_record_field_bit(Type *t, const char *name, u32 *bit_offset, u32 *bit_width);
 
-/* Reset the tag table for a new compilation unit. Record types remain
-   immortal (they may be referenced by interned pointer/array types), but the
-   tag-name mapping is cleared so a later compilation may reuse tag names. */
 void type_reset(void);
 Type *type_deref(Type *t);
 Type *type_array_elem(Type *t);
@@ -203,42 +176,29 @@ bool type_is_function(Type *t);
 u64 type_sizeof(Type *t);
 u64 type_alignof(Type *t);
 
-/* Qualifier composition (C11 §6.7.3). Qualifying an array qualifies its
-   element type (`const int a[3]` is an array of const int), so decay yields
-   `const int*` and `a[i]` lvalues are const. Qualifying is idempotent.
-   `type_unqual` removes every qualifier (rvalues are always unqualified). */
+/* C11 §6.7.3 */
 Type *type_const(Type *t);
 Type *type_volatile(Type *t);
 Type *type_restrict(Type *t);
 Type *type_qualify(Type *t, u8 qbits);
 Type *type_unqual(Type *t);
-Type *type_rvalue(Type *t); /* alias for type_unqual: strip qualifiers on read */
+Type *type_rvalue(Type *t);
 
-/* C11 §6.3.1.1 integer promotion: promote types narrower than int to int. */
+/* C11 §6.3.1.1 */
 Type *type_promote(Type *t);
 
-/* C11 §6.3.1.8 usual arithmetic conversions: common type for binary operations. */
+/* C11 §6.3.1.8 */
 Type *type_common(Type *a, Type *b);
 
-/* C11 §6.2.7: true when two types are compatible (used by `_Generic`
-   association matching, §6.5.15p2). Composites are interned, so structural
-   equality is pointer equality; only pointers/arrays/functions recurse. */
+/* C11 §6.2.7, §6.5.15p2 */
 bool type_compatible(Type *a, Type *b);
 
-/* C11 §6.4.4.1 integer constant typing. Returns the smallest type that can
-   represent `value` given the suffix constraints, per LP64 data model. */
+/* C11 §6.4.4.1 */
 Type *type_int_literal(i64 value, bool is_hex, bool is_unsigned, IntSuffix length);
 
-/* Integer rank for type comparison: higher rank = wider type.
-   Returns -1 for non-integer types. */
 int type_rank(Type *t);
 
-/* C11 §6.3.1.3: convert a value into a target integer type's range. Narrower
-   targets wrap modulo 2^width; the result is masked to the width and
-   sign-extended if the target is signed (the implementation-defined wrap for
-   out-of-range signed targets). Used by constant
-   folding of casts and switch case conversion; runtime casts lower to
-   TRUNC/ZEXT/SEXT in the IR builder instead. */
+/* C11 §6.3.1.3 */
 i64 type_reduce_int(Type *target, i64 value);
 
 const char *type_kind_name(TypeKind kind);

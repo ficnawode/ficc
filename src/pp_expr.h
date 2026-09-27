@@ -9,8 +9,6 @@ typedef struct
     bool is_unsigned;
 } PpExprVal;
 
-/* Evaluates an expanded #if controlling expression. Reports diagnostics
-   through pp_error and recovers. */
 PpExprVal pp_eval_expr(Pp *pp, const Vec *tokens);
 
 #endif

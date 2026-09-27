@@ -51,7 +51,7 @@ struct Pp
     Loc physical;
     Loc presumed;
     bool skipping;
-    PPConfig cfg; /* -I / -D / -U / -include / -nostdinc / -fpedantic */
+    PPConfig cfg;
     const char *exe_path;
     const char *builtin_dir;
     const char *cooked_date;
@@ -64,36 +64,24 @@ struct Pp
     u32 warning_count;
 };
 
-/* Returns a new pp context backed by its own arena; pp_free releases it. */
 Pp *pp_new(Arena *arena);
 
-/* Releases the pp arena (normalized source, soup, macros). The pp output is
-   only needed until lex_finalize has run. */
 void pp_free(Pp *pp);
 
-/* Translation phase 4. Returns the output soup (also pp->out) or NULL on
-   error. */
 Vec *pp_preprocess(Pp *pp, const char *file, const char *src);
 
-/* Imports a command-line config fragment into the context: `nostdinc`,
-   `pedantic`, the `-I` include paths, and the `-D`/`-U`/`-include` commands
-   (applied in order). */
 void pp_apply_config(Pp *pp, const PPConfig *cfg);
 
-/* Command-line hooks (17u), applied before the main file is read: `-D name[=val]`
-   (object-like), `-U name`, and `-include file` (preprocessed to completion). */
 void pp_define_cmdline(Pp *pp, const char *spec);
 void pp_undef_cmdline(Pp *pp, const char *name);
 void pp_include_cmdline(Pp *pp, const char *file);
 
-/* Diagnostics; exported so the #if evaluator can report through the same sink. */
 void pp_error(Pp *pp, Loc loc, const char *fmt, ...);
 void pp_warn(Pp *pp, Loc loc, const char *fmt, ...);
 void pp_note(Loc loc, const char *fmt, ...);
 void pp_verror(Pp *pp, Loc loc, const char *fmt, va_list args);
 void pp_vwarn(Pp *pp, Loc loc, const char *fmt, va_list args);
 
-/* Prints one line per soup token: presumed loc, kind, spelling, has_newline. */
 void pp_dump(const Vec *soup);
 
 #endif

@@ -4,7 +4,6 @@
 #include "ir.h"
 #include "util/types.h"
 
-/* Register classes the allocator may assign (D22.5: x87 is memory-only). */
 typedef enum
 {
     RC_GPR,
@@ -13,7 +12,6 @@ typedef enum
     RC_NONE,
 } RegClass;
 
-/* One allocatable bank: phys ids in x86_emit numbering, spills aligned to `align`. */
 typedef struct
 {
     RegClass cls;
@@ -21,41 +19,35 @@ typedef struct
     u8 names[16];
     u8 callee_saved[16];
     u8 ncallee_saved;
-    u8 align;         /* spill-slot alignment for a value of this class */
-    bool memory_only; /* values never live in a register (RC_X87) */
-    u8 fixed[16];     /* reserved from allocation: implicit operands and scratch */
+    u8 align;
+    bool memory_only;
+    u8 fixed[16];
     u8 nfixed;
 } RegBank;
 
-/* The x87 return carrier: element 0 of the physical x87 stack. */
 #define R_X87_ST0 0
 
-/* What the allocator and prologue may know about a target (B seam). */
 typedef struct TargetDesc TargetDesc;
 struct TargetDesc
 {
     const char *name;
     RegBank gpr;
     RegBank xmm;
-    RegBank x87;        /* memory_only = true */
-    u8 word_width;      /* 8 */
-    u8 frame_align;     /* 16 */
-    u8 spill_align[17]; /* alignment per byte width (index 0 unused); 16-byte x87 slots */
-    const u8 *gp_args;  /* RDI, RSI, RDX, RCX, R8, R9 (phys ids) */
-    const u8 *fp_args;  /* XMM0..XMM7 */
+    RegBank x87;
+    u8 word_width;
+    u8 frame_align;
+    u8 spill_align[17];
+    const u8 *gp_args;
+    const u8 *fp_args;
     u8 ngp;
     u8 nfp;
-    /* The register an aggregate/scalar return rides; %st0 for RC_X87. */
     u8 (*return_reg)(const TargetDesc *, u8 width, RegClass cls);
-    const u8 *clobbered_call; /* caller-saved GPR set, for the call-crossing scan */
+    const u8 *clobbered_call;
     u8 nclobbered_call;
-    /* Whether operand `opnd` of an IR op must sit in a specific register. */
     bool (*needs_reg)(const TargetDesc *, IrOpcode op, u8 width, bool is_fp, int opnd);
-    /* Physical registers `in` implicitly clobbers beyond its encoded operands
-       (e.g. %cl for a shift, %rdx for a divide); a bitmask over phys ids.  A
-       value live across such an instruction must avoid those registers. */
+    /* A value live across the instruction must avoid its implicit clobbers. */
     u16 (*instr_clobbers)(const TargetDesc *, const IrInstr *in);
-    u8 frame_reg; /* the frame pointer, reservable from allocation (append-only) */
+    u8 frame_reg;
 };
 
 const TargetDesc *x86_64_target(void);

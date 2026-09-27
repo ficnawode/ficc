@@ -8,7 +8,6 @@
 
 typedef struct X86LowerCtx X86LowerCtx;
 
-/* Raw m80 byte encoders, shared with the SysV call layer (RC_X87 is memory-only). */
 void x87_emit_fldt(ByteBuf *buf, X86Mem mem);
 void x87_emit_fstpt(ByteBuf *buf, X86Mem mem);
 void x87_emit_flds(ByteBuf *buf, X86Mem mem);
@@ -27,7 +26,6 @@ void x87_emit_fdivp(ByteBuf *buf);
 void x87_emit_fucomip(ByteBuf *buf);
 void x87_emit_fstp_st0(ByteBuf *buf);
 
-/* Width-16 IR lowering for the register-allocating backend. */
 void x87_lower_itof(IrInstr *in, X86LowerCtx *ctx);
 void x87_lower_ftoi(IrInstr *in, X86LowerCtx *ctx);
 void x87_lower_fconv(IrInstr *in, X86LowerCtx *ctx);

@@ -6,7 +6,7 @@
 #include "util/types.h"
 #include "util/vec.h"
 
-/* Preprocessing-token kinds (C11 §6.4). Append only. */
+/* C11 §6.4 */
 #define PP_KINDS(X)                                                                                \
     X(TOK_PP_EOF)                                                                                  \
     X(TOK_PP_TRIVIA_WS)                                                                            \
@@ -28,10 +28,7 @@ typedef enum
 #undef PP_ENUM_ENTRY
 } PpKind;
 
-/* Punctuator identity and spelling (C11 §6.4.6), resolved from the spelling
-   at scan time so neither the pp nor the finalizer re-matches spellings. The
-   digraphs (§6.4.6.3) map to their primary's id; they can't be entries here
-   (one entry = one enum member) and so live in the scan table directly. */
+/* C11 §6.4.6 */
 #define PP_PUNCTS(X)                                                                               \
     X(PP_PUNCT_HASH, "#")                                                                          \
     X(PP_PUNCT_HASHHASH, "##")                                                                     \
@@ -104,18 +101,10 @@ typedef struct PpToken
     Hideset *hide;
 } PpToken;
 
-/* Translation phases 1-2: trigraph replacement and backslash-newline
-   splicing. Returns a newly arena-allocated NUL-terminated buffer, or NULL
-   after reporting a diagnostic. */
 char *pp_prepare(const char *file, const char *src, Arena *arena);
 
-/* Translation phase 3: scans normalized source into a soup of PpToken*
-   (spellings slice the normalized buffer). Returns an arena-allocated Vec
-   terminated by a TOK_PP_EOF token, or NULL after reporting a diagnostic. */
 Vec *pp_lex(const char *file, const char *src, Arena *arena);
 
-/* True if joining the spellings a then b would re-lex as a single
-   (possibly longer) punctuator — the -E token-separation test. */
 bool pp_concat_is_punct(const char *a, size_t alen, const char *b, size_t blen);
 
 const char *pp_kind_name(PpKind kind);

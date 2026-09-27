@@ -3,9 +3,6 @@
 
 #include "util/types.h"
 
-/* ELF64 format definitions shared by the object writer (elf.c), the DWARF/CFI
-   writers, and the linker. Pure definitions: no code, no state. */
-
 typedef uint8_t Elf64_Byte;
 typedef uint16_t Elf64_Half;
 typedef uint32_t Elf64_Word;
@@ -142,7 +139,6 @@ typedef uint64_t Elf64_Off;
 #define DT_VERNEED 0x6ffffffe
 #define DT_VERNEEDNUM 0x6fffffff
 
-/* Symbol versioning (.gnu.version / .gnu.version_r). */
 #define VER_NDX_LOCAL 0
 #define VER_NDX_GLOBAL 1
 #define VERSYM_HIDDEN 0x8000
@@ -150,7 +146,6 @@ typedef uint64_t Elf64_Off;
 #define VER_FLG_BASE 0x1
 #define VER_FLG_WEAK 0x2
 
-/* x86-64 relocation types. */
 #define R_X86_64_NONE 0
 #define R_X86_64_64 1
 #define R_X86_64_PC32 2

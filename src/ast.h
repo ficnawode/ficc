@@ -6,7 +6,6 @@
 #include "util/types.h"
 #include "util/vec.h"
 
-/* X-macro for AST node kinds. Append only. */
 #define AST_KINDS(X)                                                                               \
     X(AST_FUNC_DEF)                                                                                \
     X(AST_COMPOUND_STMT)                                                                           \
@@ -114,12 +113,11 @@ struct ASTNode
 {
     ASTKind kind;
     Loc loc;
-    Type *expr_type; /* computed by semantic pass; non-NULL for expression nodes */
+    Type *expr_type;
 };
 
 #define ast_as(T, node) ((T *) (node))
 
-/* GNU attribute names with semantics; others become ATTR_UNKNOWN. */
 typedef enum
 {
     ATTR_PACKED,
@@ -132,28 +130,27 @@ typedef enum
 typedef struct
 {
     AttrKind kind;
-    u64 align;        /* ATTR_ALIGNED: requested alignment, 0 = target default */
-    const char *name; /* ATTR_UNKNOWN: the spelling as written */
+    u64 align;
+    const char *name;
 } Attr;
 
-/* Function declaration specifiers (C11 §6.7.4); one field per new specifier. */
+/* C11 §6.7.4 */
 typedef struct
 {
     StorageClass storage;
     bool is_inline;
-    Vec *attrs; /* Vec<Attr*> — GNU attributes seen around the declarator */
+    Vec *attrs;
 } FuncSpecs;
 
-/* Signature shared by a function definition (`{...}`) and a prototype (`;`). */
 typedef struct FuncSig FuncSig;
 struct FuncSig
 {
     Type *ret_type;
     const char *name;
-    Vec *params;      /* Vec<ASTNode*> (parameter declarations; empty for void) */
-    FuncSpecs spec;   /* storage class + function specifiers */
-    bool is_variadic; /* trailing unnamed args (C11 §6.7.6.3p8) */
-    Type *func_type;  /* interned function type (filled by semantic; NULL at parse time) */
+    Vec *params;
+    FuncSpecs spec;
+    bool is_variadic; /* C11 §6.7.6.3p8 */
+    Type *func_type;
 };
 
 typedef struct ASTFuncDef ASTFuncDef;
@@ -164,7 +161,6 @@ struct ASTFuncDef
     ASTNode *body;
 };
 
-/* A function prototype / forward declaration: a signature without a body. */
 typedef struct ASTFuncDecl ASTFuncDecl;
 struct ASTFuncDecl
 {
@@ -176,14 +172,14 @@ typedef struct ASTCompoundStmt ASTCompoundStmt;
 struct ASTCompoundStmt
 {
     ASTNode base;
-    Vec *stmts; /* Vec<ASTNode*> */
+    Vec *stmts;
 };
 
 typedef struct ASTReturnStmt ASTReturnStmt;
 struct ASTReturnStmt
 {
     ASTNode base;
-    ASTNode *expr; /* NULL for `return;` */
+    ASTNode *expr;
 };
 
 typedef struct ASTIntLiteral ASTIntLiteral;
@@ -196,7 +192,6 @@ struct ASTIntLiteral
     bool is_hex : 1;
 };
 
-/* IEEE bits or host long double; only the arm `kind` selects is read. */
 typedef union
 {
     u64 bits;
@@ -215,7 +210,7 @@ typedef struct ASTProgram ASTProgram;
 struct ASTProgram
 {
     ASTNode base;
-    Vec *decls; /* Vec<ASTNode*> — top-level declarations */
+    Vec *decls;
 };
 
 typedef struct ASTVarDecl ASTVarDecl;
@@ -224,24 +219,23 @@ struct ASTVarDecl
     ASTNode base;
     Type *type;
     const char *name;
-    ASTNode *init; /* NULL if none; an AST_INIT_LIST or AST_STRING_LITERAL for a char array */
+    ASTNode *init;
     StorageClass storage;
-    i64 const_init;        /* folded file-scope constant initializer */
-    bool has_const_init;   /* true when const_init is valid */
-    bool is_block_scope;   /* declared inside a function body (vs file scope) */
-    struct InitPlan *plan; /* aggregate/string flattening plan (filled by semantic) or NULL */
-    u32 alignas;           /* requested _Alignas alignment, 0 = natural */
-    u32 bit_width;         /* bit-field width in bits; 0 = ordinary member (§6.7.2.1) */
-    Vec *attrs;            /* Vec<Attr*> — GNU attributes on this declarator */
+    i64 const_init;
+    bool has_const_init;
+    bool is_block_scope;
+    struct InitPlan *plan;
+    u32 alignas;
+    u32 bit_width; /* C11 §6.7.2.1 */
+    Vec *attrs;
 };
 
-/* An init-declarator list `int a = 1, b = 2;` sharing one declaration-specifier sequence (C11
- * §6.7.6). */
+/* C11 §6.7.6 */
 typedef struct ASTDeclList ASTDeclList;
 struct ASTDeclList
 {
     ASTNode base;
-    Vec *decls; /* Vec<ASTVarDecl*> */
+    Vec *decls;
 };
 
 typedef struct ASTExprStmt ASTExprStmt;
@@ -268,25 +262,23 @@ struct ASTUnaryExpr
     ASTNode *operand;
 };
 
-/* Prefix (`++x`) or postfix (`x++`) increment/decrement (C11 §6.5.2.4); its operand is a modifiable
- * lvalue. */
+/* C11 §6.5.2.4 */
 typedef struct ASTIncDecExpr ASTIncDecExpr;
 struct ASTIncDecExpr
 {
     ASTNode base;
     ASTNode *operand;
-    bool is_inc;     /* true: ++ ; false: -- */
-    bool is_postfix; /* true: x++;  false: ++x */
+    bool is_inc;
+    bool is_postfix;
 };
 
 typedef struct ASTCallExpr ASTCallExpr;
 struct ASTCallExpr
 {
     ASTNode base;
-    const char *callee;   /* named callee / builtin; NULL when callee_expr is used */
-    Vec *args;            /* Vec<ASTNode*> */
-    ASTNode *callee_expr; /* indirect callee (function designator / pointer value); NULL for named
-                             calls */
+    const char *callee;
+    Vec *args;
+    ASTNode *callee_expr;
 };
 
 typedef struct ASTIdent ASTIdent;
@@ -294,8 +286,8 @@ struct ASTIdent
 {
     ASTNode base;
     const char *name;
-    ASTVarDecl *decl; /* resolved declaration (filled by semantic); NULL when is_func */
-    bool is_func;     /* true when `name` is a function designator; decl stays NULL */
+    ASTVarDecl *decl;
+    bool is_func;
 };
 
 typedef struct ASTIfStmt ASTIfStmt;
@@ -327,9 +319,9 @@ typedef struct ASTForStmt ASTForStmt;
 struct ASTForStmt
 {
     ASTNode base;
-    ASTNode *init; /* may be NULL */
-    ASTNode *cond; /* may be NULL */
-    ASTNode *post; /* may be NULL */
+    ASTNode *init;
+    ASTNode *cond;
+    ASTNode *post;
     ASTNode *body;
 };
 
@@ -372,17 +364,17 @@ typedef struct ASTCaseStmt ASTCaseStmt;
 struct ASTCaseStmt
 {
     ASTNode base;
-    ASTNode *expr; /* constant expression (folded into `value` by semantic) */
+    ASTNode *expr;
     i64 value;
-    bool value_known; /* parser failed to fold; semantic must resolve `value` */
-    Vec *stmts;       /* Vec<ASTNode*>: statements under this label */
+    bool value_known;
+    Vec *stmts;
 };
 
 typedef struct ASTDefaultStmt ASTDefaultStmt;
 struct ASTDefaultStmt
 {
     ASTNode base;
-    Vec *stmts; /* Vec<ASTNode*>: statements from this label up to the next label */
+    Vec *stmts;
 };
 
 typedef struct ASTTernaryExpr ASTTernaryExpr;
@@ -446,9 +438,9 @@ typedef struct ASTStringLiteral ASTStringLiteral;
 struct ASTStringLiteral
 {
     ASTNode base;
-    const char *data; /* decoded elements, little-endian, NUL-terminated */
-    u64 length;       /* content bytes, excluding the terminating element */
-    StrKind str_kind; /* element encoding (§6.4.5) */
+    const char *data;
+    u64 length;
+    StrKind str_kind; /* C11 §6.4.5 */
 };
 
 typedef struct ASTStructDecl ASTStructDecl;
@@ -457,8 +449,8 @@ struct ASTStructDecl
     ASTNode base;
     const char *tag;
     bool is_union;
-    Vec *fields; /* Vec<ASTVarDecl*> */
-    Vec *attrs;  /* Vec<Attr*> — GNU attributes on the record definition */
+    Vec *fields;
+    Vec *attrs;
 };
 
 typedef struct EnumConstant
@@ -471,8 +463,8 @@ typedef struct ASTEnumDecl ASTEnumDecl;
 struct ASTEnumDecl
 {
     ASTNode base;
-    const char *tag; /* NULL for anonymous enums */
-    Vec *constants;  /* Vec<EnumConstant*> */
+    const char *tag;
+    Vec *constants;
 };
 
 typedef struct ASTMemberAccess ASTMemberAccess;
@@ -482,15 +474,13 @@ struct ASTMemberAccess
     ASTNode *object;
     const char *member;
     bool is_arrow;
-    u32 field_offset; /* filled by semantic */
-    Type *field_type; /* filled by semantic */
-    bool is_bitfield; /* filled by semantic */
-    u32 bit_offset;   /* bit position within the storage unit */
-    u32 bit_width;    /* declared width in bits */
+    u32 field_offset;
+    Type *field_type;
+    bool is_bitfield;
+    u32 bit_offset;
+    u32 bit_width;
 };
 
-/* Cast `(type) expr` (C11 §5.5.4): never an lvalue; a qualified target equals the unqualified type
- * (§6.5.4p4). */
 typedef struct ASTCastExpr ASTCastExpr;
 struct ASTCastExpr
 {
@@ -499,8 +489,6 @@ struct ASTCastExpr
     ASTNode *operand;
 };
 
-/* `__builtin_va_arg(ap, type)`: its second argument is a type-name, so it is a special form, not a
- * call. */
 typedef struct ASTVaArgExpr ASTVaArgExpr;
 struct ASTVaArgExpr
 {
@@ -509,8 +497,7 @@ struct ASTVaArgExpr
     Type *type;
 };
 
-/* A typedef declaration `typedef <type> <name>;` (C11 §6.7.7): the name is an ordinary identifier
- * (§6.2.3). */
+/* C11 §6.7.7 */
 typedef struct ASTTypedefDecl ASTTypedefDecl;
 struct ASTTypedefDecl
 {
@@ -519,77 +506,71 @@ struct ASTTypedefDecl
     Type *type;
 };
 
-/* Initializer designators (C11 §6.7.9p1): `.field` members / `[idx]` elements, chained
- * outermost-first. */
+/* C11 §6.7.9p1 */
 typedef enum
 {
-    ND_FIELD, /* .field */
-    ND_INDEX, /* [idx] */
+    ND_FIELD,
+    ND_INDEX,
 } DesignatorKind;
 
 typedef struct Designator Designator;
 struct Designator
 {
     DesignatorKind kind;
-    const char *field; /* ND_FIELD */
-    i64 index;         /* ND_INDEX */
+    const char *field;
+    i64 index;
     Designator *next;
 };
 
-/* One element `[designators] value` of a brace-enclosed initializer list. */
 typedef struct InitElem InitElem;
 struct InitElem
 {
-    Designator *design; /* NULL when the element has no designators */
-    ASTNode *value;     /* expression, string literal, or nested AST_INIT_LIST */
+    Designator *design;
+    ASTNode *value;
     Loc loc;
 };
 
-/* One flattened write from semantic's initializer planner (scalar, or a char-array string fill). */
 typedef struct InitWrite InitWrite;
 struct InitWrite
 {
-    u32 offset;     /* byte offset of the subobject in the initialized object */
-    Type *type;     /* unqualified target type (scalar, or char array for a fill) */
-    ASTNode *value; /* expression (scalar) or ASTStringLiteral (string fill) */
+    u32 offset;
+    Type *type;
+    ASTNode *value;
     bool is_string_fill;
-    bool is_bitfield; /* the subobject is a bit-field member (§6.7.2.1) */
-    u32 bit_offset;   /* bit position within the storage unit */
-    u32 bit_width;    /* field width in bits */
+    bool is_bitfield; /* C11 §6.7.2.1 */
+    u32 bit_offset;
+    u32 bit_width;
 };
 
-/* A brace-enclosed initializer list `{ ... }` (C11 §6.7.9) with semantic's flattened lowering plan.
- */
+/* C11 §6.7.9 */
 typedef struct ASTInitList ASTInitList;
 struct ASTInitList
 {
     ASTNode base;
-    Vec *elems; /* Vec<InitElem*> */
+    Vec *elems;
     struct InitPlan *plan;
 };
 
 typedef struct InitPlan InitPlan;
 struct InitPlan
 {
-    Vec *writes;      /* Vec<InitWrite*> sorted by offset */
-    u64 total_size;   /* byte size of the object being initialized */
-    bool grow_array;  /* outermost array is `[]` — resized from its initializer */
-    u64 inferred_len; /* largest element index+1 reached while grow_array */
+    Vec *writes;
+    u64 total_size;
+    bool grow_array;
+    u64 inferred_len;
 };
 
-/* Compound literal `(type){ ... }` (C11 §6.5.2.5): an lvalue denoting an anonymous object. */
+/* C11 §6.5.2.5 */
 typedef struct ASTCompoundLiteral ASTCompoundLiteral;
 struct ASTCompoundLiteral
 {
     ASTNode base;
-    Type *type;            /* the type-name target */
-    ASTNode *init;         /* always an AST_INIT_LIST */
-    struct InitPlan *plan; /* flattening plan (filled by semantic) */
+    Type *type;
+    ASTNode *init;
+    struct InitPlan *plan;
 };
 
-/* One generic association `type : expr` (C11 §6.5.15). `type` is NULL for the
-   `default` association, whose expression lives in the selection's
-   `default_expr`. */
+/* C11 §6.5.15 */
 typedef struct GenericAssoc GenericAssoc;
 struct GenericAssoc
 {
@@ -597,18 +578,15 @@ struct GenericAssoc
     ASTNode *expr;
 };
 
-/* Generic selection `_Generic(controlling, assoc-list)` (§6.5.15): a
-   compile-time choice among association expressions. Semantic resolves the
-   compatible association (or `default`) and records it in `selected`; only
-   that expression is evaluated and lowered. */
+/* C11 §6.5.15 */
 typedef struct ASTGenericSelection ASTGenericSelection;
 struct ASTGenericSelection
 {
     ASTNode base;
     ASTNode *controlling;
-    Vec *assocs;           /* Vec<GenericAssoc*> — non-default associations */
-    ASTNode *default_expr; /* NULL when no `default` association */
-    ASTNode *selected;     /* filled by semantic: the chosen expression */
+    Vec *assocs;
+    ASTNode *default_expr;
+    ASTNode *selected;
 };
 
 ASTNode *ast_func_def(Type *ret_type, const char *name, Vec *params, ASTNode *body, FuncSpecs spec,

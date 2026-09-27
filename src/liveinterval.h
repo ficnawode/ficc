@@ -7,8 +7,6 @@
 #include "util/bitset.h"
 #include "util/types.h"
 
-/* A value's live range in instruction-position space; `assigned_reg` is -1
-   until the allocator hands out physical registers. */
 typedef struct
 {
     u32 vreg;
@@ -19,9 +17,7 @@ typedef struct
     int assigned_reg;
 } LiveInterval;
 
-/* Per-function position numbering: block b's j-th instruction sits at
-   block_base[b] + 2j; the odd slots between instructions are phi-copy and
-   scheduling gaps.  block_end[b] is the boundary past b's last instruction. */
+/* block b's j-th instruction is at block_base[b] + 2j; block_end[b] is past the last. */
 typedef struct
 {
     u32 nblocks;
@@ -36,9 +32,9 @@ typedef struct
     u32 nvregs;
     LiveInterval *ivs; /* live vregs in ascending vreg order */
     u32 n;
-    u32 nblocks;       /* block count backing live_in/live_out, 0 when none */
-    Bitset **live_in;  /* per block: vregs live at block entry */
-    Bitset **live_out; /* per block: vregs live at block exit */
+    u32 nblocks;
+    Bitset **live_in;
+    Bitset **live_out;
 } LiveIntervals;
 
 LiveIntervals liveinterval_compute(IrFunction *f, IrModule *mod, Arena *arena);
