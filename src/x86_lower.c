@@ -294,7 +294,7 @@ static bool folded_mem_operand(const RegAllocation *alloc, const LinearFrame *fr
    spilled/immediate/global pointer is materialized in `scratch` first.  A
    folded GEP resolves into the memory operand itself, and a rematerialized
    address is already `[%rbp+disp]`. */
-static X86Mem mem_operand_for_ptr(X86LowerCtx *ctx, IrOperand ptr, u8 scratch)
+X86Mem x86_lower_mem_for_ptr(X86LowerCtx *ctx, IrOperand ptr, u8 scratch)
 {
     if (!ptr.is_imm && !ptr.is_global && !ptr.is_func)
     {
@@ -994,7 +994,7 @@ static void lower_fcmp(IrInstr *in, X86LowerCtx *ctx)
 static void lower_load(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 w = vreg_width(ctx, in->result);
-    X86Mem addr = mem_operand_for_ptr(ctx, in->ops[0], R_R11);
+    X86Mem addr = x86_lower_mem_for_ptr(ctx, in->ops[0], R_R11);
     RegLoc rl = result_loc(ctx, in);
     if (w == W_LD)
     {
@@ -1034,13 +1034,13 @@ static void lower_store(IrInstr *in, X86LowerCtx *ctx)
         {
             ASSERT(val.u.imm == 0 && "nonzero immediate in a width-16 store");
             emit_sse_xor(ctx->buf, 0, R_XMM0, R_XMM0);
-            X86Mem addr0 = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
+            X86Mem addr0 = x86_lower_mem_for_ptr(ctx, in->ops[1], R_R11);
             emit_mov16_store(ctx->buf, addr0);
             return;
         }
         RegLoc sl = x86_lower_operand_loc(ctx, val);
         ASSERT(sl.kind == LOC_MEM && "x87 values are memory-only");
-        X86Mem addr = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
+        X86Mem addr = x86_lower_mem_for_ptr(ctx, in->ops[1], R_R11);
         emit_mov16(ctx->buf, x86_frame_mem(ctx->frame, sl.disp), addr);
         return;
     }
@@ -1048,7 +1048,7 @@ static void lower_store(IrInstr *in, X86LowerCtx *ctx)
     {
         u8 mf = MF_OF(w);
         RegLoc sl = x86_lower_operand_loc(ctx, val);
-        X86Mem addr = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
+        X86Mem addr = x86_lower_mem_for_ptr(ctx, in->ops[1], R_R11);
         if (sl.kind == LOC_REG)
         {
             emit_sse_store(ctx->buf, mf, addr, sl.reg);
@@ -1058,7 +1058,7 @@ static void lower_store(IrInstr *in, X86LowerCtx *ctx)
         emit_sse_store(ctx->buf, mf, addr, R_XMM0);
         return;
     }
-    X86Mem addr = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
+    X86Mem addr = x86_lower_mem_for_ptr(ctx, in->ops[1], R_R11);
     if (!val.is_imm && !val.is_global && !val.is_func)
     {
         RegLoc sl = x86_lower_operand_loc(ctx, val);
@@ -1162,8 +1162,8 @@ static bool lower_memcpy_block(IrInstr *in, X86LowerCtx *ctx)
     u64 size = (u64) in->ops[2].u.imm;
     if (size == 16)
     {
-        X86Mem src = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
-        X86Mem dst = mem_operand_for_ptr(ctx, in->ops[0], R_EAX);
+        X86Mem src = x86_lower_mem_for_ptr(ctx, in->ops[1], R_R11);
+        X86Mem dst = x86_lower_mem_for_ptr(ctx, in->ops[0], R_EAX);
         emit_mov16(ctx->buf, src, dst);
         return true;
     }
@@ -1172,9 +1172,9 @@ static bool lower_memcpy_block(IrInstr *in, X86LowerCtx *ctx)
         return false;
     }
     u8 w = size == 1 ? W_BYTE : size == 2 ? W_WORD : size == 4 ? W_DWORD : W_QWORD;
-    X86Mem src = mem_operand_for_ptr(ctx, in->ops[1], R_R11);
+    X86Mem src = x86_lower_mem_for_ptr(ctx, in->ops[1], R_R11);
     emit_mov(ctx->buf, w, xop_reg(R_R11), xop_mem(src));
-    X86Mem dst = mem_operand_for_ptr(ctx, in->ops[0], R_EAX);
+    X86Mem dst = x86_lower_mem_for_ptr(ctx, in->ops[0], R_EAX);
     emit_mov(ctx->buf, w, xop_mem(dst), xop_reg(R_R11));
     return true;
 }

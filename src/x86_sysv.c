@@ -202,13 +202,21 @@ static void emit_reg_arg(X86LowerCtx *ctx, IrOperand op, const SysvArgPlan *p)
 {
     if (p->is_record)
     {
-        /* R11 is reserved scratch and never an argument lane, so the record's
-           address is materialized once and read at every chunk offset. */
-        x86_lower_force_to_reg(ctx, op, R_R11);
+        /* A record address that already names a frame slot folds into each
+           chunk load, saving a lea per chunk.  Any other address (including a
+           register base) is materialized once into scratch, because a chunk
+           load could otherwise clobber the base before a later chunk reads it. */
+        X86Mem base = x86_lower_mem_for_ptr(ctx, op, R_R11);
+        if (base.base != R_ESP && base.base != R_EBP && base.base != R_R11)
+        {
+            x86_lower_force_to_reg(ctx, op, R_R11);
+            base = x86_mem_r11(0);
+        }
         for (u8 c = 0; c < p->nchunks; c++)
         {
             const SysvChunk *chunk = &p->chunks[c];
-            X86Mem src = x86_mem_r11((i32) chunk->chunk_off);
+            X86Mem src = base;
+            src.disp += (i32) chunk->chunk_off;
             if (chunk->kind == SYSV_GP)
             {
                 emit_mov(ctx->buf, W_QWORD, xop_reg(ctx->target->gp_args[chunk->reg]),

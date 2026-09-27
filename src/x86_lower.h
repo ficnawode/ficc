@@ -69,6 +69,10 @@ void x86_lower_force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg);
 RegLoc x86_lower_result_loc(X86LowerCtx *ctx, IrInstr *in);
 void x86_lower_store_reg_result(X86LowerCtx *ctx, IrInstr *in, u8 width, u8 reg);
 X86Mem x86_lower_pointer_in_rax(X86LowerCtx *ctx, IrOperand ptr);
+
+/* Address of the pointee as a memory operand: a folded GEP or a rematerialized
+   address resolves directly, otherwise `ptr` is materialized in `scratch`. */
+X86Mem x86_lower_mem_for_ptr(X86LowerCtx *ctx, IrOperand ptr, u8 scratch);
 void x86_lower_store_vreg_from_reg(X86LowerCtx *ctx, u32 vreg, u8 width, u8 reg);
 
 /* Store (before) or reload (after) every value split across the call at
