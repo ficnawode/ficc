@@ -130,13 +130,12 @@ bool type_is_signed_int(Type *t)
            t->kind == TYPE_LONG || t->kind == TYPE_LLONG || t->kind == TYPE_ENUM;
 }
 
-/* Signedness for operator selection: the exact inverse of type_is_unsigned.
-   Unlike type_is_signed_int (a signed-integer-kind test), this also treats
-   non-integer types such as pointers as signed, so relational comparisons on
-   them pick the signed opcodes. */
+/* Signedness for operator selection. Pointers and other non-integer types are
+   unsigned: relational operators on pointers compare addresses, so they must
+   use the unsigned opcodes (`setb`/`setbe`/...), matching C address ordering. */
 bool type_is_signed(Type *t)
 {
-    return !type_is_unsigned(t);
+    return type_is_signed_int(t);
 }
 
 bool type_is_unsigned(Type *t)
@@ -751,10 +750,91 @@ static void type_init_tags(void)
     tag_table = strmap_new(tag_arena);
 }
 
+/* Block-scope tag scoping (C11 §6.2.1): the parser pushes/pops a tag scope in
+   lockstep with its name scopes. A tag definition whose tag is not already
+   bound in the current scope shadows any visible outer binding; popping the
+   scope restores the previous global mapping. Without this, two functions each
+   defining their own `struct TableEntry { ... }` would collide in the single
+   interned tag namespace. */
+typedef struct TagUndo
+{
+    const char *tag;
+    Type *prev; /* binding to restore (NULL = remove) */
+} TagUndo;
+
+typedef struct TagScope
+{
+    StrMap *defs; /* tag -> Type* declared in this scope */
+    Vec *undo;    /* Vec<TagUndo*> for this scope */
+} TagScope;
+
+static Vec *tag_scope_stack; /* Vec<TagScope*> */
+
+void type_tag_scope_push(void)
+{
+    type_init_tags();
+    if (!tag_scope_stack)
+    {
+        tag_scope_stack = vec_new(tag_arena);
+    }
+    TagScope *s = arena_alloc(tag_arena, sizeof(TagScope), _Alignof(TagScope));
+    s->defs = strmap_new(tag_arena);
+    s->undo = vec_new(tag_arena);
+    vec_push(tag_scope_stack, s);
+}
+
+void type_tag_scope_pop(void)
+{
+    if (!tag_scope_stack || vec_size(tag_scope_stack) == 0)
+    {
+        return;
+    }
+    TagScope *s = (TagScope *) vec_pop(tag_scope_stack);
+    for (size_t i = vec_size(s->undo); i-- > 0;)
+    {
+        TagUndo *u = (TagUndo *) vec_get(s->undo, i);
+        if (u->prev)
+        {
+            strmap_set(tag_table, u->tag, u->prev);
+        }
+        else
+        {
+            (void) hashmap_remove((HashMap *) tag_table, u->tag);
+        }
+    }
+}
+
+static bool tag_bound_in_current_scope(const char *tag)
+{
+    if (!tag_scope_stack || vec_size(tag_scope_stack) == 0)
+    {
+        return false;
+    }
+    TagScope *s = (TagScope *) vec_last(tag_scope_stack);
+    return strmap_get(s->defs, tag) != NULL;
+}
+
+/* Bind `t` (with interned `tag`) as the visible type for `tag`, recording the
+   previous visible binding for restoration when the current scope pops. */
+static void tag_bind(Type *t, const char *tag, Type *prev)
+{
+    if (tag_scope_stack && vec_size(tag_scope_stack) > 0)
+    {
+        TagScope *s = (TagScope *) vec_last(tag_scope_stack);
+        TagUndo *u = arena_alloc(tag_arena, sizeof(TagUndo), _Alignof(TagUndo));
+        u->tag = tag;
+        u->prev = prev;
+        vec_push(s->undo, u);
+        strmap_set(s->defs, tag, t);
+    }
+    strmap_set(tag_table, tag, t);
+}
+
 void type_reset(void)
 {
     type_init_tags();
     tag_table = strmap_new(tag_arena);
+    tag_scope_stack = NULL;
 }
 
 /* Record/enum types are immortal (see type_reset above), so their tag strings
@@ -774,11 +854,11 @@ Type *type_record(TypeKind kind, const char *tag)
     ASSERT(kind == TYPE_STRUCT || kind == TYPE_UNION);
     type_init_tags();
 
-    Type *existing = strmap_get(tag_table, tag);
-    if (existing)
+    if (tag_bound_in_current_scope(tag))
     {
-        return existing;
+        return strmap_get(tag_table, tag);
     }
+    Type *prev = strmap_get(tag_table, tag);
 
     Type *t = arena_alloc(tag_arena, sizeof(Type), _Alignof(Type));
     t->kind = kind;
@@ -793,7 +873,7 @@ Type *type_record(TypeKind kind, const char *tag)
     t->record.packed = false;
     t->record.align_override = 0;
     t->record.qual_variants = NULL;
-    strmap_set(tag_table, t->record.tag, t);
+    tag_bind(t, t->record.tag, prev);
     return t;
 }
 
@@ -955,11 +1035,11 @@ Type *type_enum(const char *tag)
 {
     type_init_tags();
 
-    Type *existing = strmap_get(tag_table, tag);
-    if (existing)
+    if (tag_bound_in_current_scope(tag))
     {
-        return existing;
+        return strmap_get(tag_table, tag);
     }
+    Type *prev = strmap_get(tag_table, tag);
 
     Type *t = arena_alloc(tag_arena, sizeof(Type), _Alignof(Type));
     t->kind = TYPE_ENUM;
@@ -970,7 +1050,7 @@ Type *type_enum(const char *tag)
     t->unqual_base = NULL;
     t->enumm.tag = tag_intern(tag);
     t->enumm.complete = false;
-    strmap_set(tag_table, t->enumm.tag, t);
+    tag_bind(t, t->enumm.tag, prev);
     return t;
 }
 

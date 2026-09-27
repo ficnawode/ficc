@@ -177,6 +177,11 @@ Type *type_va_list(void);
 Type *type_enum(const char *tag);
 Type *type_enum_anon(void);
 Type *type_record_lookup(const char *tag);
+/* Block-scope tag scoping: push/pop a tag scope alongside the parser's name
+   scopes so a local struct/union/enum definition shadows an outer same-named
+   tag and is forgotten when the scope ends (C11 §6.2.1). */
+void type_tag_scope_push(void);
+void type_tag_scope_pop(void);
 bool type_record_has_fam(Type *t); /* last member is a flexible array `T x[]` */
 Type *type_record_field(Type *t, const char *name);
 u32 type_record_field_offset(Type *t, const char *name);

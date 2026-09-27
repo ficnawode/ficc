@@ -46,11 +46,12 @@ TEST(types, type_is_signed_int)
 
 TEST(types, type_is_signed_is_unsigned_complement)
 {
-    /* type_is_signed is the exact inverse of type_is_unsigned, so relations
-       and pointers fall on the "signed" side while unsigned ints do not. */
+    /* type_is_signed reports signed-integer kinds. Pointers are unsigned:
+       relational operators on them compare addresses and must use the
+       unsigned opcodes. */
     EXPECT_TRUE(type_is_signed(type_int()));
     EXPECT_TRUE(!type_is_signed(type_uint()));
-    EXPECT_TRUE(type_is_signed(type_ptr(type_int())));
+    EXPECT_TRUE(!type_is_signed(type_ptr(type_int())));
     EXPECT_TRUE(type_is_signed(type_long()));
     EXPECT_TRUE(!type_is_unsigned(type_ptr(type_int())));
     EXPECT_EQ(type_is_signed(type_int()), !type_is_unsigned(type_int()));
