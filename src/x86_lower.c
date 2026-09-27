@@ -3,6 +3,7 @@
 #include "regalloc.h"
 #include "target.h"
 #include "type.h"
+#include "util/arena.h"
 #include "util/assert.h"
 #include "util/bytebuf.h"
 #include "util/hashmap.h"
@@ -3145,8 +3146,14 @@ static void split_phi_edges(IrFunction *f, Arena *arena)
     }
 }
 
-static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *arena, bool debug)
+static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *arena, Arena *scratch,
+                       bool debug)
 {
+    /* `arena` owns everything that must outlive the function (the emitted
+       bytes and the relocation records).  `scratch` holds the per-function
+       liveness/regalloc working state; for a large translation unit it dwarfs
+       the output, so reusing one scratch arena per function keeps peak memory
+       proportional to the largest function instead of their sum. */
     ByteBuf *buf = arena_alloc(arena, sizeof(ByteBuf), sizeof(void *));
     bytebuf_init(buf, arena);
     Vec *patches = vec_new(arena);
@@ -3156,33 +3163,34 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     Vec *lines = debug ? vec_new(arena) : NULL;
 
     const TargetDesc *target = x86_64_target();
-    canonicalize_identity_geps(f, mod->next_vreg, arena);
-    split_phi_edges(f, arena);
-    LiveIntervals set = liveinterval_compute(f, mod, arena);
-    RegAllocation *alloc = regalloc_linear(f, &set, target, arena);
+    canonicalize_identity_geps(f, mod->next_vreg, scratch);
+    split_phi_edges(f, scratch);
+    LiveIntervals set = liveinterval_compute(f, mod, scratch);
+    RegAllocation *alloc = regalloc_linear(f, &set, target, scratch);
 
     size_t nblocks = vec_size(f->blocks);
-    Vec **phi_copies = arena_alloc(arena, (nblocks ? nblocks : 1) * sizeof(Vec *), sizeof(void *));
+    Vec **phi_copies =
+        arena_alloc(scratch, (nblocks ? nblocks : 1) * sizeof(Vec *), sizeof(void *));
     for (size_t bi = 0; bi < nblocks; bi++)
     {
-        phi_copies[bi] = vec_new(arena);
+        phi_copies[bi] = vec_new(scratch);
     }
-    StrMap *label_to_index = index_labels(f, arena);
-    build_phi_copies(f, label_to_index, phi_copies, arena);
+    StrMap *label_to_index = index_labels(f, scratch);
+    build_phi_copies(f, label_to_index, phi_copies, scratch);
 
     bool omit_fp = false;
     if (x86_frame_can_omit_fp(mod, f, debug) && alloc->frame_size == 0)
     {
         /* A spill-free function's frame is only the phi scratch or a static
            alloca; %rbp is then free to join the register bank. */
-        RegAllocation *lean = regalloc_linear_ex(f, &set, target, arena, true);
+        RegAllocation *lean = regalloc_linear_ex(f, &set, target, scratch, true);
         if (lean->frame_size == 0)
         {
             alloc = lean;
         }
         omit_fp = true;
     }
-    if (phi_copies_need_scratch(alloc, &set.pos, phi_copies, nblocks, arena))
+    if (phi_copies_need_scratch(alloc, &set.pos, phi_copies, nblocks, scratch))
     {
         alloc->frame_size += 16;
     }
@@ -3220,13 +3228,14 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
 
     /* One extra slot: a value live out of the final block records `end` as
        npositions, the position just past the function. */
-    u32 *position_offsets = arena_alloc(arena, (set.pos.npositions + 1) * sizeof(u32), sizeof(u32));
+    u32 *position_offsets =
+        arena_alloc(scratch, (set.pos.npositions + 1) * sizeof(u32), sizeof(u32));
     for (u32 p = 0; p <= set.pos.npositions; p++)
     {
         position_offsets[p] = POS_UNSET;
     }
 
-    u32 *use_count = arena_alloc(arena, (set.nvregs ? set.nvregs : 1) * sizeof(u32), sizeof(u32));
+    u32 *use_count = arena_alloc(scratch, (set.nvregs ? set.nvregs : 1) * sizeof(u32), sizeof(u32));
     count_vreg_uses(f, set.nvregs, use_count);
 
     bool multiple_rets = count_opcode(f, OP_RET) > 1;
@@ -3259,13 +3268,13 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
         .epilogue_follows_body = epilogue_follows_body,
         .epilogue_jumps = vec_new(arena),
     };
-    analyze_gep_folds(&ctx, use_count, arena);
-    ctx.zero_extended = analyze_zero_extended(f, mod->widths, mod->next_vreg, arena);
+    analyze_gep_folds(&ctx, use_count, scratch);
+    ctx.zero_extended = analyze_zero_extended(f, mod->widths, mod->next_vreg, scratch);
 
     x86_frame_emit_prologue(buf, f, mod, alloc, &frame, debug);
     u32 off_params = (u32) bytebuf_len(buf);
 
-    size_t *order = layout_blocks(f, &ctx, nblocks, arena);
+    size_t *order = layout_blocks(f, &ctx, nblocks, scratch);
     for (size_t pos = 0; pos < nblocks; pos++)
     {
         size_t bi = order[pos];
@@ -3309,12 +3318,18 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
 size_t x86_lower_module(CodegenModule *cm, IrModule *ir, bool debug, Arena *arena)
 {
     size_t nfuncs = vec_size(ir->funcs);
+    Arena *scratch = debug ? arena : arena_new();
     for (size_t i = 0; i < nfuncs; i++)
     {
         IrFunction *f = (IrFunction *) vec_get(ir->funcs, i);
         CodegenFunc *cf = arena_alloc(arena, sizeof(CodegenFunc), sizeof(void *));
-        lower_func(f, cf, ir, arena, debug);
+        lower_func(f, cf, ir, arena, scratch, debug);
         vec_push(cm->funcs, cf);
+        if (!debug)
+        {
+            arena_free(scratch);
+            scratch = arena_new();
+        }
     }
     return nfuncs;
 }

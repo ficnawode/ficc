@@ -304,7 +304,11 @@ TEST(x86_lower, identity_geps_fold_before_liveness)
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     u32 g = zero_offset_gep_result(f);
     EXPECT_TRUE(g != NO_VREG);
-    CodegenModule *cm = codegen_ir_to_machine(m, NULL, a);
+    /* The segment table is only retained after lowering in debug builds (it
+       backs DWARF locations); a plain build frees it with the per-function
+       scratch arena, so inspect it under -g. */
+    CodegenConfig dbg = {.debug = true};
+    CodegenModule *cm = codegen_ir_to_machine(m, &dbg, a);
     EXPECT_NOTNULL(cm);
     EXPECT_EQ(zero_offset_gep_result(f), NO_VREG);
     const RegAllocation *alloc = ((CodegenFunc *) vec_get(cm->funcs, 0))->alloc;
