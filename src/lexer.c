@@ -218,10 +218,14 @@ static void finalize_push_token(FinalizeCtx *ctx, Token token)
         {
             u32 prev_len = prev->str_len;
             u32 add_len = token.str_len;
-            char *buf = arena_alloc(ctx->arena, (size_t) prev_len + add_len + 1, 1);
+            u32 esz = str_kind_elem_size(prev->str_kind);
+            char *buf = arena_alloc(ctx->arena, (size_t) prev_len + add_len + esz, 1);
             memcpy(buf, prev->payload.str, prev_len);
             memcpy(buf + prev_len, token.payload.str, add_len);
-            buf[prev_len + add_len] = '\0';
+            for (u32 b = 0; b < esz; b++)
+            {
+                buf[prev_len + add_len + b] = '\0';
+            }
             prev->payload.str = buf;
             prev->str_len = prev_len + add_len;
             return;
