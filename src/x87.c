@@ -21,7 +21,6 @@
 #define X87_DIG_2 2
 #define X87_DIG_3 3
 
-/* x87 register-form opcodes (primary byte then fixed sub-opcode byte). */
 #define X87_FLDZ 0xD9EE
 #define X87_FCHS 0xD9E0
 #define X87_FADDP 0xDEC1
@@ -32,7 +31,6 @@
 #define X87_FUCOMIP 0xDFE9
 #define X87_FSTP_ST0 0xDDD8
 
-/* 80-bit pattern of 2^63: significand 0x8000000000000000 @ exponent 0x403E. */
 #define LD_EXPONENT_2POW63 0x403E
 #define LD_SIGNIFICAND_2POW63 0x8000000000000000ULL
 
@@ -280,7 +278,6 @@ static void emit_scratch_release(ByteBuf *buf)
     emit_binop_rhs(buf, W_QWORD, &arith_specs[OP_ADD], R_ESP, xop_imm(W_LD));
 }
 
-/* Build the 80-bit 2^63 in a temporary %rsp scratch region, fldt it, release. */
 static void emit_load_2pow63_ld(X86LowerCtx *ctx)
 {
     ByteBuf *b = ctx->buf;
@@ -310,7 +307,6 @@ static X86Mem ld_result_mem(X86LowerCtx *ctx, IrInstr *in)
     return x86_lower_frame_mem(ctx, l.disp);
 }
 
-/* Load an integer operand into %rax, sign/zero-extended to its 64-bit value; reports signedness. */
 static u8 load_int_operand(X86LowerCtx *ctx, IrOperand op, bool *is_signed)
 {
     ByteBuf *b = ctx->buf;
@@ -340,7 +336,6 @@ static u8 load_int_operand(X86LowerCtx *ctx, IrOperand op, bool *is_signed)
     return sw;
 }
 
-/* u64 ≥ 2^63 to long double: clear bit 63, convert, add the exact 2^63 back. */
 static void emit_itof_u64_x87(X86LowerCtx *ctx, X86Mem dst)
 {
     ByteBuf *b = ctx->buf;
@@ -382,7 +377,6 @@ void x87_lower_itof(IrInstr *in, X86LowerCtx *ctx)
     x87_balance(ctx);
 }
 
-/* u64 result from long double: values ≥ 2^63 subtract 2^63, re-truncate, set bit 63. */
 static void emit_ftoi_u64_x87(X86LowerCtx *ctx, X86Mem src, X86Mem scratch)
 {
     ByteBuf *b = ctx->buf;
@@ -464,7 +458,6 @@ static void fp_operand_to_xmm(X86LowerCtx *ctx, IrOperand op, u8 w, u8 xmm)
     emit_sse_load(b, MF_OF(w), xmm, x86_lower_frame_mem(ctx, l.disp));
 }
 
-/* Long double ↔ float/double via the x87 stack; register homes stage through %rsp. */
 void x87_lower_fconv(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 dw = x86_lower_vreg_width(ctx, in->result);
@@ -583,7 +576,7 @@ void x87_lower_fneg(IrInstr *in, X86LowerCtx *ctx)
     x87_balance(ctx);
 }
 
-/* FP compare setcc matrix; join=0 predicates need no PF (unordered) fixup. */
+/* join=0 predicates need no PF (unordered) fixup. */
 typedef struct
 {
     u8 cc;

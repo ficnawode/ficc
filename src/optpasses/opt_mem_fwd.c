@@ -14,9 +14,9 @@ typedef struct
 {
     FwdFactKind kind;
     IrOperand ptr;
-    IrOperand val; /* store value, or the earlier load's result vreg */
+    IrOperand val;
     u8 width;
-    bool is_signed; /* load-result class the forwarding is valid for */
+    bool is_signed;
     bool is_float;
 } FwdFact;
 
@@ -35,9 +35,7 @@ static void facts_clear(Vec *facts)
     }
 }
 
-/* Loading back a stored slot reproduces the stored operand's bits only when
-   the operand is already in its width-w canonical form (the load applies its
-   own width/sign mask to the raw bytes). */
+/* A load masks to its own width and sign, so only a canonical value forwards. */
 static bool store_value_reproducible(const IrModule *mod, IrOperand val, u8 w, bool is_signed)
 {
     if (val.is_imm)
@@ -78,13 +76,13 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx)
                 if (op == OP_CALL || op == OP_MEMCPY || op == OP_VA_START || op == OP_VA_ARG ||
                     op == OP_VA_END)
                 {
-                    facts_clear(facts); /* barrier: nothing stays provable */
+                    facts_clear(facts);
                     i++;
                     continue;
                 }
                 if (op == OP_STORE)
                 {
-                    facts_clear(facts); /* any store may alias any previous fact */
+                    facts_clear(facts);
                     if (in->extra.mem.is_volatile)
                     {
                         i++;
@@ -108,7 +106,7 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx)
                 {
                     if (in->extra.mem.is_volatile)
                     {
-                        facts_clear(facts); /* volatile reads see raw state */
+                        facts_clear(facts);
                         i++;
                         continue;
                     }
@@ -145,7 +143,7 @@ bool opt_pass_mem_fwd(OptimizerContext *ctx)
                     if (fwd)
                     {
                         i++;
-                        continue; /* load is replaced; do not record it as a fact */
+                        continue;
                     }
                     if (w != 16)
                     {

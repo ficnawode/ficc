@@ -30,7 +30,7 @@ bool opt_pass_phi_simp(OptimizerContext *ctx)
                     IrOperand val = in->extra.phi.entries[e].val;
                     if (!val.is_imm && !val.is_global && !val.is_func && val.u.vreg == in->result)
                     {
-                        continue; /* self entry: the latch keeps the value */
+                        continue;
                     }
                     if (have)
                     {

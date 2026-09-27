@@ -18,7 +18,6 @@ void opt_error(const char *fmt, ...)
     printf("\n");
 }
 
-/* -O0 runs no passes; the optimizer only canonicalizes when asked to. */
 static const OptPassId level1_passes[] = {
     OPT_PASS_CANON,    OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY,  OPT_PASS_CAST,      OPT_PASS_CPROP,
     OPT_PASS_PHI_SIMP, OPT_PASS_DCE,        OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER, OPT_PASS_INLINE,
@@ -63,7 +62,6 @@ const OptConfig *opt_config_for(OptLevel level)
     }
 }
 
-/* The pass registry; each pass file fills its row's fn (NULL = reserved). */
 static const OptPass opt_passes[] = {
     {OPT_PASS_FOLD_CONST, "fold_const", opt_pass_fold_const},
     {OPT_PASS_IDENTITY, "identity", opt_pass_identity},
@@ -144,7 +142,6 @@ static void trace_counts(IrModule *mod, size_t *instrs, size_t *blocks)
     *blocks = nb;
 }
 
-/* Run the config's passes to fixpoint, bounded by its iteration budget. */
 static void run_pipeline(OptimizerContext *ctx)
 {
     const OptConfig *cfg = ctx->opts;
@@ -216,9 +213,7 @@ static void run_pipeline(OptimizerContext *ctx)
         }
         iterations++;
     }
-    /* Dead function elimination runs once the rest of the pipeline stops
-       cloning: a function may be unreferenced at any single iteration and
-       still be referenced by a clone a later inline pass produces. */
+    /* DFE runs outside the loop: only a later inline clone can still reference a function. */
     const OptPass *dfe = pass_lookup(OPT_PASS_DFE);
     if (dfe && dfe->fn && !pass_skipped(dfe->name))
     {
@@ -432,7 +427,6 @@ static IrOperand phi_value_for_pred(IrInstr *phi, IrBlock *pred)
     return ir_operand_imm(0);
 }
 
-/* Collapse the spliced preds' entries in `phi` into one entry for the new block. */
 static void phi_retag_entries(IrInstr *phi, Vec *preds, IrBlock *bb, IrOperand merged)
 {
     u32 nkept = 0;
@@ -507,7 +501,6 @@ IrBlock *opt_insert_preheader(IrModule *mod, IrFunction *f, IrBlock *pred, IrBlo
     return opt_insert_empty_block(mod, f, preds, succ, prefix);
 }
 
-/* Drop `from`'s phi entries so a block's phis stay exactly its pred set. */
 static void phi_drop_pred(IrBlock *bb, const char *label)
 {
     size_t ninstr = vec_size(bb->instrs);
@@ -670,7 +663,6 @@ void opt_repl_set(OptimizerContext *ctx, u32 vreg, IrOperand val)
     ctx->repl_gen[vreg] = ctx->repl_serial;
 }
 
-/* Follow a pending replacement to its final operand (with a cycle guard). */
 static IrOperand repl_resolve(OptimizerContext *ctx, IrOperand op)
 {
     u32 nvregs = ctx->mod->width_count;
@@ -699,7 +691,7 @@ static void repl_rewrite_slot(OptimizerContext *ctx, IrOperand *slot)
         return;
     }
     IrOperand resolved = repl_resolve(ctx, *slot);
-    ctx->repl_val[v] = resolved; /* path-compress repeated chains */
+    ctx->repl_val[v] = resolved;
     *slot = resolved;
 }
 
@@ -769,7 +761,7 @@ void optimize(IrModule *mod, OptLevel level, Arena *arena)
 {
     if (mod == NULL || level == OPT_LEVEL_0)
     {
-        return; /* -O0 runs no passes; nothing to build or run */
+        return;
     }
 
     OptimizerContext ctx;

@@ -44,8 +44,6 @@ static char pp_trigraph(char c)
     }
 }
 
-/* Width of a trigraph starting at src[i]: 0, or 3 with its replacement in
- *out. */
 static u32 pp_trigraph_width(const char *src, size_t i, size_t n, char *out)
 {
     if (src[i] != '?' || i + 2 >= n || src[i + 1] != '?')
@@ -152,8 +150,6 @@ static bool is_ident_char(char c)
     return is_ident_start(c) || is_digit(c);
 }
 
-/* True when p begins a (possibly prefixed) string or char literal; prefix_len
-   excludes the opening quote, quote receives it. */
 static bool pp_literal_start(const char *p, u32 *prefix_len, char *quote)
 {
     if (*p == '"' || *p == '\'')
@@ -189,9 +185,7 @@ struct PpPunctSpelling
     PpPunct punct;
 };
 
-/* Every input spelling: the primary puncts from PP_PUNCTS plus the digraphs
-   (C11 §6.4.6.3), which map to their primary's id. Order is irrelevant —
-   pp_punct_match takes the longest match. */
+/* Digraphs (C11 §6.4.6.3) map to their primary's id; pp_punct_match takes the longest. */
 static const PpPunctSpelling PP_PUNCT_TABLE[] = {
 #define PP_TABLE_ENTRY(KIND, SPELLING) {SPELLING, KIND},
     PP_PUNCTS(PP_TABLE_ENTRY)
@@ -219,10 +213,7 @@ static u32 pp_punct_match(const char *p, PpPunct *out)
     return best_len;
 }
 
-/* Joining a then b reads as one punctuator when the concatenation itself is
-   one, or when max-munch would chew part of `a` across the seam (`a` a strict
-   prefix of a punctuator whose remainder `b` starts with, e.g. `<` `<<`). This
-   is the -E token-separation test. */
+/* -E token separation: true when joining a+b would re-lex under max-munch. */
 bool pp_concat_is_punct(const char *a, size_t alen, const char *b, size_t blen)
 {
     if (alen + blen > 4)
@@ -284,7 +275,7 @@ static void scanner_advance(SoupScannerCtx *ctx)
             ctx->col = 1;
             break;
         case '\t':
-            ctx->col = (ctx->col + 7) & ~7U; /* tab stop alignment */
+            ctx->col = (ctx->col + 7) & ~7U;
             break;
         default:
             ctx->col++;
@@ -313,7 +304,6 @@ static void scanner_push(SoupScannerCtx *ctx, PpToken token)
     vec_push(ctx->tokens, slot);
 }
 
-/* Records a token covering [start, ctx->p). */
 static void scanner_emit(SoupScannerCtx *ctx, PpKind kind, const char *start, Loc loc,
                          bool has_newline)
 {
@@ -520,9 +510,7 @@ Vec *pp_lex(const char *file, const char *src, Arena *arena)
 
     while (*ctx.p)
     {
-        /* First recognizer to match wins; literal-before-ident keeps a
-           prefixed literal one token, comment-before-punct so a block comment
-           isn't split into `/` and `*`. Whatever remains is a TOK_PP_OTHER. */
+        /* Order matters: literal before ident, comment before punct. */
         if (!(scan_ws(&ctx) || scan_nl(&ctx) || scan_comment(&ctx) || scan_literal(&ctx) ||
               scan_number(&ctx) || scan_ident(&ctx) || scan_punct(&ctx)))
         {

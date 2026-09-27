@@ -7,9 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* An edge t -> h is a back edge iff h dominates t. A do-while's natural
-   header is its body block, which dominates the cond block; the header's
-   latch set is exactly the back-edge sources. */
+/* An edge t -> h is a back edge iff h dominates t. */
 
 static bool vec_has(Vec *v, void *item)
 {
@@ -133,7 +131,6 @@ static IrOperand phi_value_for_pred(IrInstr *phi, const char *label, bool *found
     return ir_operand_imm(0);
 }
 
-/* Collapse the phi entries from `gone` into one entry for `new_pred`. */
 static void phi_splice_entries(IrInstr *phi, Vec *gone, IrBlock *new_pred, IrOperand new_val)
 {
     u32 nkept = 0;
@@ -218,7 +215,6 @@ static Vec *latches_of_header(Vec *pairs, IrBlock *header)
     return NULL;
 }
 
-/* header, latches, header, latches, ... in discovery order. */
 static Vec *find_back_edges(IrFunction *f, CfgInfo *cfg, Dominators *doms, Arena *arena)
 {
     Vec *pairs = vec_new(arena);
@@ -277,7 +273,7 @@ static void build_loop_bodies(IrFunction *f, LoopInfo *loops, Arena *arena)
             IrBlock *bb = (IrBlock *) vec_get(loop->blocks, q);
             if (bb == loop->header)
             {
-                continue; /* blocks above the header are outside the loop */
+                continue;
             }
             size_t npred = vec_size(bb->preds);
             for (size_t p = 0; p < npred; p++)

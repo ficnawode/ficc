@@ -28,7 +28,6 @@ Queue *queue_new(Arena *arena)
 static void queue_grow(Queue *q)
 {
     size_t old_cap = q->cap;
-    /* cap * 2 * sizeof(void *) must not wrap */
     if (old_cap > SIZE_MAX / (2 * sizeof(void *)))
     {
         arena_oom_abort();

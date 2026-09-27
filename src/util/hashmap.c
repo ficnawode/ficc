@@ -32,7 +32,7 @@ struct HashMap
     bool (*eq)(const void *a, const void *b);
 };
 
-/* FNV-1a 64-bit — byte-at-a-time, cheap for short C strings */
+/* FNV-1a 64-bit: cheap for short C strings. */
 u64 hashmap_str_hash(const void *key)
 {
     const char *s = key;
@@ -51,8 +51,7 @@ bool hashmap_str_eq(const void *a, const void *b)
     return strcmp((const char *) a, (const char *) b) == 0;
 }
 
-/* MurmurHash3 64-bit finalizer — avalanche so nearby integer keys
-   (e.g. 19, 23, 31) land in different buckets */
+/* MurmurHash3 finalizer: avalanche separates nearby integer keys. */
 static u64 hash_u64(const void *key)
 {
     u64 k = (u64) (uintptr_t) key;
@@ -97,7 +96,6 @@ static void hashmap_rehash(HashMap *m)
 {
     size_t old_cap = m->cap;
     HashMapEntry *old = m->entries;
-    /* cap * 2 * sizeof(HashMapEntry) must not wrap */
     if (old_cap > SIZE_MAX / (2 * sizeof(HashMapEntry)))
     {
         arena_oom_abort();

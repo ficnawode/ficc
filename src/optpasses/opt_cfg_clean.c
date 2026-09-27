@@ -59,7 +59,6 @@ static void succs_of(StrMap *labels, IrBlock *bb, Vec *out)
     }
 }
 
-/* Blocks reachable from the entry, iterated worklist-style (no recursion). */
 static u8 *reachable(IrFunction *f, StrMap *labels, Arena *arena)
 {
     size_t nblocks = vec_size(f->blocks);
@@ -88,7 +87,6 @@ static u8 *reachable(IrFunction *f, StrMap *labels, Arena *arena)
     return seen;
 }
 
-/* Remove the element at `i` from a pointer Vec (stable suffix shift). */
 static void vec_remove_at(Vec *v, size_t i)
 {
     if (i >= vec_size(v))
@@ -144,7 +142,6 @@ static bool prune_unreachable(OptimizerContext *ctx, IrFunction *f, StrMap *labe
     return pruned;
 }
 
-/* Fold a brcond whose condition is a constant into an unconditional br. */
 static bool fold_constant_brcond(OptimizerContext *ctx, IrFunction *f, StrMap *labels)
 {
     (void) ctx;
@@ -182,7 +179,6 @@ static bool fold_constant_brcond(OptimizerContext *ctx, IrFunction *f, StrMap *l
     return changed;
 }
 
-/* Rename one label in every phi of `bb`, keeping entries == preds. */
 static void phi_rename_label(IrBlock *bb, const char *old_label, const char *new_label)
 {
     size_t ninstr = vec_size(bb->instrs);
@@ -203,7 +199,6 @@ static void phi_rename_label(IrBlock *bb, const char *old_label, const char *new
     }
 }
 
-/* A pure jump stub: a non-entry block whose only instruction is `br Y`. */
 static IrInstr *jump_stub(IrFunction *f, IrBlock *bb)
 {
     if (opt_block_index(f, bb) == 0)
@@ -239,7 +234,6 @@ static bool vec_contains_ptr(Vec *v, void *item)
     return false;
 }
 
-/* True when one of `bb`'s phis takes a value from `label`. */
 static bool phis_reference_label(IrBlock *bb, const char *label)
 {
     size_t ninstr = vec_size(bb->instrs);
@@ -261,7 +255,6 @@ static bool phis_reference_label(IrBlock *bb, const char *label)
     return false;
 }
 
-/* True when `bb`'s terminator can reach more than one block. */
 static bool block_has_split_exit(StrMap *labels, IrBlock *bb)
 {
     if (vec_size(bb->instrs) == 0)
@@ -271,7 +264,7 @@ static bool block_has_split_exit(StrMap *labels, IrBlock *bb)
     IrInstr *last = (IrInstr *) vec_last(bb->instrs);
     if (last->opcode != OP_BRCOND && last->opcode != OP_SWITCH)
     {
-        return false; /* br / ret: a single, unambiguous successor */
+        return false;
     }
     if (last->opcode == OP_BRCOND)
     {
@@ -317,8 +310,7 @@ static bool merge_jump_stubs(OptimizerContext *ctx, IrFunction *f, StrMap *label
             {
                 continue;
             }
-            /* Skip: the phi copy's successor would become a block that also
-               branches elsewhere, so the copy would run for the wrong target. */
+            /* The phi copy would run for the wrong target if pred splits its exit. */
             if (phis_reference_label(target, bb->label) && block_has_split_exit(labels, pred))
             {
                 continue;

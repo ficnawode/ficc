@@ -21,7 +21,6 @@
 #define F32_SIGN_BIT 0x80000000
 #define F64_SIGN_BIT 0x8000000000000000ULL
 
-/* IEEE bit patterns of 2^63, added back by the u64 int→FP sequence. */
 #define F32_BITS_2POW63 0x5F000000
 #define F64_BITS_2POW63 0x43E0000000000000ULL
 
@@ -36,7 +35,6 @@ typedef struct
     bool src_is_scratch; /* the source was spilled to the cycle-break scratch slot */
 } LowerPhiCopy;
 
-/* Jump table appended to the function's .text, indexed by `val - min`. */
 typedef struct
 {
     size_t disp_field_off;
@@ -46,7 +44,6 @@ typedef struct
 
 #define STACK_ALIGN 16
 
-/* Sentinel for a position slot whose byte offset has not been recorded yet. */
 #define POS_UNSET UINT32_MAX
 
 static u8 vreg_width(X86LowerCtx *ctx, u32 vreg)
@@ -81,15 +78,12 @@ static u8 load_int_operand(X86LowerCtx *ctx, IrOperand op, bool *is_signed);
 static u8 fp_imm_load_width(u8 w, i64 imm);
 static void fp_operand_to_xmm(X86LowerCtx *ctx, IrOperand op, u8 w, u8 xmm);
 
-/* GepFold kinds: which operands lowering resolves at the use site. */
 #define GEP_FOLD_NONE 0
 #define GEP_FOLD_DISP 1 /* result holds the base; the constant offset is the disp */
 #define GEP_FOLD_A 2    /* result holds the base; the index resolves at the use */
 #define GEP_FOLD_B 3    /* result holds the index; the base resolves at the use */
 #define GEP_FOLD_PAIR 4 /* no result; both operands resolve at the use */
 
-/* Like loc_at, but returns false instead of asserting when `op` has no home at
-   `pos` (a folded-GEP use may read a value it does not literally name). */
 static bool loc_at_soft(const RegAllocation *alloc, IrOperand op, u32 pos, RegLoc *out)
 {
     if (op.is_imm || op.is_global || op.is_func || op.u.vreg >= alloc->nvregs)
@@ -112,9 +106,6 @@ static bool loc_at_soft(const RegAllocation *alloc, IrOperand op, u32 pos, RegLo
     return false;
 }
 
-/* Materialize `imm` into `reg`.  A zero becomes a shorter zeroing xor, which is
-   safe in the only contexts this feeds: operand setup (before the consuming
-   instruction's own flag write) and phi copies (past the terminator). */
 static void emit_imm_to_reg(X86LowerCtx *ctx, u8 width, u8 reg, i64 imm)
 {
     if (imm == 0 && (width == 4 || width == 8) && !ctx->flags_live)
@@ -125,14 +116,12 @@ static void emit_imm_to_reg(X86LowerCtx *ctx, u8 width, u8 reg, i64 imm)
     emit_mov(ctx->buf, width, xop_reg(reg), xop_imm(imm));
 }
 
-/* Force `op` into physical `reg`, emitting an address load for globals/functions. */
 static void force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
 {
     ByteBuf *b = ctx->buf;
     if (op.is_imm)
     {
-        /* Materialize the full 64-bit value: an imm32 load zero-extends and would
-           lose the sign of a negative immediate used in a 64-bit context. */
+        /* imm32 load zero-extends and would lose the sign of a 64-bit immediate */
         emit_imm_to_reg(ctx, W_QWORD, reg, op.u.imm);
         return;
     }
@@ -164,7 +153,6 @@ static void force_to_reg(X86LowerCtx *ctx, IrOperand op, u8 reg)
     emit_mov(b, w, xop_reg(reg), xop_mem(x86_frame_mem(ctx->frame, l.disp)));
 }
 
-/* Resolve `op` to an operand without forcing register placement. */
 static X86Operand resolve(X86LowerCtx *ctx, IrOperand op, u8 scratch)
 {
     if (op.is_imm)
@@ -194,7 +182,6 @@ static X86Operand resolve(X86LowerCtx *ctx, IrOperand op, u8 scratch)
     return xop_mem(x86_frame_mem(ctx->frame, l.disp));
 }
 
-/* A right-hand operand; an imm64 that no encoding reaches is materialized in `scratch`. */
 static X86Operand resolve_rhs(X86LowerCtx *ctx, IrOperand op, u8 width, u8 scratch)
 {
     if (op.is_imm && width == 8 && !fits_i32(op.u.imm))
@@ -224,15 +211,12 @@ static void store_reg_result(X86LowerCtx *ctx, IrInstr *in, u8 width, u8 reg)
     emit_mov(ctx->buf, width, xop_mem(x86_frame_mem(ctx->frame, l.disp)), xop_reg(reg));
 }
 
-/* Address of the pointee in %rax; globals/functions carry their own relocations. */
 static X86Mem pointer_in_rax(X86LowerCtx *ctx, IrOperand ptr)
 {
     force_to_reg(ctx, ptr, R_EAX);
     return x86_mem_rax(0);
 }
 
-/* Resolve a folded base+index GEP at `pos`; `result_reg` carries whichever
-   operand the fold left in the result register (unused for the pair form). */
 static void remat_mem_base(const LinearFrame *frame, RegLoc bl, X86Mem *m)
 {
     if (bl.kind == LOC_REMAT)
@@ -291,10 +275,6 @@ static bool folded_mem_operand(const RegAllocation *alloc, const LinearFrame *fr
     return true;
 }
 
-/* A pointer already in a register is used as the base directly; a
-   spilled/immediate/global pointer is materialized in `scratch` first.  A
-   folded GEP resolves into the memory operand itself, and a rematerialized
-   address is already `[%rbp+disp]`. */
 X86Mem x86_lower_mem_for_ptr(X86LowerCtx *ctx, IrOperand ptr, u8 scratch)
 {
     if (!ptr.is_imm && !ptr.is_global && !ptr.is_func)
@@ -325,7 +305,6 @@ X86Mem x86_lower_mem_for_ptr(X86LowerCtx *ctx, IrOperand ptr, u8 scratch)
     return (X86Mem) {.base = scratch, .index = NO_REG, .scale = 1, .disp = 0};
 }
 
-/* The low `width` bytes of an immediate, as the multiply sees them. */
 static bool mul_pow2_shift(i64 imm, u8 width, u8 *shift)
 {
     u64 bits = width >= 8 ? (u64) imm : (u64) imm & ((1ULL << (width * 8)) - 1);
@@ -457,7 +436,6 @@ static bool operand_extend_needed(u8 width, u8 result_width)
     return width < result_width && width < 4;
 }
 
-/* Compare `lhs` and `rhs` into EFLAGS, shared by lower_icmp and the brcond fold. */
 static void emit_icmp_cmp(X86LowerCtx *ctx, IrOperand lhs, IrOperand rhs)
 {
     u8 w0 = operand_width(ctx, lhs);
@@ -580,11 +558,6 @@ static void lower_trunc(IrInstr *in, X86LowerCtx *ctx)
     store_reg_result(ctx, in, w, R_EAX);
 }
 
-/* Widen `op` into `dst`.  The extension reads the source where it already
-   lives, so a register copy is never emitted just to widen in place: a source
-   in a register or spill slot feeds movsx/movzx (or a 32-bit mov for the
-   zero-extend case) directly.  A rematerialized address has no value home, so
-   it is materialized first. */
 static void emit_widen(X86LowerCtx *ctx, u8 sw, u8 dw, u8 dst, X86Operand src, bool is_signed)
 {
     if (sw == 4 && !is_signed)
@@ -691,7 +664,6 @@ static u8 fp_imm_load_width(u8 w, i64 imm)
     return w == 4 ? 4 : imm_load_width(imm);
 }
 
-/* Move an FP operand's bits into `xmm`; a bare immediate rides a GP mov + movd/movq. */
 static void fp_operand_to_xmm(X86LowerCtx *ctx, IrOperand op, u8 w, u8 xmm)
 {
     ByteBuf *b = ctx->buf;
@@ -922,8 +894,6 @@ static const FcmpSpec fcmp_specs[OP_FCMP_GE + 1] = {
     [OP_FCMP_GT] = {CC_A, 0},      [OP_FCMP_LE] = {CC_BE, OP_AND}, [OP_FCMP_GE] = {CC_AE, 0},
 };
 
-/* Compare `ops[0]` and `ops[1]` into EFLAGS via ucomisd; shared by lower_fcmp
-   and the brcond fold. */
 static void emit_fcmp_flags(IrInstr *in, X86LowerCtx *ctx)
 {
     u8 sw = in->ops[0].is_imm ? 8 : vreg_width(ctx, in->ops[0].u.vreg);
@@ -1081,10 +1051,8 @@ static void lower_gep(IrInstr *in, X86LowerCtx *ctx)
     {
         if (gf->kind == GEP_FOLD_PAIR)
         {
-            return; /* every use resolves both operands itself */
+            return;
         }
-        /* A/B/DISP: the result register carries one operand, so a use only has
-           to resolve the other (or the constant offset). */
         RegLoc rl = result_loc(ctx, in);
         ASSERT(rl.kind == LOC_REG && "a folded GEP result stays in a register");
         force_to_reg(ctx, gf->kind == GEP_FOLD_B ? in->ops[1] : in->ops[0], rl.reg);
@@ -1099,8 +1067,6 @@ static void lower_gep(IrInstr *in, X86LowerCtx *ctx)
     {
         force_to_reg(ctx, in->ops[1], R_R11);
     }
-    /* A register base is the lea base directly; a spilled or immediate one is
-       materialized in `dst` first. */
     u8 base = dst;
     if (!in->ops[0].is_imm && !in->ops[0].is_global && !in->ops[0].is_func)
     {
@@ -1149,15 +1115,10 @@ static void lower_gep(IrInstr *in, X86LowerCtx *ctx)
 
 static void lower_alloca(IrInstr *in, X86LowerCtx *ctx)
 {
-    /* The frame planner reserves a static slot and the result is recomputed at
-       each use (LOC_REMAT), so the definition emits nothing. */
     (void) in;
     (void) ctx;
 }
 
-/* 24 and 32 bytes are the largest blocks the reserved xmm0/xmm1 and %r11
-   scratch can cover.  24 ends with an 8-byte scalar tail; every load still
-   runs before any store. */
 static void lower_memcpy_wide(ByteBuf *buf, X86Mem src, X86Mem dst, u64 size)
 {
     X86Mem src_hi = src;
@@ -1184,9 +1145,7 @@ static void lower_memcpy_wide(ByteBuf *buf, X86Mem src, X86Mem dst, u64 size)
     }
 }
 
-/* A small block is copied with movups chunks, and every load runs before any
-   store so a self-overlapping copy stays correct.  This avoids the
-   %rsi/%rdi/%rcx setup and rep-movsb start-up a byte loop would pay. */
+/* every load runs before any store so a self-overlapping copy stays correct */
 static bool lower_memcpy_block(IrInstr *in, X86LowerCtx *ctx)
 {
     u64 size = (u64) in->ops[2].u.imm;
@@ -1216,9 +1175,7 @@ static bool lower_memcpy_block(IrInstr *in, X86LowerCtx *ctx)
     return true;
 }
 
-/* rdi <- dst, rsi <- src, then rep movsb.  The two moves are ordered so a
-   source still living in %rdi or %rsi is read before its register is
-   overwritten (the pathological swap goes through %rax). */
+/* rdi <- dst, rsi <- src; read a source in %rdi/%rsi before overwriting it */
 static void lower_memcpy(IrInstr *in, X86LowerCtx *ctx)
 {
     IrOperand dst = in->ops[0];
@@ -1294,7 +1251,6 @@ static void lower_ret(IrInstr *in, X86LowerCtx *ctx)
     bytebuf_append(ctx->buf, X86_RET);
 }
 
-/* Emit the one epilogue shared by every `ret`; each `ret` jumped here. */
 static void emit_shared_epilogue(X86LowerCtx *ctx)
 {
     size_t epilogue = bytebuf_len(ctx->buf);
@@ -1359,7 +1315,6 @@ static u8 invert_cc(u8 cc)
     return (u8) (cc ^ 1);
 }
 
-/* Branch on `cc`; an edge that is the next block falls through instead. */
 static void emit_cond_branch(X86LowerCtx *ctx, u8 cc, const char *true_label,
                              const char *false_label)
 {
@@ -1401,8 +1356,7 @@ static void lower_brcond_branch(IrInstr *in, X86LowerCtx *ctx, u8 cc)
     emit_cond_branch(ctx, cc, in->extra.brcond.true_label, in->extra.brcond.false_label);
 }
 
-/* The unordered (PF) case is false for every ordered predicate and true for
-   `!=`; branch to the matching edge before the ordered condition. */
+/* unordered (PF) is false for ordered predicates and true for !=; branch there first */
 static void lower_fcmp_branch(IrInstr *in, IrOpcode op, X86LowerCtx *ctx)
 {
     const char *nan_target =
@@ -1428,7 +1382,6 @@ static bool is_fcmp(IrOpcode op)
     return op >= OP_FCMP_EQ && op <= OP_FCMP_GE;
 }
 
-/* Load the switch control into %rax at its exact 64-bit semantic value. */
 static u8 load_int_operand(X86LowerCtx *ctx, IrOperand op, bool *is_signed)
 {
     if (op.is_imm)
@@ -1464,12 +1417,8 @@ static u8 load_int_operand(X86LowerCtx *ctx, IrOperand op, bool *is_signed)
     return sw;
 }
 
-/* Tables only when the case range is small (≤ JT_MAX_RANGE); sparse switches use a chain. */
 #define JT_MAX_RANGE 256
 
-/* Bounds-check %eax to [min,max], subtract min, jump through the full-range table.
-   The check is unsigned: after `sub min`, the in-range values are 0..range and
-   everything else wraps above it, so one `ja` catches both sides. */
 static void emit_switch_table(X86LowerCtx *ctx, IrSwitchCase *cases, u32 n, i64 min, i64 max,
                               const char *default_label)
 {
@@ -1617,7 +1566,6 @@ typedef void (*LowerFn)(IrInstr *, X86LowerCtx *);
     X(OP_FCMP_LE, lower_fcmp)                                                                      \
     X(OP_FCMP_GE, lower_fcmp)
 
-/* Dispatch table indexed by opcode; unlisted opcodes hit the unsupported path. */
 static const LowerFn lower_fns[OP_FCMP_GE + 1] = {
 #define LOWER_INIT(op, fn) [op] = fn,
     LOWER_ENTRIES(LOWER_INIT)
@@ -1626,8 +1574,6 @@ static const LowerFn lower_fns[OP_FCMP_GE + 1] = {
 
 static void lower_instr(IrInstr *in, X86LowerCtx *ctx)
 {
-    /* A rematerialized result (a static alloca or an address derived from one)
-       has no home; its uses recompute it, so the definition emits nothing. */
     if (in->result != NO_VREG && regalloc_is_remat(ctx->alloc, in->result))
     {
         return;
@@ -1659,7 +1605,6 @@ static void store_vreg_from_reg(X86LowerCtx *ctx, u32 vreg, u8 width, u8 reg)
     store_reg_to_loc(ctx, x86_lower_operand_loc(ctx, ir_operand_vreg(vreg)), width, reg);
 }
 
-/* Emits `dst <- src` for an already-resolved destination location. */
 static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
 {
     if (dw == W_LD)
@@ -1775,8 +1720,7 @@ static void emit_copy_to_loc(X86LowerCtx *ctx, IrOperand src, RegLoc dl, u8 dw)
     emit_mov(ctx->buf, dw, xop_mem(x86_frame_mem(ctx->frame, dl.disp)), xop_reg(R_EAX));
 }
 
-/* A PHI edge's copy runs at its predecessor's end, so it reads the incoming
-   value at its final use and defines the phi result at the same position. */
+/* a PHI edge's copy runs at its predecessor's end, at the incoming value's last use */
 static void emit_phi_copy(X86LowerCtx *ctx, IrOperand src, u32 dst_vreg)
 {
     u8 dw = vreg_width(ctx, dst_vreg);
@@ -1784,7 +1728,6 @@ static void emit_phi_copy(X86LowerCtx *ctx, IrOperand src, u32 dst_vreg)
     emit_copy_to_loc(ctx, src, dl, dw);
 }
 
-/* Saves `src` into the 16-byte scratch slot used to break phi-copy cycles. */
 static void emit_scratch_store(X86LowerCtx *ctx, IrOperand src)
 {
     X86Mem sm = x86_frame_mem(ctx->frame, ctx->scratch_disp);
@@ -1837,7 +1780,6 @@ static void emit_scratch_store(X86LowerCtx *ctx, IrOperand src)
     }
 }
 
-/* Restores the scratch slot into the phi destination `dst_vreg`. */
 static void emit_scratch_load(X86LowerCtx *ctx, u32 dst_vreg)
 {
     X86Mem sm = x86_frame_mem(ctx->frame, ctx->scratch_disp);
@@ -1895,9 +1837,7 @@ static bool phi_operand_same(IrOperand a, IrOperand b)
     return a.u.vreg == b.u.vreg;
 }
 
-/* PHI copies share registers (coalescing, argument lanes), so parallel-copy
-   ordering must compare physical locations, not vregs: two distinct vregs can
-   occupy one register. */
+/* distinct vregs can share a register, so ordering compares locations, not vregs */
 static bool phi_loc_same(RegLoc a, RegLoc b)
 {
     if (a.kind != b.kind)
@@ -1925,7 +1865,6 @@ static bool phi_src_same_loc(const RegAllocation *alloc, const LowerPhiCopy *a,
     return phi_loc_same(loc_at(alloc, a->src, pos), loc_at(alloc, b->src, pos));
 }
 
-/* A block's pending PHI copies plus the scheduler's done flags. */
 typedef struct
 {
     LowerPhiCopy **copies;
@@ -1948,8 +1887,6 @@ static PhiCopyPlan phi_copy_plan(Vec *pcs, Arena *arena)
     return plan;
 }
 
-/* Index of a pending copy whose destination no other pending copy reads, or `n`
-   when every remaining destination is a source (a cycle). */
 static size_t phi_ready_copy(const RegAllocation *alloc, LowerPhiCopy **work, const bool *done,
                              size_t n, u32 pos)
 {
@@ -1981,7 +1918,6 @@ static size_t phi_ready_copy(const RegAllocation *alloc, LowerPhiCopy **work, co
     return n;
 }
 
-/* Whether any block has a PHI-copy cycle, so lowering needs the scratch slot. */
 static bool phi_copies_need_scratch(const RegAllocation *alloc, const IrPositions *pos,
                                     Vec **phi_copies, size_t nblocks, Arena *arena)
 {
@@ -2009,10 +1945,6 @@ static bool phi_copies_need_scratch(const RegAllocation *alloc, const IrPosition
     return false;
 }
 
-/* Emits a block's PHI copies with parallel-copy semantics. A copy whose
-   destination is still a source of a pending copy must wait; when every
-   remaining destination is a source (a cycle, e.g. a loop-carried swap), the
-   cycle is broken through the scratch slot. */
 static void emit_block_phi_copies(X86LowerCtx *ctx, size_t bi)
 {
     if (vec_size(ctx->phi_copies[bi]) == 0)
@@ -2043,8 +1975,6 @@ static void emit_block_phi_copies(X86LowerCtx *ctx, size_t bi)
             continue;
         }
 
-        /* Cycle: spill one pending source to the scratch slot and redirect every
-           pending copy that reads it. */
         size_t c = 0;
         while (done[c])
         {
@@ -2090,7 +2020,6 @@ static void build_phi_copies(IrFunction *f, StrMap *label_to_index, Vec **phi_co
     }
 }
 
-/* Record where `in` starts lowering; skip line-0 (pre-statement) rows. */
 static void record_line_entry(X86LowerCtx *ctx, IrInstr *in)
 {
     if (!ctx->debug || in->line == 0)
@@ -2103,13 +2032,12 @@ static void record_line_entry(X86LowerCtx *ctx, IrInstr *in)
     vec_push(ctx->lines, le);
 }
 
-/* Position of block-local instruction `ii`: two slots per instruction. */
+/* two position slots per instruction */
 static u32 pos_of(u32 base, size_t ii)
 {
     return base + 2u * (u32) ii;
 }
 
-/* Fill still-unset position slots in [from, to) with `value`. */
 static void fill_unset_positions(u32 *offsets, u32 from, u32 to, u32 value)
 {
     for (u32 p = from; p < to; p++)
@@ -2121,8 +2049,6 @@ static void fill_unset_positions(u32 *offsets, u32 from, u32 to, u32 value)
     }
 }
 
-/* A brcond over a single-use compare immediately before it compares into the
-   flags. */
 static IrInstr *foldable_brcond_cmp(IrBlock *blk, X86LowerCtx *ctx)
 {
     size_t n = vec_size(blk->instrs);
@@ -2153,8 +2079,6 @@ static IrInstr *foldable_brcond_cmp(IrBlock *blk, X86LowerCtx *ctx)
     return prev;
 }
 
-/* A value split at a pressure point changes home between the instructions
-   around `pos`: store it to the slot, or reload it into the new register. */
 static void emit_seg_move(X86LowerCtx *ctx, u32 vreg, RegLoc pre, RegLoc post)
 {
     u8 w = vreg_width(ctx, vreg);
@@ -2245,8 +2169,7 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
 
     IrInstr *term = (IrInstr *) vec_get(blk->instrs, ii);
     bool is_brcond = term->opcode == OP_BRCOND;
-    /* The folded compare runs before the terminator's segment transitions,
-       which may reuse a register it still reads. */
+    /* the folded compare runs before transitions that may reuse a register it still reads */
     if (is_brcond && fold_cmp)
     {
         ctx->cur_pos = pos_of(base, ii - 1);
@@ -2265,8 +2188,7 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
     {
         lower_brcond_test(term, ctx);
     }
-    /* The compare above sets the flags the branch below reads; the phi copies in
-       between must not clobber them, so they avoid a zeroing xor. */
+    /* phi copies between the compare and branch must not clobber the flags (no zeroing xor) */
     ctx->flags_live = is_brcond;
     emit_block_phi_copies(ctx, bi);
 
@@ -2293,7 +2215,6 @@ static void emit_block_linear(IrBlock *blk, size_t bi, X86LowerCtx *ctx)
         lower_instr(term, ctx);
     }
     ctx->position_offsets[pos_of(base, ii)] = (u32) bytebuf_len(ctx->buf);
-    /* Gap positions (phi-copy and scheduling slots) run to the block end. */
     fill_unset_positions(ctx->position_offsets, base, bend, (u32) bytebuf_len(ctx->buf));
     ASSERT(ii + 1 == ninstr && "the terminator is the last instruction in a block");
 }
@@ -2309,7 +2230,6 @@ static void resolve_block_patches(X86LowerCtx *ctx)
     }
 }
 
-/* Jump tables follow the body; entries store target - table_base offsets. */
 static void emit_switch_tables(X86LowerCtx *ctx)
 {
     size_t nst = vec_size(ctx->switch_tables);
@@ -2349,7 +2269,6 @@ static IrInstr *block_terminator(IrBlock *blk)
     return n ? (IrInstr *) vec_get(blk->instrs, n - 1) : NULL;
 }
 
-/* The successor a block falls through to: false edge, jump target, or default. */
 static const char *fallthrough_label(IrBlock *blk)
 {
     IrInstr *t = block_terminator(blk);
@@ -2370,7 +2289,6 @@ static const char *fallthrough_label(IrBlock *blk)
     }
 }
 
-/* Push non-fallthrough edges (index+1) for later traces. */
 static void push_cold_succs(IrBlock *blk, const char *fallthrough, X86LowerCtx *ctx, Vec *stack)
 {
     IrInstr *t = block_terminator(blk);
@@ -2408,7 +2326,6 @@ static void push_cold_succs(IrBlock *blk, const char *fallthrough, X86LowerCtx *
     }
 }
 
-/* Trace layout: follow fallthrough edges, deferring cold ones; entry stays first. */
 static size_t *layout_blocks(IrFunction *f, X86LowerCtx *ctx, size_t nblocks, Arena *arena)
 {
     size_t *order = arena_alloc(arena, (nblocks ? nblocks : 1) * sizeof(size_t), sizeof(size_t));
@@ -2509,9 +2426,7 @@ static void rewrite_operand(IrOperand *op, const IrOperand *repl, const bool *ha
     }
 }
 
-/* Fold `gep base, idx, stride` with a zero byte offset into `base`: the value
-   flows directly, so no address instruction is emitted and a parameter's live
-   range reaches the real use. Runs before liveness. */
+/* runs before liveness so a parameter's range reaches the real use */
 static void canonicalize_identity_geps(IrFunction *f, u32 nvregs, Arena *arena)
 {
     u32 n = nvregs ? nvregs : 1;
@@ -2558,7 +2473,7 @@ static void canonicalize_identity_geps(IrFunction *f, u32 nvregs, Arena *arena)
             IrInstr *in = (IrInstr *) vec_get(blk->instrs, ii);
             if (in->opcode == OP_GEP && in->result != NO_VREG && has[in->result])
             {
-                continue; /* the identity definition, now unused */
+                continue;
             }
             for (u8 oi = 0; oi < in->nops; oi++)
             {
@@ -2585,9 +2500,7 @@ static void canonicalize_identity_geps(IrFunction *f, u32 nvregs, Arena *arena)
     }
 }
 
-/* Every segment home of `vreg` is a physical register: a folded address must
-   stay materialized (a SEG_MEM home would hold the base while a reloaded use
-   expects base+disp). */
+/* a SEG_MEM home would hold the base, but a reloaded use expects base+disp */
 static bool all_segments_reg(const RegAllocation *alloc, u32 vreg)
 {
     if (vreg >= alloc->nvregs)
@@ -2604,8 +2517,6 @@ static bool all_segments_reg(const RegAllocation *alloc, u32 vreg)
     return true;
 }
 
-/* The operand positions a folded GEP can absorb: a load/store pointer, or (for
-   the constant form only) the base of another candidate. */
 static bool folds_into_use(const IrInstr *in, u8 oi, const bool *cand, bool allow_gep_base)
 {
     if (in->opcode == OP_LOAD)
@@ -2620,7 +2531,6 @@ static bool folds_into_use(const IrInstr *in, u8 oi, const bool *cand, bool allo
            cand[in->result];
 }
 
-/* Phi entries and indirect-call arguments/callee are never foldable uses. */
 static void scan_gep_extra_uses(const IrInstr *in, const bool *cand, u32 nv, bool *bad)
 {
     if (in->opcode == OP_PHI)
@@ -2652,8 +2562,6 @@ static void scan_gep_extra_uses(const IrInstr *in, const bool *cand, u32 nv, boo
     }
 }
 
-/* Mark every candidate vreg that has a use the fold cannot absorb; count its
-   load/store pointer uses into `ucount` when `ucount` is non-NULL. */
 static void scan_gep_uses(IrFunction *f, const bool *cand, bool allow_gep_base, u32 nv, u32 *ucount,
                           bool *bad)
 {
@@ -2687,9 +2595,6 @@ static void scan_gep_uses(IrFunction *f, const bool *cand, bool allow_gep_base, 
     }
 }
 
-/* A constant-offset GEP whose every use is a load/store pointer (or the base of
-   another constant candidate) stays in its base: each use carries the byte
-   offset as its displacement. */
 static void constant_gep_folds(X86LowerCtx *ctx, const u32 *use_count, Arena *arena, GepFold *folds)
 {
     const RegAllocation *alloc = ctx->alloc;
@@ -2732,17 +2637,12 @@ static void constant_gep_folds(X86LowerCtx *ctx, const u32 *use_count, Arena *ar
         }
     }
 
-    /* Only a load/store pointer or the base of another candidate can absorb the
-       offset; anything else (phi, call argument, stored value, memcpy, ...)
-       forces the GEP to be materialized. */
     scan_gep_uses(f, cand, true, nv, NULL, bad);
 
     for (u32 v = 0; v < nv; v++)
     {
         valid[v] = cand[v] && !bad[v];
     }
-    /* A candidate used as the base of an invalid candidate cannot fold: the
-       invalid user emits a real `lea` over the base and needs its full value. */
     for (;;)
     {
         for (u32 v = 0; v < nv; v++)
@@ -2798,10 +2698,6 @@ static void constant_gep_folds(X86LowerCtx *ctx, const u32 *use_count, Arena *ar
     }
 }
 
-/* A base+index GEP whose every use is a load/store pointer becomes a SIB
-   operand: whichever operand is live at the use is read there, the other is
-   carried in the result register (or, for the pair form, both resolve at the
-   use and the result is unused). */
 static void index_gep_folds(X86LowerCtx *ctx, const u32 *use_count, Arena *arena, GepFold *folds)
 {
     const RegAllocation *alloc = ctx->alloc;
@@ -2850,9 +2746,6 @@ static void index_gep_folds(X86LowerCtx *ctx, const u32 *use_count, Arena *arena
         }
     }
 
-    /* Index folds may only feed load/store pointers; any other use keeps the
-       GEP materialized.  Count the foldable uses so a second pass can record
-       each one's position in a flat list. */
     scan_gep_uses(f, icand, false, nv, ucount, ibad);
     u32 *ustart = arena_alloc(arena, (n + 1) * sizeof(u32), sizeof(u32));
     u32 total = 0;
@@ -2940,9 +2833,7 @@ static void index_gep_folds(X86LowerCtx *ctx, const u32 *use_count, Arena *arena
     }
 }
 
-/* Address folding: fold every GEP that only feeds load/store pointers into the
-   memory operands, so no `lea` is emitted for it.  Runs after register
-   allocation (it reads the segment homes) and before lowering. */
+/* runs after register allocation (reads segment homes) and before lowering */
 static void analyze_gep_folds(X86LowerCtx *ctx, const u32 *use_count, Arena *arena)
 {
     u32 nv = ctx->alloc->nvregs;
@@ -2977,8 +2868,7 @@ static u32 count_opcode(IrFunction *f, IrOpcode op)
     return n;
 }
 
-/* Ops whose 32-bit x86 lowering writes a 32-bit destination, which the ISA
-   zero-extends to 64 bits.  OP_ADD..OP_NOT are the integer arithmetic ops. */
+/* 32-bit x86 writes zero-extend to 64; OP_ADD..OP_NOT are the integer arithmetic ops */
 static bool zero_extends_to_64(IrOpcode op)
 {
     return (op >= OP_ADD && op <= OP_NOT) || is_icmp(op) || op == OP_LOAD || op == OP_ZEXT ||
@@ -3150,8 +3040,6 @@ static void split_one_edge(IrFunction *f, IrBlock *pred, IrBlock *succ, const ch
     }
 }
 
-/* PHI copies run at a block's end, so a copy for one successor edge would also
-   run on the block's other edges; split those edges into trampolines. */
 static void split_phi_edges(IrFunction *f, Arena *arena)
 {
     u32 serial = 0;
@@ -3185,11 +3073,7 @@ static void split_phi_edges(IrFunction *f, Arena *arena)
 static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *arena, Arena *scratch,
                        bool debug)
 {
-    /* `arena` owns everything that must outlive the function (the emitted
-       bytes and the relocation records).  `scratch` holds the per-function
-       liveness/regalloc working state; for a large translation unit it dwarfs
-       the output, so reusing one scratch arena per function keeps peak memory
-       proportional to the largest function instead of their sum. */
+    /* arena owns the emitted bytes and relocations; scratch is per-function working state */
     ByteBuf *buf = arena_alloc(arena, sizeof(ByteBuf), sizeof(void *));
     bytebuf_init(buf, arena);
     Vec *patches = vec_new(arena);
@@ -3217,8 +3101,6 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     bool omit_fp = false;
     if (x86_frame_can_omit_fp(mod, f, debug) && alloc->frame_size == 0)
     {
-        /* A spill-free function's frame is only the phi scratch or a static
-           alloca; %rbp is then free to join the register bank. */
         RegAllocation *lean = regalloc_linear_ex(f, &set, target, scratch, true);
         if (lean->frame_size == 0)
         {
@@ -3262,8 +3144,7 @@ static void lower_func(IrFunction *f, CodegenFunc *cf, IrModule *mod, Arena *are
     /* Reserved slot sits below every real spill slot. */
     i32 scratch_disp = -(i32) (frame.saved_bytes + alloc->frame_size);
 
-    /* One extra slot: a value live out of the final block records `end` as
-       npositions, the position just past the function. */
+    /* one extra slot: a value live out of the final block records end as npositions */
     u32 *position_offsets =
         arena_alloc(scratch, (set.pos.npositions + 1) * sizeof(u32), sizeof(u32));
     for (u32 p = 0; p <= set.pos.npositions; p++)
@@ -3370,7 +3251,6 @@ size_t x86_lower_module(CodegenModule *cm, IrModule *ir, bool debug, Arena *aren
     return nfuncs;
 }
 
-/* Exported views of the lowering helpers, for the SysV call/varargs layer. */
 u8 x86_lower_vreg_width(X86LowerCtx *ctx, u32 vreg)
 {
     return vreg_width(ctx, vreg);

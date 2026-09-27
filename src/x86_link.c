@@ -60,8 +60,6 @@ static RelocResult apply_x86_reloc(u32 type, u8 *field, u64 s, i64 addend, u64 p
     }
 }
 
-/* xor ebp,ebp; pop rdi; mov rsi,rsp; and rsp,-16; call main; mov edi,eax;
-   mov eax,60; syscall. Returns the offset of the `call main` rel32 field. */
 static u64 emit_x86_start(ByteBuf *out)
 {
     static const u8 head[] = {0x31, 0xed,                   /* xor ebp,ebp   */

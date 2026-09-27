@@ -41,8 +41,6 @@ static void plan_stack_arg(SysvArgPlan *p, u32 *stack, u32 size, u32 align)
     *stack += p->stack_size;
 }
 
-/* Assign a record's eightbyte chunks to GP/XMM registers; false when the
-   remaining registers cannot hold it and the whole record must go on the stack. */
 static bool plan_record_chunks(SysvArgPlan *p, u32 *gp, u32 *fp)
 {
     SysVEightByte eb = sysv_eightbyte_split(p->type);
@@ -202,10 +200,7 @@ static void emit_reg_arg(X86LowerCtx *ctx, IrOperand op, const SysvArgPlan *p)
 {
     if (p->is_record)
     {
-        /* A record address that already names a frame slot folds into each
-           chunk load, saving a lea per chunk.  Any other address (including a
-           register base) is materialized once into scratch, because a chunk
-           load could otherwise clobber the base before a later chunk reads it. */
+        /* Materialize a non-frame record base into scratch so a chunk load cannot clobber it. */
         X86Mem base = x86_lower_mem_for_ptr(ctx, op, R_R11);
         if (base.base != R_ESP && base.base != R_EBP && base.base != R_R11)
         {
@@ -239,9 +234,9 @@ static void emit_reg_arg(X86LowerCtx *ctx, IrOperand op, const SysvArgPlan *p)
 
 typedef enum
 {
-    GP_ARG_REG,  /* source is a vreg already in a register */
-    GP_ARG_MEM,  /* source is a spilled vreg */
-    GP_ARG_PURE, /* immediate, global, or function address */
+    GP_ARG_REG,
+    GP_ARG_MEM,
+    GP_ARG_PURE,
 } GpArgKind;
 
 typedef struct
@@ -297,8 +292,7 @@ static void emit_gp_arg_move(X86LowerCtx *ctx, const GpArgMove *m)
     }
 }
 
-/* A destination read by another pending move must wait; when every remaining
-   move is blocked the cycle is broken through %rax (reserved, never a lane). */
+/* A destination read by another pending move must wait; cycles break through %rax. */
 static bool gp_arg_move_ready(const GpArgMove *moves, u32 n, u32 i)
 {
     for (u32 j = 0; j < n; j++)
@@ -330,9 +324,7 @@ static void break_gp_arg_cycle(X86LowerCtx *ctx, GpArgMove *moves, u32 n)
     }
 }
 
-/* Place scalar GP arguments as a parallel copy: an argument may already ride
-   its own lane (collect_arg_prefs), and the ones that do not must be moved
-   without clobbering a sibling that is still to be read. */
+/* Parallel copy: move each GP arg without clobbering a sibling still to be read. */
 static void emit_gp_args_parallel(X86LowerCtx *ctx, IrInstr *in, const SysvArgPlan *plans,
                                   u32 nargs)
 {
@@ -426,8 +418,7 @@ static void emit_call_target(X86LowerCtx *ctx, IrInstr *in)
 
 void x86_sysv_lower_call(IrInstr *in, X86LowerCtx *ctx)
 {
-    /* Caller-saved registers are clobbered from the first argument move on, so
-       every split value is stored before the call sequence begins. */
+    /* Caller-saved regs die with the first argument move, so split values store first. */
     x86_lower_call_gaps(ctx, true);
     u32 nargs = in->extra.call.nargs;
     u32 nalloc = MAX(nargs, 1);
@@ -455,9 +446,7 @@ void x86_sysv_lower_call(IrInstr *in, X86LowerCtx *ctx)
             emit_stack_arg(ctx, in->extra.call.args[i], &plans[i]);
         }
     }
-    /* FP and record arguments never share a register file with the scalar GP
-       arguments, so they go in first; the GP moves are then scheduled as a
-       parallel copy so a value already in its lane needs no move. */
+    /* FP and record args do not share the GP file, so they go in before the GP copy. */
     for (u32 i = 0; i < nargs; i++)
     {
         if (!plans[i].on_stack && (plans[i].is_record || type_is_fp(plans[i].type)))

@@ -15,7 +15,7 @@ struct Parser
     StrMap *enum_consts;
     Vec *name_scopes;
     ParserConfig cfg;
-    const char *cur_func; /* enclosing function name for the `__func__` identifier */
+    const char *cur_func;
 };
 
 typedef enum
@@ -29,19 +29,18 @@ typedef struct Binding Binding;
 struct Binding
 {
     BindingKind kind;
-    Type *type; /* BIND_TYPEDEF only */
+    Type *type;
 };
 
 typedef struct Declarator
 {
     Type *type;
     const char *name;
-    u32 stars;      /* explicit `*` count */
-    u32 array_dims; /* explicit `[..]` count (not array-typedef base layers) */
-    /* Parameters captured when the outermost suffix folded the signature. */
+    u32 stars;
+    u32 array_dims;
     Vec *func_params;
     bool func_variadic;
-    Vec *attrs; /* Vec<Attr*> — GNU attributes on this declarator */
+    Vec *attrs;
 } Declarator;
 
 typedef struct Specs
@@ -50,8 +49,8 @@ typedef struct Specs
     StorageClass storage;
     u32 alignas;
     ASTNode *tag_def;
-    bool is_inline; /* the `inline` function specifier was seen (C11 §6.7.4) */
-    Vec *attrs;     /* Vec<Attr*> — GNU attributes before the type */
+    bool is_inline; /* C11 §6.7.4 */
+    Vec *attrs;
 } Specs;
 
 static Token *peek_token(Parser *p)
@@ -87,7 +86,6 @@ static void parse_error(Parser *p, const char *fmt, ...)
     fprintf(stderr, "\n");
 }
 
-/* A pedantic-only diagnostic; silent by default (GNU attribute tolerance). */
 static void parse_warning(Parser *p, Loc loc, const char *fmt, ...)
 {
     if (!p->cfg.pedantic)
@@ -262,7 +260,6 @@ static bool is_attribute_name(Token *t)
                                     strcmp(t->payload.str, "__attribute") == 0);
 }
 
-/* Classifies one attribute name; `align` is filled for `aligned(n)`. */
 static AttrKind attribute_kind(const char *name, u64 *align, bool *has_align)
 {
     *has_align = false;
@@ -286,7 +283,6 @@ static AttrKind attribute_kind(const char *name, u64 *align, bool *has_align)
     return ATTR_UNKNOWN;
 }
 
-/* Attribute names include GNU spelling aliases that lex as keywords. */
 static bool attribute_name_token(Token *t)
 {
     switch (t->kind)
@@ -306,10 +302,9 @@ static bool attribute_name_token(Token *t)
     }
 }
 
-/* Consumes one `__attribute__ (( ... ))` group into `out`. */
 static bool parse_attribute_list(Parser *p, Vec *out)
 {
-    next_token(p); /* __attribute__ */
+    next_token(p);
     if (peek_token(p)->kind != TOK_LPAREN)
     {
         parse_error(p, "expected '(' after __attribute__");
@@ -382,7 +377,6 @@ static bool parse_attribute_list(Parser *p, Vec *out)
     return true;
 }
 
-/* Parses every `__attribute__` group at the current position into `*slot`. */
 static bool parse_attributes(Parser *p, Vec **slot)
 {
     while (is_attribute_name(peek_token(p)))
@@ -415,7 +409,6 @@ static bool attrs_has_packed(Vec *attrs)
     return false;
 }
 
-/* The largest `aligned(n)` request (bare `aligned` → 16), or 0. */
 static u32 attrs_requested_align(Vec *attrs)
 {
     u32 align = 0;
@@ -439,7 +432,6 @@ static u32 attrs_requested_align(Vec *attrs)
     return align;
 }
 
-/* Appends `src` (may be NULL) onto `*dst` (created on demand). */
 static void merge_attrs(Vec **dst, Vec *src)
 {
     if (!src)
@@ -484,8 +476,7 @@ static ASTNode *parse_member_decl(Parser *p, Type *base, u32 alignas, Token *sta
         u32 bit_width = 0;
         if (peek_token(p)->kind == TOK_COLON)
         {
-            /* C11 §6.7.2.1p12: `declarator : constant-expression`, integer
-               (or _Bool/enum) base, width within the declared type. */
+            /* C11 §6.7.2.1p12 */
             if (!(type_is_integer(d.type) || d.type->kind == TYPE_ENUM))
             {
                 parse_error(p, "bit-field has non-integer type");
@@ -573,10 +564,6 @@ static bool validate_flexible_members(Parser *p, Type *rec, Vec *fields)
         RecordField *f = (RecordField *) vec_get(fields, i);
         if (type_is_record(f->type) && type_record_has_fam(f->type))
         {
-            /* C11 permits a record with a flexible array member as a member
-               (its size excludes the flexible tail); only arrays of such
-               records are ill-formed (checked in semantic). GCC accepts this
-               and warns only under -pedantic, so do the same. */
             parse_warning(p, peek_token(p)->loc,
                           "invalid use of structure with flexible array member");
         }
@@ -627,9 +614,7 @@ static Vec *parse_record_body(Parser *p, Type *rec)
             return NULL;
         }
 
-        /* Anonymous struct/union member (C11 §6.7.2.1p13): a tagless record
-           specifier with no declarator contributes its members to the
-           enclosing record. */
+        /* C11 §6.7.2.1p13 */
         if (type_is_record(mspecs.type) && peek_token(p)->kind == TOK_SEMI &&
             mspecs.type->record.tag == NULL && mspecs.type->record.complete)
         {
@@ -701,7 +686,7 @@ static bool parse_enumerator_body(Parser *p, Vec *constants, i64 *next_value)
             }
         }
 
-        /* GCC/C23 allow an enumerator up to `unsigned int` (not just `int`). */
+        /* GCC/C23 allow an enumerator up to `unsigned int`. */
         if (value < INT32_MIN || value > 0xffffffffLL)
         {
             parse_error(p, "enumerator value out of range (must fit in int)");
@@ -753,8 +738,6 @@ static bool parse_tag_prefix(Parser *p, TypeKind kind, const char **tag, Type **
     *tag = t->payload.str;
     if (is_def)
     {
-        /* A definition: type_record/type_enum interns a fresh type when the
-           tag is not already bound in this scope, shadowing any outer type. */
         *out = kind == TYPE_ENUM ? type_enum(t->payload.str) : type_record(kind, t->payload.str);
     }
     else if (existing)
@@ -763,7 +746,6 @@ static bool parse_tag_prefix(Parser *p, TypeKind kind, const char **tag, Type **
     }
     else
     {
-        /* First sight of the tag (implicit forward declaration). */
         *out = kind == TYPE_ENUM ? type_enum(t->payload.str) : type_record(kind, t->payload.str);
     }
     return true;
@@ -798,7 +780,6 @@ static Type *parse_record_specifier(Parser *p, bool is_union, ASTNode **tag_def)
         {
             return NULL;
         }
-        /* Record suffix attrs: `packed`/`aligned` re-lay the record out. */
         Vec *suffix_attrs = NULL;
         if (!parse_attributes(p, &suffix_attrs))
         {
@@ -949,7 +930,6 @@ static Type *parse_integer_specifiers(Parser *p)
         return NULL;
     }
 
-    /* FP specifiers: only `float`, `double`, and the recognized `long double`. */
     if (n_float || n_double)
     {
         if (n_signed || n_unsigned || n_char || n_short || n_int)
@@ -1137,13 +1117,12 @@ static Specs parse_decl_specifiers(Parser *p)
         }
         else if (k == TOK_KW_INLINE)
         {
-            /* Function specifiers (§6.7.4): `inline` drives the tier-1 inliner. */
+            /* C11 §6.7.4 */
             s.is_inline = true;
             next_token(p);
         }
         else if (k == TOK_KW_REGISTER || k == TOK_KW_AUTO || k == TOK_KW_NORETURN)
         {
-            /* Storage-class/specifier spellings with no effect here. */
             next_token(p);
         }
         else
@@ -1240,8 +1219,7 @@ static Type *ptr_layers(Type *t, u32 n)
     return t;
 }
 
-/* Pointer layers with per-level qualifiers: the leftmost `*` is the innermost
-   (closest to the base), so `T * const *` is a pointer to a const pointer. */
+/* Leftmost `*` is the innermost pointer (`T * const *` is pointer to const pointer). */
 static Type *ptr_layers_quals(Type *t, u32 n, const u8 *quals)
 {
     for (u32 i = 0; i < n; i++)
@@ -1289,7 +1267,7 @@ static Type *parse_group_suffixes(Parser *p, Type *t, u32 *nptr, Vec **captured_
                 vec_push(param_types, type_unqual(pd->type));
             }
             t = type_func(ptr_layers(t, *nptr), param_types, variadic);
-            /* Keep the params so a `(name)(params){...}` definition can use them. */
+            /* Keep the params so a definition can use them. */
             if (captured_params)
             {
                 *captured_params = params;
@@ -1307,12 +1285,6 @@ static Type *parse_group_suffixes(Parser *p, Type *t, u32 *nptr, Vec **captured_
 static bool parse_declarator_group(Parser *p, Type *base, u32 nptr, Declarator *out,
                                    bool name_optional)
 {
-    /* A parenthesized declarator is `( inner ) suffix*`. Both the enclosing
-       pointer layers (`nptr`, the stars before this `(`) and the suffixes wrap
-       the base type *before* the inner declarator is interpreted, so the base
-       must be transformed first. The suffixes, however, follow the inner text.
-       Parse the inner once to locate the matching `)`, compute the
-       suffix-wrapped base, then re-parse the inner against it. */
     size_t inner_start = p->pos;
     Declarator scratch;
     if (!parse_declarator_core(p, base, &scratch, name_optional, true))
@@ -1345,7 +1317,6 @@ static bool parse_declarator_group(Parser *p, Type *base, u32 nptr, Declarator *
         return false;
     }
     p->pos = after_suffix;
-    /* The stars and arrays are already folded into out->type by the re-parse. */
     out->stars = 0;
     out->array_dims = 0;
     if (!out->func_params)
@@ -1436,7 +1407,6 @@ static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool n
     {
         out->type = ptr_layers_quals(out->type, nptr, ptr_layer_quals);
     }
-    /* A `(params)` suffix inside the group belongs to this declarator. */
     if (inner_group && peek_token(p)->kind == TOK_LPAREN)
     {
         u32 suffix_ptrs = 0;
@@ -1629,7 +1599,7 @@ static Type *parse_array_suffix(Parser *p, Type *type, u32 *ndim_out)
 typedef struct StoragePrefix
 {
     StorageClass storage;
-    u8 lead_quals; /* qualifiers consumed ahead of the storage class */
+    u8 lead_quals;
 } StoragePrefix;
 
 static StoragePrefix parse_storage_prefix(Parser *p)
@@ -1673,7 +1643,6 @@ static StoragePrefix parse_storage_prefix(Parser *p)
 
 static Specs parse_specs_storage(Parser *p, bool storage_ok)
 {
-    /* A GNU attribute may precede the storage class. */
     Vec *lead_attrs = NULL;
     if (!parse_attributes(p, &lead_attrs))
     {
@@ -1954,7 +1923,6 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
 
 static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start)
 {
-    /* The parenthesized declarator already folded the params; only `;` or `{...}` remains. */
     if (s.alignas)
     {
         parse_error(p, "_Alignas is not permitted on a function");
@@ -1985,7 +1953,6 @@ static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start
     }
     else
     {
-        /* Rebuild the parameters from the type, unattached to names. */
         params = vec_new(p->arena);
         Vec *ptypes = d.type->func.params;
         for (size_t i = 0; i < vec_size(ptypes); i++)
@@ -2472,7 +2439,7 @@ static ASTNode *parse_stmt(Parser *p)
     Token *t = peek_token(p);
     if (t->kind == TOK_SEMI)
     {
-        /* C11 §6.8.3: null statement; macro bodies leave a stray `;`. */
+        /* C11 §6.8.3 */
         next_token(p);
         return ast_compound_stmt(vec_new(p->arena), t->loc, p->arena);
     }
@@ -2890,7 +2857,6 @@ static ASTNode *parse_unary(Parser *p)
     }
     if (t->kind == TOK_PLUS)
     {
-        /* Unary plus is the identity (after integer promotion). */
         next_token(p);
         return parse_unary(p);
     }
@@ -2989,8 +2955,6 @@ static ASTNode *parse_postfix(Parser *p)
     return parse_postfix_ops(p, node);
 }
 
-/* Left-associative binary operators, multiplicative down to logical-or, with
-   precedence (higher binds tighter). */
 enum
 {
     PREC_LOG_OR = 1,
@@ -3262,10 +3226,7 @@ static ASTNode *parse_initializer(Parser *p)
     return parse_assign(p);
 }
 
-/* The promoted type of a foldable constant expression, derived from the
-   leaves (literal suffixes, casts, sizeof) because parse-time nodes have no
-   expr_type yet. Lets `folded_const` honor unsigned DIV/REM/SHR and
-   relational semantics (§6.3.1.8). */
+/* C11 §6.3.1.8 */
 static bool folded_const(Parser *p, ASTNode *node, i64 *out);
 static Type *folded_const_type(Parser *p, ASTNode *node)
 {
@@ -3323,7 +3284,7 @@ static Type *folded_const_type(Parser *p, ASTNode *node)
         case AST_SIZEOF_EXPR:
         case AST_ALIGNOF_TYPE:
         case AST_ALIGNOF_EXPR:
-            return type_ulong(); /* size_t: results are unsigned */
+            return type_ulong();
         case AST_CAST_EXPR:
             return type_is_integer(ast_as(ASTCastExpr, node)->target_type)
                        ? type_unqual(ast_as(ASTCastExpr, node)->target_type)
@@ -3333,9 +3294,6 @@ static Type *folded_const_type(Parser *p, ASTNode *node)
     }
 }
 
-/* Whether a folded binary operation follows unsigned semantics: the usual
-   arithmetic conversions' common type for DIV/REM and the relational
-   comparands, the promoted left operand for shifts. */
 static bool folded_binary_unsigned(Parser *p, ASTBinaryExpr *b)
 {
     if (b->op == BIN_SHL || b->op == BIN_SHR)
@@ -3364,7 +3322,7 @@ static bool folded_const(Parser *p, ASTNode *node, i64 *out)
             ASTUnaryExpr *u = ast_as(ASTUnaryExpr, node);
             if (u->op == UN_ADDR && u->operand->kind == AST_MEMBER_ACCESS)
             {
-                /* `offsetof` reads the member's byte offset inside the record (§7.19p3). */
+                /* C11 §7.19p3 */
                 ASTMemberAccess *ma = ast_as(ASTMemberAccess, u->operand);
                 if (ma->object->kind == AST_CAST_EXPR)
                 {
@@ -3444,11 +3402,11 @@ static bool folded_const(Parser *p, ASTNode *node, i64 *out)
                     }
                     if (b->op == BIN_SHR && folded_binary_unsigned(p, b))
                     {
-                        *out = (i64) ((u64) l >> r); /* logical */
+                        *out = (i64) ((u64) l >> r);
                     }
                     else if (b->op == BIN_SHR)
                     {
-                        *out = l >> r; /* arithmetic */
+                        *out = l >> r;
                     }
                     else
                     {
@@ -3506,7 +3464,6 @@ static bool folded_const(Parser *p, ASTNode *node, i64 *out)
             *out = (i64) type_sizeof(ast_as(ASTSizeofType, node)->type);
             return true;
         case AST_SIZEOF_EXPR:
-            /* sizeof of a string literal is the array size incl. the NUL. */
             if (ast_as(ASTSizeofExpr, node)->operand &&
                 ast_as(ASTSizeofExpr, node)->operand->kind == AST_STRING_LITERAL)
             {
@@ -3563,7 +3520,7 @@ static bool resolve_constant_init(Parser *p, ASTVarDecl *vd, ASTNode *expr)
     }
     if (expr->kind == AST_CAST_EXPR)
     {
-        /* Null pointer constant spelled with a cast, e.g. `(void*)0` (§6.3.2.3p3). */
+        /* C11 §6.3.2.3p3 */
         ASTCastExpr *ce = ast_as(ASTCastExpr, expr);
         i64 v;
         if (ce->operand && folded_const(p, ce->operand, &v) && v == 0)
@@ -3573,7 +3530,7 @@ static bool resolve_constant_init(Parser *p, ASTVarDecl *vd, ASTNode *expr)
             return true;
         }
     }
-    /* FP scalars defer to the init planner (ir_builder owns the single FP fold). */
+    /* FP scalars: ir_builder owns the single FP fold. */
     if (type_is_fp(type_unqual(vd->type)))
     {
         vd->init = expr;
@@ -3586,8 +3543,7 @@ static bool resolve_constant_init(Parser *p, ASTVarDecl *vd, ASTNode *expr)
         vd->has_const_init = true;
         return true;
     }
-    /* Not foldable without types (e.g. `sizeof(x)`): defer to semantic, which
-       folds it as an integer constant expression or rejects it. */
+    /* Not foldable without types: defer to semantic. */
     vd->init = expr;
     return true;
 }
@@ -3611,9 +3567,6 @@ ASTNode *parse(Token *tokens, u64 count, const ParserConfig *cfg, Arena *arena)
     Vec *decls = vec_new(arena);
     while (peek_token(&p)->kind != TOK_EOF)
     {
-        /* An empty declaration (a stray `;`) is valid at file scope; GCC
-           diagnoses it only under -pedantic.  `SQLITE_EXTENSION_INIT1;` in the
-           SQLite shell expands to exactly this. */
         if (peek_token(&p)->kind == TOK_SEMI)
         {
             next_token(&p);

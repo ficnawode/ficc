@@ -25,19 +25,18 @@ typedef struct InterpCtx InterpCtx;
 struct InterpCtx
 {
     IrModule *mod;
-    Vec *stack; /* Vec<Frame*> */
+    Vec *stack;
     Arena *frame_arena;
     u32 nregs;
-    StrMap *func_map; /* name -> IrFunction* */
+    StrMap *func_map;
 
-    /* Per-function block lookup (rebuilt on every run_func / eval_call) */
-    StrMap *block_map; /* label -> IrBlock* */
+    StrMap *block_map;
 
-    IrBlock *next_bb;   /* next block to execute (set by branch ops) */
-    IrBlock *next_pred; /* the block that jumps to next_bb */
+    IrBlock *next_bb;
+    IrBlock *next_pred;
     bool jumped;
     bool returned;
-    bool error; /* set on a runtime trap (e.g. null dereference) */
+    bool error;
 
     u8 *alloca_base;
     u64 alloca_top;
@@ -54,17 +53,16 @@ struct InterpCtx
 };
 
 #define VA_GP_ARGS 6
-#define VA_GP_BYTES (VA_GP_ARGS * 8) /* 48 */
+#define VA_GP_BYTES (VA_GP_ARGS * 8)
 #define VA_XMM_ARGS 8
 #define VA_XMM_STRIDE 16
-#define VA_SAVE_BYTES (VA_GP_BYTES + VA_XMM_ARGS * VA_XMM_STRIDE) /* 176 */
+#define VA_SAVE_BYTES (VA_GP_BYTES + VA_XMM_ARGS * VA_XMM_STRIDE)
 
-/* Call-stack entry with register file; variadic callees get va_list regions. */
 typedef struct
 {
     i64 *regs;
-    u8 *va_save;     /* register save area (VA_SAVE_BYTES), or NULL */
-    u8 *va_overflow; /* class-overflowed args, 8 bytes each */
+    u8 *va_save;
+    u8 *va_overflow;
 } Frame;
 
 /* `regs[v]` is the 64-bit value; width-16 also uses regs[nregs + v]. */
@@ -159,7 +157,6 @@ static u8 *resolve_ptr(InterpCtx *ctx, IrOperand op, i64 *regs)
 static Frame *frame_new(Arena *arena, u32 nregs)
 {
     Frame *f = arena_alloc(arena, sizeof(Frame), sizeof(void *));
-    /* The second nregs hold the upper half of width-16 values. */
     f->regs = arena_alloc(arena, nregs * 2 * sizeof(i64), sizeof(i64));
     memset(f->regs, 0, nregs * 2 * sizeof(i64));
     f->va_save = NULL;
@@ -167,7 +164,6 @@ static Frame *frame_new(Arena *arena, u32 nregs)
     return f;
 }
 
-/* Bump from the interpreter's alloca region (shared with eval_alloca). */
 static u8 *interp_alloc(InterpCtx *ctx, u64 size)
 {
     u64 aligned = (size + 7) & ~7ULL;
@@ -398,7 +394,6 @@ static void build_block_map(InterpCtx *ctx, IrFunction *func)
     }
 }
 
-/* Direct/indirect callee resolution; NULL (with a diagnostic) if unknown. */
 static IrFunction *resolve_callee(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     if (in->extra.call.is_indirect)
@@ -419,7 +414,6 @@ static IrFunction *resolve_callee(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return callee;
 }
 
-/* Bind named arguments into the callee frame (extras left to varargs). */
 static void bind_args(IrInstr *in, InterpCtx *ctx, i64 *regs, Frame *callee_frame,
                       IrFunction *callee)
 {
@@ -443,7 +437,6 @@ static void bind_args(IrInstr *in, InterpCtx *ctx, i64 *regs, Frame *callee_fram
     }
 }
 
-/* A call arg is FP when it's an FP-classed vreg; immediates/addresses are GP. */
 static bool call_arg_is_fp(InterpCtx *ctx, IrOperand arg)
 {
     if (arg.is_imm || arg.is_global || arg.is_func)
@@ -453,7 +446,6 @@ static bool call_arg_is_fp(InterpCtx *ctx, IrOperand arg)
     return ir_vreg_float(ctx->mod, arg.u.vreg);
 }
 
-/* A call arg is the X87 class (width 16): never a GP/SSE register. */
 static bool call_arg_is_ld(InterpCtx *ctx, IrOperand arg)
 {
     if (arg.is_imm || arg.is_global || arg.is_func)
@@ -463,7 +455,6 @@ static bool call_arg_is_ld(InterpCtx *ctx, IrOperand arg)
     return ctx->mod->widths[arg.u.vreg] == 16;
 }
 
-/* Spill GP/SSE args and stack the rest; width-16 args use 16-aligned slots. */
 static bool materialize_varargs(IrInstr *in, InterpCtx *ctx, i64 *regs, Frame *callee_frame)
 {
     u32 nargs = in->extra.call.nargs;
@@ -581,9 +572,7 @@ static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
     build_block_map(ctx, callee);
     IrBlock *entry = (IrBlock *) vec_get(callee->blocks, 0);
 
-    /* The callee's run_block reuses and overwrites the caller's block-walk
-       scratch (next_bb/next_pred/jumped/returned). Save it so the caller
-       resumes its own walk after the call returns. */
+    /* Save the caller's block-walk scratch: the callee's run_block reuses it. */
     IrBlock *saved_next_bb = ctx->next_bb;
     IrBlock *saved_next_pred = ctx->next_pred;
     bool saved_jumped = ctx->jumped;
@@ -601,7 +590,6 @@ static i64 eval_call(IrInstr *in, InterpCtx *ctx, i64 *regs)
     {
         if (ctx->mod->widths[in->result] == 16)
         {
-            /* The callee's eval_ret staged the full cell in ctx->ret_cell. */
             write_cell(ctx, regs, in->result, ctx->ret_cell);
         }
         else
@@ -622,7 +610,6 @@ typedef struct
     u64 reg_save;
 } VaFields;
 
-/* va_start(ap, last): write the four va_list fields. */
 static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     Frame *frame = (Frame *) vec_get(ctx->stack, vec_size(ctx->stack) - 1);
@@ -643,7 +630,6 @@ static i64 eval_va_start(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* The result width/class picks the va_arg walk (ld: overflow-only). */
 static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     u8 *ap = resolve_ptr(ctx, in->ops[0], regs);
@@ -655,7 +641,6 @@ static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs)
     memcpy(&va, ap, sizeof(va));
     if (ctx->mod->widths[in->result] == 16)
     {
-        /* X87 args ride the overflow area only: align up to 16, read 16, bump 16. */
         u64 src = (va.overflow + 15) & ~15ULL;
         va.overflow = src + 16;
         memcpy(ap, &va, sizeof(va));
@@ -685,7 +670,6 @@ static i64 eval_va_arg(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* __builtin_va_end(ap): no-op (SysV has no va_end action). */
 static i64 eval_va_end(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     (void) in;
@@ -694,7 +678,6 @@ static i64 eval_va_end(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* Assert the jump target exists and record it for the block loop. */
 static void jump_to(InterpCtx *ctx, const char *target_label)
 {
     IrBlock *target = strmap_get(ctx->block_map, target_label);
@@ -770,7 +753,6 @@ static i64 eval_trunc(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* Zero- or sign-extend to the destination width (literals are already i64). */
 static i64 eval_extend(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     i64 src = operand_val(ctx, in->ops[0], regs);
@@ -804,13 +786,11 @@ static i64 eval_unreachable(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 1;
 }
 
-/* Conversion boundaries at long-double precision (2^31/2^63/2^64 exact). */
 #define U64_SIGN_BIT (1ULL << 63)
 #define LDBL_TWO_31 2147483648.0L
 #define LDBL_TWO_63 9223372036854775808.0L
 #define LDBL_TWO_64 18446744073709551616.0L
 
-/* Write an FP pattern into a vreg: the low `width` bytes, or the pair for 16. */
 static void store_fp_bits(InterpCtx *ctx, i64 *regs, u32 vreg, const void *bits, u8 width)
 {
     if (width == 16)
@@ -827,7 +807,6 @@ static u8 operand_fp_width(InterpCtx *ctx, IrOperand o)
     return o.is_imm ? 8 : ctx->mod->widths[o.u.vreg];
 }
 
-/* Read an FP operand into the host long-double channel at its own width. */
 static long double read_fp_value(InterpCtx *ctx, i64 *regs, IrOperand o, u8 w)
 {
     if (w == 16)
@@ -851,7 +830,6 @@ static long double read_fp_value(InterpCtx *ctx, i64 *regs, IrOperand o, u8 w)
     return (long double) d;
 }
 
-/* Round a host long double back to the destination precision (4/8 re-round). */
 static void store_fp_value(InterpCtx *ctx, i64 *regs, u32 vreg, long double v, u8 dw)
 {
     if (dw == 16)
@@ -891,7 +869,6 @@ static i64 eval_itof(IrInstr *in, InterpCtx *ctx, i64 *regs)
     }
     else
     {
-        /* u64 ≥ 2^63: clear the top bit, convert, add back 2^63. */
         u64 y = (u64) src & ~U64_SIGN_BIT;
         v = (long double) (u64) y + LDBL_TWO_63;
     }
@@ -907,12 +884,10 @@ static i64 eval_ftoi(IrInstr *in, InterpCtx *ctx, i64 *regs)
     i64 t;
     if (dw == 8 && is_signed)
     {
-        /* Signed 64: i64 window; NaN/out-of-range brand INT64_MIN. */
         t = trunc_to_i64_long(d);
     }
     else if (dw == 8)
     {
-        /* Unsigned 64: cvttsd2si, then for d ≥ 2^63 subtract 2^63 and set bit 63. */
         if (d != d || d < -LDBL_TWO_63 || d >= LDBL_TWO_64)
         {
             t = INT64_MIN;
@@ -928,7 +903,6 @@ static i64 eval_ftoi(IrInstr *in, InterpCtx *ctx, i64 *regs)
     }
     else if (is_signed)
     {
-        /* Narrow signed: i32 window (x86's 0x80000000 out-of-range brand). */
         if (d != d || d >= LDBL_TWO_31 || d < -LDBL_TWO_31)
         {
             t = INT32_MIN;
@@ -940,7 +914,6 @@ static i64 eval_ftoi(IrInstr *in, InterpCtx *ctx, i64 *regs)
     }
     else
     {
-        /* Narrow unsigned: i64 window, masked by the width pass. */
         t = trunc_to_i64_long(d);
     }
     regs[in->result] = t;
@@ -956,14 +929,11 @@ static i64 eval_fconv(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* An immediate carries the FP pattern for the destination width (a bare imm
-   rides no width-table entry); classed vregs name their own width. */
 static u8 fp_operand_width(InterpCtx *ctx, IrOperand o, u8 dw)
 {
     return o.is_imm ? dw : ctx->mod->widths[o.u.vreg];
 }
 
-/* FP arithmetic on the host long-double channel, re-rounded per destination width. */
 static i64 eval_fbin(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     u8 dw = ctx->mod->widths[in->result];
@@ -1005,7 +975,7 @@ static i64 eval_fneg(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* C11 NaN semantics on the host long-double channel (float→ld widening is exact). */
+/* C11 NaN semantics on the host long-double channel. */
 static i64 eval_fcmp(IrInstr *in, InterpCtx *ctx, i64 *regs)
 {
     long double a = read_fp_value(ctx, regs, in->ops[0], operand_fp_width(ctx, in->ops[0]));
@@ -1040,7 +1010,6 @@ static i64 eval_fcmp(IrInstr *in, InterpCtx *ctx, i64 *regs)
     return 0;
 }
 
-/* Copy at most one register-sized word into/out of a typed slot. */
 static void copy_word(u8 *dst, const void *src, u32 bytes)
 {
     memcpy(dst, src, bytes > 8 ? 8 : bytes);
@@ -1056,7 +1025,7 @@ static i64 eval_load(IrInstr *in, InterpCtx *ctx, i64 *regs)
     u8 w = ctx->mod->widths[in->result];
     if (w == 16)
     {
-        write_cell(ctx, regs, in->result, addr); /* 16-byte move into the pair */
+        write_cell(ctx, regs, in->result, addr);
         return 0;
     }
     i64 val = 0;
@@ -1143,7 +1112,7 @@ static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
     }
 
     u32 *results = malloc(nphi * sizeof(u32));
-    i64 *vals = malloc(nphi * 2 * sizeof(i64)); /* low, high (width-16) per phi */
+    i64 *vals = malloc(nphi * 2 * sizeof(i64));
     ASSERT(results && vals);
 
     for (size_t i = 0; i < nphi; i++)
@@ -1252,7 +1221,6 @@ static void eval_phis(InterpCtx *ctx, i64 *regs, IrBlock *bb, IrBlock *pred)
     X(OP_FCMP_LE, eval_fcmp)                                                                       \
     X(OP_FCMP_GE, eval_fcmp)
 
-/* Opcode dispatch table; unlisted opcodes are NULL and diagnosed in run_block. */
 static const EvalFn eval_fns[] = {
 #define EVAL_INIT(op, fn) [op] = fn,
     EVAL_ENTRIES(EVAL_INIT)
@@ -1366,7 +1334,6 @@ static InterpGlobal *init_globals(Arena *arena, IrModule *m, u32 *out_count)
     return globals;
 }
 
-/* Patch address-constant pointer subobjects with the target's address. */
 static void apply_global_relocs(IrModule *m, InterpGlobal *globals)
 {
     size_t nglobals = vec_size(m->globals);

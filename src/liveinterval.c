@@ -24,8 +24,6 @@ static BlockTable index_blocks(IrFunction *f, Arena *arena)
     return bt;
 }
 
-/* Resolve a predecessor label to its block index; false when the label is
-   unknown (a phi edge to a block outside this function). */
 static bool block_index_by_label(const BlockTable *bt, const char *label, size_t *out)
 {
     void *v = strmap_get(bt->label_to_index, label);
@@ -112,7 +110,6 @@ static IrPositions build_positions(IrFunction *f, Arena *arena)
     pos.npositions = cursor;
     return pos;
 }
-/* Per-block def/use sets plus the PHI bookkeeping that feeds the live dataflow. */
 typedef struct
 {
     size_t nblocks;
@@ -146,8 +143,7 @@ static void scan_call_uses(Bitset *seen, Bitset *ubd, IrInstr *in)
     }
 }
 
-/* A PHI's copies at the predecessors' ends define its result and read its
-   operands there, so the dataflow treats the phi as living in its preds. */
+/* A phi's copies run at each pred's end, so the dataflow treats it as living in its preds. */
 static void record_phi_edges(const BlockTable *bt, BlockSets *s, IrInstr *in)
 {
     for (u32 e = 0; e < in->extra.phi.nentries; e++)
@@ -456,10 +452,7 @@ typedef struct
     u32 *end;
 } IntervalCtx;
 
-/* Phi copies run at each predecessor's end: they write the phi result and
-   read its operands at the block-end gap (the odd position after the last
-   instruction).  The pred seeds let a copy-only operand, never used by a
-   real instruction, still register its def position. */
+/* Phi copies run at each predecessor's end, in the odd block-end gap position. */
 static Bitset **phi_copy_marks(IntervalCtx *cx, IrFunction *f, Arena *arena)
 {
     Bitset **copy_uses = arena_alloc(arena, cx->bt->nblocks * sizeof(Bitset *), sizeof(void *));
@@ -516,9 +509,6 @@ static Bitset **phi_copy_marks(IntervalCtx *cx, IrFunction *f, Arena *arena)
     return copy_uses;
 }
 
-/* Backward scan of one block: seed `work` from the block's live-out values
-   plus its phi-copy reads, walk last-to-first so each vreg's end lands on its
-   final use, and pin defs; live-in/live-out values extend across the block. */
 static void refine_block(IntervalCtx *cx, IrFunction *f, size_t b, Bitset **lvin, Bitset **lvout,
                          Bitset *copy_uses, Bitset *work)
 {

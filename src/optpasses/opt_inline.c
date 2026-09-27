@@ -7,26 +7,21 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Clones a callee into each direct call site, ahead of GVN/LICM. */
-
-#define INLINE_T2_MAX_INSTRS 2  /* tier-2 body cap, in non-phi instructions */
+#define INLINE_T2_MAX_INSTRS 2
 #define INLINE_T2_LOOP_FACTOR 4 /* a call in a loop amortizes its own overhead */
-#define INLINE_T2_MAX_PARAMS 4  /* frame/spill cost guard for tier 2 */
-#define INLINE_T2_MAX_LOCALS 8  /* alloca count guard for tier 2 */
-#define INLINE_MAX_CHAIN 16     /* lineage depth cap */
-#define INLINE_CALLER_BUDGET                                                                       \
-    800                     /* cloned instructions a single caller may absorb over the             \
-                                whole optimize() run, so one caller cannot balloon into a          \
-                                dominator-analyzer hostage (G's selftest gate) */
-#define INLINE_BUDGET 65536 /* cloned instructions per pass, hard stop */
+#define INLINE_T2_MAX_PARAMS 4
+#define INLINE_T2_MAX_LOCALS 8
+#define INLINE_MAX_CHAIN 16
+#define INLINE_CALLER_BUDGET 800
+#define INLINE_BUDGET 65536
 
 typedef struct
 {
     OptimizerContext *ctx;
-    int budget; /* remaining clone allowance for the whole pass */
+    int budget;
 } InlinePass;
 
-/* Each caller's clone allowance, persisted so pipeline iterations cannot replay it. */
+/* Each caller's clone allowance is persisted so pipeline iterations cannot replay it. */
 static u32 caller_absorbed(InlinePass *ip, IrFunction *caller)
 {
     void *v = hashmap_get(ip->ctx->inline_caller_used, caller);
@@ -104,7 +99,6 @@ static bool callee_uses_va_or_special(IrFunction *callee)
     return false;
 }
 
-/* Cloning the callee's entry store is the "fresh temporaries" of §F1. */
 static bool callee_entry_has_phis(IrFunction *callee)
 {
     IrBlock *entry = (IrBlock *) vec_get(callee->blocks, 0);
@@ -153,7 +147,6 @@ static u32 count_allocas(IrFunction *callee)
     return n;
 }
 
-/* Direct call sites naming `name` across the whole module. */
 static u32 count_module_calls(IrModule *mod, const char *name)
 {
     u32 n = 0;
@@ -180,14 +173,11 @@ static u32 count_module_calls(IrModule *mod, const char *name)
     return n;
 }
 
-/* A static with one call site has no other use once that site is cloned, so
-   DFE removes the original: the clone replaces the definition it costs. */
 static bool single_use_static(IrModule *mod, IrFunction *callee)
 {
     return callee->is_static && count_module_calls(mod, callee->name) == 1;
 }
 
-/* Tier 1 needs no size census; tier 2 is the size filter. */
 static bool callee_eligible(IrModule *mod, IrFunction *callee, bool in_loop)
 {
     if (callee->is_variadic || callee_uses_va_or_special(callee) || callee_entry_has_phis(callee))
@@ -207,7 +197,6 @@ static bool callee_eligible(IrModule *mod, IrFunction *callee, bool in_loop)
     return count_body_instrs(callee) <= limit;
 }
 
-/* Budgets, the lineage/caller cycle guard, and the tier test. */
 static bool site_eligible(InlinePass *ip, IrFunction *caller, Vec *lin, IrFunction *callee,
                           bool in_loop)
 {
@@ -236,8 +225,8 @@ static bool site_eligible(InlinePass *ip, IrFunction *caller, Vec *lin, IrFuncti
 typedef struct
 {
     u32 nvregs;
-    IrOperand *vreg_map; /* callee vreg -> cloned operand (args for params) */
-    StrMap *labels;      /* callee block label -> cloned IrBlock* */
+    IrOperand *vreg_map;
+    StrMap *labels;
 } InlineCtx;
 
 static u32 clone_result(InlineCtx *ic, u32 src_result)
@@ -390,7 +379,6 @@ static IrInstr *clone_instr(InlineCtx *ic, IrBlock *nb, const IrInstr *src)
     return ni;
 }
 
-/* Clone blocks carry their ancestry so re-scans never expand recursion. */
 static Vec *child_lineage(InlinePass *ip, Vec *parent, IrFunction *callee)
 {
     Vec *lin = vec_new(ip->ctx->arena);
@@ -406,7 +394,6 @@ static Vec *child_lineage(InlinePass *ip, Vec *parent, IrFunction *callee)
     return lin;
 }
 
-/* Splitting `old` moved its branch into `new`, so successor phis must key by it. */
 static void rename_phi_pred(IrFunction *f, const char *old_label, const char *new_label)
 {
     size_t nb = vec_size(f->blocks);
@@ -462,12 +449,11 @@ static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 
         return false;
     }
 
-    /* Param vregs -> the arg operands; cloned results -> fresh vregs. */
     u32 nvregs = mod->width_count;
     IrOperand *vreg_map = arena_alloc(scratch, nvregs * sizeof(IrOperand), sizeof(IrOperand));
     for (u32 v = 0; v < nvregs; v++)
     {
-        vreg_map[v] = ir_operand_vreg(NO_VREG); /* the "unmapped" sentinel */
+        vreg_map[v] = ir_operand_vreg(NO_VREG);
     }
     for (u32 p = 0; p < nparams; p++)
     {
@@ -501,7 +487,6 @@ static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 
         }
     }
 
-    /* Split the call block; clone ret paths merge the result into the tail. */
     IrBlock *cont = ir_func_add_block(caller, clone_label(arena, caller->name, site, 0, "r"));
     hashmap_set(ip->ctx->inline_lineage, cont, parent_lineage);
     IrInstr *res_phi = NULL;
@@ -521,7 +506,6 @@ static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 
     }
     rename_phi_pred(caller, bb->label, cont->label);
 
-    /* Clone the blocks first so label translations resolve, then fill them. */
     Vec *cloned = vec_new(scratch);
     StrMap *labels = strmap_new(scratch);
     Vec *clone_lin = child_lineage(ip, parent_lineage, callee);
@@ -538,7 +522,6 @@ static bool perform_inline(InlinePass *ip, IrFunction *caller, IrBlock *bb, u32 
 
     InlineCtx ic = {.nvregs = nvregs, .vreg_map = vreg_map, .labels = labels};
 
-    /* Allocate the callee's allocas once in the caller's entry, not per site. */
     Vec *hoisted = vec_new(scratch);
     u32 ncloned = 0;
     for (size_t cbi = 0; cbi < ncb; cbi++)
@@ -619,7 +602,7 @@ static void scan_blocks(InlinePass *ip, IrFunction *caller, const LoopInfo *loop
                 {
                     if (perform_inline(ip, caller, bb, j, in, callee, lin))
                     {
-                        j = 0; /* the call is gone; rescan the truncated block */
+                        j = 0;
                         continue;
                     }
                 }
@@ -643,7 +626,6 @@ static void push_succ_pred(IrBlock *from, Vec *succ_preds)
     vec_push(succ_preds, from);
 }
 
-/* Regenerate preds from terminators, matching the CFG builder / opt_verify. */
 static void rebuild_preds(IrFunction *f, Arena *arena)
 {
     StrMap *labels = opt_label_map_build(f, arena);
@@ -720,7 +702,6 @@ static bool process_caller(InlinePass *ip, IrFunction *caller)
     {
         return false;
     }
-    /* Loop info is pooled before cloning; the growth/lineage maps persist. */
     LoopInfo *loops = opt_get_loops(ip->ctx, caller);
     scan_blocks(ip, caller, loops);
     rebuild_preds(caller, ip->ctx->scratch);

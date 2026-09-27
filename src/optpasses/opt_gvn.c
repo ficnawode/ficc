@@ -158,7 +158,6 @@ static void build_key(const IrModule *mod, const IrInstr *in, VnKey *key)
     }
 }
 
-/* def_block per vreg, for the leader's dominance test; params map to entry. */
 static void build_def_block(IrFunction *f, IrBlock **def_block)
 {
     IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);

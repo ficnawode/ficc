@@ -32,7 +32,7 @@ enum
 
 #define EH_ENTRY_ALIGN 8
 
-/* unsigned LEB128 (DWARF4 §7.6): 7 bits per byte, high bit = more follows. */
+/* unsigned LEB128 (DWARF4 §7.6). */
 static void uleb128(ByteBuf *b, u64 val)
 {
     for (;;)
@@ -51,7 +51,6 @@ static void uleb128(ByteBuf *b, u64 val)
     }
 }
 
-/* signed LEB128: little-endian sign extension through the padding bits. */
 static void sleb128(ByteBuf *b, i64 val)
 {
     bool more = true;
@@ -69,7 +68,6 @@ static void sleb128(ByteBuf *b, i64 val)
     }
 }
 
-/* Deltas ride 0x02/0x03/0x04 with 1/2/4-byte operands (libgcc's op-code map). */
 static void cfa_advance(ByteBuf *b, u32 delta)
 {
     if (delta < 64)
@@ -138,13 +136,13 @@ static void cfi_emit_cie(ByteBuf *b)
     size_t body_start = bytebuf_len(b) + sizeof(u32);
     bytebuf_append_u32(b, 0); /* length placeholder: patched in cfi_entry_finish */
     bytebuf_append_u32(b, 0); /* CIE id: 0 in .eh_frame */
-    bytebuf_append(b, 1);     /* version */
-    bytebuf_append_bytes(b, (const u8 *) "zR", 3); /* augmentation + NUL */
-    uleb128(b, 1);                                 /* code alignment factor */
-    sleb128(b, CFA_DATA_ALIGN);                    /* data alignment factor */
-    bytebuf_append(b, CFA_REG_RIP);                /* return address register */
-    uleb128(b, 1);                                 /* augmentation data length */
-    bytebuf_append(b, EH_PE_ABSPTR);               /* FDE pc encoding: absolute address */
+    bytebuf_append(b, 1);
+    bytebuf_append_bytes(b, (const u8 *) "zR", 3);
+    uleb128(b, 1);
+    sleb128(b, CFA_DATA_ALIGN);
+    bytebuf_append(b, CFA_REG_RIP);
+    uleb128(b, 1);
+    bytebuf_append(b, EH_PE_ABSPTR);
 
     /* Initial rules: CFA = rsp+8 with the return address at CFA-8. */
     cfa_def_cfa(b, CFA_REG_RSP, 8);
@@ -153,7 +151,6 @@ static void cfi_emit_cie(ByteBuf *b)
     cfi_entry_finish(b, body_start);
 }
 
-/* FDE rows: CFA rsp+8 -> rsp+16/rbp@CFA-16 -> rbp+16, then back at the ret. */
 static void cfi_emit_fde(CfiOutput *out, CodegenFunc *cf)
 {
     ByteBuf *b = &out->eh_frame;
@@ -162,9 +159,9 @@ static void cfi_emit_fde(CfiOutput *out, CodegenFunc *cf)
 
     /* CIE pointer (backward offset) equals the field's own position. */
     bytebuf_append_u32(b, (u32) bytebuf_len(b));
-    size_t pc_slot = bytebuf_len(b);                     /* initial_location begins here */
-    bytebuf_append_u64(b, 0);                            /* initial_location: RELA resolves this */
-    bytebuf_append_u64(b, (u64) bytebuf_len(cf->bytes)); /* address_range: plain size */
+    size_t pc_slot = bytebuf_len(b);
+    bytebuf_append_u64(b, 0); /* initial_location: a RELA (below) resolves this */
+    bytebuf_append_u64(b, (u64) bytebuf_len(cf->bytes));
     uleb128(b, 0); /* FDE augmentation length: "z" CIEs need the prefix even when empty */
 
     u32 off_push = cf->frame.off_push;
@@ -179,8 +176,7 @@ static void cfi_emit_fde(CfiOutput *out, CodegenFunc *cf)
     cfa_advance(b, off_mov - off_push);
     cfa_def_cfa_register(b, CFA_REG_RBP);
 
-    /* Callee-saved pushes land one 8-byte slot below the previous, starting at
-       slot 3 (rbp itself is slot 2) in the CFA's -8 factored units. */
+    /* Callee-saved pushes start at slot 3 (rbp = slot 2) in -8 factored units. */
     u32 pos = off_mov;
     for (u8 i = 0; i < cf->frame.nsaved; i++)
     {
@@ -191,7 +187,6 @@ static void cfi_emit_fde(CfiOutput *out, CodegenFunc *cf)
         cfa_offset(b, x86_dwarf_gpr_number(reg), 3 + i);
     }
 
-    /* At the ret byte the frame is gone: unwind to the caller's CFA. */
     u64 fsize = (u64) bytebuf_len(cf->bytes);
     if (fsize >= 1 && fsize - 1 >= pos)
     {

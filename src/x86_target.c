@@ -6,7 +6,6 @@ static const u8 gp_args[6] = {R_EDI, R_ESI, R_EDX, R_ECX, R_R8, R_R9};
 
 static const u8 fp_args[8] = {R_XMM0, R_XMM1, 2, 3, 4, 5, 6, 7};
 
-/* Caller-saved GP registers a call may clobber. */
 static const u8 clobbered_call[9] = {R_EAX, R_ECX, R_EDX, R_ESI, R_EDI, R_R8, R_R9, R_R10, R_R11};
 
 static u8 x86_return_reg(const TargetDesc *t, u8 width, RegClass cls)
@@ -47,9 +46,7 @@ static bool x86_needs_reg(const TargetDesc *t, IrOpcode op, u8 width, bool is_fp
     }
 }
 
-/* Registers lowering writes that are not named by the operand encoding.  A
-   value live across one of these instructions cannot ride the clobbered
-   register; the allocator keeps it out. */
+/* Registers lowering writes but the operand encoding does not name. */
 static u16 x86_instr_clobbers(const TargetDesc *t, const IrInstr *in)
 {
     (void) t;

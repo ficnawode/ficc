@@ -19,8 +19,7 @@ static bool pp_emit_kind_word(PpKind kind)
     return kind == TOK_PP_IDENT || kind == TOK_PP_NUMBER;
 }
 
-/* True when printing prev then cur without a separator would re-lex to a
-   different token sequence than the two printed tokens. */
+/* True when printing prev then cur would re-lex differently. */
 static bool pp_emit_needs_space(const PpToken *prev, const PpToken *cur)
 {
     if (pp_emit_kind_word(prev->kind) && pp_emit_kind_word(cur->kind))
@@ -45,8 +44,6 @@ static bool pp_emit_needs_space(const PpToken *prev, const PpToken *cur)
     }
     if (prev->kind == TOK_PP_IDENT && (cur->kind == TOK_PP_STRING || cur->kind == TOK_PP_CHAR))
     {
-        /* `L "x"` / `u "x"` / `U "x"` / `u8 "x"` would merge into one
-           prefixed literal. */
         return pp_emit_spell_is(prev, "L") || pp_emit_spell_is(prev, "u") ||
                pp_emit_spell_is(prev, "U") || pp_emit_spell_is(prev, "u8");
     }
@@ -62,8 +59,6 @@ static bool pp_emit_needs_space(const PpToken *prev, const PpToken *cur)
     return false;
 }
 
-/* Whether a `#line N "file"` marker must precede this line: its first real
-   token follows a different file or a non-contiguous line number. */
 static bool pp_emit_marker_needed(const PpToken *next, const PpToken *prev)
 {
     if (!prev)
@@ -87,10 +82,7 @@ static void pp_emit_spell(FILE *f, const PpToken *t)
     fprintf(f, "%.*s", (int) t->len, t->spell);
 }
 
-/* Emits a `#line` marker at column 0 when the upcoming line needs one. Safe
-   only while still at column 0 and no newline intervenes before the first
-   real token; otherwise the intervening newline returns us to column 0 and
-   the next call places the marker. */
+/* Emit a `#line` marker only at column 0 and before any newline/real token. */
 static void pp_emit_maybe_marker(const Vec *out, size_t i, const PpToken *prev, bool no_markers,
                                  FILE *f, bool *at_line_start)
 {

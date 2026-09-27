@@ -6,19 +6,19 @@
 
 typedef enum
 {
-    ARG_NONE,     /* -c, -E, -nostdinc: flag only */
-    ARG_SEPARATE, /* value is the next argv item */
-    ARG_JOINED,   /* value is glued to the name in the same item */
-    ARG_EITHER,   /* -I dir or -Idir; -D name or -Dname; -o FILE or -o=FILE */
+    ARG_NONE,
+    ARG_SEPARATE,
+    ARG_JOINED,
+    ARG_EITHER,
 } ArgShape;
 
 typedef struct
 {
     const char *name;
     ArgShape shape;
-    const char *value; /* help placeholder for the option's value; 0 for flags */
+    const char *value;
     bool (*apply)(CompilerConfig *cfg, const char *value);
-    const char *help; /* one-line description for the aligned --help listing */
+    const char *help;
 } CLIOption;
 
 static void cli_config_init(CompilerConfig *cfg, Arena *arena, const char *exe_path)
@@ -413,9 +413,7 @@ static const CLIOption *lookup(const CLIOption *table, const char *arg, const ch
             return o;
         }
     }
-    /* -f/-fno- pairing: -fno-X falls back to its -fX entry. Both pedantic
-       spellings are listed explicitly, so this only fires for a future flag
-       that lists a single -f form. */
+    /* -fno-X falls back to its -fX entry. */
     if (strncmp(arg, "-fno-", 5) == 0)
     {
         char set_name[64];
@@ -493,13 +491,13 @@ CompilerConfig *cli_parse(int argc, char **argv, Arena *arena)
         }
         if (cfg->show_help)
         {
-            break; /* --help: nothing after it matters */
+            break;
         }
     }
 
     if (cfg->show_help)
     {
-        return cfg; /* caller prints cli_help and exits 0 */
+        return cfg;
     }
     if (vec_size(cfg->inputs) == 0)
     {

@@ -1,8 +1,6 @@
 #include "abi.h"
 #include "util/vec.h"
 
-/* Pure SysV AMD64 eightbyte classification; no emitter reach. */
-
 static bool class_is_x87(ArgClass c)
 {
     return c == AC_X87 || c == AC_X87UP || c == AC_COMPLEX_X87;
@@ -74,8 +72,7 @@ static void set_lane(ArgClass *lanes, u32 lane, ArgClass c)
     }
 }
 
-/* Merge `t`'s class into every eightbyte `t` spans at offset `off`, following
-   the psABI's "fields are considered in pairs, merged per eightbyte". */
+/* Merge t's class into the eightbytes it spans at offset off (psABI §3.2.3). */
 static void classify_at(Type *t, u32 off, ArgClass *lanes)
 {
     switch (t->kind)
@@ -175,8 +172,7 @@ SysVEightByte sysv_eightbyte_split(Type *t)
             memory = true;
         }
     }
-    /* 5c: more than two eightbytes pass only as a vector (first SSE, then
-       SSEUP); ficc has no vector types, so this collapses to memory. */
+    /* 5c: >2 eightbytes pass only as a vector; no vector types here, so memory. */
     if (nlanes > 2)
     {
         bool vector = lanes[0] == AC_SSE;

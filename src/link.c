@@ -383,7 +383,7 @@ static const OutSecDesc OUT_SECS[OUT_COUNT] = {
 typedef struct
 {
     ByteBuf bytes;
-    u64 size; /* logical size; == bytes.len for non-NOBITS */
+    u64 size; /* == bytes.len for non-NOBITS */
     u64 align;
     u64 addr;
     u64 offset;
@@ -392,8 +392,8 @@ typedef struct
 typedef struct
 {
     LinkObject *obj;
-    u64 *sec_out; /* OutSecId per input section, OUT_NULL when ignored */
-    u64 *sec_off; /* offset of each input section within its output section */
+    u64 *sec_out; /* OutSecId per input section; OUT_NULL when ignored */
+    u64 *sec_off;
 } InputObject;
 
 typedef struct GlobalSym GlobalSym;
@@ -418,9 +418,9 @@ typedef struct
     u8 type, bind;
     u64 value, size;
     u16 shndx;
-    u16 verndx;          /* version index in the DSO's .gnu.version */
-    const char *vername; /* version name, NULL when unversioned */
-    bool verhidden;      /* VERSYM_HIDDEN: a non-default compatibility symbol */
+    u16 verndx;
+    const char *vername;
+    bool verhidden;
 } DsoSym;
 
 typedef struct
@@ -429,8 +429,8 @@ typedef struct
     const char *soname;
     const u8 *data;
     size_t len;
-    StrMap *exports; /* name -> DsoSym* */
-    Vec *syms;       /* Vec<DsoSym*>, dynsym order (for alias lookup) */
+    StrMap *exports;
+    Vec *syms;
 } Dso;
 
 typedef struct VerAux VerAux;
@@ -443,11 +443,11 @@ typedef struct
     u64 value;
     u64 size;
     u32 name_off;
-    bool is_defined;     /* exported (COPY relocation or -rdynamic), hashed */
-    GlobalSym *global;   /* the definition this entry exports, NULL for imports */
-    const char *vername; /* required version name, NULL when unversioned */
-    const char *verfile; /* soname of the DSO that provides the version */
-    VerAux *veraux;      /* resolved vernaux once versions are built */
+    bool is_defined;
+    GlobalSym *global;
+    const char *vername;
+    const char *verfile;
+    VerAux *veraux;
 } DynSym;
 
 typedef struct
@@ -462,9 +462,9 @@ typedef struct
 typedef struct
 {
     const char *name;
-    u64 off; /* offset within .got or .got.plt */
+    u64 off;
     u64 addr;
-    bool is_dynamic; /* slot filled by ld.so via GLOB_DAT */
+    bool is_dynamic;
 } GotSlot;
 
 typedef struct
@@ -482,7 +482,7 @@ typedef struct
     const char *name;
     u64 size;
     u64 align;
-    u64 off; /* offset within .bss */
+    u64 off;
     u64 addr;
     u32 dynidx;
     bool has_reloc;
@@ -534,42 +534,41 @@ typedef struct
 {
     const LinkConfig *cfg;
     Arena *arena;
-    Vec *objects; /* Vec<InputObject*> */
+    Vec *objects;
     OutSec out[OUT_COUNT];
     StrMap *globals;
-    Vec *global_order;    /* Vec<GlobalSym*>, creation order (deterministic) */
-    Vec *archives;        /* Vec<Archive*> */
-    Vec *dsos;            /* Vec<Dso*> */
-    Vec *search_dirs;     /* Vec<const char*> — -L dirs then the built-in list */
-    StrMap *loaded_paths; /* file inputs already added, by path */
-    size_t nresolved;     /* objects below this index are already in the global table */
+    Vec *global_order; /* creation order (deterministic) */
+    Vec *archives;
+    Vec *dsos;
+    Vec *search_dirs; /* -L dirs then the built-in list */
+    StrMap *loaded_paths;
+    size_t nresolved; /* objects below this index are already in the global table */
     u64 seg_off[4], seg_addr[4], seg_filesz[4], seg_memsz[4];
-    u64 file_end;   /* end of the last file-backed section (non-alloc included) */
-    u64 dso_handle; /* .bss offset of the synthesized __dso_handle slot */
+    u64 file_end;
+    u64 dso_handle;
     u64 entry;
     bool has_start_stub;
     u64 start_off;
     u64 start_rel_off;
     u32 nerrors;
 
-    /* Dynamic output state (used only when `dynamic`). */
     bool dynamic;
-    Vec *dynsyms;      /* Vec<DynSym*> — index 0 is null */
-    StrMap *dyn_index; /* name -> DynSym* */
+    Vec *dynsyms; /* index 0 is null */
+    StrMap *dyn_index;
     u32 hash_symoffset;
     u32 hash_nbuckets;
     u32 hash_bloom_size;
     u32 hash_bloom_shift;
-    Vec *rela_dyn;   /* Vec<DynReloc*> */
-    Vec *rela_plt;   /* Vec<DynReloc*> */
-    Vec *needed;     /* Vec<const char*> sonames */
-    Vec *needed_off; /* Vec<u64> offsets of sonames in .dynstr */
-    StrMap *got_map; /* name -> GotSlot* */
-    Vec *got_slots;  /* Vec<GotSlot*> */
-    StrMap *plt_map; /* name -> PltSlot* */
-    Vec *plt_slots;  /* Vec<PltSlot*> */
-    Vec *copies;     /* Vec<CopySlot*> */
-    Vec *vergroups;  /* Vec<VerGroup*>, needed versions grouped by DSO */
+    Vec *rela_dyn;
+    Vec *rela_plt;
+    Vec *needed;
+    Vec *needed_off;
+    StrMap *got_map;
+    Vec *got_slots;
+    StrMap *plt_map;
+    Vec *plt_slots;
+    Vec *copies;
+    Vec *vergroups;
     u32 nverneeds;
     ByteBuf dynbuf[DSEC_COUNT];
     u64 dyn_addr[DSEC_COUNT];
@@ -891,8 +890,7 @@ static void allocate_commons(Linker *lk)
     }
 }
 
-/* crtbegin normally defines __dso_handle; without it, reserve a zeroed slot
-   (glibc reads its value, so it must be a real object, not an absolute). */
+/* glibc reads __dso_handle's value; it must be a real object, not an absolute. */
 static void allocate_synth(Linker *lk)
 {
     OutSec *bss = &lk->out[OUT_BSS];
@@ -945,9 +943,7 @@ static void resolve_globals(Linker *lk)
     allocate_commons(lk);
 }
 
-/* glibc exports weak aliases of strong data (environ vs __environ, same
-   address). A COPY relocation must name the strong symbol, as GNU ld does, or
-   ld.so never populates the executable's copy. */
+/* A COPY relocation must name the strong alias, as GNU ld does. */
 static DsoSym *dso_strong_alias(Dso *d, DsoSym *s)
 {
     if (s->bind != STB_WEAK)
@@ -965,8 +961,7 @@ static DsoSym *dso_strong_alias(Dso *d, DsoSym *s)
     return s;
 }
 
-/* Exact-name lookup, without the weak->strong alias retarget below. Version
-   requirements must use the symbol actually named, not its alias. */
+/* Exact-name lookup; version requirements must use the symbol actually named. */
 static DsoSym *dso_lookup_exact(Linker *lk, const char *name, Dso **owner)
 {
     for (size_t i = 0; i < vec_size(lk->dsos); i++)
@@ -1124,7 +1119,7 @@ static u32 next_pow2(u32 n)
     return p;
 }
 
-/* GNU hash of a symbol name (Drepper, "How To Write Shared Libraries", §5.4). */
+/* GNU hash (Drepper, "How To Write Shared Libraries", §5.4). */
 static u32 gnu_hash(const char *name)
 {
     u32 h = 5381;
@@ -1260,8 +1255,6 @@ static bool synth_value(Linker *lk, const char *name, u64 *out)
     }
     if (name_is(name, "__dso_handle"))
     {
-        /* crtbegin normally defines this; without it, a zeroed slot whose
-           value NULL means "main program" to glibc's __cxa_atexit. */
         *out = lk->out[OUT_BSS].addr + lk->dso_handle;
         return true;
     }
@@ -1565,7 +1558,6 @@ static bool patch_entry(Linker *lk)
     return true;
 }
 
-/* Executable section indices (fixed order). */
 enum
 {
     EXE_NULL = 0,
@@ -1738,7 +1730,6 @@ static OutSecId out_sec_id_of(u16 idx)
     }
 }
 
-/* Non-debug sections are always emitted; an empty .debug_* section is dropped. */
 static bool keep_out_sec(const Linker *lk, OutSecId id)
 {
     if (id < OUT_DEBUG_INFO || id > OUT_DEBUG_LOC)
@@ -1748,9 +1739,6 @@ static bool keep_out_sec(const Linker *lk, OutSecId id)
     return lk->out[id].size > 0;
 }
 
-/* A local section symbol per emitted section; `shndx` maps each EXE section
-   index to its emitted header index (0 when dropped).  Returns the symbol
-   index where globals begin (`sh_info`). */
 static u32 emit_symtab(Linker *lk, ByteBuf *symtab, ByteBuf *strtab, const u16 *shndx)
 {
     for (u64 i = 0; i < sizeof(Elf64_Sym); i++)
@@ -1860,8 +1848,6 @@ static void append_out_section(ByteBuf *out, Linker *lk, u16 idx, const u64 off[
     bytebuf_append_bytes(out, o->bytes.data, o->bytes.len);
 }
 
-/* Assign each EXE section index its emitted header index; an empty debug
-   section is dropped.  Returns the number of emitted headers. */
 static u16 build_exe_shndx(const Linker *lk, u16 shndx[EXE_NSEC])
 {
     shndx[EXE_NULL] = 0;
@@ -2016,8 +2002,8 @@ static const char *const DEFAULT_LIB_DIRS[] = {
 typedef struct
 {
     const char *name;
-    u64 offset; /* archive file offset of the member header */
-    u64 size;   /* member data size */
+    u64 offset;
+    u64 size;
     bool loaded;
 } ArchiveMember;
 
@@ -2026,8 +2012,8 @@ typedef struct
     const char *path;
     const u8 *data;
     size_t len;
-    Vec *members;  /* Vec<ArchiveMember*> */
-    StrMap *index; /* symbol name -> ArchiveMember* (first definition wins) */
+    Vec *members;
+    StrMap *index; /* first definition wins */
 } Archive;
 
 static u32 be32(const u8 *p)
@@ -2295,7 +2281,7 @@ static const char *find_in_dirs(Linker *lk, const char *name)
 
 typedef struct
 {
-    Vec *tokens; /* Vec<const char*> */
+    Vec *tokens;
     size_t i;
 } ScriptScan;
 
@@ -2591,7 +2577,6 @@ static Dso *dso_read(const u8 *data, size_t len, const char *path, Arena *arena)
     u64 entsize = dynsym->sh_entsize ? dynsym->sh_entsize : sizeof(Elf64_Sym);
     u64 nsyms = dynsym->sh_size / entsize;
 
-    /* Map a version index to its name via .gnu.version_d. */
     const char **vermap = arena_alloc(arena, (nsyms + 1) * sizeof(char *), sizeof(void *));
     for (u64 i = 0; i <= nsyms; i++)
     {
@@ -2645,8 +2630,7 @@ static Dso *dso_read(const u8 *data, size_t len, const char *path, Arena *arena)
         DsoSym *prev = (DsoSym *) strmap_get(d->exports, name);
         if (prev)
         {
-            /* A name can appear more than once under different versions; the
-               default (VERSYM_HIDDEN clear) definition is the one to bind. */
+            /* the default (non-hidden) definition is the one to bind */
             if (prev->verhidden && !vhidden)
             {
                 prev->type = ELF64_ST_TYPE(es.st_info);
@@ -2928,8 +2912,7 @@ static void dynamic_scan(Linker *lk)
                     }
                     else
                     {
-                        /* A shared function taken by address resolves to its
-                           (fixed, non-PIE) PLT entry. */
+                        /* a shared function taken by address resolves to its PLT entry */
                         plt_slot(lk, sym->name);
                     }
                 }
@@ -3014,9 +2997,6 @@ static void build_gnu_hash(Linker *lk)
     gnu_hash_emit(lk, &h);
 }
 
-/* .gnu.hash hashes only defined exports, which must sit contiguously at the
-   end of .dynsym and be bucket-sorted. Reorder the table accordingly and
-   remap every symbol index a relocation or slot holds. */
 typedef struct
 {
     DynSym *d;
@@ -3112,10 +3092,7 @@ static void order_dynsyms(Linker *lk)
     lk->hash_bloom_size = nbuckets;
 }
 
-/* Symbol versioning. An imported symbol that a DSO exports under a version
-   gets a versym index; needed versions are grouped per providing DSO in
-   .gnu.version_r. A vernaux's index is its position in the concatenated aux
-   array, starting at 2 (0 = local, 1 = global). */
+/* vernaux index starts at 2 (0=local, 1=global) in the concatenated aux array */
 struct VerAux
 {
     const char *name;
@@ -3127,10 +3104,9 @@ typedef struct
 {
     const char *file;
     u32 file_off;
-    Vec *auxs; /* Vec<VerAux*> */
+    Vec *auxs;
 } VerGroup;
 
-/* SysV (DT_HASH) hash, also used for version names. */
 static u32 elf_hash(const char *name)
 {
     u32 h = 0;
@@ -3322,8 +3298,7 @@ static void dynamic_build(Linker *lk)
     versions_link(lk);
     versions_emit(lk);
 
-    /* Keep this in step with finalize_dynamic: layout_dynamic sizes the
-       .dynamic slot from the placeholder emitted here. */
+    /* must match the DT_* count finalize_dynamic emits */
     u64 ndyn = 16 + vec_size(lk->needed);
     if (vec_size(lk->dynsyms) > 1)
     {
@@ -3405,7 +3380,6 @@ static void layout_dynamic(Linker *lk)
     lk->file_end = off;
 }
 
-/* Dynamic executable section indices (fixed order). */
 enum
 {
     DX_NULL = 0,
@@ -3728,7 +3702,6 @@ static void dyn_section_headers(Linker *lk, ByteBuf *out, u32 nm[DX_NSEC], const
     dyn_shdr(out, nm[DX_SHSTRTAB], SHT_STRTAB, 0, 0, off_sh, size_sh, 0, 0, 1, 0);
 }
 
-/* Objects that contribute a compile unit's .debug_info. */
 static u32 debug_object_count(Linker *lk)
 {
     u32 n = 0;
@@ -3747,8 +3720,6 @@ static u32 debug_object_count(Linker *lk)
     return n;
 }
 
-/* Assign each DX section index its emitted header index; an empty debug
-   section is dropped.  Returns the number of emitted headers. */
 static u16 build_dyn_shndx(const Linker *lk, u16 shndx[DX_NSEC])
 {
     u16 n = 1;

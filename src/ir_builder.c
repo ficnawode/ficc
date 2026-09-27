@@ -25,8 +25,8 @@ struct PendingPhi
 typedef struct BlockLocals BlockLocals;
 struct BlockLocals
 {
-    U64Map *locals;    /* (u64)ASTVarDecl* -> IrOperand* */
-    Vec *pending_phis; /* Vec<PendingPhi*> */
+    U64Map *locals;
+    Vec *pending_phis;
 };
 
 typedef struct ExprResult ExprResult;
@@ -36,19 +36,16 @@ struct ExprResult
     IrBlock *block;
 };
 
-/* A lowered write target: an SSA slot for block-scope scalars, or an explicit
-   address operand for globals, statics, spilled autos, member GEPs, derefs,
-   subscripts, and record/array storage pointers. */
 typedef struct LvalueSlot LvalueSlot;
 struct LvalueSlot
 {
-    ASTVarDecl *decl; /* SSA target (when is_ssa) */
+    ASTVarDecl *decl;
     bool is_ssa;
-    IrOperand addr; /* memory address (when !is_ssa) */
+    IrOperand addr;
     Type *type;
-    bool is_bitfield; /* bit-field in a record: addr points at the storage unit */
-    u32 bit_offset;   /* bit position within the unit (LSb of first field) */
-    u32 bit_width;    /* field width in bits */
+    bool is_bitfield;
+    u32 bit_offset;
+    u32 bit_width;
 };
 
 typedef struct LvalueResult LvalueResult;
@@ -94,9 +91,9 @@ struct LoopContext
 typedef struct SwitchCtx SwitchCtx;
 struct SwitchCtx
 {
-    U64Map *case_blocks; /* (u64)case value -> IrBlock* */
-    IrBlock *default_bb; /* NULL if no `default:` label */
-    Vec *default_stmts;  /* statements following `default:` (NULL if none) */
+    U64Map *case_blocks;
+    IrBlock *default_bb;
+    Vec *default_stmts;
     IrBlock *exit_bb;
 };
 
@@ -104,7 +101,7 @@ typedef struct SwitchCase SwitchCase;
 struct SwitchCase
 {
     i64 value;
-    Vec *stmts; /* Vec<ASTNode*>: statements under this `case N:` label */
+    Vec *stmts;
     IrBlock *bb;
 };
 
@@ -113,19 +110,19 @@ struct FuncBuilder
 {
     IrModule *mod;
     IrFunction *f;
-    U64Map *block_locals;  /* (u64)IrBlock* -> BlockLocals* */
-    Vec *loop_stack;       /* Vec<LoopContext*> */
-    Vec *switch_stack;     /* Vec<SwitchCtx*> */
-    StrMap *goto_labels;   /* label name -> IrBlock* */
-    StrMap *func_types;    /* function name -> Type* (interned function type) */
-    StrMap *global_map;    /* file-scope variable name -> u32* (index into mod->globals) */
-    U64Map *static_map;    /* (u64)ASTVarDecl* -> u32* (index into mod->globals) */
-    Vec *spilled;          /* Vec<ASTVarDecl*>: block-scope autos whose address is taken */
-    U64Map *spill_slots;   /* (u64)ASTVarDecl* -> IrOperand* (function-entry slot addr) */
-    U64Map *mem_slots;     /* (u64)ASTVarDecl* -> IrOperand* (aggregate object address) */
-    U64Map *param_decls;   /* (u64)ASTVarDecl* -> non-NULL for parameters */
-    U64Map *local_records; /* (u64)ASTVarDecl* -> IrLocal* (debug locations) */
-    u32 sret_vreg;         /* hidden sret pointer vreg for record-returning funcs */
+    U64Map *block_locals;
+    Vec *loop_stack;
+    Vec *switch_stack;
+    StrMap *goto_labels;
+    StrMap *func_types;
+    StrMap *global_map;
+    U64Map *static_map;
+    Vec *spilled;
+    U64Map *spill_slots;
+    U64Map *mem_slots;
+    U64Map *param_decls;
+    U64Map *local_records;
+    u32 sret_vreg;
     bool failed;
 };
 
@@ -180,14 +177,12 @@ static u32 alloc_vreg_from_type(FuncBuilder *ctx, Type *type)
     return ir_alloc_vreg(ctx->mod, width, type_is_signed_int(type), type_is_fp(type));
 }
 
-/* Records and arrays are memory objects: addressed by pointer, never loaded
-   as SSA scalars. */
+/* Records and arrays are address-only, never loaded as SSA scalars. */
 static bool type_is_memory(Type *t)
 {
     return type_is_record(t) || type_is_array(t);
 }
 
-/* Memory objects' SSA slot is a pointer to their storage. */
 static Type *var_ssa_type(Type *t)
 {
     if (type_is_memory(t))
@@ -219,9 +214,7 @@ static u32 imm_to_vreg(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *type)
     return vreg;
 }
 
-/* FP → i1: C truthiness is `x != 0.0` (−0.0 compares equal to 0.0, NaN is
-   truthy), so bit-testing the raw bytes would mis-evaluate −0.0. Integer
-   values pass through unchanged — the conditions test them directly. */
+/* FP→i1 is `x != 0.0`, not a bit test: −0.0 is falsy, NaN truthy. */
 static IrOperand boolify(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *type)
 {
     if (!type_is_fp(type))
@@ -234,9 +227,7 @@ static IrOperand boolify(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *typ
     return ir_operand_vreg(dst);
 }
 
-/* The FP literal 1.0 at `type`'s precision: an immediate carrying the IEEE-754
-   bit pattern for float/double, or an ITOF'd vreg for `long double` (no imm
-   encoding). Same trick as `boolify`'s FCMP against imm 0. */
+/* Long double has no immediate encoding; float/double use their IEEE-754 bits. */
 static IrOperand fp_one(FuncBuilder *ctx, IrBlock *bb, Type *type)
 {
     if (type->kind == TYPE_LONG_DOUBLE)
@@ -267,7 +258,6 @@ static IrOperand promote_to(FuncBuilder *ctx, IrBlock *bb, IrOperand val, Type *
     u8 src_w = src_type->width / 8;
     u8 tgt_w = target_type->width / 8;
 
-    /* int↔FP → ITOF/FTOI, float↔double → FCONV; _Bool targets stay integer-only. */
     if (type_is_fp(src_type) || type_is_fp(target_type))
     {
         Type *su = type_unqual(src_type);
@@ -370,7 +360,6 @@ static bool is_divrem_op(BinOpKind op)
 
 static u32 alloc_phi_vreg(FuncBuilder *ctx, ASTVarDecl *var)
 {
-    /* A phi slot holds the var's SSA shape: a decayed/pointed value. */
     return alloc_vreg_for_var(ctx, var->type);
 }
 
@@ -426,8 +415,7 @@ static void declare_pred(IrBlock *bb, IrBlock *pred)
     vec_push(bb->preds, pred);
 }
 
-/* Address-taken autos become memory-resident: slot loads/stores see current
-   memory, so the SSA stack is bypassed and no PHIs are needed. */
+/* Address-taken autos are memory-resident: no SSA, so no PHIs. */
 
 static bool is_spillable_var(ASTVarDecl *decl)
 {
@@ -448,8 +436,6 @@ static bool already_spilled(FuncBuilder *ctx, ASTVarDecl *decl)
     return false;
 }
 
-/* Record the SSA vreg that now carries an address-not-taken scalar local, so the
-   DWARF writer can describe its location list. */
 static void record_local_vreg(FuncBuilder *ctx, ASTVarDecl *var, IrOperand val)
 {
     if (!ir_operand_is_vreg(val) || !is_spillable_var(var) ||
@@ -478,8 +464,7 @@ static IrOperand *spill_slot(FuncBuilder *ctx, ASTVarDecl *var)
     return u64map_get(ctx->spill_slots, (u64) (uintptr_t) var);
 }
 
-/* Allocate each address-taken auto's slot in the entry block: hoisted so slot
-   addresses are invariant and dominate every use. */
+/* Hoisted to the entry block so slot addresses dominate every use. */
 static void emit_spill_allocas(FuncBuilder *ctx, IrBlock *entry)
 {
     size_t n = vec_size(ctx->spilled);
@@ -495,11 +480,7 @@ static void emit_spill_allocas(FuncBuilder *ctx, IrBlock *entry)
 
 static IrOperand read_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
 {
-    /* An aggregate/union/array object is its storage address, which is fixed
-       for the whole function (the entry slot, or the caller's copy for a record
-       parameter).  Return it directly: routing it through per-block SSA would
-       yield a PHI whose incoming value from a switch's dispatch block is the
-       undefined `0` when the object was declared inside the switch body. */
+    /* Aggregate objects return their fixed address, never a per-block SSA PHI. */
     IrOperand *mem = u64map_get(ctx->mem_slots, (u64) (uintptr_t) var);
     if (mem)
     {
@@ -532,7 +513,6 @@ static IrOperand read_var_at_merge(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *b
     }
     else if (npreds == 1 && !bb->is_loop_header)
     {
-        /* Single pred, no merge: reuse its value. */
         val = read_variable(ctx, var, (IrBlock *) vec_get(bb->preds, 0));
     }
     else if (bb->sealed)
@@ -541,7 +521,6 @@ static IrOperand read_var_at_merge(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *b
     }
     else
     {
-        /* Unsealed merge: register a placeholder PHI filled on seal. */
         u32 dst = alloc_phi_vreg(ctx, var);
         PendingPhi *ip = arena_alloc(ctx->mod->arena, sizeof(PendingPhi), sizeof(void *));
         ip->var = var;
@@ -555,8 +534,6 @@ static IrOperand read_var_at_merge(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *b
 
 static void write_variable(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb, IrOperand val)
 {
-    /* Aggregate objects have a fixed storage address; remember it instead of
-       tracking a per-block SSA value (see read_variable). */
     if (type_is_memory(var->type))
     {
         u64map_set(ctx->mem_slots, (u64) (uintptr_t) var, persist_operand(ctx, val));
@@ -580,7 +557,6 @@ static void fill_phi_entries(FuncBuilder *ctx, IrBlock *bb, ASTVarDecl *var, IrI
     {
         IrBlock *pred = (IrBlock *) vec_get(bb->preds, e);
         IrOperand pval = read_variable(ctx, var, pred);
-        /* Self-reference: fall back to the header's loop-carried value. */
         if (!pval.is_imm && !pval.is_global && !pval.is_func && pval.u.vreg == phi->result)
         {
             BlockLocals *bl = get_block_locals(ctx, bb);
@@ -599,8 +575,7 @@ static IrOperand build_phi(FuncBuilder *ctx, ASTVarDecl *var, IrBlock *bb)
     BlockLocals *bl = get_block_locals(ctx, bb);
     u32 dst = alloc_phi_vreg(ctx, var);
     IrInstr *phi = ir_emit_phi_at_start(bb, dst, (u32) vec_size(bb->preds));
-    /* Register before filling: a loop header's back-edge can resolve through
-       this block while its PHI is being built, which must terminate. */
+    /* Register before filling: a loop back-edge can resolve through this PHI mid-build. */
     u64map_set(bl->locals, (u64) (uintptr_t) var, persist_operand(ctx, ir_operand_vreg(dst)));
     record_local_vreg(ctx, var, ir_operand_vreg(dst));
     fill_phi_entries(ctx, bb, var, phi);
@@ -722,10 +697,7 @@ static ExprResult build_short_circuit(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlo
     jump(true_bb, merge_bb);
     jump(false_bb, merge_bb);
 
-    /* Seal branches first so merge inputs come from sealed preds. `left.block`
-       must NOT be sealed: it often belongs to an enclosing construct whose
-       incoming edges are not wired yet (do-while body, loop body, unsealed
-       merge), and an early seal resolves its not-yet-connected reads as imm 0. */
+    /* Seal branches only; `left.block` may have unwired enclosing edges and would seal as imm 0. */
     seal_block(ctx, right_bb);
     seal_block(ctx, false_bb);
     seal_block(ctx, true_bb);
@@ -771,10 +743,7 @@ static ExprResult build_ternary_expr(FuncBuilder *ctx, ASTTernaryExpr *te, IrBlo
     }
     if (mem_tern)
     {
-        /* A record/array result is a memory object (§6.5.15): copy the
-           selected branch's value into a temp slot and yield its address,
-           like the other memory-typed rvalues in this IR. The slot must be
-           allocated before the branch so every edge can reference it. */
+        /* Record/array result is memory (§6.5.15); slot allocated before the branch. */
         mem_dst = alloc_vreg_from_type(ctx, type_ptr(tern_type));
         ir_emit_alloca(cond.block, (u32) mem_dst, tern_type->size);
     }
@@ -807,8 +776,7 @@ static ExprResult build_ternary_expr(FuncBuilder *ctx, ASTTernaryExpr *te, IrBlo
     IrOperand t_prom = then_val.value;
     if (!is_terminated(then_val.block))
     {
-        /* §6.5.15p5: each branch converts to the common type before the phi,
-           so `int : double` and `float : double` meet the right value. */
+        /* §6.5.15p5: each branch converts to the common type before the phi. */
         t_prom =
             promote_to(ctx, then_val.block, then_val.value, node_type(te->then_expr), tern_type);
         jump(then_val.block, merge_bb);
@@ -939,10 +907,7 @@ static i64 bitfield_mask(u32 width)
     return (i64) (((u64) 1 << width) - 1);
 }
 
-/* Extract a bit-field from its storage unit at addr and return a value of the
-   declared type: load the unit, shift the field to the LSb, mask to its width,
-   then sign-extend within the unit for signed bases (gcc semantics: enum and
-   _Bool read without sign extension). */
+/* gcc semantics: enum and `_Bool` bit-fields read without sign extension. */
 static IrOperand bitfield_read(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *ty,
                                u32 bit_offset, u32 bit_width)
 {
@@ -967,8 +932,6 @@ static IrOperand bitfield_read(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Ty
     return out;
 }
 
-/* Write a bit-field via read-modify-write: clear the field's bits, OR in the
-   (truncated) value shifted into place. */
 static void bitfield_store(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *ty, u32 bit_offset,
                            u32 bit_width, IrOperand val)
 {
@@ -992,8 +955,6 @@ static void bitfield_store(FuncBuilder *ctx, IrBlock *bb, IrOperand addr, Type *
     ir_emit_store(bb, ir_operand_vreg(nv), addr, ty->size, type_is_volatile(ty));
 }
 
-/* Read a lowered lvalue: SSA scalars via read_variable (or their spill slot);
-   memory targets loaded at the slot type's width. */
 static IrOperand load_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot)
 {
     if (slot->is_ssa)
@@ -1009,8 +970,6 @@ static IrOperand load_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot)
     return ir_operand_vreg(dst);
 }
 
-/* Store into a lowered lvalue: records via OP_MEMCPY (their value is a pointer
-   to source storage); scalars via OP_STORE; SSA scalars via write_variable. */
 static IrBlock *store_lvalue(FuncBuilder *ctx, IrBlock *bb, LvalueSlot *slot, IrOperand val)
 {
     if (slot->is_ssa)
@@ -1134,8 +1093,7 @@ static BinOpKind strip_assign_op(BinOpKind op)
     }
 }
 
-/* Usual-arithmetic promotions: pointer operands convert the non-pointer side
-   to the pointer type; shift counts promote independently (§6.5.9p4/§6.5.7). */
+/* Shift counts promote independently (§6.5.9p4/§6.5.7). */
 static void promote_binop_operands(FuncBuilder *ctx, BinOpKind op, IrBlock *bb, IrOperand *lhs,
                                    IrOperand *rhs, Type **lt, Type **rt)
 {
@@ -1173,8 +1131,7 @@ static void promote_binop_operands(FuncBuilder *ctx, BinOpKind op, IrBlock *bb, 
         *rt = promoted;
         return;
     }
-    /* Shifts: an unpromoted char would shift at its own width with garbage
-       high bits (`char -8 >> 1` → 124 instead of -4). */
+    /* Promote shift operands: `char -8 >> 1` must be -4, not 124. */
     *lhs = promote_to(ctx, bb, *lhs, *lt, type_promote(*lt));
     *lt = type_promote(*lt);
     *rhs = promote_to(ctx, bb, *rhs, *rt, type_promote(*rt));
@@ -1185,8 +1142,7 @@ static IrOpcode arith_opcode(BinOpKind op, Type *lt)
 {
     if (type_is_fp(lt))
     {
-        /* Floating lanes pick the FP opcodes; `%`/shifts/bitwise never reach
-           here (semantic rejects them first, and division is always FDIV). */
+        /* `%`/shift/bitwise never reach here: semantic rejects them first. */
         switch (op)
         {
             case BIN_ADD:
@@ -1312,8 +1268,7 @@ static ArithResult lower_arith_into(FuncBuilder *ctx, ArithSpec spec, IrOperand 
     }
     if (spec.op == BIN_SUB && type_is_ptr(spec.lt) && type_is_ptr(spec.rt))
     {
-        /* §6.5.6p9: subtracting two pointers yields the element distance as
-           ptrdiff_t (long): (lhs - rhs) / sizeof(elem). */
+        /* §6.5.6p9: pointer difference is the element distance as ptrdiff_t. */
         Type *elem = type_deref(spec.lt);
         u32 diff_vreg = alloc_vreg_from_type(ctx, type_long());
         ir_emit_binop(bb, OP_SUB, diff_vreg, lval, rval);
@@ -1338,8 +1293,7 @@ static ArithResult lower_arith_into(FuncBuilder *ctx, ArithSpec spec, IrOperand 
     }
     if (type_is_fp(lt))
     {
-        /* A bare FP immediate rides no width-table entry; give it a classed
-           vreg so the backends read float vs double at the right width. */
+        /* A classed vreg so the backend reads float vs double at the right width. */
         if (lhs.is_imm)
         {
             lhs = ir_operand_vreg(imm_to_vreg(ctx, bb, lhs, lt));
@@ -1440,7 +1394,6 @@ static ExprResult build_unary_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *
     return expr_result(ir_operand_vreg(dst), src.block);
 }
 
-/* An anonymous object whose slot is allocated and plan-applied (§6.5.2.5). */
 static ExprResult compound_literal_slot(FuncBuilder *ctx, ASTCompoundLiteral *cl, IrBlock *bb)
 {
     u32 slot = alloc_vreg_from_type(ctx, type_ptr(cl->type));
@@ -1449,8 +1402,7 @@ static ExprResult compound_literal_slot(FuncBuilder *ctx, ASTCompoundLiteral *cl
     return expr_result(ir_operand_vreg(slot), bb);
 }
 
-/* §6.5.2.5 compound literal: yield the slot address (memory) or a loaded
-   scalar. */
+/* §6.5.2.5 */
 static ExprResult build_compound_literal_expr(FuncBuilder *ctx, ASTCompoundLiteral *cl, IrBlock *bb)
 {
     ExprResult slot = compound_literal_slot(ctx, cl, bb);
@@ -1467,8 +1419,7 @@ static ExprResult build_compound_literal_expr(FuncBuilder *ctx, ASTCompoundLiter
     return load_value(ctx, bb, slot.value, ty);
 }
 
-/* §6.5.4 cast: `(void)` discards; integer/pointer converts via promote_to;
-   pointer→pointer is a reinterpretation, so no instruction. */
+/* §6.5.4 */
 static ExprResult build_cast_expr(FuncBuilder *ctx, ASTCastExpr *ce, IrBlock *bb)
 {
     ExprResult src = build_expr(ctx, ce->operand, bb);
@@ -1513,7 +1464,6 @@ static void va_layout(IrFunction *f, i64 *gp, i64 *fp, i64 *skip)
     for (size_t i = 0; i < n; i++)
     {
         IrParam *p = (IrParam *) vec_get(f->params, i);
-        /* Record params arrive as a pointer; `agg_type` is the aggregate. */
         Type *t = p->agg_type ? p->agg_type : p->type;
         if (t->kind == TYPE_LONG_DOUBLE)
         {
@@ -1594,8 +1544,6 @@ static ExprResult build_va_builtin(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *b
     return expr_void(bb);
 }
 
-/* Lower one call argument: record args are copied into a fresh temp and passed
-   by pointer; the rest convert to the parameter's type. */
 static IrBlock *lower_call_arg(FuncBuilder *ctx, ASTNode *arg, Type *param_type, IrBlock *bb,
                                IrOperand *out)
 {
@@ -1663,8 +1611,7 @@ static ExprResult build_call_expr(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *bb
         callee_type = strmap_get(ctx->func_types, ce->callee);
         if (!callee_type)
         {
-            /* A compiler builtin; a user definition with the same name wins
-               and never reaches this branch. */
+            /* Not in func_types: a compiler builtin; a same-named user definition wins first. */
             return build_va_builtin(ctx, ce, bb);
         }
     }
@@ -1672,8 +1619,7 @@ static ExprResult build_call_expr(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *bb
     Type *callee_ret = callee_type->func.ret;
     bool is_variadic = callee_type->func.is_variadic;
 
-    /* By-memory convention: a record return is written through a hidden sret
-       pointer; record args pass by pointer. */
+    /* Records pass by memory: hidden sret pointer for returns, pointer args. */
     bool sret = type_is_record(callee_ret);
     u32 nargs = (u32) vec_size(ce->args);
     u32 total_args = (sret ? 1 : 0) + nargs;
@@ -1702,7 +1648,6 @@ static ExprResult build_call_expr(FuncBuilder *ctx, ASTCallExpr *ce, IrBlock *bb
     u32 dst;
     if (sret)
     {
-        /* The result is the sret slot pointer, which we already hold. */
         dst = NO_VREG;
     }
     else
@@ -1743,7 +1688,6 @@ static ExprResult build_deref_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *
     }
     if (result_type->kind == TYPE_VOID)
     {
-        /* `void*` deref: no load and no value. */
         return expr_void(ptr_res.block);
     }
     return load_value(ctx, ptr_res.block, ptr_res.value, result_type);
@@ -1759,7 +1703,6 @@ static ExprResult build_addr_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *b
             ASTUnaryExpr *inner = ast_as(ASTUnaryExpr, operand);
             if (inner->op == UN_DEREF)
             {
-                /* `&*p`: the address of the pointed-to object is just p. */
                 return build_expr(ctx, inner->operand, bb);
             }
             break;
@@ -1775,7 +1718,6 @@ static ExprResult build_addr_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *b
             ASTIdent *id = ast_as(ASTIdent, operand);
             if (id->is_func)
             {
-                /* `&f` is the function's address, identical to the designator. */
                 return expr_result(ir_operand_func(id->name), bb);
             }
             ASTVarDecl *decl = id->decl;
@@ -1785,7 +1727,6 @@ static ExprResult build_addr_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *b
             {
                 return expr_result(ir_operand_global(midx), bb);
             }
-            /* `&x` of an address-taken auto is its spill slot address. */
             IrOperand *slot = spill_slot(ctx, decl);
             if (slot)
             {
@@ -1796,7 +1737,6 @@ static ExprResult build_addr_expr(FuncBuilder *ctx, ASTUnaryExpr *ue, IrBlock *b
         default:
             break;
     }
-    /* Arrays decay to a pointer in build_expr; other operands build their value. */
     return build_expr(ctx, operand, bb);
 }
 
@@ -1861,8 +1801,7 @@ static const u8 *encode_const_bytes(Arena *arena, i64 value, u32 size)
     return buf;
 }
 
-/* Encode a folded constant into an object of `type`'s width; `_Bool` holds
-   0/1 (§6.3.1.2). */
+/* `_Bool` holds 0/1 (§6.3.1.2). */
 static const u8 *encode_object_bytes(Arena *arena, i64 value, Type *type)
 {
     if (type->kind == TYPE_BOOL)
@@ -1890,8 +1829,7 @@ static bool fold_unary_constant(ASTUnaryExpr *u, i64 v, i64 *out)
     }
 }
 
-/* Fold a binary constant (§6.6). DIV/REM, shifts, and the relational
-   comparisons honor the operands' unsignedness (§6.3.1.8). */
+/* DIV/REM, shifts, and relationals honor unsignedness (§6.3.1.8). */
 static bool fold_binary_unsigned(ASTBinaryExpr *b);
 static bool fold_binary_constant(ASTBinaryExpr *b, i64 l, i64 r, i64 *out)
 {
@@ -1974,9 +1912,7 @@ static bool fold_binary_constant(ASTBinaryExpr *b, i64 l, i64 r, i64 *out)
     }
 }
 
-/* Whether a foldable binary operation follows unsigned semantics: the usual
-   arithmetic conversions' common type for arithmetic/relational ops, the
-   promoted left operand for shifts. */
+/* Common type for arithmetic/relational, left operand for shifts. */
 static bool fold_binary_unsigned(ASTBinaryExpr *b)
 {
     Type *lt = b->left->expr_type ? type_promote(b->left->expr_type) : type_int();
@@ -1988,8 +1924,7 @@ static bool fold_binary_unsigned(ASTBinaryExpr *b)
     return type_is_unsigned(type_common(lt, rt));
 }
 
-/* Fold a constant expression (§6.6); semantic already resolved sizeof/alignof.
-   Returns false when not constant. */
+/* §6.6 (sizeof/alignof already resolved by semantic). */
 static bool fold_constant_ir(ASTNode *node, i64 *out)
 {
     if (!node)
@@ -2057,8 +1992,7 @@ static bool fold_constant_ir(ASTNode *node, i64 *out)
                 *out = type_reduce_int(ce->target_type, v);
                 return true;
             }
-            /* An address constant may be an integer constant expression cast
-               to pointer type (§6.6p9), not only the null pointer constant. */
+            /* §6.6p9: an integer constant expression cast to pointer type. */
             if (type_is_ptr(ce->target_type))
             {
                 *out = v;
@@ -2073,7 +2007,6 @@ static bool fold_constant_ir(ASTNode *node, i64 *out)
     }
 }
 
-/* Folded FP constant: the exact host value at `kind`'s precision. */
 typedef struct
 {
     FloatKind kind;
@@ -2111,7 +2044,6 @@ static long double fp_const_value(const FpConst *c)
     return c->ld;
 }
 
-/* Fold an FP constant expression; integer leaves fold as double. */
 static bool fold_float_operand(ASTNode *node, FpConst *out, bool at_least_double)
 {
     if (!node)
@@ -2135,7 +2067,6 @@ static bool fold_float_operand(ASTNode *node, FpConst *out, bool at_least_double
     return false;
 }
 
-/* Arithmetic at the operands' precision; a long double operand uses x87. */
 static bool fp_binary_arith(BinOpKind op, FpConst l, FpConst r, FpConst *out)
 {
     if (l.kind == FK_LONG || r.kind == FK_LONG)
@@ -2314,7 +2245,6 @@ static bool fold_float_constant(ASTNode *node, FpConst *out)
     return false;
 }
 
-/* FP const bytes at the object's precision, rounding through float/double. */
 static const u8 *encode_fp_object_bytes(Arena *arena, const FpConst *c, Type *type)
 {
     if (type->size == 4)
@@ -2362,8 +2292,6 @@ static void ir_global_add_reloc(IrGlobal *g, u32 offset, int target, i64 addend,
     r->addend = addend;
 }
 
-/* A data-side function-address relocation: elf.c resolves it against the
-   function symbol like the code-side loads. */
 static void ir_global_add_func_reloc(IrGlobal *g, u32 offset, const char *func_name, Arena *arena)
 {
     GlobalReloc *r = push_reloc(g, arena);
@@ -2382,8 +2310,7 @@ static char *anon_name(Arena *arena, const char *prefix, u32 idx)
     return buf;
 }
 
-/* An address constant (§6.6p9): a global object, a function designator, or
-   neither. The serializer turns this into a relocation. */
+/* An address constant (§6.6p9). */
 typedef enum
 {
     RELOC_TARGET_NONE,
@@ -2394,9 +2321,9 @@ typedef enum
 typedef struct
 {
     RelocTargetKind kind;
-    u32 index;        /* valid for RELOC_TARGET_OBJECT */
-    const char *func; /* valid for RELOC_TARGET_FUNC */
-    i64 addend;       /* symbol-relative byte offset (e.g. &obj.member) */
+    u32 index;
+    const char *func;
+    i64 addend;
 } RelocTarget;
 
 static RelocTarget reloc_target_none(void)
@@ -2426,8 +2353,6 @@ static RelocTarget reloc_target_func(const char *func)
 static RelocTarget serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap *global_map,
                                            U64Map *static_map, Arena *arena);
 
-/* An anonymous file-scope compound literal becomes an IrGlobal whose init
-   bytes come from its plan (relocating against other globals / strings). */
 static u32 emit_file_scope_compound(ASTCompoundLiteral *cl, IrModule *mod, Arena *arena,
                                     StrMap *global_map, U64Map *static_map)
 {
@@ -2440,8 +2365,6 @@ static u32 emit_file_scope_compound(ASTCompoundLiteral *cl, IrModule *mod, Arena
     {
         return NO_VREG;
     }
-    /* Const-qualified targets land in .rodata; the anonymous object is
-       internal-linkage (no user-visible name). */
     bool is_const = type_is_const(cl->type);
     g->section = is_const ? IR_SECTION_RODATA : IR_SECTION_DATA;
     g->linkage = IR_LINK_LOCAL;
@@ -2450,8 +2373,6 @@ static u32 emit_file_scope_compound(ASTCompoundLiteral *cl, IrModule *mod, Arena
     return idx;
 }
 
-/* An `&expr` address constant: an anonymous compound literal, a function
-   designator, or the address of a global / block-scope static. */
 static RelocTarget serializer_addr_target(ASTNode *operand, IrModule *mod, StrMap *global_map,
                                           U64Map *static_map, Arena *arena)
 {
@@ -2459,7 +2380,6 @@ static RelocTarget serializer_addr_target(ASTNode *operand, IrModule *mod, StrMa
     {
         case AST_COMPOUND_LITERAL:
         {
-            /* `&(type){...}` serializes the literal's anonymous object. */
             u32 idx = emit_file_scope_compound(ast_as(ASTCompoundLiteral, operand), mod, arena,
                                                global_map, static_map);
             return idx == NO_VREG ? reloc_target_none() : reloc_target_object(idx);
@@ -2469,7 +2389,6 @@ static RelocTarget serializer_addr_target(ASTNode *operand, IrModule *mod, StrMa
             ASTIdent *id = ast_as(ASTIdent, operand);
             if (id->is_func)
             {
-                /* `&f` is the designator's address, a function reloc. */
                 return reloc_target_func(id->name);
             }
             ASTVarDecl *decl = id->decl;
@@ -2489,7 +2408,6 @@ static RelocTarget serializer_addr_target(ASTNode *operand, IrModule *mod, StrMa
         }
         case AST_MEMBER_ACCESS:
         {
-            /* `&obj.member`: the object's address plus the member offset. */
             ASTMemberAccess *ma = ast_as(ASTMemberAccess, operand);
             RelocTarget base =
                 serializer_addr_target(ma->object, mod, global_map, static_map, arena);
@@ -2497,7 +2415,6 @@ static RelocTarget serializer_addr_target(ASTNode *operand, IrModule *mod, StrMa
         }
         case AST_SUBSCRIPT_EXPR:
         {
-            /* `&arr[i]`: the array address plus a constant element offset. */
             ASTSubscriptExpr *se = ast_as(ASTSubscriptExpr, operand);
             RelocTarget base =
                 serializer_addr_target(se->array, mod, global_map, static_map, arena);
@@ -2523,7 +2440,6 @@ static RelocTarget serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap
             return reloc_target_object(
                 ir_add_string_global(ast_as(ASTStringLiteral, value), mod, arena));
         case AST_CAST_EXPR:
-            /* A cast only adjusts the pointer type; the address constant is in the operand. */
             return serializer_reloc_target(ast_as(ASTCastExpr, value)->operand, mod, global_map,
                                            static_map, arena);
         case AST_IDENT:
@@ -2533,7 +2449,7 @@ static RelocTarget serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap
             {
                 return reloc_target_func(id->name);
             }
-            /* Object/array designators decay to their address (§6.3.2.1). */
+            /* §6.3.2.1 */
             return serializer_addr_target(value, mod, global_map, static_map, arena);
         }
         case AST_UNARY_EXPR:
@@ -2547,7 +2463,6 @@ static RelocTarget serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap
         }
         case AST_BINARY_EXPR:
         {
-            /* An address constant adjusted by a constant: `&obj + n`. */
             ASTBinaryExpr *b = ast_as(ASTBinaryExpr, value);
             if (b->op != BIN_ADD && b->op != BIN_SUB)
             {
@@ -2572,8 +2487,7 @@ static RelocTarget serializer_reloc_target(ASTNode *value, IrModule *mod, StrMap
     return reloc_target_none();
 }
 
-/* String-fill length, clamped to the array size: the NUL is stored only if
-   there is room (`char s[2] = "hi"` drops it, §6.7.9p14). */
+/* §6.7.9p14: `char s[2] = "hi"` drops the NUL. */
 static u32 clamped_string_len(ASTStringLiteral *sl, Type *array_type)
 {
     u32 esz = str_kind_elem_size(sl->str_kind);
@@ -2620,7 +2534,6 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
             bool ptr_sized_int = type_is_integer(wt) && wt->size == 8;
             if (!type_is_ptr(wt) && !ptr_sized_int)
             {
-                /* A scalar initializer must not decay into a silent relocation. */
                 ir_error(w->value, "initializer element is not a constant");
                 return false;
             }
@@ -2629,7 +2542,6 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
         }
         if (type_is_fp(type_unqual(w->type)))
         {
-            /* FP elements fold to their bits at the object's precision. */
             Type *wt = type_unqual(w->type);
             FpConst c;
             if (!fold_float_operand(w->value, &c, true))
@@ -2649,8 +2561,6 @@ static bool serialize_init_plan(IrGlobal *g, InitPlan *plan, IrModule *mod, StrM
         }
         if (w->is_bitfield)
         {
-            /* File-scope bit-field: merge the folded value into its storage
-               unit in the serialized bytes (read-modify-write in place). */
             u32 tbits = w->type->size * 8;
             u64 mask = bitfield_mask(w->bit_width) << w->bit_offset;
             u64 word = 0;
@@ -2680,7 +2590,6 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
     g->align = vd->type->align;
     g->relocs = NULL;
 
-    /* Const-qualified objects land in `.rodata` even when zero-initialized. */
     bool is_const = type_is_const(vd->type);
 
     if (vd->storage == SC_EXTERN)
@@ -2692,7 +2601,6 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
     }
     else if (vd->plan)
     {
-        /* Aggregate and string initializers serialize through their plan. */
         if (!serialize_init_plan(g, vd->plan, mod, global_map, static_map, arena))
         {
             return false;
@@ -2702,8 +2610,6 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
     }
     else if (vd->init && vd->init->kind == AST_STRING_LITERAL)
     {
-        /* `char *p = "..."`: 8 zero bytes + a relocation against the string
-           symbol. */
         RelocTarget str = serializer_reloc_target(vd->init, mod, global_map, static_map, arena);
         ASSERT(str.kind == RELOC_TARGET_OBJECT);
         g->init_data = encode_const_bytes(arena, 0, 8);
@@ -2740,10 +2646,7 @@ static bool fill_global(IrGlobal *g, ASTVarDecl *vd, IrModule *mod, StrMap *glob
 static u32 emit_global_decl(ASTVarDecl *vd, IrModule *mod, Arena *arena, StrMap *global_map,
                             U64Map *static_map)
 {
-    /* C tentative definitions merge: `int x;` followed by `int x = 1;` (or a
-       second `int x;`) is a single object (§6.9.2).  Likewise an `extern`
-       declaration of a name that is later defined.  Reuse the existing slot
-       rather than emitting a duplicate symbol with the same name. */
+    /* Tentative definitions (and a later definition) merge into one object (§6.9.2). */
     u32 *existing = strmap_get(global_map, vd->name);
     if (existing)
     {
@@ -2798,11 +2701,11 @@ static Type *string_literal_ir_elem_type(StrKind kind)
     switch (kind)
     {
         case STRK_WIDE:
-            return type_int(); /* wchar_t */
+            return type_int();
         case STRK_UTF16:
-            return type_ushort(); /* char16_t */
+            return type_ushort();
         case STRK_UTF32:
-            return type_uint(); /* char32_t */
+            return type_uint();
         case STRK_NARROW:
         default:
             return type_char();
@@ -2842,8 +2745,6 @@ static u32 ir_add_rodata_blob(IrModule *mod, Arena *arena, const void *bytes, u3
     return idx;
 }
 
-/* A synthesized file-scope zero blob: block-scope aggregate initializers
-   zero-fill their alloca slot with one OP_MEMCPY from these bytes. */
 static u32 ir_add_zero_blob(IrModule *mod, Arena *arena, u32 size)
 {
     u32 idx = (u32) vec_size(mod->globals);
@@ -2890,8 +2791,7 @@ static IrBlock *emit_init_plan(FuncBuilder *ctx, IrBlock *bb, IrOperand base, In
             bb = val.block;
             if (type_is_record(w->type))
             {
-                /* Whole-object copy of a record-valued subobject (§6.7.9p13):
-                   record rvalues are addresses in this IR, so move by value. */
+                /* §6.7.9p13 */
                 ir_emit_memcpy(bb, ir_operand_vreg(addr), val.value, w->type->size);
             }
             else
@@ -2899,8 +2799,7 @@ static IrBlock *emit_init_plan(FuncBuilder *ctx, IrBlock *bb, IrOperand base, In
                 IrOperand o = promote_to(ctx, bb, val.value, node_type(w->value), w->type);
                 if (w->is_bitfield)
                 {
-                    /* Bit-field members initialize via read-modify-write of
-                       their storage unit (§6.7.2.1), like lvalue assignments. */
+                    /* §6.7.2.1 */
                     bitfield_store(ctx, bb, ir_operand_vreg(addr), w->type, w->bit_offset,
                                    w->bit_width, o);
                 }
@@ -2945,7 +2844,6 @@ static ExprResult build_member_access_expr(FuncBuilder *ctx, ASTMemberAccess *ma
     }
     if (ma->field_type->kind == TYPE_VOID)
     {
-        /* A `void`-typed field has no loading width; cf. build_deref_expr. */
         return expr_void(lv.block);
     }
     return load_value(ctx, lv.block, lv.value, ma->field_type);
@@ -2961,7 +2859,7 @@ static ExprResult build_binary_expr(FuncBuilder *ctx, ASTBinaryExpr *be, IrBlock
     {
         case BIN_COMMA:
         {
-            /* §6.5.17: evaluate the left and discard it, return the right. */
+            /* §6.5.17 */
             ExprResult left = build_expr(ctx, be->left, bb);
             return build_expr(ctx, be->right, left.block);
         }
@@ -2984,7 +2882,6 @@ static ExprResult build_expr(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
             return expr_result(ir_operand_imm(ast_as(ASTIntLiteral, node)->value), bb);
         case AST_FLOAT_LITERAL:
         {
-            /* 80-bit constants are memory: a .rodata blob plus a 16-byte load. */
             ASTFloatLiteral *fl = ast_as(ASTFloatLiteral, node);
             if (fl->kind == FK_LONG)
             {
@@ -3127,8 +3024,7 @@ static IrBlock *label_block(FuncBuilder *ctx, const char *name)
         label_bb->is_loop_header = true;
         strmap_set(ctx->goto_labels, name, label_bb);
     }
-    /* Label blocks are treated as merge points because backward gotos can add
-       predecessor edges after this point, so PHIs must wait. */
+    /* Merge point: backward gotos can add preds later, so PHIs wait. */
     return label_bb;
 }
 
@@ -3199,8 +3095,7 @@ static IrBlock *build_loop_body(FuncBuilder *ctx, ASTNode *body_node, LoopBlocks
     return end;
 }
 
-/* A short-circuiting condition lowers through its own blocks, so the body's
-   notional header edge really arrives from the condition's result block. */
+/* The body's header edge arrives from the condition's result block. */
 static void patch_body_pred(LoopBlocks *lb, IrBlock *cond_block)
 {
     if (!cond_block || cond_block == lb->header)
@@ -3217,8 +3112,6 @@ static void patch_body_pred(LoopBlocks *lb, IrBlock *cond_block)
     }
 }
 
-/* Emit `cond` into the loop header, branching to body/exit; returns the block
-   the condition lowered into (its result block for short-circuits). */
 static IrBlock *emit_loop_condition(FuncBuilder *ctx, ASTNode *cond, LoopBlocks *lb)
 {
     IrBlock *h = lb->header;
@@ -3267,7 +3160,6 @@ static IrBlock *build_while_stmt(FuncBuilder *ctx, ASTWhileStmt *ws, IrBlock *bb
     jump(bb, lb.header);
 
     IrBlock *h = emit_loop_condition(ctx, ws->cond, &lb);
-    /* The body's only predecessor is the condition's result block, not the header. */
     declare_pred(lb.body, h);
     declare_pred(lb.exit, h);
 
@@ -3293,7 +3185,6 @@ static IrBlock *build_do_while_stmt(FuncBuilder *ctx, ASTDoWhileStmt *ds, IrBloc
     /* Seal after the condition so the back-edge PHI sees its post-cond value. */
     IrBlock *h = NULL;
     finish_loop(ctx, ds->cond, &lb, &h);
-    /* The back edge comes from the short-circuited condition's result block. */
     patch_body_pred(&lb, h);
     seal_block(ctx, lb.body);
 
@@ -3323,8 +3214,7 @@ static IrBlock *build_for_stmt(FuncBuilder *ctx, ASTForStmt *fs, IrBlock *bb)
 
     backedge(build_loop_body(ctx, fs->body, &lb), &lb);
 
-    /* Seal the latch before the post-expression so post reads see sealed
-       predecessors. */
+    /* Seal the latch before the post-expression so post reads see sealed preds. */
     seal_block(ctx, lb.latch);
 
     if (fs->post)
@@ -3378,8 +3268,7 @@ static IrBlock *build_label_stmt(FuncBuilder *ctx, ASTLabelStmt *ls, IrBlock *bb
     return build_stmt(ctx, ls->stmt, label_bb);
 }
 
-/* Collect case/default labels in source order, creating their blocks up front
-   so the dispatch can target them. Nested switches are the inner builder's. */
+/* Labels are collected up front so the dispatch can target them. */
 static void collect_switch(FuncBuilder *ctx, ASTNode *node, SwitchCtx *sc, Vec *cases)
 {
     if (!node)
@@ -3397,8 +3286,7 @@ static void collect_switch(FuncBuilder *ctx, ASTNode *node, SwitchCtx *sc, Vec *
             c->bb = new_block(ctx->f, "switch_case");
             vec_push(cases, c);
             u64map_set(sc->case_blocks, (u64) cs->value, c->bb);
-            /* Grouped labels (`case 1: case 2:`) arrive as nested ASTCaseStmt:
-               register them so the body walk can resolve them. */
+            /* Grouped labels (`case 1: case 2:`) arrive nested; register them too. */
             size_t ns = vec_size(cs->stmts);
             for (size_t i = 0; i < ns; i++)
             {
@@ -3467,8 +3355,7 @@ static IrBlock *build_switch_stmt(FuncBuilder *ctx, ASTSwitchStmt *ss, IrBlock *
     Vec *cases = vec_new(ctx->mod->arena);
     collect_switch(ctx, ss->body, &sc, cases);
 
-    /* One OP_SWITCH carries every case; the backend picks table vs chain, and the
-       dispatch block preds every case/exit block. */
+    /* One OP_SWITCH carries every case; the dispatch block preds each case/exit. */
     size_t n = vec_size(cases);
     IrSwitchCase *sw_cases =
         arena_alloc(ctx->mod->arena, n * sizeof(IrSwitchCase), _Alignof(IrSwitchCase));
@@ -3483,8 +3370,6 @@ static IrBlock *build_switch_stmt(FuncBuilder *ctx, ASTSwitchStmt *ss, IrBlock *
     declare_pred(no_match, bb);
     ir_emit_switch(bb, cv, (u32) n, sw_cases, no_match->label);
 
-    /* `break` goes to the switch exit; `continue` (invalid in a bare switch)
-       propagates to the enclosing loop's latch. */
     LoopContext *outer_loop =
         vec_size(ctx->loop_stack) ? (LoopContext *) vec_last(ctx->loop_stack) : NULL;
     LoopContext lc = {.continue_target = outer_loop ? outer_loop->continue_target : NULL,
@@ -3492,8 +3377,7 @@ static IrBlock *build_switch_stmt(FuncBuilder *ctx, ASTSwitchStmt *ss, IrBlock *
     vec_push(ctx->loop_stack, &lc);
     vec_push(ctx->switch_stack, &sc);
 
-    /* Walk the body as ordinary statements; `case`/`default` labels land in their
-           pre-created blocks, giving exact C fall-through semantics. */
+    /* Walk as statements; labels land in pre-created blocks for C fall-through. */
     IrBlock *end = build_stmt(ctx, ss->body, bb);
 
     vec_pop(ctx->switch_stack);
@@ -3507,8 +3391,7 @@ static IrBlock *build_switch_stmt(FuncBuilder *ctx, ASTSwitchStmt *ss, IrBlock *
     return sc.exit_bb;
 }
 
-/* Fallback path only for case labels nested inside inner blocks of a switch
-   body (the parser's normalize_case_groups handles the top level). */
+/* Fallback for case labels nested in inner blocks (the parser normalizes the top level). */
 static IrBlock *build_case_stmt(FuncBuilder *ctx, ASTCaseStmt *cs, IrBlock *bb)
 {
     SwitchCtx *sc = (SwitchCtx *) vec_last(ctx->switch_stack);
@@ -3552,14 +3435,10 @@ static IrBlock *build_return_stmt(FuncBuilder *ctx, ASTReturnStmt *ret, IrBlock 
     return bb;
 }
 
-/* Materialize the backing global for a block-scope static or an extern local
-   exactly once. Returns false (error reported) on serialization failure. */
 static bool ensure_synthesized_global(FuncBuilder *ctx, ASTVarDecl *vd)
 {
     if (vd->storage == SC_STATIC)
     {
-        /* Block-scope statics are file-backed: the loaded image holds their
-           constant initializer, so runtime sees a no-op. */
         if (block_static_index(ctx, vd) != NO_VREG)
         {
             return true;
@@ -3568,8 +3447,6 @@ static bool ensure_synthesized_global(FuncBuilder *ctx, ASTVarDecl *vd)
                NO_VREG;
     }
     ASSERT(vd->storage == SC_EXTERN);
-    /* Reference the external entity: emit an undefined global once if no
-       file-scope declaration preceded it. */
     if (global_index_of(ctx, vd->name) != NO_VREG)
     {
         return true;
@@ -3591,8 +3468,6 @@ static IrBlock *build_var_decl_stmt(FuncBuilder *ctx, ASTVarDecl *vd, IrBlock *b
 
     if (type_is_memory(vd->type))
     {
-        /* Memory objects: a stack slot whose pointer is the variable's value;
-           plan writes zero-fill + store, an expression init applies via memcpy. */
         u32 dst = alloc_vreg_for_var(ctx, vd->type);
         ir_emit_alloca(bb, dst, vd->type->size);
         /* Publish the slot first so `&s` in the initializer resolves to it. */
@@ -3613,7 +3488,6 @@ static IrBlock *build_var_decl_stmt(FuncBuilder *ctx, ASTVarDecl *vd, IrBlock *b
     IrOperand val = ir_operand_imm(0);
     if (vd->plan)
     {
-        /* `{expr}` around a scalar unwraps to the single element. */
         if (vd->plan->writes && vec_size(vd->plan->writes) > 0)
         {
             InitWrite *w = (InitWrite *) vec_get(vd->plan->writes, 0);
@@ -3661,7 +3535,6 @@ static IrBlock *build_stmt(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
         case AST_STRUCT_DECL:
         case AST_ENUM_DECL:
         case AST_TYPEDEF_DECL:
-            /* Tag/typedef definitions are parse-time only. */
             return bb;
         case AST_STATIC_ASSERT:
             /* Checked in the semantic pass; emits nothing. */
@@ -3714,7 +3587,6 @@ static void setup_params(FuncBuilder *ctx, ASTFuncDef *ast, IrBlock *entry)
     ctx->sret_vreg = NO_VREG;
     if (type_is_record(ast->sig.ret_type))
     {
-        /* Record returns arrive through a hidden sret pointer. */
         u32 vreg = alloc_vreg_for_var(ctx, ast->sig.ret_type);
         push_param(ctx, "__sret", type_ptr(ast->sig.ret_type), vreg, NULL);
         ctx->sret_vreg = vreg;
@@ -3764,8 +3636,7 @@ static void finish_func(FuncBuilder *ctx, IrBlock *exit)
     seal_all_blocks(ctx);
 }
 
-/* Pre-pass: record address-taken autos so their slot allocas exist before
-   lowering (reads/writes go through memory before the `&` is visited). */
+/* Pre-pass: address-taken autos spill before lowering visits the `&`. */
 static void mark_addr_taken_expr(FuncBuilder *ctx, ASTNode *node);
 static void mark_addr_taken_stmt(FuncBuilder *ctx, ASTNode *node);
 
@@ -3797,7 +3668,6 @@ static void mark_addr_taken_expr(FuncBuilder *ctx, ASTNode *node)
         }
         case AST_INCDEC_EXPR:
         {
-            /* Descend: nested `&x` must still spill (`0[&c]`, `&*(&c)++`). */
             mark_addr_taken_expr(ctx, ast_as(ASTIncDecExpr, node)->operand);
             break;
         }
@@ -3850,7 +3720,6 @@ static void mark_addr_taken_expr(FuncBuilder *ctx, ASTNode *node)
             /* _Alignof does not evaluate its operand (§6.5.3.4p2). */
             break;
         case AST_COMPOUND_LITERAL:
-            /* The literal's init list may carry `&x` — those autos must spill. */
             mark_addr_taken_expr(ctx, ast_as(ASTCompoundLiteral, node)->init);
             break;
         case AST_INIT_LIST:
@@ -3865,7 +3734,7 @@ static void mark_addr_taken_expr(FuncBuilder *ctx, ASTNode *node)
             break;
         }
         default:
-            break; /* literals, identifiers, sizeof-type: nothing to walk */
+            break;
     }
 }
 
@@ -3969,17 +3838,16 @@ static void mark_addr_taken_stmt(FuncBuilder *ctx, ASTNode *node)
             break;
         }
         case AST_STATIC_ASSERT:
-            /* Compile-time only (§6.7.4): nothing inside is address-taken. */
+            /* §6.7.4 */
             break;
         default:
-            break; /* break/continue/goto: no subexpressions */
+            break;
     }
 }
 
 static void hoist_allocas(IrFunction *func)
 {
     IrBlock *entry = (IrBlock *) vec_get(func->blocks, 0);
-    /* Keep the leading PHIs first. */
     size_t ipos = 0;
     for (; ipos < vec_size(entry->instrs); ipos++)
     {
@@ -4050,8 +3918,7 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
     /* Pre-create blocks for all labels so gotos can target them. */
     collect_labels(&ctx, func_ast->body);
 
-    /* Collect address-taken autos, hoist their slot allocas into the entry block,
-           then wire params (address-taken params store into the existing slots). */
+    /* Spill allocas are hoisted before params; address-taken params store into them. */
     mark_addr_taken_stmt(&ctx, func_ast->body);
     emit_spill_allocas(&ctx, entry);
 
@@ -4066,9 +3933,7 @@ static bool build_func(ASTNode *ast, IrModule *mod, StrMap *func_types, StrMap *
     return !ctx.failed;
 }
 
-/* Seed func_types with every defined/prototyped function so calls resolve
-   their signature. A prototype makes no IrFunction — the ELF side emits the
-   SHN_UNDEF symbol. */
+/* A prototype makes no IrFunction; the ELF side emits the SHN_UNDEF symbol. */
 static void register_func_type(ASTNode *decl, StrMap *func_types)
 {
     Type *func_type = NULL;
@@ -4099,7 +3964,6 @@ static bool emit_file_globals(ASTNode *decl, IrModule *mod, Arena *arena, StrMap
     }
     if (decl->kind == AST_DECL_LIST)
     {
-        /* An init-declarator list at file scope: one global per declarator. */
         ASTDeclList *dl = ast_as(ASTDeclList, decl);
         size_t n = vec_size(dl->decls);
         for (size_t j = 0; j < n; j++)
@@ -4136,7 +4000,6 @@ static bool is_toplevel_declaration(ASTNode *decl)
     }
 }
 
-/* True when `spec` carries the given GNU attribute. */
 static bool spec_has_attr(const FuncSpecs *spec, AttrKind kind)
 {
     if (!spec->attrs)
@@ -4154,7 +4017,6 @@ static bool spec_has_attr(const FuncSpecs *spec, AttrKind kind)
     return false;
 }
 
-/* The signature of a top-level function definition or declaration. */
 static FuncSig *toplevel_func_sig(ASTNode *decl)
 {
     if (decl->kind == AST_FUNC_DEF)
@@ -4168,7 +4030,6 @@ static FuncSig *toplevel_func_sig(ASTNode *decl)
     return NULL;
 }
 
-/* One 8-byte pointer per `constructor`/`destructor`, in declaration order. */
 static void emit_ctor_arrays(ASTProgram *prog, IrModule *mod, Arena *arena, AttrKind kind,
                              IrSection section)
 {

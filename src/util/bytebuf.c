@@ -80,7 +80,6 @@ void bytebuf_align(ByteBuf *bb, size_t align)
     }
 }
 
-/* Overwrite the 4 bytes at `off` (little-endian), for patching placeholders. */
 void bytebuf_poke_u32(ByteBuf *bb, size_t off, u32 val)
 {
     ASSERT(off + 4 <= bb->len);

@@ -7,8 +7,6 @@
 #define NO_DOM UINT32_MAX
 #define ENTRY_BLOCK 0
 
-/* Cooper–Harvey–Kennedy iterate-to-fixpoint idom computation. rpo positions
-   grow along the dominator chain, so the finger later in RPO climbs first. */
 static u32 meet_idoms(const CfgInfo *cfg, const u32 *idom, u32 a, u32 b)
 {
     while (a != b)
@@ -59,7 +57,6 @@ Dominators *opt_doms_build(CfgInfo *cfg, Arena *arena)
     int guard = 0;
     while (changed)
     {
-        /* Stop loudly rather than hang the compiler on a wild CFG. */
         if (++guard > (int) n * 16 + 2048)
         {
             opt_error("dominator fixpoint failed to converge in '%s' (%zu blocks)", cfg->func->name,

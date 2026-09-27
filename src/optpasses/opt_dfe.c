@@ -4,12 +4,7 @@
 
 #include <string.h>
 
-/* Inlining clones a callee's body into its callers but leaves the original
-   definition in the module, and codegen lowers every IrFunction.  Drop an
-   internal-linkage function once nothing references it: no direct call, no
-   is_func operand, no global pointer to its address, and not main.  Exported
-   functions and inline definitions stay, since another translation unit may
-   link against them (C11 §6.7.4). */
+/* Exported and inline functions stay: another translation unit may link them (C11 §6.7.4). */
 
 static bool operand_names_func(IrOperand op, const char *name)
 {

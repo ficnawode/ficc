@@ -15,7 +15,6 @@ static bool ptr_eq(const void *a, const void *b)
     return a == b;
 }
 
-/* def_block/def_instr per vreg; params are "defined" at the entry block. */
 static void build_def_maps(IrFunction *f, IrBlock **def_block, IrInstr **def_instr)
 {
     IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
@@ -97,9 +96,7 @@ static bool in_set(const HashSet *set, const void *item)
     return hashset_contains(set, item);
 }
 
-/* True when every vreg operand's def sits outside the loop body. A def this
-   run will hoist stays invariant: both land in the preheader, and the RPO
-   drain places defs before their uses there. */
+/* A def hoisted this run stays invariant: it lands in the preheader. */
 static bool operands_invariant(const IrInstr *in, IrBlock *pre, const HashSet *loop_blocks,
                                IrBlock **def_block, IrInstr **def_instr, const HashSet *hoisted)
 {
@@ -113,7 +110,7 @@ static bool operands_invariant(const IrInstr *in, IrBlock *pre, const HashSet *l
         IrBlock *bb = def_block[op.u.vreg];
         if (bb == NULL || bb == pre)
         {
-            continue; /* params and preheader defs run before the loop */
+            continue;
         }
         if (in_set(loop_blocks, bb))
         {
@@ -127,7 +124,6 @@ static bool operands_invariant(const IrInstr *in, IrBlock *pre, const HashSet *l
     return true;
 }
 
-/* The single predecessor of `loop`'s header outside the latches, if any. */
 static IrBlock *outside_preheader(Loop *loop)
 {
     size_t npred = vec_size(loop->header->preds);
@@ -150,7 +146,7 @@ static IrBlock *outside_preheader(Loop *loop)
         }
         if (outside != NULL)
         {
-            return NULL; /* more than one outside pred: no unique preheader */
+            return NULL;
         }
         outside = pred;
     }

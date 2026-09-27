@@ -7,7 +7,6 @@ static bool is_assoc_op(IrOpcode op)
     return op == OP_ADD || op == OP_SUB || op == OP_MUL;
 }
 
-/* The constant addend an ADD/SUB tree reduces to: (a ± c1) ± c2 -> a + A. */
 static bool combine_addsub(IrOpcode outer, IrOpcode inner, i64 c1, i64 c2, i64 *addend)
 {
     if (outer == OP_ADD)
@@ -19,7 +18,6 @@ static bool combine_addsub(IrOpcode outer, IrOpcode inner, i64 c1, i64 c2, i64 *
     return true;
 }
 
-/* The `t OP c` shape: the constant operand and the value operand. */
 static bool imm_operand(IrInstr *in, IrOperand *val, i64 *c)
 {
     if (in->ops[1].is_imm)
@@ -37,8 +35,7 @@ static bool imm_operand(IrInstr *in, IrOperand *val, i64 *c)
     return false;
 }
 
-/* Fold (a OP1 c1) OP2 c2 into a single a OP c when both are constants. The
-   inner definition is left in place (DCE removes it when it dies). */
+/* The inner definition is left in place; DCE removes it when it dies. */
 bool opt_pass_reassoc(OptimizerContext *ctx)
 {
     bool changed = false;
@@ -72,7 +69,7 @@ bool opt_pass_reassoc(OptimizerContext *ctx)
                 }
                 if ((in->opcode == OP_MUL) != (inner->opcode == OP_MUL))
                 {
-                    continue; /* multiply and add/subtract do not mix */
+                    continue;
                 }
                 IrOperand a;
                 i64 c1 = 0;

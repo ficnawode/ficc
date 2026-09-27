@@ -51,7 +51,6 @@ static SysvArgPlan *plan_params(IrFunction *f, Arena *arena)
     return plans;
 }
 
-/* Records always stage (their home points into the slot); scalars only under -g. */
 static u32 frame_param_stage_bytes(const SysvArgPlan *plan, bool debug)
 {
     if (plan->is_record)
@@ -71,9 +70,7 @@ static u32 stage_total_bytes(const SysvArgPlan *plans, size_t n, bool debug)
     return total;
 }
 
-/* Static alloca: every OP_ALLOCA reserves a fixed frame slot, so its address
-   is a cheap %rbp-relative lea that lowering recomputes instead of spilling.
-   Slots are placed below `base`; returns the bytes they consume. */
+/* Every OP_ALLOCA is a fixed frame slot: lowering recomputes a lea instead of spilling. */
 static u32 plan_allocas(IrFunction *f, u32 base)
 {
     u32 cum = 0;
@@ -130,8 +127,7 @@ static bool function_makes_calls(IrFunction *f)
     return false;
 }
 
-/* A call with arguments past the register banks is set up by moving %rsp, after
-   which an %rsp-based frame would no longer line up. */
+/* A call with stack-passed args moves %rsp, so an %rsp-based frame would not line up. */
 static bool function_uses_stack_args(IrFunction *f)
 {
     size_t nblocks = vec_size(f->blocks);
@@ -165,8 +161,7 @@ static bool function_uses_stack_args(IrFunction *f)
     return false;
 }
 
-/* x87 conversions stage through %rsp, so a long double anywhere rules the
-   frame pointer out. */
+/* x87 conversions stage through %rsp, so any long double rules out the frame pointer. */
 static bool function_uses_x87(IrModule *mod, IrFunction *f)
 {
     size_t nparams = vec_size(f->params);
@@ -201,9 +196,6 @@ static bool function_uses_x87(IrModule *mod, IrFunction *f)
     return false;
 }
 
-/* Whether the frame pointer may be dropped: no debug frame, no variadic save
-   area, every parameter arriving in a register, and %rsp staying put after the
-   prologue. */
 bool x86_frame_can_omit_fp(IrModule *mod, IrFunction *f, bool debug)
 {
     if (debug || f->is_variadic || function_uses_stack_args(f) || function_uses_x87(mod, f))
@@ -242,8 +234,7 @@ void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *targe
     u32 stage_bytes = nparams > 0 ? stage_total_bytes(plans, nparams, debug) : 0;
     if (stage_bytes > 0)
     {
-        /* A stage slot at offset S spans [%rbp-S, %rbp-S+16), so the first one must
-           start a full slot below the locals; this also clears the saved %rbp. */
+        /* First stage slot starts a 16-byte slot below the locals, clearing the saved %rbp. */
         out->stage_base = align_up(locals_end, STACK_ALIGN) + STACK_ALIGN;
         locals_end = out->stage_base + stage_bytes;
     }
@@ -260,8 +251,7 @@ void x86_frame_plan(RegAllocation *alloc, IrFunction *f, const TargetDesc *targe
     locals_end += plan_allocas(f, locals_end);
     u32 frame_size = align_up(locals_end, STACK_ALIGN);
 
-    /* The pushes below %rbp total 8*nsaved; an odd count leaves %rsp 8 mod 16
-       before `sub`, so pad the reservation to keep call sites 16-aligned. */
+    /* Pad to 16-align call sites when the saved-register pushes leave %rsp misaligned. */
     if (out->nsaved & 1)
     {
         frame_size += 8;
@@ -290,8 +280,6 @@ static X86Mem stage_mem(const LinearFrame *frame, u32 off)
     return x86_frame_mem(frame, -(i32) (frame->stage_base + off));
 }
 
-/* Advance the running stage-slot cursor past `plan` and return the offset the
-   parameter occupies; parameters that stage nowhere consume no space. */
 static u32 param_stage_next(const SysvArgPlan *plan, bool debug, u32 *cursor)
 {
     u32 at = *cursor;
@@ -423,7 +411,6 @@ static void load_record_home(ByteBuf *buf, const SysvArgPlan *plan, RegLoc home,
     }
 }
 
-/* Move a scalar parameter into its home from its incoming register or stack slot. */
 static void load_scalar_home(ByteBuf *buf, const LinearFrame *frame, RegLoc home, u8 width,
                              bool is_fp, X86Operand src)
 {
@@ -483,7 +470,6 @@ static void load_scalar_home(ByteBuf *buf, const LinearFrame *frame, RegLoc home
     }
 }
 
-/* A scalar parameter's incoming register, or its caller stack slot. */
 static X86Operand scalar_param_src(IrParam *p, const SysvArgPlan *plan, IrModule *mod,
                                    const TargetDesc *target)
 {

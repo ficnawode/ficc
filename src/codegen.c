@@ -21,7 +21,6 @@ static void assign_func_offsets(CodegenModule *cm, size_t nfuncs)
     }
 }
 
-/* Resolve direct calls by name; undefined targets become SHN_UNDEF + R_X86_64_PLT32 in elf.c. */
 static void resolve_direct_calls(CodegenModule *cm, size_t nfuncs, Arena *arena)
 {
     StrMap *func_by_name = strmap_new(arena);

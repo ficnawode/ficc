@@ -27,7 +27,6 @@ void vec_push(Vec *v, void *item)
     if (v->len >= v->cap)
     {
         size_t old_cap = v->cap;
-        /* cap * 2 * sizeof(void *) must not wrap */
         if (old_cap > SIZE_MAX / (2 * sizeof(void *)))
         {
             arena_oom_abort();

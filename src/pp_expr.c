@@ -36,7 +36,6 @@ static void expr_advance(ExprParser *ep)
     ep->pos++;
 }
 
-/* Location of the current token, or of the last one consumed at end. */
 static Loc expr_loc(ExprParser *ep)
 {
     PpToken *t = expr_peek(ep);
@@ -407,8 +406,6 @@ static PpExprVal expr_binop(ExprParser *ep, PpPunct op, PpExprVal l, PpExprVal r
 
 typedef PpExprVal (*NextLevel)(ExprParser *);
 
-/* Parses an operand that C never evaluates (short-circuited &&/||/?:) with
-   diagnostics suppressed. */
 static void expr_skip(ExprParser *ep, NextLevel next)
 {
     bool saved = ep->suppress;

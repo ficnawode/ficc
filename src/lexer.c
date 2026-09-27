@@ -112,11 +112,7 @@ static TokenKind keyword_kind(const char *name)
     return TOK_IDENT;
 }
 
-/* Decode one escape sequence; the leading backslash is already consumed.
-   Shared by the legacy string lexer, the finalizer's string decoder, and the
-   pp destringizer for `_Pragma` (C11 §6.10.9). Returns e.g. 'n' -> '\n'.
-   Numeric escapes accumulate greedily and can return values > 0xFF, which
-   callers reject. Unknown escapes keep the character. */
+/* Decode one escape; numeric escapes may exceed 0xFF, which callers reject. */
 int lex_escape_byte(const char **pp, const char *end)
 {
     static const char simple_codes[] = "abfnrtv\\'\"?";
@@ -212,8 +208,7 @@ u32 str_kind_elem_size(StrKind kind)
     }
 }
 
-/* Appends token, merging it into the previous token when both are adjacent
-   string literals (C11 §5.1.1.2 phase 6). */
+/* Adjacent string literals concatenate (C11 §5.1.1.2 phase 6). */
 static void finalize_push_token(FinalizeCtx *ctx, Token token)
 {
     if (token.kind == TOK_STRING_LIT && vec_size(ctx->tokens) > 0)
@@ -237,8 +232,7 @@ static void finalize_push_token(FinalizeCtx *ctx, Token token)
     *slot = token;
     if (slot->loc.file)
     {
-        /* The soup's file strings live in the pp arena, which the driver frees
-           right after finalize; intern them so later diagnostics stay valid. */
+        /* Intern the file string: the pp arena is freed right after finalize. */
         slot->loc.file = intern(ctx->files, slot->loc.file);
     }
     vec_push(ctx->tokens, slot);
@@ -253,8 +247,7 @@ static void finalize_ident(FinalizeCtx *ctx, const PpToken *tok)
                         (Token) {.kind = keyword_kind(buf), .loc = tok->loc, .payload.str = buf});
 }
 
-/* Maps a pp punctuator id to the parser's token kind. `#`/`##` have no
-   TokenKind and must never reach the finalizer (C11 §6.4.6). */
+/* Maps a pp punctuator id to the parser's TokenKind; `#`/`##` (C11 §6.4.6) never reach here. */
 static void finalize_punct(FinalizeCtx *ctx, const PpToken *tok)
 {
     TokenKind kind;
@@ -407,8 +400,6 @@ static void finalize_punct(FinalizeCtx *ctx, const PpToken *tok)
     finalize_push_token(ctx, (Token) {.kind = kind, .loc = tok->loc});
 }
 
-/* Decodes one escape at *pp, advancing it; end bounds the spelling. Numeric
-   escapes accumulate greedily and can return values > 0xFF. */
 static int finalize_escape(const char **pp, const char *end, FinalizeCtx *ctx, Loc loc)
 {
     int val = lex_escape_byte(pp, end);
@@ -420,8 +411,6 @@ static int finalize_escape(const char **pp, const char *end, FinalizeCtx *ctx, L
     return 0;
 }
 
-/* Splits an optional encoding prefix off a literal spelling; *pp points at the
-   opening quote on success. Returns false for a malformed prefix. */
 static bool literal_prefix(const char *spell, u32 len, const char **pp, StrKind *kind)
 {
     const char *p = spell;
@@ -525,8 +514,7 @@ static void finalize_char(FinalizeCtx *ctx, const PpToken *tok)
         finalize_error(ctx, tok->loc, "multi-character character constant");
         return;
     }
-    /* §6.4.4.4: the value must fit the element type (a plain char constant is
-       an int, but its value must fit in an unsigned char). */
+    /* §6.4.4.4: the value must fit the element type. */
     u32 limit = kind == STRK_NARROW ? 0xFFu : kind == STRK_UTF16 ? 0xFFFFu : 0x10FFFFu;
     if ((u32) val > limit)
     {
@@ -591,7 +579,6 @@ static void finalize_float(FinalizeCtx *ctx, const PpToken *tok)
         return;
     }
 
-    /* strtof/strtod/strtold give the exact host value; floats keep their bits. */
     char *endptr;
     u64 pat = 0;
     long double ld = 0.0L;
@@ -703,9 +690,7 @@ static void finalize_number(FinalizeCtx *ctx, const PpToken *tok)
         return;
     }
 
-    /* C11 §6.4.4.1: hex/octal ("non-decimal") literals may take an unsigned
-       type when the value exceeds the widest signed type; decimal literals are
-       signed-only, and an explicit u/U suffix widens the range to UINT64_MAX. */
+    /* C11 §6.4.4.1: non-decimal literals may widen to unsigned; decimal is signed-only. */
     bool is_non_decimal = is_hex || is_octal;
     if (overflow)
     {

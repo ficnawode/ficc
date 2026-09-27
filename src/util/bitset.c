@@ -83,7 +83,6 @@ void bitset_and(Bitset *dst, const Bitset *src)
     {
         dst->words[i] &= src->words[i];
     }
-    /* zero remaining words in dst: implicit zeros in src */
     for (size_t i = n; i < dst->nwords; i++)
     {
         dst->words[i] = 0;

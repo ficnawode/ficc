@@ -159,8 +159,6 @@ ASTNode *ast_call_expr(const char *callee, Vec *args, Loc loc, Arena *arena)
     return &n->base;
 }
 
-/* A call through a non-identifier expression `(*fp)(x)`, `p->hash(x)`,
-   `(f)(x)`. */
 ASTNode *ast_indirect_call(ASTNode *callee_expr, Vec *args, Loc loc, Arena *arena)
 {
     ASTCallExpr *n = ast_new_node(sizeof(ASTCallExpr), AST_CALL_EXPR, loc, arena);
@@ -597,7 +595,7 @@ static void ast_dump_rec(ASTNode *node, int depth)
             ASTFloatLiteral *float_literal = ast_as(ASTFloatLiteral, node);
             if (float_literal->kind == FK_LONG)
             {
-                unsigned long long lo; /* FP-free dump: byte copy of the low half */
+                unsigned long long lo;
                 memcpy(&lo, &float_literal->value.ld, 8);
                 printf("FLOAT_LITERAL l 0x%016llxL\n", lo);
             }
@@ -624,7 +622,7 @@ static void ast_dump_rec(ASTNode *node, int depth)
             }
             else
             {
-                /* An unnamed parameter of a prototype (§6.7.6.3). */
+                /* §6.7.6.3 */
                 printf("VAR_DECL <unnamed> : %s\n", type_kind_name(var_decl->type->kind));
             }
             if (var_decl->init)

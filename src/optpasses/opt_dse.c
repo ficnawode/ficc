@@ -2,8 +2,7 @@
 
 #include "ir.h"
 
-/* The alloca a pointer operand is built from (the alloca itself or a constant
-   GEP over one), or NO_VREG when it is opaque. Distinct allocas never alias. */
+/* Distinct allocas never alias. */
 static u32 alloca_base(OptimizerContext *ctx, IrOperand op)
 {
     if (!ir_operand_is_vreg(op))
@@ -41,9 +40,6 @@ static bool is_call_barrier(IrOpcode op)
            op == OP_VA_END;
 }
 
-/* A store overwritten by a later store to the same address, with no access in
-   between that could read it, is dead. Accesses to provably-distinct allocas
-   do not stop the scan. */
 bool opt_pass_dse(OptimizerContext *ctx)
 {
     bool changed = false;
@@ -79,7 +75,7 @@ bool opt_pass_dse(OptimizerContext *ctx)
                         u32 jbase = alloca_base(ctx, jn->ops[1]);
                         if (!may_alias(base, jbase))
                         {
-                            continue; /* a disjoint store does not overwrite `in` */
+                            continue;
                         }
                         if ((u32) jn->ops[2].u.imm == width &&
                             opt_operand_eq(jn->ops[1], in->ops[1]))
@@ -87,7 +83,7 @@ bool opt_pass_dse(OptimizerContext *ctx)
                             vec_push(dead, in);
                             changed = true;
                         }
-                        break; /* a may-aliasing store ends the proof either way */
+                        break;
                     }
                     if (jn->opcode == OP_LOAD)
                     {

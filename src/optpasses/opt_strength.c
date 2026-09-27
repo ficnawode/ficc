@@ -2,7 +2,6 @@
 
 #include "ir.h"
 
-/* The low `width` bytes of an immediate, as the instruction sees them. */
 static u64 low_bits(i64 v, u8 width)
 {
     if (width >= 8)
@@ -32,8 +31,7 @@ static bool pow2_shift(u64 bits, u8 width, u8 *shift)
     return true;
 }
 
-/* Rewrite a multiply or unsigned divide/remainder by a power of two into a
-   shift or mask. In place: the result vreg keeps its uses. */
+/* Rewritten in place: the result vreg keeps its uses. */
 bool opt_pass_strength(OptimizerContext *ctx)
 {
     bool changed = false;
@@ -79,7 +77,7 @@ bool opt_pass_strength(OptimizerContext *ctx)
                 {
                     if (k == 0)
                     {
-                        continue; /* multiply by one is an identity */
+                        continue;
                     }
                     in->opcode = OP_SHL;
                     in->ops[1] = ir_operand_imm((i64) k);
@@ -92,7 +90,7 @@ bool opt_pass_strength(OptimizerContext *ctx)
                 else
                 {
                     in->opcode = OP_AND;
-                    in->ops[1] = ir_operand_imm((i64) (bits - 1)); /* x % 2^k == x & (2^k - 1) */
+                    in->ops[1] = ir_operand_imm((i64) (bits - 1));
                 }
                 in->ops[0] = var;
                 changed = true;

@@ -10,7 +10,6 @@
 /* Byte width of the x87 long double value class. */
 #define LD_BYTES 16
 
-/* Reports through the same sink the IR builder uses for its own errors. */
 static void verify_error(const char *fmt, ...)
 {
     fprintf(stderr, "[ir] error: ");
@@ -27,13 +26,11 @@ static bool is_terminator_op(IrOpcode op)
            op == OP_SWITCH;
 }
 
-/* Dump-style message names the opcode without its OP_ prefix. */
 static const char *opcode_short_name(IrOpcode op)
 {
     return ir_opcode_name(op) + 3;
 }
 
-/* Result requirement per opcode; CALL is the only optional case (void calls). */
 typedef enum
 {
     RESULT_NONE,
@@ -49,7 +46,6 @@ typedef struct
     ResultKind result;
 } OpShape;
 
-/* Operand-count range and result rule per opcode, named case by case. */
 static OpShape op_shape(IrOpcode op)
 {
     switch (op)
@@ -144,7 +140,6 @@ static bool is_param_vreg(IrFunction *f, u32 vreg)
     return false;
 }
 
-/* Vreg operands must resolve to a definition here, or to a parameter. */
 static void check_operand(IrModule *mod, IrFunction *f, IrInstr **defs, IrFunction **def_funcs,
                           IrOperand op, bool *ok)
 {
@@ -214,7 +209,6 @@ static void check_call_args(IrModule *mod, IrFunction *f, IrInstr *in, IrInstr *
     }
 }
 
-/* A long-double parameter forces its argument into a vreg. */
 static void check_call_ld_args(IrModule *mod, IrBlock *bb, IrInstr *in, bool *ok)
 {
     if (in->extra.call.is_indirect)
@@ -269,7 +263,6 @@ static IrBlock *find_block_by_label(IrFunction *f, const char *label)
     return NULL;
 }
 
-/* Terminator targets must name blocks in this function. */
 static void check_targets_exist(IrFunction *f, IrInstr *in, IrBlock *bb, bool *ok)
 {
     switch (in->opcode)
@@ -312,7 +305,6 @@ static void check_targets_exist(IrFunction *f, IrInstr *in, IrBlock *bb, bool *o
     }
 }
 
-/* Payloads holding operands or block labels beyond the fixed ops[] slots. */
 static void check_payloads(IrModule *mod, IrFunction *f, IrBlock *bb, IrInstr *in, IrInstr **defs,
                            IrFunction **def_funcs, bool *ok)
 {
@@ -349,8 +341,6 @@ static void check_payloads(IrModule *mod, IrFunction *f, IrBlock *bb, IrInstr *i
     }
 }
 
-/* One block: leading phis, then a single trailing terminator; every operand
-   sits inside the value table and resolves to a definition. */
 static void check_block(IrModule *mod, IrFunction *f, IrBlock *bb, IrInstr **defs,
                         IrFunction **def_funcs, bool *ok)
 {
@@ -474,8 +464,8 @@ static bool phi_has_duplicate_label(IrInstr *phi)
     return false;
 }
 
-/* Every phi lists exactly the block's preds; the interpreter selects an
-   incoming value by predecessor label and would leave a dropped entry silent. */
+/* Every phi lists exactly the block's preds; the interpreter selects an incoming
+   value by predecessor label. */
 static void check_phi_preds(IrBlock *bb, bool *ok)
 {
     size_t ninstr = vec_size(bb->instrs);
@@ -515,8 +505,7 @@ static void check_phi_preds(IrBlock *bb, bool *ok)
     }
 }
 
-/* Pred lists over-approximate (a no-condition loop header records itself as a
-   predecessor of the exit it never reaches), so only a real edge must appear. */
+/* Pred lists over-approximate, so only a real edge must appear. */
 static bool is_recorded_pred(IrBlock *to, IrBlock *bb)
 {
     size_t npred = vec_size(to->preds);
@@ -634,7 +623,6 @@ static void check_function(IrModule *mod, IrFunction *f, IrInstr **defs, IrFunct
     }
 }
 
-/* Each result is defined once, in range, and at a real width. */
 static void record_result(IrModule *mod, IrFunction *f, IrInstr *in, IrInstr **defs,
                           IrFunction **def_funcs, bool *ok)
 {

@@ -5,8 +5,6 @@
 #include "util/vec.h"
 #include <string.h>
 
-/* Integer type singletons. LP64 data model:
-   char=8, short=16, int=32, long=64, long long=64. */
 static const Type the_void = {.kind = TYPE_VOID, .width = 0, .align = 1, .size = 0};
 static const Type the_bool = {.kind = TYPE_BOOL, .width = 8, .align = 1, .size = 1};
 static const Type the_char = {.kind = TYPE_CHAR, .width = 8, .align = 1, .size = 1};
@@ -20,10 +18,9 @@ static const Type the_uint = {.kind = TYPE_UINT, .width = 32, .align = 4, .size 
 static const Type the_ulong = {.kind = TYPE_ULONG, .width = 64, .align = 8, .size = 8};
 static const Type the_ullong = {.kind = TYPE_ULLONG, .width = 64, .align = 8, .size = 8};
 
-/* IEEE-754 single/double singletons (SSE2 sizes). */
 static const Type the_float = {.kind = TYPE_FLOAT, .width = 32, .align = 4, .size = 4};
 static const Type the_double = {.kind = TYPE_DOUBLE, .width = 64, .align = 8, .size = 8};
-/* x87 80-bit double-extended in a 16-byte slot (align 16, SysV). */
+/* SysV psABI: x87 80-bit double-extended in a 16-byte aligned slot. */
 static const Type the_long_double = {
     .kind = TYPE_LONG_DOUBLE,
     .width = 128,
@@ -31,16 +28,12 @@ static const Type the_long_double = {
     .size = 16,
 };
 
-/* Composite type intern pool */
 static Arena *type_arena;
 static U64Map *ptr_cache;
 static U64Map *array_cache;
 static U64Map *func_cache;
 
-/* MurmurHash3 finalizer (same avalanche as hash_u64): mixes the key so
-   `elem`-pointer alignment and `length` low bits cannot alias. The naive
-   `(u64)elem ^ (length << 3)` collides when elem pointers sit 2^k apart — the
-   static singletons are spaced 128 bytes, so char[16] and int[0] share a key. */
+/* MurmurHash3 finalizer: a naive xor key aliases pointers 2^k apart. */
 static u64 type_key_mix(u64 x)
 {
     x ^= x >> 33;
@@ -51,15 +44,9 @@ static u64 type_key_mix(u64 x)
     return x;
 }
 
-/* Qualified-type variant cache: base Type* -> const-qualified variant.
-   Scalars, pointers, records, and enums get one interned variant (idempotent,
-   so `const const int` is legal C11); arrays are qualified through their
-   element type and never appear as wrapper types here. For records the variant
-   keeps a pointer back to the tag-intermed canonical (`unqual_base`), and the
-   canonical keeps a list of its variants so completion propagates. */
+/* Base Type* -> const-qualified variant; records track variants for completion. */
 static U64Map *qual_cache;
 
-/* Tag namespace: tag string -> record/enum Type* (interning, pointer-equality). */
 static Arena *tag_arena;
 static StrMap *tag_table;
 
@@ -70,7 +57,7 @@ Type *type_void(void)
 Type *type_cbool(void)
 {
     return (Type *) &the_bool;
-} /* C11 _Bool */
+}
 Type *type_char(void)
 {
     return (Type *) &the_char;
@@ -130,9 +117,7 @@ bool type_is_signed_int(Type *t)
            t->kind == TYPE_LONG || t->kind == TYPE_LLONG || t->kind == TYPE_ENUM;
 }
 
-/* Signedness for operator selection. Pointers and other non-integer types are
-   unsigned: relational operators on pointers compare addresses, so they must
-   use the unsigned opcodes (`setb`/`setbe`/...), matching C address ordering. */
+/* Pointers are unsigned: address-ordered relational ops select unsigned opcodes. */
 bool type_is_signed(Type *t)
 {
     return type_is_signed_int(t);
@@ -140,9 +125,7 @@ bool type_is_signed(Type *t)
 
 bool type_is_unsigned(Type *t)
 {
-    /* `_Bool` is an unsigned integer type (C11 §6.2.5p6) — grouped with the
-       unsigned width types so `type_is_integer(_Bool)` holds and its value
-       loads zero-extend / compares unsigned. */
+    /* _Bool is an unsigned integer type (C11 §6.2.5p6). */
     return t->kind == TYPE_BOOL || t->kind == TYPE_UCHAR || t->kind == TYPE_USHORT ||
            t->kind == TYPE_UINT || t->kind == TYPE_ULONG || t->kind == TYPE_ULLONG;
 }
@@ -152,7 +135,6 @@ bool type_is_integer(Type *t)
     return type_is_signed_int(t) || type_is_unsigned(t);
 }
 
-/* The two SSE float kinds; long double joins type_is_fp only. */
 bool type_is_float(Type *t)
 {
     return t->kind == TYPE_FLOAT || t->kind == TYPE_DOUBLE;
@@ -187,9 +169,7 @@ bool type_is_complete(Type *t)
 {
     if (type_is_array(t))
     {
-        /* §6.7.6.2p4: a length-0 array is the `[]` "as unspecified" sentinel
-           until an initializer completes it — incomplete. An array of
-           incomplete elements is likewise incomplete. */
+        /* §6.7.6.2p4: a length-0 array is incomplete until its bound is known. */
         if (t->arr.length == 0)
         {
             return false;
@@ -213,7 +193,6 @@ bool type_is_volatile(Type *t)
     return (t->qualifiers & Q_VOLATILE) != 0;
 }
 
-/* The tag-intermed unqualified record/enum a qualified variant wraps. */
 static Type *type_base(Type *t)
 {
     return t->unqual_base ? t->unqual_base : t;
@@ -248,14 +227,12 @@ int type_rank(Type *t)
 
 Type *type_promote(Type *t)
 {
-    /* C11 §6.3.1.1: if an int can represent all values of the original type,
-       the value is converted to int; otherwise unsigned int. */
+    /* C11 §6.3.1.1: promote to int when int can represent all original values. */
     t = type_unqual(t);
     if (!type_is_integer(t))
     {
         return t;
     }
-    /* Enums are int-sized; promote them to int. */
     if (t->kind == TYPE_ENUM || type_rank(t) < type_rank(type_int()))
     {
         return type_int();
@@ -265,7 +242,6 @@ Type *type_promote(Type *t)
 
 Type *type_common(Type *a, Type *b)
 {
-    /* FP wins by flat precedence (long double > double > float). */
     a = type_promote(a);
     b = type_promote(b);
 
@@ -303,8 +279,6 @@ Type *type_common(Type *a, Type *b)
         return a_rank >= b_rank ? a : b;
     }
 
-    /* Mixed signedness: if unsigned rank >= signed rank, result is unsigned.
-       Otherwise result is the signed type (it has greater rank). */
     Type *signed_type = a_signed ? a : b;
     Type *unsigned_type = a_signed ? b : a;
 
@@ -325,9 +299,7 @@ bool type_compatible(Type *a, Type *b)
     {
         return false;
     }
-    /* An enum is compatible with its underlying integer type (C11 §6.7.2.2p4);
-       ficc does not track the exact underlying kind, so match any non-enum
-       integer of the same width. */
+    /* An enum is compatible with its underlying integer type (C11 §6.7.2.2p4). */
     if ((a->kind == TYPE_ENUM && type_is_integer(b) && b->kind != TYPE_ENUM) ||
         (b->kind == TYPE_ENUM && type_is_integer(a) && a->kind != TYPE_ENUM))
     {
@@ -425,7 +397,7 @@ Type *type_int_literal(i64 value, bool is_hex, bool is_unsigned, IntSuffix lengt
     }
     if (is_unsigned || is_hex)
     {
-        return fit_hex(uval, /* has_ullong */ length == SUFFIX_NONE);
+        return fit_hex(uval, length == SUFFIX_NONE);
     }
     return fit_none(uval, length);
 }
@@ -513,12 +485,7 @@ bool type_array_is_pending(Type *t)
     return t && t->kind == TYPE_ARRAY && t->arr.bound_expr != NULL;
 }
 
-/* Structural key for an interned function type: mixes the (interned, so
-   collision-free) ret/param pointers and the variadic bit. The fold is
-   add-based and order-sensitive: a pure XOR fold cancels to 0 when a
-   parameter pointer equals the return pointer (e.g. `T *f(T *)`), after which
-   `type_key_mix` — being 0-preserving — keeps 0, so every such signature
-   collided on one cache slot. */
+/* Add-based, order-sensitive fold: a pure XOR fold cancels param==ret pointers. */
 static u64 func_key_mix(Type *ret, Vec *params, bool is_variadic)
 {
     u64 key = type_key_mix((u64) (uintptr_t) ret + (is_variadic ? 0x9E3779B97F4A7C15ULL : 0));
@@ -532,9 +499,7 @@ static u64 func_key_mix(Type *ret, Vec *params, bool is_variadic)
     return key;
 }
 
-/* Best-effort interning (same pattern as ptr_cache/array_cache): on a hash
-   collision the stored candidate is verified structurally and a fresh type is
-   allocated on mismatch, so equal signature → pointer-equal, never wrong. */
+/* Interning: hash collisions are verified structurally; mismatch allocates fresh. */
 Type *type_func(Type *ret, Vec *params, bool is_variadic)
 {
     type_init_pool();
@@ -559,8 +524,7 @@ Type *type_func(Type *ret, Vec *params, bool is_variadic)
             return cached;
         }
     }
-    /* The cached Type must outlive the caller's arena: build the parameter
-       list in the pool so no interned entry points into transient storage. */
+    /* Copy params into the pool arena: the interned Type must outlive the caller. */
     Vec *pool_params = vec_new(type_arena);
     size_t nparams = vec_size(params);
     for (size_t i = 0; i < nparams; i++)
@@ -586,11 +550,7 @@ bool type_is_variadic(Type *t)
     return t && t->kind == TYPE_FUNC && t->func.is_variadic;
 }
 
-/* The builtin `va_list`: glibc's x86-64 tag, a 24-byte struct used as
-   an array of 1 (decays to a pointer on use, so passing it to a fixed
-   `va_list` libc parameter is a plain pointer — vsnprintf interop). The record
-   is anonymous and minted fresh on type_reset (the tagless record pattern),
-   then cached as the array-of-1 interned type. */
+/* glibc x86-64 va_list: the 24-byte tag as an array of 1 (decays to a pointer). */
 static Type *the_va_list;
 
 Type *type_va_list(void)
@@ -668,9 +628,7 @@ Type *type_qualify(Type *t, u8 qbits)
         return t;
     }
     u8 combined = t->qualifiers | qbits;
-    /* Qualifying an array qualifies its element type (C11: `const int a[3]`
-       is an array of const int). Decay then yields `const int*`, and `a[i]`
-       lvalues are const through the element type. */
+    /* C11: qualifying an array qualifies its element type. */
     if (t->kind == TYPE_ARRAY)
     {
         Type *elem = type_qualify(t->arr.elem, qbits);
@@ -750,12 +708,7 @@ static void type_init_tags(void)
     tag_table = strmap_new(tag_arena);
 }
 
-/* Block-scope tag scoping (C11 §6.2.1): the parser pushes/pops a tag scope in
-   lockstep with its name scopes. A tag definition whose tag is not already
-   bound in the current scope shadows any visible outer binding; popping the
-   scope restores the previous global mapping. Without this, two functions each
-   defining their own `struct TableEntry { ... }` would collide in the single
-   interned tag namespace. */
+/* C11 §6.2.1: block-scope tag shadowing; parser pushes/pops scopes in lockstep. */
 typedef struct TagUndo
 {
     const char *tag;
@@ -764,11 +717,11 @@ typedef struct TagUndo
 
 typedef struct TagScope
 {
-    StrMap *defs; /* tag -> Type* declared in this scope */
-    Vec *undo;    /* Vec<TagUndo*> for this scope */
+    StrMap *defs;
+    Vec *undo;
 } TagScope;
 
-static Vec *tag_scope_stack; /* Vec<TagScope*> */
+static Vec *tag_scope_stack;
 
 void type_tag_scope_push(void)
 {
@@ -814,8 +767,6 @@ static bool tag_bound_in_current_scope(const char *tag)
     return strmap_get(s->defs, tag) != NULL;
 }
 
-/* Bind `t` (with interned `tag`) as the visible type for `tag`, recording the
-   previous visible binding for restoration when the current scope pops. */
 static void tag_bind(Type *t, const char *tag, Type *prev)
 {
     if (tag_scope_stack && vec_size(tag_scope_stack) > 0)
@@ -837,10 +788,7 @@ void type_reset(void)
     tag_scope_stack = NULL;
 }
 
-/* Record/enum types are immortal (see type_reset above), so their tag strings
-   — used both as `record.tag`/`enumm.tag` and as the tag_table keys — must not
-   dangle into a per-compilation arena. Copy the caller's tag into the immortal
-   tag_arena the first time it is stored. */
+/* Tag strings are immortal: copy into tag_arena so they outlive the compilation. */
 static const char *tag_intern(const char *tag)
 {
     size_t len = strlen(tag);
@@ -877,10 +825,7 @@ Type *type_record(TypeKind kind, const char *tag)
     return t;
 }
 
-/* An anonymous record definition (`typedef struct { ... } Name;`,
-   `struct { ... } v;`): a *fresh* tagless type, never interened by tag, never
-   in tag_table. C11 §6.7.2.1p7: each such definition is a distinct type. The
-   caller parses the member list and completes it with type_record_complete. */
+/* C11 §6.7.2.1p7: each anonymous record definition is a distinct tagless type. */
 Type *type_record_anon(TypeKind kind)
 {
     ASSERT(kind == TYPE_STRUCT || kind == TYPE_UNION);
@@ -915,9 +860,7 @@ void type_record_complete(Type *t, Vec *fields)
     type_record_relayout(t);
 }
 
-/* Recomputes member offsets and the record's size/align from the current field
-   types. Layout is first done at parse time; semantic calls this again after
-   resolving a member array bound that had been deferred (§6.7.6.2). */
+/* Semantic re-runs this after completing a deferred member array bound §6.7.6.2. */
 void type_record_relayout(Type *t)
 {
     ASSERT(type_is_record(t));
@@ -926,20 +869,12 @@ void type_record_relayout(Type *t)
     size_t n = vec_size(fields);
     if (t->kind == TYPE_STRUCT)
     {
-        /* Members are laid out from a bit cursor. An ordinary member first
-           rounds the cursor up to a byte, aligns, and consumes its whole size.
-           A bit-field must lie inside one storage unit of its declared type
-           (size == align for the integer bases C11 §6.7.2.1p12 allows): it is
-           placed in the unit currently covering the cursor when it fits,
-           otherwise in the next unit-aligned boundary. This matches gcc, e.g.
-           `char c; int x:1;` shares the 4-byte unit at offset 0 (bit 8). */
+        /* A bit-field lies in one storage unit of its declared type (C11 §6.7.2.1p12). */
         u32 max_align = 1;
-        u64 cursor = 0; /* bit offset of the next free bit */
+        u64 cursor = 0;
         for (size_t i = 0; i < n; i++)
         {
             RecordField *f = (RecordField *) vec_get(fields, i);
-            /* `packed` drops a member's natural alignment to 1; an explicit
-               `_Alignas`/`aligned` override wins. */
             u32 fa =
                 f->align_override ? f->align_override : (t->record.packed ? 1 : f->type->align);
             if (fa > max_align)
@@ -951,8 +886,7 @@ void type_record_relayout(Type *t)
                 cursor = (cursor + 7) / 8 * 8;
                 u32 offset = align_up((u32) (cursor / 8), fa);
                 f->offset = offset;
-                /* A flexible array member (§6.7.2.1p18) is the last member and
-                   contributes no bytes; sizeof stops at its aligned offset. */
+                /* A flexible array member (C11 §6.7.2.1p18) contributes no bytes. */
                 if (i == n - 1 && type_is_array(f->type) && f->type->arr.length == 0)
                 {
                     continue;
@@ -989,9 +923,7 @@ void type_record_relayout(Type *t)
         {
             RecordField *f = (RecordField *) vec_get(fields, i);
             f->offset = 0;
-            /* Only real bit-fields carry a bit position; ordinary union
-               members must keep bit_offset < 0 so they are not mistaken for
-               bit-fields (§6.7.2.1). */
+            /* Ordinary union members keep bit_offset < 0 (C11 §6.7.2.1). */
             f->bit_offset = f->bit_width >= 0 ? 0 : -1;
             if (f->type->size > max_size)
             {
@@ -1014,8 +946,7 @@ void type_record_relayout(Type *t)
 
     t->record.complete = true;
 
-    /* Propagate layout/completeness to any earlier-built qualified variants
-       (e.g. `const struct S *p;` before `struct S { ... };`). */
+    /* Propagate layout to earlier-built qualified variants. */
     if (t->record.qual_variants)
     {
         size_t nv = vec_size(t->record.qual_variants);
@@ -1058,9 +989,7 @@ Type *type_enum_anon(void)
 {
     type_init_tags();
 
-    /* Anonymous enum definition (`enum { A, B } v;`, `typedef enum { ... }
-       E;`): a fresh type, never interned by tag (C11: distinct type per
-       definition). */
+    /* C11: each anonymous enum definition is a distinct tagless type. */
     Type *t = arena_alloc(tag_arena, sizeof(Type), _Alignof(Type));
     t->kind = TYPE_ENUM;
     t->width = type_int()->width;
@@ -1082,9 +1011,7 @@ Type *type_record_lookup(const char *tag)
     return strmap_get(tag_table, tag);
 }
 
-/* Finds `name` in record t's own members or recursively inside an anonymous
-   struct/union member (C11 §6.7.2.1p13), writing the absolute field offset
-   (summing the anonymous member chain) into *off_out. */
+/* Search nested anonymous members (C11 §6.7.2.1p13); *off_out gets the absolute offset. */
 static RecordField *find_record_field(Type *t, const char *name, u32 *off_out)
 {
     t = type_base(t);
@@ -1201,10 +1128,7 @@ Type *type_decay(Type *t)
     }
     if (t->kind == TYPE_FUNC)
     {
-        /* Function-to-pointer conversion (C11 §6.3.2.1p4): a function
-           designator used in any other context than the operand of `&`,
-           `sizeof`, `_Alignof`, or unary `*` converts to a pointer to the
-           function. */
+        /* Function-to-pointer conversion (C11 §6.3.2.1p4). */
         return type_ptr(t);
     }
     return t;
@@ -1230,8 +1154,7 @@ u64 type_alignof(Type *t)
 i64 type_reduce_int(Type *target, i64 value)
 {
     ASSERT(type_is_integer(target));
-    /* §6.3.1.2: conversion to _Bool maps any nonzero value to 1. This must run
-       before the width masking — `(_Bool)5` folds to 1 here and at runtime. */
+    /* §6.3.1.2: conversion to _Bool maps nonzero to 1, before width masking. */
     if (target->kind == TYPE_BOOL)
     {
         return value != 0 ? 1 : 0;

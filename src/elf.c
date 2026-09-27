@@ -4,9 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* String table builder. */
-/* A string table is a byte buffer whose first byte is NUL and whose only
-   appends are strings followed by NUL. strtab_add returns the offset. */
 static void strtab_init(ByteBuf *st, Arena *arena)
 {
     bytebuf_init(st, arena);
@@ -22,7 +19,6 @@ static u32 strtab_add(ByteBuf *st, const char *s)
     return off;
 }
 
-/* Base sections always exist (indices 1-10); the -g-only sections follow. */
 typedef enum
 {
     SEC_NULL = 0,
@@ -55,9 +51,7 @@ typedef enum
 /* e_shnum without the -g-only sections (byte-identical non-debug path). */
 #define SEC_BASE_COUNT (SEC_RELA_FINI_ARRAY + 1)
 
-/* Symbol indices are fixed for determinism:
-   0 = null, 1-4 = section symbols (text/rodata/data/bss),
-   5+i = global i (definition order), then function symbols. */
+/* Symbol indices are fixed: 0 = null, 1-4 = section symbols, 5+i = global i, then functions. */
 #define FIRST_GLOBAL_SYM 5
 /* Symtab index of .text: target for every .eh_frame FDE and .debug_* RELA. */
 #define TEXT_SECTION_SYM 1
@@ -120,12 +114,7 @@ static void rela_emit(ByteBuf *out, u64 offset, u32 sym_idx, u32 type, i64 adden
     bytebuf_append_u64(out, (u64) addend);
 }
 
-/* .symtab layout. 0 = null, 1-4 = section symbols; then all STB_LOCAL
-   symbols first (string/static globals, then static functions); then the
-   globals (non-local globals, then defined functions); then SHN_UNDEF extern
-   function symbols. BFD/ld treat every symbol below sh_info as local and
-   every symbol at or above it as global (matching st_info), so sh_info must
-   be exactly the first non-local index. */
+/* ELF gABI: symbols below sh_info are local; sh_info = the first non-local index. */
 typedef struct
 {
     size_t nlocal_globals;
@@ -166,8 +155,7 @@ static SymLayout sym_layout(size_t nglobals, Vec *globals, size_t nfuncs, Vec *f
     return l;
 }
 
-/* Symbol-table index of the global vector element gi (locals and non-locals
-   are interleaved in cm->globals). */
+/* Locals and non-locals are interleaved in cm->globals. */
 static u32 global_sym_index(Vec *globals, size_t gi, const SymLayout *l)
 {
     IrGlobal *g = (IrGlobal *) vec_get(globals, gi);
@@ -201,10 +189,6 @@ static CodegenFunc *find_codegen_func_elf(CodegenModule *cm, const char *name)
     return NULL;
 }
 
-/* Symbol-table index of a function name: a defined in-module function
-   (static in the local region, non-static among the globals) or a
-   declaration-only extern (after the defined functions). Returns 0 if not
-   found (only the null-symbol index 0 is a valid fallback). */
 static u32 func_sym_index(CodegenModule *cm, const char *name, Vec *extern_syms, const SymLayout *l)
 {
     size_t sfunc = 0, gfunc = 0;
@@ -302,7 +286,6 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
         }
     }
 
-    /* .text content */
     size_t nfuncs = vec_size(cm->funcs);
     for (size_t i = 0; i < nfuncs; i++)
     {
@@ -310,8 +293,6 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
         bytebuf_append_bytes(&text, bytebuf_data(cf->bytes), bytebuf_len(cf->bytes));
     }
 
-    /* .symtab: 0 = null, 1-4 = section symbols; local globals and static
-       functions first (indices below sh_info), then globals, then externs. */
     ByteBuf symtab;
     bytebuf_init(&symtab, arena);
     for (size_t i = 0; i < sizeof(Elf64_Sym); i++)
@@ -378,12 +359,8 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
                  bytebuf_len(cf->bytes));
     }
 
-    /* Declaration-only extern functions referenced by calls *or* whose address
-       is taken: one SHN_UNDEF STB_GLOBAL symbol per unique name,
-       placed after the defined-function symbols; elf's symbol index for extern
-       e is FIRST_GLOBAL_SYM + nglobals + nfuncs + e. */
     size_t nextern = cm->extern_calls ? vec_size(cm->extern_calls) : 0;
-    Vec *extern_syms = vec_new(arena); /* Vec<const char*> — unique names */
+    Vec *extern_syms = vec_new(arena);
     for (size_t i = 0; i < nextern; i++)
     {
         ExternCall *ec = (ExternCall *) vec_get(cm->extern_calls, i);
@@ -404,8 +381,6 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
             sym_emit(&symtab, name_off, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC), SHN_UNDEF, 0, 0);
         }
     }
-    /* Function-address loads (`&f`/designator) of *extern* functions
-       also need an undefined symbol, even if never called. */
     for (size_t fi = 0; fi < nfuncs; fi++)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, fi);
@@ -415,7 +390,7 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
             FuncAddrPatch *fp = (FuncAddrPatch *) vec_get(cf->func_patches, pi);
             if (find_codegen_func_elf(cm, fp->name))
             {
-                continue; /* defined in-module — no undefined symbol needed */
+                continue;
             }
             bool seen = false;
             size_t nuniq = vec_size(extern_syms);
@@ -435,9 +410,6 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
             }
         }
     }
-    /* File-scope function-pointer initializers: a data-side
-       R_X86_64_64 relocation against an *extern* function also needs an
-       undefined symbol. */
     for (size_t i = 0; i < nglobals; i++)
     {
         IrGlobal *g = (IrGlobal *) vec_get(cm->globals, i);
@@ -472,8 +444,7 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
         }
     }
 
-    /* Relocations reference the global's own symbol (5+i), not its section
-       symbol, so the linker adjusts for prepended section content. */
+    /* Relocations use the global's own symbol (5+i) so the linker adjusts for prepended content. */
     ByteBuf rela_text;
     bytebuf_init(&rela_text, arena);
     for (size_t fi = 0; fi < nfuncs; fi++)
@@ -487,9 +458,7 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
         }
     }
 
-    /* External function calls: R_X86_64_PLT32 against the SHN_UNDEF symbol,
-       addend -4 (gcc convention — the rel32 field spans to the next
-       instruction). r_offset is the absolute .text offset of the field. */
+    /* R_X86_64_PLT32 against the SHN_UNDEF symbol, addend -4 (psABI: rel32 spans to next insn). */
     for (size_t i = 0; i < nextern; i++)
     {
         ExternCall *ec = (ExternCall *) vec_get(cm->extern_calls, i);
@@ -507,8 +476,7 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
         rela_emit(&rela_text, ec->text_offset, sym_idx, R_X86_64_PLT32, -4);
     }
 
-    /* Function-address loads (`&f`/designator): R_X86_64_32S against
-       the function's own symbol (defined or SHN_UNDEF extern). */
+    /* R_X86_64_32S against the function's own symbol (defined or SHN_UNDEF extern). */
     for (size_t fi = 0; fi < nfuncs; fi++)
     {
         CodegenFunc *cf = (CodegenFunc *) vec_get(cm->funcs, fi);
@@ -547,8 +515,6 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
             u32 sym_idx;
             if (gr->is_func)
             {
-                /* A function-address initializer: R_X86_64_64 against
-                   the function's symbol. */
                 sym_idx = func_sym_index(cm, gr->func_name, extern_syms, &layout);
             }
             else
@@ -670,7 +636,6 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
     bytebuf_append_u16(out, nsections);
     bytebuf_append_u16(out, SEC_SHSTRTAB);
 
-    /* Section content */
     bytebuf_append_bytes(out, bytebuf_data(&text), bytebuf_len(&text));
     bytebuf_append_bytes(out, bytebuf_data(&rodata), bytebuf_len(&rodata));
     while ((size_t) bytebuf_len(out) < off_data)
@@ -702,7 +667,6 @@ ByteBuf *elf_serialize(CodegenModule *cm, const DwarfOutput *dwarf, Arena *arena
     bytebuf_append_bytes(out, bytebuf_data(&rela_fini_array), bytebuf_len(&rela_fini_array));
     if (dwarf)
     {
-        /* .eh_frame plus its RELA against the .text section symbol. */
         while ((size_t) bytebuf_len(out) < off_eh_frame)
         {
             bytebuf_append(out, 0);

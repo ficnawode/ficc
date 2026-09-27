@@ -100,7 +100,6 @@ enum DwarfAtE
     DW_ATE_unsigned_char = 0x08,
 };
 
-/* Abbrev codes: the fixed table emitted into .debug_abbrev in this order. */
 enum
 {
     ABBREV_CU = 1,
@@ -108,7 +107,7 @@ enum
     ABBREV_FORMAL_PARAM = 3,
     ABBREV_VARIABLE = 4,
     ABBREV_BASE_TYPE = 5,
-    ABBREV_VARIABLE_NO_LOC = 6, /* externs declare no DW_AT_location */
+    ABBREV_VARIABLE_NO_LOC = 6,
     ABBREV_POINTER_TYPE = 7,
     ABBREV_CONST_TYPE = 8,
     ABBREV_ARRAY_TYPE = 9,
@@ -139,7 +138,7 @@ enum
     DW_ADDRESS_SIZE = 8, /* SysV AMD64: 64-bit address slots for set_address */
 };
 
-/* unsigned LEB128 (DWARF4 §7.6): 7 bits per byte, high bit = more follows. */
+/* unsigned LEB128 (DWARF4 §7.6). */
 void dwarf_uleb128(ByteBuf *b, u64 val)
 {
     for (;;)
@@ -158,7 +157,6 @@ void dwarf_uleb128(ByteBuf *b, u64 val)
     }
 }
 
-/* signed LEB128: little-endian sign extension through the padding bits. */
 void dwarf_sleb128(ByteBuf *b, i64 val)
 {
     while (true)
@@ -201,7 +199,6 @@ static void line_advance_line(ByteBuf *b, i64 *line, i64 target)
     *line = target;
 }
 
-/* One row; prefer a one-byte special opcode, else advance/copy. */
 static void line_row(ByteBuf *b, u64 *addr, i64 *line, u64 target_addr, i64 target_line)
 {
     u64 daddr = target_addr - *addr;
@@ -225,16 +222,15 @@ static void line_row(ByteBuf *b, u64 *addr, i64 *line, u64 target_addr, i64 targ
 
 static void line_end_sequence(ByteBuf *b)
 {
-    bytebuf_append(b, 0); /* opcode 0 = extended opcode follows */
-    bytebuf_append(b, 1); /* extended opcode length */
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 1);
     bytebuf_append(b, DW_LNE_end_sequence);
 }
 
-/* Set_address + rows + end_sequence for one function. */
 static void line_func(ByteBuf *b, Vec *relocs, CodegenFunc *cf)
 {
-    bytebuf_append(b, 0);                          /* opcode 0 = extended opcode follows */
-    bytebuf_append(b, (u8) (1 + DW_ADDRESS_SIZE)); /* extended opcode length */
+    bytebuf_append(b, 0);
+    bytebuf_append(b, (u8) (1 + DW_ADDRESS_SIZE));
     bytebuf_append(b, DW_LNE_set_address);
     size_t slot = bytebuf_len(b);
     bytebuf_append_u64(b, 0);
@@ -270,7 +266,6 @@ static void line_func(ByteBuf *b, Vec *relocs, CodegenFunc *cf)
     line_end_sequence(b);
 }
 
-/* Header fields until (not including) the line program; lengths backpatched. */
 static void line_header(ByteBuf *b, const char *compile_unit)
 {
     bytebuf_append_u32(b, 0); /* unit length: patched in dwarf_build */
@@ -287,18 +282,16 @@ static void line_header(ByteBuf *b, const char *compile_unit)
     {
         bytebuf_append(b, std_oplen[i]);
     }
-    bytebuf_append(b, 0); /* empty include_directories */
+    bytebuf_append(b, 0);
 
     size_t name_len = strlen(compile_unit);
     bytebuf_append_bytes(b, (const u8 *) compile_unit, name_len);
-    bytebuf_append(b, 0); /* end of file name */
-    bytebuf_append(b, 0); /* dir index 0 */
-    bytebuf_append(b, 0); /* mtime */
-    bytebuf_append(b, 0); /* length */
-    bytebuf_append(b, 0); /* end of file_names */
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
+    bytebuf_append(b, 0);
 }
-
-/* .debug_info: one DWARF4 compile-unit tree. */
 
 typedef struct
 {
@@ -308,12 +301,12 @@ typedef struct
 
 typedef struct
 {
-    ByteBuf *b;          /* .debug_info being built */
-    Vec *relocs;         /* .rela.debug_info */
-    ByteBuf *loc;        /* .debug_loc being built */
+    ByteBuf *b;
+    Vec *relocs;
+    ByteBuf *loc;
     U64Map *type_to_die; /* Type* -> DIE byte offset (0: not yet emitted) */
-    u64 void_die;        /* cached fallback DIE for `void` references */
-    Vec *pending;        /* Vec<PendingRef*>: type refs patched before the CU ends */
+    u64 void_die;
+    Vec *pending; /* Vec<PendingRef*>: type refs patched before the CU ends */
 } InfoCtx;
 
 static void info_reloc(InfoCtx *c, u32 sym, i64 addend)
@@ -340,8 +333,7 @@ static void info_string(InfoCtx *c, const char *s)
 /* DW_OP_fbreg plus the widest SLEB128 an i64 displacement can take. */
 #define FBREG_EXPR_MAX 11
 
-/* One `.debug_loc` range: [begin, end) carries `expr`.  DWARF4 defaults the
-   base address to the CU's `DW_AT_low_pc`, so the entries are CU-relative. */
+/* `.debug_loc` range [begin, end) carries `expr`; entries are CU-relative (DWARF4 §2.6.2). */
 static void loc_range(InfoCtx *c, i64 begin, i64 end, const u8 *expr, u32 expr_len)
 {
     bytebuf_append_u64(c->loc, (u64) begin);
@@ -357,7 +349,7 @@ static void loc_list_end(InfoCtx *c)
     bytebuf_append_u64(c->loc, 0);
 }
 
-/* Write expr = DW_OP_fbreg(disp) into `out` (>= FBREG_EXPR_MAX bytes). */
+/* Writes expr = DW_OP_fbreg(disp); `out` must hold >= FBREG_EXPR_MAX bytes. */
 static u32 fbreg_expr(Arena *arena, u8 *out, i64 disp)
 {
     ByteBuf tmp;
@@ -368,7 +360,6 @@ static u32 fbreg_expr(Arena *arena, u8 *out, i64 disp)
     return (u32) (1 + bytebuf_len(&tmp));
 }
 
-/* The DWARF register number a parameter lives in while it holds a physical reg. */
 static u8 dwarf_reg_number(Type *type, int phys)
 {
     if (type_is_fp(type))
@@ -378,11 +369,6 @@ static u8 dwarf_reg_number(Type *type, int phys)
     return x86_dwarf_gpr_number((u8) phys);
 }
 
-/* A segment's inclusive position span as a function-relative byte range: a
-   value defined at `start` is available past that instruction, and dies past
-   its last use at `end`.  `entry_home` is set for a parameter, whose home is
-   written by the prologue and so is valid from the body start (position 0).
-   Returns false for an empty span. */
 static bool segment_bounds(CodegenFunc *cf, const RegSegment *seg, bool entry_home, i64 *out_begin,
                            i64 *out_end)
 {
@@ -409,7 +395,6 @@ static bool segment_bounds(CodegenFunc *cf, const RegSegment *seg, bool entry_ho
     return true;
 }
 
-/* Emit one location-list entry for a segment; returns its byte end (0 when empty). */
 static i64 emit_segment_loc(InfoCtx *c, CodegenFunc *cf, u32 vreg, const RegSegment *seg,
                             Type *type, bool entry_home)
 {
@@ -439,9 +424,6 @@ static i64 emit_segment_loc(InfoCtx *c, CodegenFunc *cf, u32 vreg, const RegSegm
     return end;
 }
 
-/* A parameter's location list: one entry per segment, then the entry-printed
-   stage slot over the remainder of the function (the slot keeps the incoming
-   value for the whole frame). */
 static void emit_param_locs(InfoCtx *c, CodegenFunc *cf, IrParam *p, size_t pi)
 {
     const RegAllocation *alloc = cf->alloc;
@@ -464,7 +446,6 @@ static void emit_param_locs(InfoCtx *c, CodegenFunc *cf, IrParam *p, size_t pi)
     loc_list_end(c);
 }
 
-/* True when any of the local's SSA versions has a non-empty segment. */
 static bool local_has_loc(CodegenFunc *cf, IrLocal *l)
 {
     const RegAllocation *alloc = cf->alloc;
@@ -489,7 +470,6 @@ static bool local_has_loc(CodegenFunc *cf, IrLocal *l)
     return false;
 }
 
-/* A local's location list is the union of its SSA versions' segment entries. */
 static void emit_local_locs(InfoCtx *c, CodegenFunc *cf, IrLocal *l)
 {
     const RegAllocation *alloc = cf->alloc;
@@ -533,7 +513,6 @@ static u64 dump_base_type(InfoCtx *c, const char *name, u8 byte_size, u8 encodin
     return die;
 }
 
-/* Fallback void DIE for types this phase does not describe. */
 static u64 void_base_type(InfoCtx *c)
 {
     if (c->void_die == 0)
@@ -542,8 +521,6 @@ static u64 void_base_type(InfoCtx *c)
     }
     return c->void_die;
 }
-
-/* Compound type DIEs: pointer/const/array/record/enum/func. */
 
 static u64 type_die(InfoCtx *c, Type *t);
 
@@ -575,7 +552,6 @@ static void type_poke(InfoCtx *c, size_t slot, Type *t)
     vec_push(c->pending, p);
 }
 
-/* Emit a u32 ref4 placeholder for `t`; resolves via type_poke. */
 static size_t type_ref_emit(InfoCtx *c, Type *t)
 {
     size_t slot = bytebuf_len(c->b);
@@ -623,14 +599,14 @@ static u64 array_die(InfoCtx *c, Type *t)
         return off;
     }
     u64 elem = type_die(c, t->arr.elem);
-    u64 index = type_die(c, type_ulong()); /* subrange index type (size_t) */
+    u64 index = type_die(c, type_ulong());
     off = type_die_reserve(c, t);
     dwarf_uleb128(c->b, ABBREV_ARRAY_TYPE);
     bytebuf_append_u32(c->b, (u32) elem);
     dwarf_uleb128(c->b, ABBREV_SUBRANGE_TYPE);
     bytebuf_append_u32(c->b, (u32) index);
     dwarf_uleb128(c->b, t->arr.length);
-    bytebuf_append(c->b, 0); /* end of array_type's children */
+    bytebuf_append(c->b, 0);
     return off;
 }
 
@@ -644,7 +620,6 @@ static u64 enum_die(InfoCtx *c, Type *t)
     off = type_die_reserve(c, t);
     dwarf_uleb128(c->b, ABBREV_ENUM_TYPE);
     info_string(c, t->enumm.tag ? t->enumm.tag : "");
-    /* Constants are folded away, so there are no enumerator children. */
     dwarf_uleb128(c->b, t->size);
     return off;
 }
@@ -660,7 +635,6 @@ static u64 record_die(InfoCtx *c, Type *t)
     bool is_struct = t->kind == TYPE_STRUCT;
     if (!t->record.complete)
     {
-        /* Forward-declared `struct S;`: name only, no byte_size, no members. */
         dwarf_uleb128(c->b, is_struct ? ABBREV_STRUCT_INCOMPLETE : ABBREV_UNION_INCOMPLETE);
         info_string(c, t->record.tag ? t->record.tag : "");
         return off;
@@ -686,7 +660,7 @@ static u64 record_die(InfoCtx *c, Type *t)
             dwarf_uleb128(c->b, (u64) (unit_bits - f->bit_offset - f->bit_width));
         }
     }
-    bytebuf_append(c->b, 0); /* end of the record's children */
+    bytebuf_append(c->b, 0);
     return off;
 }
 
@@ -707,11 +681,10 @@ static u64 func_die(InfoCtx *c, Type *t)
         dwarf_uleb128(c->b, ABBREV_SUBPROG_PARAM);
         type_ref_emit(c, (Type *) vec_get(t->func.params, i));
     }
-    bytebuf_append(c->b, 0); /* end of subroutine_type's children */
+    bytebuf_append(c->b, 0);
     return off;
 }
 
-/* Fundamental scalar -> its base-type DIE; compound types get their own DIEs. */
 static u64 type_die(InfoCtx *c, Type *t)
 {
     if (!t)
@@ -852,7 +825,7 @@ static void subprogram_emit(InfoCtx *c, CodegenFunc *cf)
     info_string(c, cf->name);
     info_reloc(c, DWARF_SYM_TEXT, (i64) cf->offset);
     bytebuf_append_u32(c->b, (u32) bytebuf_len(cf->bytes)); /* high_pc = size */
-    bytebuf_append(c->b, 1);                                /* frame_base exprloc length */
+    bytebuf_append(c->b, 1);
     bytebuf_append(c->b, DW_OP_call_frame_cfa);
     type_ref_emit(c, cf->func->ret_type);
 
@@ -882,7 +855,7 @@ static void subprogram_emit(InfoCtx *c, CodegenFunc *cf)
         emit_local_locs(c, cf, l);
         bytebuf_append_u32(c->b, loc_off);
     }
-    bytebuf_append(c->b, 0); /* end of this subprogram's children */
+    bytebuf_append(c->b, 0);
 }
 
 static u32 global_section_sym(IrGlobal *g)
@@ -1000,8 +973,6 @@ static void abbrev_emit(ByteBuf *b)
     dwarf_uleb128(b, DW_FORM_data1);
     bytebuf_append(b, 0);
     bytebuf_append(b, 0);
-
-    /* Rich type abbreviations. */
 
     dwarf_uleb128(b, ABBREV_POINTER_TYPE);
     dwarf_uleb128(b, DW_TAG_pointer_type);
@@ -1139,7 +1110,7 @@ static void abbrev_emit(ByteBuf *b)
     bytebuf_append(b, 0);
     bytebuf_append(b, 0);
 
-    bytebuf_append(b, 0); /* end of the abbrev table */
+    bytebuf_append(b, 0);
 }
 
 void dwarf_build(CodegenModule *cm, const char *compile_unit, const char *comp_dir,
@@ -1198,7 +1169,7 @@ void dwarf_build(CodegenModule *cm, const char *compile_unit, const char *comp_d
         text_size += bytebuf_len(((CodegenFunc *) vec_get(cm->funcs, i))->bytes);
     }
     bytebuf_append_u32(c.b, (u32) text_size); /* high_pc of the whole unit */
-    bytebuf_append_u32(c.b, 0);               /* stmt_list: the one .debug_line unit */
+    bytebuf_append_u32(c.b, 0);
 
     preemit_types(&c, cm);
 
@@ -1230,6 +1201,6 @@ void dwarf_build(CodegenModule *cm, const char *compile_unit, const char *comp_d
         bytebuf_poke_u32(c.b, p->slot, (u32) type_die(&c, p->type));
     }
 
-    bytebuf_append(c.b, 0); /* null DIE: terminates the compile_unit children */
+    bytebuf_append(c.b, 0);
     bytebuf_poke_u32(c.b, cu_length_off, (u32) (bytebuf_len(c.b) - cu_length_off - sizeof(u32)));
 }

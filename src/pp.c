@@ -237,8 +237,6 @@ Pp *pp_new(Arena *arena)
     pp_predefine(pp, "__amd64", "1");
     pp_predefine(pp, "__LP64__", "1");
     pp_predefine(pp, "_LP64", "1");
-    /* Host platform macros, as a hosted Linux/x86-64 compiler predefines them.
-       Feature code (e.g. SQLite's mmap support) branches on these. */
     pp_predefine(pp, "__linux__", "1");
     pp_predefine(pp, "__linux", "1");
     pp_predefine(pp, "linux", "1");
@@ -247,7 +245,6 @@ Pp *pp_new(Arena *arena)
     pp_predefine(pp, "__unix", "1");
     pp_predefine(pp, "unix", "1");
     pp_predefine(pp, "__ELF__", "1");
-    /* <sys/cdefs.h> keeps `__attribute__` only for GNU/clang/tinycc identity. */
     pp_predefine(pp, "__TINYC__", "927");
     pp_predefine(pp, "__SIZEOF_POINTER__", "8");
     pp_predefine(pp, "__SIZEOF_LONG__", "8");
@@ -418,7 +415,6 @@ static Vec *pp_expand_vec(Pp *pp, Vec *input)
     return expanded;
 }
 
-/* The real tokens in [start, end), macro-expanded with trivia dropped. */
 static Vec *pp_gather_real(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end)
 {
     Vec *real = vec_new(pp->arena);
@@ -514,7 +510,6 @@ static bool pp_require_variadic_last(Pp *pp, const PpIncludeFrame *frame, size_t
     return true;
 }
 
-/* `name...` (GNU) aliases `__VA_ARGS__`; a bare `...` is the variadic tail. */
 static bool pp_parse_params(Pp *pp, const PpIncludeFrame *frame, size_t open, size_t close,
                             Vec *params, bool *variadic, const char **variadic_name)
 {
@@ -564,8 +559,6 @@ static bool pp_parse_params(Pp *pp, const PpIncludeFrame *frame, size_t open, si
     return true;
 }
 
-/* Body identifiers naming a parameter become TOK_PP_PARAM markers;
-   `__VA_ARGS__` and the GNU alias mark the variadic tail. */
 static Vec *pp_mark_params(Pp *pp, Vec *body, Vec *params, bool variadic, const char *variadic_name)
 {
     Vec *marked = vec_new(pp->arena);
@@ -596,9 +589,6 @@ static Vec *pp_mark_params(Pp *pp, Vec *body, Vec *params, bool variadic, const 
     return marked;
 }
 
-/* Installs a predefined function-like macro from comma-separated parameter
-   names and body text (used for glibc's __REDIRECT family, whose asm-label
-   form we replace with a plain declaration). */
 static void pp_predefine_func_macro(Pp *pp, const char *name, const char *params, const char *body)
 {
     Loc loc = (Loc) {.file = "<built-in>", .line = 1, .col = 1};
@@ -1088,7 +1078,6 @@ typedef struct
     bool system;
 } IncludeHit;
 
-/* Quoted headers try the including file's directory first (gcc). */
 static IncludeHit pp_include_find(Pp *pp, bool quoted, const char *name, const char *including_file,
                                   bool next_mode)
 {
@@ -1167,7 +1156,6 @@ static void pp_include_file(Pp *pp, const char *path, bool system)
     pp_push_include(pp, path, tokens, system);
 }
 
-/* Reads `<...>` in a raw line; comments or newlines inside are errors. */
 static const char *pp_angle_header_name(Pp *pp, const PpIncludeFrame *frame, size_t open,
                                         size_t end, size_t *next_index)
 {
@@ -1205,8 +1193,6 @@ static const char *pp_angle_header_name(Pp *pp, const PpIncludeFrame *frame, siz
     return (const char *) bytebuf_data(&name);
 }
 
-/* Reads one header-name at *pos: `"..."` or `<...>`. `what` names the
-   directive for diagnostics. */
 static const char *pp_read_header_name(Pp *pp, Vec *tokens, size_t *pos, bool *quoted,
                                        const char *what)
 {
@@ -1253,7 +1239,6 @@ typedef struct
     size_t next;
 } IncludeOperand;
 
-/* Requires the expanded operand to be exactly one `"..."`/`<...>` name. */
 static const char *pp_expanded_header_name(Pp *pp, Vec *expanded, bool *quoted, Loc loc)
 {
     if (vec_size(expanded) == 0)
@@ -1281,8 +1266,6 @@ static const char *pp_expanded_header_name(Pp *pp, Vec *expanded, bool *quoted, 
     return name;
 }
 
-/* Parses the header-name on the line: a literal form, or a macro that must
-   expand to exactly one. Reports a diagnostic and returns false on error. */
 static bool pp_include_operand(Pp *pp, const PpIncludeFrame *frame, size_t start, size_t end,
                                Loc directive_loc, IncludeOperand *out)
 {
@@ -1314,8 +1297,6 @@ static bool pp_include_operand(Pp *pp, const PpIncludeFrame *frame, size_t start
     return out->name != NULL;
 }
 
-/* Resolves and processes one include; `next_mode` (`#include_next`) searches
-   the search path after the current directory. */
 static void pp_include_common(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
                               Loc directive_loc, bool next_mode)
 {
@@ -1366,8 +1347,6 @@ static void pp_gnu_warn(Pp *pp, Loc loc, const char *feature)
     }
 }
 
-/* Handles `#pragma once`, `#pragma GCC poison`, `#pragma GCC system_header`;
-   anything else is parsed and ignored. */
 static void pp_pragma_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
                                 Loc directive_loc)
 {
@@ -1458,7 +1437,6 @@ static PpToken *pp_cooked_bool(Pp *pp, bool value, Loc loc)
     return t;
 }
 
-/* Cooks `defined X` and `defined(X)` into 0/1 literals before expansion. */
 static void pp_resolve_defined(Pp *pp, Vec *raw, size_t *i, Vec *out, Loc loc)
 {
     bool paren = *i < vec_size(raw) && pp_is_punct(vec_get(raw, *i), PP_PUNCT_LPAREN);
@@ -1493,8 +1471,6 @@ static void pp_resolve_defined(Pp *pp, Vec *raw, size_t *i, Vec *out, Loc loc)
     vec_push(out, pp_cooked_bool(pp, defined, loc));
 }
 
-/* Cooks a `__has_include` operand: a macro-expanded header name whose
-   existence is reported back to the #if parser. */
 static bool pp_header_found(Pp *pp, Vec *operand, const char *including_file, bool next, Loc loc)
 {
     Vec *expanded = pp_expand_vec(pp, operand);
@@ -1524,7 +1500,6 @@ static bool pp_header_found(Pp *pp, Vec *operand, const char *including_file, bo
     return pp_include_find(pp, quoted, name, including_file, next).path != NULL;
 }
 
-/* Cooks `__has_include(...)` / `__has_include_next(...)` into 0/1. */
 static void pp_resolve_has_include(Pp *pp, Vec *raw, size_t *i, Vec *out, Loc loc, bool next,
                                    const char *including_file)
 {
@@ -1691,8 +1666,6 @@ static const char *pp_render_text(Pp *pp, Vec *tokens)
     return (const char *) bytebuf_data(&buf);
 }
 
-/* Sets presumed_line from the operand's leading decimal and returns the
-   expanded operand for further inspection, or NULL after an error. */
 static Vec *pp_apply_presumed_line(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
                                    Loc directive_loc)
 {
@@ -1744,7 +1717,6 @@ static void pp_line_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_
     }
 }
 
-/* The GNU `# N "file"` linemarker: lenient about trailing tokens. */
 static void pp_linemarker_directive(Pp *pp, PpIncludeFrame *frame, size_t start, size_t end,
                                     Loc directive_loc)
 {
@@ -1815,10 +1787,7 @@ static void pp_elif_directive(Pp *pp, PpIncludeFrame *frame, size_t i, size_t en
     top->ever_taken = top->taken;
 }
 
-/* X-macro: the `#name` directives (C11 §6.10). Columns: kind, spelling,
-   handler, and whether it enables conditional inclusion — a conditional must
-   still run inside skipped regions so its nesting stays balanced. Append
-   only. */
+/* C11 §6.10: conditional directives must run inside skipped regions to keep nesting balanced. */
 #define DIRECTIVE_KINDS(X)                                                                         \
     X(DIRECTIVE_IFDEF, "ifdef", pp_ifdef_directive, true)                                          \
     X(DIRECTIVE_IFNDEF, "ifndef", pp_ifndef_directive, true)                                       \
@@ -1870,8 +1839,6 @@ static const Directive *pp_directive_lookup(const PpToken *name)
     return NULL;
 }
 
-/* Dispatches one directive line. Returns true when it adjusted the presumed
-   line. */
 static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end)
 {
     size_t i = pp_skip_trivia(frame, begin, end);
@@ -1881,7 +1848,7 @@ static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end
     size_t name_index = pp_skip_trivia(frame, i, end);
     if (name_index >= end)
     {
-        return false; /* null directive */
+        return false;
     }
     PpToken *name = vec_get(frame->tokens, name_index);
     if (name->kind == TOK_PP_NUMBER)
@@ -1904,8 +1871,7 @@ static bool pp_directive(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end
     {
         dir->run(pp, frame, name_index + 1, end, directive_loc);
     }
-    /* Only `#line` establishes the presumed line itself; the caller must not
-       also count this line's newlines. */
+    /* #line sets the presumed line itself; the caller must not count this line's newlines. */
     return dir->kind == DIRECTIVE_LINE;
 }
 
@@ -1982,8 +1948,7 @@ static bool pp_collect_args(Pp *pp, PpToken *name, Macro *macro, TokList *lparen
     return false;
 }
 
-/* Stringizes a raw argument (C11 §6.10.3.2): outer whitespace is stripped,
-   interior runs collapse to one space, and `"`/`\` are quoted. */
+/* C11 §6.10.3.2: `#` stringization. */
 static PpToken *pp_stringize(Pp *pp, Vec *raw, Loc loc)
 {
     ByteBuf buf;
@@ -2093,8 +2058,6 @@ static PpToken *pp_hidden_copy(Pp *pp, PpToken *src, const SubstArgs *sa)
     return copy;
 }
 
-/* Argument substitution strips outer whitespace but keeps interior trivia, so
-   a rescanned outer stringize still sees single spaces (`XSTR(a b)`). */
 static void pp_push_arg(Pp *pp, Vec *out, Vec *arg, const SubstArgs *sa)
 {
     size_t start = 0;
@@ -2121,8 +2084,6 @@ static PpToken *pp_comma_token(Pp *pp, Loc loc)
     return t;
 }
 
-/* Joins the variadic tail into one comma-separated argument; missing named
-   args become empty. */
 static Vec *pp_effective_args(Pp *pp, Vec *args, u32 param_count, Loc loc)
 {
     Vec *eff = vec_new(pp->arena);
@@ -2148,8 +2109,6 @@ static Vec *pp_effective_args(Pp *pp, Vec *args, u32 param_count, Loc loc)
     return eff;
 }
 
-/* Substitutes parameters: `#` stringizes, a parameter beside `##` takes its
-   raw argument, everything else the prescanned one. */
 static Vec *pp_substitute(Pp *pp, Macro *macro, const SubstArgs *sa)
 {
     Vec *out = vec_new(pp->arena);
@@ -2198,8 +2157,7 @@ static Vec *pp_substitute(Pp *pp, Macro *macro, const SubstArgs *sa)
     return out;
 }
 
-/* Merges `##` pairs with placemarker semantics: a missing side disappears,
-   and whitespace around the paste is discarded (C11 §6.10.3.3). */
+/* C11 §6.10.3.3: a missing `##` operand is a placemarker. */
 static TokList *pp_paste_list(Pp *pp, Vec *tokens, Loc inv_loc)
 {
     Vec *out = vec_new(pp->arena);
@@ -2236,7 +2194,6 @@ static TokList *pp_paste_list(Pp *pp, Vec *tokens, Loc inv_loc)
             }
             i = ri;
         }
-        /* a trailing `##` with an empty right operand disappears */
     }
 
     TokList *head = NULL;
@@ -2253,8 +2210,7 @@ static TokList *pp_subst(Pp *pp, Macro *macro, const SubstArgs *sa)
     return pp_paste_list(pp, pp_substitute(pp, macro, sa), sa->loc);
 }
 
-/* Deletes the string prefix and quotes, unescaping only `\"` — the rule gcc
-   and clang actually implement for `_Pragma` (C11 §6.10.9 decodes all). */
+/* _Pragma: gcc/clang unescape only \", though C11 §6.10.9 decodes all. */
 static const char *pp_destringize(Pp *pp, const PpToken *str)
 {
     const char *p = str->spell;
@@ -2319,8 +2275,6 @@ static Vec *pp_synthesize_pragma_line(Pp *pp, const char *text, Loc loc)
     return line;
 }
 
-/* Feeds the destringized _Pragma operand back through the directive
-   dispatcher as a synthetic `#pragma` line. */
 static void pp_execute_pragma(Pp *pp, const char *text, Loc loc)
 {
     if (vec_size(pp->includes) == 0)
@@ -2345,8 +2299,6 @@ static void pp_execute_pragma(Pp *pp, const char *text, Loc loc)
     }
 }
 
-/* Returns the single string literal the operand expands to, or NULL after a
-   diagnostic. */
 static PpToken *pp_pragma_string_arg(Pp *pp, TokList *arg, Loc loc)
 {
     if (!arg)
@@ -2372,8 +2324,7 @@ static PpToken *pp_pragma_string_arg(Pp *pp, TokList *arg, Loc loc)
     return str;
 }
 
-/* C11 §6.10.9: the operand stringifies like a call argument, then executes
-   as a #pragma line. `_Pragma` itself emits no tokens. */
+/* C11 §6.10.9: _Pragma stringizes and executes as #pragma; emits no tokens. */
 static TokList *pp_pragma_op(Pp *pp, TokList *ts)
 {
     PpToken *prag = ts->tok;
@@ -2412,7 +2363,6 @@ static TokList *pp_pragma_op(Pp *pp, TokList *ts)
 
 static Vec *pp_prescan_args(Pp *pp, Vec *args);
 
-/* Reports use of a poisoned identifier that is not being expanded. */
 static void pp_check_poison(Pp *pp, const PpToken *t)
 {
     if (t->kind == TOK_PP_IDENT && !t->hide && hashset_contains(pp->poison, pp_token_text(pp, t)))
@@ -2421,8 +2371,6 @@ static void pp_check_poison(Pp *pp, const PpToken *t)
     }
 }
 
-/* Expands one function-like invocation, returning its replacement spliced
-   with the tokens after the call, or NULL to keep the token unchanged. */
 static TokList *pp_expand_call(Pp *pp, PpToken *name, Macro *macro, TokList *lparen)
 {
     MacroArgs args;
@@ -2462,8 +2410,7 @@ static TokList *pp_expand_call(Pp *pp, PpToken *name, Macro *macro, TokList *lpa
     return list_concat(pp->arena, pp_subst(pp, macro, &sa), args.after);
 }
 
-/* Rescans a token list, splicing in replacements; a macro is disabled while
-   its own replacement is rescanned (C11 §6.10.3.4). */
+/* C11 §6.10.3.4: a macro is disabled while its own replacement is rescanned. */
 static TokList *pp_expand_list(Pp *pp, TokList *ts)
 {
     TokList *out = NULL;
@@ -2527,8 +2474,7 @@ static Vec *pp_prescan_args(Pp *pp, Vec *args)
         Vec *arg = vec_new(pp->arena);
         for (TokList *r = pp_expand_list(pp, list); r; r = r->next)
         {
-            /* Materialize `__LINE__`/`__FILE__` in the argument before it is
-               substituted or stringized (C11 §6.10.3.1). */
+            /* C11 §6.10.3.1: materialize __LINE__/__FILE__ before substitution. */
             vec_push(arg, pp_cook_predefined(pp, r->tok, r->tok->loc.line, r->tok->loc.file));
         }
         vec_push(expanded, arg);
@@ -2536,8 +2482,6 @@ static Vec *pp_prescan_args(Pp *pp, Vec *args)
     return expanded;
 }
 
-/* Expands one logical line, stamping presumed locations and materializing
-   predefined macros; newline tokens bump the presumed line. */
 static void pp_expand_line(Pp *pp, PpIncludeFrame *frame, size_t begin, size_t end)
 {
     TokList *list = NULL;
@@ -2594,8 +2538,6 @@ static const PpToken *pp_first_real(const PpIncludeFrame *frame, size_t start, s
     return NULL;
 }
 
-/* Processes one directive line, or gathers consecutive non-directive lines
-   (so macro invocations may span lines) before expanding them. */
 static void pp_line(Pp *pp, PpIncludeFrame *frame)
 {
     size_t count = vec_size(frame->tokens);
@@ -2678,8 +2620,7 @@ static bool pp_is_ident_text(const char *s, size_t n)
     return true;
 }
 
-/* `-D name[=value]` (gcc): object-like, value defaults to `1`; `name=` gives
-   an empty body. */
+/* -D name[=value]: value defaults to 1; name= gives an empty body (gcc). */
 void pp_define_cmdline(Pp *pp, const char *spec)
 {
     Loc loc = (Loc) {.file = "<command-line>", .line = 1, .col = 1};
@@ -2745,8 +2686,6 @@ void pp_undef_cmdline(Pp *pp, const char *name)
     hashmap_remove(pp->macros, name);
 }
 
-/* `-include file`: resolves like an angle include and processes it now, so
-   its macros and output precede the main file. */
 void pp_include_cmdline(Pp *pp, const char *file)
 {
     Loc loc = (Loc) {.file = file, .line = 1, .col = 1};

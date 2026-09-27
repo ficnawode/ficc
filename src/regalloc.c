@@ -145,8 +145,7 @@ static ClobberPos *collect_clobbers(IrFunction *f, const IrPositions *pos, const
     return out;
 }
 
-/* GPR ids only: the mask is not meaningful for the XMM bank, whose ids share
-   the same numbers. */
+/* GPR ids only: XMM bank ids share the same numbers. */
 static u16 clobber_avoid(const ClobberPos *clob, u32 nclob, u32 start, u32 end)
 {
     u16 avoid = 0;
@@ -233,8 +232,7 @@ static Vec *call_site_vec(const u32 *calls, u32 ncall, Arena *arena)
     return sites;
 }
 
-/* A value owns a slot when it has a SEG_MEM run or a call gap; one slot serves
-   every run and every gap of the vreg.  Rematerialized values never do. */
+/* One slot serves every SEG_MEM run and call gap of the vreg. */
 static void mark_slot_users(RegAllocation *alloc, const LiveIntervals *set)
 {
     for (u32 v = 0; v < set->nvregs; v++)
@@ -339,8 +337,6 @@ static void build_seg_gaps(RegAllocation *alloc, Vec *sgaps, Arena *arena)
     qsort(alloc->seg_gaps, n, sizeof(SegGap), seg_gap_cmp);
 }
 
-/* A vreg with no record (x87, or one that never got a range) lives in memory
-   for its whole span. */
 static void build_segments(RegAllocation *alloc, const LiveIntervals *set, Vec *recs, Vec *gaps,
                            Vec *sgaps, Arena *arena)
 {
@@ -394,7 +390,7 @@ static void build_segments(RegAllocation *alloc, const LiveIntervals *set, Vec *
     build_seg_gaps(alloc, sgaps, arena);
 }
 
-/* Only the bank's own class counts: XMM register ids share the GPR numbering. */
+/* XMM register ids share the GPR numbering. */
 static u8 saved_mask_of(const RegAllocation *alloc, const RegBank *bank)
 {
     u8 mask = 0;
@@ -483,10 +479,6 @@ static bool bank_allows(const RegBank *bank, u8 reg)
     return true;
 }
 
-/* The register of a predecessor operand that a PHI copy can share with its
-   result. The first already-allocated operand of the same class wins; the
-   active-set check in pick_register rejects a hint whose source is still live
-   past the result's start, so only a source that dies at the copy is reused. */
 static int phi_coalesce_hint(const IrInstr *phi, RegClass cls, const RegClass *vreg_cls,
                              const int *phys_map)
 {
@@ -506,9 +498,7 @@ static int phi_coalesce_hint(const IrInstr *phi, RegClass cls, const RegClass *v
     return -1;
 }
 
-/* The two-address form of these ops writes its result over `ops[0]`; the result
-   can share that operand's register when the operand dies at the instruction.
-   A PHI result likewise shares a predecessor operand's register. */
+/* Two-address ops write their result over ops[0]; a PHI shares a predecessor operand. */
 static int coalesce_hint(const IrInstr *def, const int *phys_map, RegClass cls,
                          const RegClass *vreg_cls)
 {
@@ -516,8 +506,6 @@ static int coalesce_hint(const IrInstr *def, const int *phys_map, RegClass cls,
     {
         return -1;
     }
-    /* Only true two-address ops coalesce: a load reads its pointer to form an
-       address, so its result does not belong in the pointer's register. */
     if (def->opcode == OP_LOAD)
     {
         return -1;
@@ -633,8 +621,7 @@ static u32 instr_use_count(const IrInstr *in, u32 vreg)
     return count;
 }
 
-/* Reads of every vreg, PHI-edge operands included: a spilled value is reloaded
-   at each read, so its read count is its spill cost. */
+/* A spilled value reloads at each read, so read count is spill cost. */
 static u32 *collect_use_counts(IrFunction *f, u32 nvregs, Arena *arena)
 {
     u32 *counts = arena_alloc(arena, (nvregs ? nvregs : 1) * sizeof(u32), sizeof(u32));
@@ -687,8 +674,7 @@ static u32 *collect_use_counts(IrFunction *f, u32 nvregs, Arena *arena)
     return counts;
 }
 
-/* Every vreg read by a call (argument or indirect callee).  A value read at the
-   call position must resolve to its pre-call home, so it is never split. */
+/* A call operand must resolve to its pre-call home, so it is never split. */
 static bool *collect_call_operands(IrFunction *f, u32 nvregs, Arena *arena)
 {
     bool *op = arena_alloc(arena, (nvregs ? nvregs : 1) * sizeof(bool), sizeof(bool));
@@ -775,8 +761,7 @@ static u32 edge_index_of(const CfgEdge *edges, u32 nedges, u32 pred, u32 succ)
     return UINT32_MAX;
 }
 
-/* Vregs live on each CFG edge, including PHI operands read at the predecessor's
-   end (which are not live-in to the successor). */
+/* Includes PHI operands read at the predecessor's end, which are not live-in. */
 static Bitset **collect_edge_live(IrFunction *f, const LiveIntervals *set, const CfgEdge *edges,
                                   u32 nedges, Arena *arena)
 {
@@ -817,8 +802,7 @@ static Bitset **collect_edge_live(IrFunction *f, const LiveIntervals *set, const
     return live;
 }
 
-/* The last position at which a PHI result is defined (its latest predecessor
-   end); a split at or before it would cut the definition. */
+/* A split at or before a PHI's latest predecessor end would cut its definition. */
 static u32 *collect_phi_max_def(IrFunction *f, const IrPositions *pos, u32 nvregs, Arena *arena)
 {
     u32 *mx = arena_alloc(arena, (nvregs ? nvregs : 1) * sizeof(u32), sizeof(u32));
@@ -860,8 +844,7 @@ static u32 *collect_phi_max_def(IrFunction *f, const IrPositions *pos, u32 nvreg
 static int pick_register(const RegBank *bank, const ActiveInterval *active, u32 nactive,
                          bool crossing, u16 avoid, int hint, u32 start)
 {
-    /* A coalescing hint may reuse a register still held by an interval that dies
-       exactly here (end == start); any interval that lives past `start` blocks it. */
+    /* A hint may reuse a register only when its holder dies here (end == start). */
     if (hint >= 0 && bank_allows(bank, (u8) hint) && !(avoid & (u16) (1u << hint)) &&
         (!crossing || bank_callee_index(bank, (u8) hint) >= 0))
     {
@@ -885,8 +868,7 @@ static int pick_register(const RegBank *bank, const ActiveInterval *active, u32 
     {
         used[active[a].reg] = true;
     }
-    /* A non-crossing value prefers a caller-saved register (no prologue save);
-       only fall back to a callee-saved one when the caller-saved bank is full. */
+    /* Prefer a caller-saved register (no prologue save); callee-saved only when full. */
     for (u8 pass = 0; pass < 2; pass++)
     {
         for (u8 i = 0; i < bank->num_regs; i++)
@@ -906,21 +888,19 @@ static int pick_register(const RegBank *bank, const ActiveInterval *active, u32 
             }
             else if ((pass == 0) == callee)
             {
-                continue; /* pass 0 takes caller-saved, pass 1 callee-saved */
+                continue;
             }
             return reg;
         }
         if (crossing)
         {
-            break; /* no second pass */
+            break;
         }
     }
     return -1;
 }
 
-/* Registers a call's argument setup writes that the allocator may otherwise
-   hand out. A call operand must avoid them: another argument's move could
-   otherwise clobber it before it is read. */
+/* Registers a call operand must avoid so a sibling argument move cannot clobber it. */
 static u16 call_arg_avoid_mask(const RegBank *bank, const u8 *args, u8 nargs)
 {
     u16 mask = 0;
@@ -934,9 +914,7 @@ static u16 call_arg_avoid_mask(const RegBank *bank, const u8 *args, u8 nargs)
     return mask;
 }
 
-/* A call whose arguments include a by-value record: the record's stack copy
-   runs through rep movsb, clobbering %rsi/%rdi/%rcx, so every argument of such
-   a call must keep off the argument lanes. Unknown types stay conservative. */
+/* By-value record arg: rep movsb clobbers %rsi/%rdi/%rcx, so keep args off those lanes. */
 static bool call_has_record_arg(const IrInstr *in)
 {
     if (!in->extra.call.arg_types)
@@ -954,12 +932,7 @@ static bool call_has_record_arg(const IrInstr *in)
     return false;
 }
 
-/* Mark every vreg whose value arrives in (caller side) or is loaded from
-   (callee side) an ABI argument register. Such a vreg must not itself be
-   allocated to an argument register, or one argument's move would clobber
-   another's incoming value. A scalar GP argument of a record-free call is the
-   exception: lowering schedules those moves as a parallel copy, so the value
-   may ride its own argument lane (see collect_arg_prefs). */
+/* A vreg arriving in an ABI arg register must not be allocated to one itself. */
 static bool *mark_arg_reg_vregs(IrFunction *f, u32 nvregs, Arena *arena)
 {
     bool *op = arena_alloc(arena, nvregs * sizeof(bool), sizeof(bool));
@@ -1011,9 +984,7 @@ static bool *mark_arg_reg_vregs(IrFunction *f, u32 nvregs, Arena *arena)
     return op;
 }
 
-/* Preferred physical lane per vreg: a scalar GP argument of a record-free call
-   is born in the lane it will be passed in, so its argument move is a no-op.
-   Returns -1 for every other value. */
+/* Scalar GP argument born in the lane it is passed in; its argument move is a no-op. */
 static int *collect_arg_prefs(IrFunction *f, u32 nvregs, const TargetDesc *target, Arena *arena)
 {
     int *pref = arena_alloc(arena, nvregs * sizeof(int), sizeof(int));
@@ -1053,11 +1024,7 @@ static int *collect_arg_prefs(IrFunction *f, u32 nvregs, const TargetDesc *targe
     return pref;
 }
 
-/* When no register is free, a shorter-lived interval can take the register of
-   an active interval that ends farther away.  Prefer the active read at most
-   as often as the newcomer, so a hot value is not displaced by a colder one;
-   when every active is hotter, the one ending farthest still gives way.
-   Returns the index to evict, or -1. */
+/* Evict the farthest-ending active no hotter than the newcomer. */
 static int pick_eviction(const ScanCtx *cx, bool crossing, u16 avoid, u32 iv_end, u32 new_uses)
 {
     int best = -1;
@@ -1089,8 +1056,7 @@ static int pick_eviction(const ScanCtx *cx, bool crossing, u16 avoid, u32 iv_end
     return cold >= 0 ? cold : best;
 }
 
-/* A value that lives over a call needs a callee-saved register or a slot.  A
-   call's own result starts at the call position and so need not survive it. */
+/* A value live over a call needs a callee-saved register or a slot. */
 static bool scan_crosses(const ScanCtx *cx, const LiveInterval *iv)
 {
     for (u32 i = 0; i < cx->ncall; i++)
@@ -1110,10 +1076,7 @@ static bool scan_crosses(const ScanCtx *cx, const LiveInterval *iv)
     return false;
 }
 
-/* A split at call position `c` moves the value's home at `c`.  It is sound
-   only when no live CFG edge of the value straddles `c`: an edge from before
-   the split to after it would deliver the wrong home, and a backward edge
-   would do the same.  A PHI result must also be defined before the split. */
+/* A split is sound only when no live CFG edge straddles the cut. */
 static bool split_allowed_at(const ScanCtx *cx, u32 v, u32 c)
 {
     if (cx->defs[v] && cx->defs[v]->opcode == OP_PHI && c <= cx->phi_max_def[v])
@@ -1139,9 +1102,6 @@ static bool split_allowed_at(const ScanCtx *cx, u32 v, u32 c)
     return true;
 }
 
-/* The uses of `v` at positions in [lo, hi).  Instruction operands, call
-   arguments, and an indirect callee all count; the threshold only decides
-   whether a reload pays for itself. */
 static u32 uses_between(const ScanCtx *cx, u32 v, u32 lo, u32 hi)
 {
     u32 count = 0;
@@ -1175,9 +1135,7 @@ static u32 next_call_pos(const ScanCtx *cx, u32 from)
     return 0;
 }
 
-/* The first call strictly inside (from, end) at which the value may split.
-   A cut is only taken when the region it opens holds at least two uses, so
-   the reload is amortized against the store/reload pair it costs. */
+/* A cut needs >= 2 uses in the region it opens to amortize its reload. */
 static u32 next_accepted_call(const ScanCtx *cx, const LiveInterval *iv, u32 from)
 {
     for (u32 i = 0; i < cx->ncall; i++)
@@ -1232,7 +1190,6 @@ static SegRec *seg_rec_new(ScanCtx *cx, u32 vreg, u32 start, u32 end)
     return rec;
 }
 
-/* A rematerialized value has no home: it is one whole-range SEG_REMAT run. */
 static void push_remat_rec(ScanCtx *cx, const LiveInterval *iv)
 {
     SegRec *rec = seg_rec_new(cx, iv->vreg, iv->start, iv->end);
@@ -1279,9 +1236,7 @@ static int assign_range(ScanCtx *cx, bool crossing, u16 avoid, int hint, SegRec 
     return reg;
 }
 
-/* The block containing the whole [start, end] range, or -1 when it spans more
-   than one.  Splitting is only sound inside one block: there position order is
-   execution order, so a move before an instruction always precedes it. */
+/* Splitting is only sound within one block, where position order is execution order. */
 static int range_block(const ScanCtx *cx, u32 start, u32 end)
 {
     for (u32 b = 0; b < cx->pos->nblocks; b++)
@@ -1302,8 +1257,6 @@ static void record_seg_gap(ScanCtx *cx, u32 vreg, u32 pos)
     vec_push(cx->seg_gaps, g);
 }
 
-/* Whether `in` reads `vreg` (an ordinary operand, a call argument, or an
-   indirect callee; a PHI's edge reads live at its predecessor boundary). */
 static bool instr_uses_vreg(const IrInstr *in, u32 vreg)
 {
     for (u8 oi = 0; oi < in->nops; oi++)
@@ -1331,9 +1284,6 @@ static bool instr_uses_vreg(const IrInstr *in, u32 vreg)
     return false;
 }
 
-/* The first instruction (even) position after `from` and at or before `end`
-   that reads `vreg`, or 0.  A value is reloaded at its next use, so the reload
-   position is always the start of a real instruction. */
 static u32 first_use_after(const ScanCtx *cx, u32 vreg, u32 from, u32 end)
 {
     u32 best = 0;
@@ -1358,10 +1308,7 @@ static u32 first_use_after(const ScanCtx *cx, u32 vreg, u32 from, u32 end)
     return best;
 }
 
-/* A range that cannot get a register is split at its next use: the head stays
-   in the slot and the tail is rescanned, so the value rides a register from
-   that use on.  Only within one block, so the reload has a fixed position in
-   the instruction stream; repeated splits advance to successive uses. */
+/* Split at the next use so the tail rides a register; within one block only. */
 static bool pressure_split(ScanCtx *cx, const LiveInterval *iv, SegRec *rec, u32 start, u32 end,
                            bool crossing)
 {
@@ -1400,8 +1347,7 @@ static void scan_range(ScanCtx *cx, const LiveInterval *iv, u32 start, u32 end, 
     pressure_split(cx, iv, rec, start, end, crossing);
 }
 
-/* A value live across a call that touches its first position cannot be split:
-   there is no earlier segment to store before the call. */
+/* A value whose first position is a call cannot be split: no earlier segment to store. */
 static bool call_at_start(const ScanCtx *cx, const LiveInterval *iv)
 {
     for (u32 i = 0; i < cx->ncall; i++)
@@ -1412,7 +1358,7 @@ static bool call_at_start(const ScanCtx *cx, const LiveInterval *iv)
         }
         if (cx->defs[iv->vreg] && cx->defs[iv->vreg]->opcode == OP_CALL)
         {
-            continue; /* the call defines the value */
+            continue;
         }
         return true;
     }
@@ -1519,8 +1465,7 @@ static void expire(ScanCtx *cx, u32 pos)
     }
 }
 
-/* Intervals and split tails are merged in (start, vreg) order so the active
-   set always reflects everything live at the range being allocated. */
+/* Merge intervals and split tails in (start, vreg) order for the active set. */
 static void linear_scan_class(ScanCtx *cx, const LiveInterval **order, u32 nintervals)
 {
     cx->active = arena_alloc(cx->arena, (nintervals ? nintervals : 1) * sizeof(ActiveInterval),
@@ -1559,8 +1504,6 @@ static void linear_scan_class(ScanCtx *cx, const LiveInterval **order, u32 ninte
     }
 }
 
-/* %rbp without the frame-pointer reservation: it joins the allocatable
-   callee-saved bank. */
 static RegBank bank_with_rbp_allocatable(const RegBank *bank, u8 frame_reg)
 {
     RegBank out = *bank;
@@ -1576,9 +1519,7 @@ static RegBank bank_with_rbp_allocatable(const RegBank *bank, u8 frame_reg)
     return out;
 }
 
-/* Linear scan in interval-start order: assign the lowest free register, else
-   spill.  Reserved registers (implicit operands and scratch) are never handed
-   out, so a fixed-encoding instruction's operands can be coerced in place. */
+/* Reserved registers (implicit operands and scratch) are never handed out. */
 RegAllocation *regalloc_linear(IrFunction *f, const LiveIntervals *set, const TargetDesc *target,
                                Arena *arena)
 {
@@ -1610,8 +1551,7 @@ RegAllocation *regalloc_linear_ex(IrFunction *f, const LiveIntervals *set, const
             remat[v] = true;
         }
     }
-    /* An address formed by adding a constant to a static alloca is itself a
-       constant %rbp-relative address, so rematerialize it too. */
+    /* A constant offset from a static alloca is itself a rematerializable address. */
     for (u32 v = 0; v < set->nvregs; v++)
     {
         IrInstr *d = defs[v];

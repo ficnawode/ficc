@@ -9,18 +9,16 @@ typedef struct SemanticCtx SemanticCtx;
 struct SemanticCtx
 {
     Arena *arena;
-    StrMap *globals;     /* function name -> ASTFuncDef */
-    StrMap *global_vars; /* file-scope variable name -> ASTVarDecl */
-    Vec *scopes;         /* Vec<StrMap*> — lexical scope stack (name -> ASTVarDecl) */
-    StrMap *labels;      /* label name -> ASTLabelStmt (collected per function) */
+    StrMap *globals;
+    StrMap *global_vars;
+    Vec *scopes;
+    StrMap *labels;
     int loop_depth;
     int switch_depth;
-    Vec *switch_sem_stack;    /* Vec<SwitchSem*> — per-switch case-value sets */
-    Vec *fn_params;           /* enclosing function's ASTVarDecl* list (for builtin
-                                 va_start validation), NULL outside function bodies */
-    Vec *resolving_records;   /* Vec<Type*> — records on the type-resolution stack,
-                                 to break self-referential cycles */
-    U64Map *resolved_records; /* records already fully resolved this unit (memo) */
+    Vec *switch_sem_stack;
+    Vec *fn_params;
+    Vec *resolving_records;
+    U64Map *resolved_records;
     SemanticConfig cfg;
     bool error;
 };
@@ -28,16 +26,16 @@ struct SemanticCtx
 typedef struct SwitchSem SwitchSem;
 struct SwitchSem
 {
-    U64Map *values;      /* (u64)converted case value -> non-NULL, for duplicate detection */
-    Type *promoted_cond; /* type_promote(controlling expression type) */
+    U64Map *values;
+    Type *promoted_cond;
     bool has_default;
 };
 
 typedef enum
 {
-    PLAN_HANDLED, /* aggregate / string / address-constant initializer was planned */
-    PLAN_NONE,    /* scalar initializer — not planned; the caller checks it as an expression */
-    PLAN_ERROR,   /* a diagnostic was emitted; the caller must abort */
+    PLAN_HANDLED,
+    PLAN_NONE,
+    PLAN_ERROR,
 } PlanResult;
 
 static Type *check_expr(ASTNode *node, SemanticCtx *ctx);
@@ -68,17 +66,13 @@ static bool sem_error(SemanticCtx *ctx, Loc loc, const char *fmt, ...)
     return false;
 }
 
-/* C11 §6.2.5p21: scalar types are arithmetic and pointer types. Records,
-   arrays, and void are not scalar. */
+/* C11 §6.2.5p21: scalar types are arithmetic and pointer types. */
 static bool is_scalar_type(Type *t)
 {
     t = type_unqual(t);
     return t->kind != TYPE_VOID && !type_is_record(t) && !type_is_array(t);
 }
 
-/* A value expression that turned out void (`(void)x`, a void function call, a
-   dereference of a void object) cannot be used where a value is needed;
-   report the classic diagnostic instead of lowering a width-0 vreg. */
 static bool check_value_used(ASTNode *node, SemanticCtx *ctx)
 {
     if (node->expr_type && node->expr_type->kind == TYPE_VOID)
@@ -88,8 +82,6 @@ static bool check_value_used(ASTNode *node, SemanticCtx *ctx)
     return true;
 }
 
-/* A condition operand; floats are admitted now — the IR builder boolifies them
-   with FCMP_NE(x, 0.0), so -0.0/NaN never bit-test. */
 static bool check_condition(SemanticCtx *ctx, ASTNode *cond)
 {
     return check_expr(cond, ctx) && check_value_used(cond, ctx);
@@ -129,7 +121,6 @@ static ASTVarDecl *scope_top_lookup(SemanticCtx *ctx, const char *name)
     return strmap_get(current_scope(ctx), name);
 }
 
-/* Both AST_FUNC_DEF and AST_FUNC_DECL embed a FuncSig; either kind reduces to it. */
 static FuncSig *func_sig_of(ASTNode *node)
 {
     if (node->kind == AST_FUNC_DEF)
@@ -157,7 +148,7 @@ static bool check_identifier_expr(ASTIdent *ident, SemanticCtx *ctx)
         ident->base.expr_type = type_decay(decl->type);
         return true;
     }
-    /* A function designator (§6.3.2.1p4): its value is a pointer to the function. */
+    /* §6.3.2.1p4: a function designator's value is a pointer to the function. */
     ASTNode *fnode = strmap_get(ctx->globals, ident->name);
     if (fnode)
     {
@@ -190,9 +181,7 @@ static bool is_compound_assign_op(BinOpKind op)
     return op <= BIN_XOR_ASSIGN && is_compound_assign_table[op];
 }
 
-/* Operators that are integer-only (§6.5.5/% , §6.5.7 shifts, §6.5.12-14
-   bitwise): a floating operand is a constraint violation in every case,
-   including their compound-assignment forms. */
+/* Integer-only operators: §6.5.5 %, §6.5.7 shifts, §6.5.12-14 bitwise. */
 static bool op_requires_integer(BinOpKind op)
 {
     switch (op)
@@ -215,10 +204,7 @@ static bool op_requires_integer(BinOpKind op)
     }
 }
 
-/* §6.5.16.1p1 assignment compatibility (used by `=`, call args, returns,
-   initializers): pointers gain qualifiers only at the first pointee level
-   (`int**` is not assignable to `const int**`); records must be identical;
-   other scalars convert freely. */
+/* §6.5.16.1p1: pointers gain qualifiers only at the first pointee level. */
 static bool type_assignable(Type *dst, Type *src)
 {
     dst = type_unqual(dst);
@@ -231,9 +217,7 @@ static bool type_assignable(Type *dst, Type *src)
         {
             return true;
         }
-        /* §6.5.16.1p1: the pointed-to types must be compatible and the target
-           must carry every qualifier of the source (`char **` -> `char *const *`
-           is legal; `char **` -> `const char **` is not). */
+        /* §6.5.16.1p1: the target must carry every qualifier of the source. */
         if (!type_compatible(type_unqual(pd), type_unqual(ps)))
         {
             return false;
@@ -251,9 +235,7 @@ static bool type_assignable(Type *dst, Type *src)
     return true;
 }
 
-/* True when the (possibly decayed) lvalue expression denotes an array: arrays
-   are never modifiable lvalues (§6.3.2.1), so the write gate must see through
-   the decay to reject `a = x`, `a++`, `a += 1`. */
+/* §6.3.2.1: arrays are never modifiable lvalues. */
 static bool lvalue_is_array(ASTNode *lhs)
 {
     if (type_is_array(lhs->expr_type))
@@ -292,9 +274,7 @@ static bool check_modifiable_lvalue(ASTNode *lhs, SemanticCtx *ctx)
     return true;
 }
 
-/* §6.5.16.1: `E1 = E2` requires a modifiable lvalue; pointer and record targets
-   are checked for assignability. Returns the result type (an rvalue of the lhs
-   type), or NULL after emitting an error. */
+/* §6.5.16.1: `E1 = E2` requires a modifiable lvalue. */
 static Type *check_assign_expr(ASTBinaryExpr *be, Type *lt, Type *rt, SemanticCtx *ctx)
 {
     if (!check_modifiable_lvalue(be->left, ctx))
@@ -314,8 +294,7 @@ static Type *check_assign_expr(ASTBinaryExpr *be, Type *lt, Type *rt, SemanticCt
     return type_rvalue(lt);
 }
 
-/* §6.5.16.2: `E1 op= E2` = `E1 = E1 op (E2)` with E1 evaluated once; a pointer
-   lhs is legal only for `+=`/`-=` with an integer rhs. */
+/* §6.5.16.2: a pointer `lhs` is legal only for `+=`/`-=` with an integer `rhs`. */
 static Type *check_compound_assign_expr(ASTBinaryExpr *be, Type *lt, Type *rt, SemanticCtx *ctx)
 {
     if (!check_modifiable_lvalue(be->left, ctx))
@@ -338,9 +317,6 @@ static Type *check_compound_assign_expr(ASTBinaryExpr *be, Type *lt, Type *rt, S
     return type_rvalue(lt);
 }
 
-/* Result type of a non-assignment binary op on scalar/pointer operands: logical
-   and comparison ops yield int; pointer add/sub of a pointer and an integer
-   keeps the pointer; otherwise the usual arithmetic conversion's common type. */
 static Type *value_op_result(BinOpKind op, Type *lt, Type *rt)
 {
     if (op == BIN_LOG_AND || op == BIN_LOG_OR || is_comparison_op(op))
@@ -349,8 +325,7 @@ static Type *value_op_result(BinOpKind op, Type *lt, Type *rt)
     }
     if (type_is_ptr(lt) && type_is_ptr(rt))
     {
-        /* §6.5.6p9: subtracting two pointers yields ptrdiff_t (long on LP64).
-           Every other pointer-`op`-pointer arithmetic is ill-formed. */
+        /* §6.5.6p9: subtracting two pointers yields ptrdiff_t. */
         return op == BIN_SUB ? type_long() : NULL;
     }
     if (type_is_ptr(lt) && (op == BIN_ADD || op == BIN_SUB) && !type_is_ptr(rt))
@@ -381,12 +356,10 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
         return false;
     }
     /* Array and function designators decay to pointers in value positions
-       (§6.3.2.1p3/p4); identifiers already decay in check_identifier_expr,
-       this folds nested designators like `(*fp)` in `fp == *fp`. */
+       (§6.3.2.1p3/p4). */
     Type *lt = type_decay(binary_expr->left->expr_type);
     Type *rt = type_decay(binary_expr->right->expr_type);
-    bool left_void_ok = binary_expr->op == BIN_COMMA; /* §6.5.17p2: the comma's left
-                                        operand is evaluated as a void expression */
+    bool left_void_ok = binary_expr->op == BIN_COMMA;
     if (binary_expr->op == BIN_COMMA)
     {
         /* §6.5.17p3: the comma's result is the right operand's value and type. */
@@ -395,7 +368,6 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     else if ((!left_void_ok && !check_value_used(binary_expr->left, ctx)) ||
              !check_value_used(binary_expr->right, ctx))
     {
-        /* `(void)x + 1`, `f() = 5` — operand is void, not a value. */
         return false;
     }
     if (binary_expr->op != BIN_ASSIGN && binary_expr->op != BIN_COMMA &&
@@ -406,8 +378,6 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     if (binary_expr->op != BIN_ASSIGN && binary_expr->op != BIN_COMMA &&
         (type_is_fp(lt) || type_is_fp(rt)))
     {
-        /* FP arithmetic/comparisons/logical lower as float; %/shifts/bitwise
-           are integer-only and a float mix is a plain constraint violation. */
         if (op_requires_integer(binary_expr->op))
         {
             return sem_error(ctx, binary_expr->base.loc,
@@ -450,8 +420,6 @@ static bool check_binary_expr(ASTBinaryExpr *binary_expr, SemanticCtx *ctx)
     return true;
 }
 
-/* `&operand`: a pointer to the operand's declared (lvalue) type, qualifiers
-   included; NULL after emitting an error. */
 static Type *check_address_of(ASTNode *operand, SemanticCtx *ctx)
 {
     if (operand->kind == AST_UNARY_EXPR && ast_as(ASTUnaryExpr, operand)->op == UN_DEREF)
@@ -481,7 +449,7 @@ static Type *check_address_of(ASTNode *operand, SemanticCtx *ctx)
         ASTIdent *id = ast_as(ASTIdent, operand);
         if (id->is_func)
         {
-            return operand->expr_type; /* `&f` is already the function's address */
+            return operand->expr_type;
         }
         if (!id->decl)
         {
@@ -492,8 +460,6 @@ static Type *check_address_of(ASTNode *operand, SemanticCtx *ctx)
     }
     if (operand->kind == AST_COMPOUND_LITERAL)
     {
-        /* The anonymous object's address; pointee qualifiers survive, so
-           `&(const struct S){...}` is `const struct S *`. */
         Type *ty = ast_as(ASTCompoundLiteral, operand)->type;
         return type_ptr(ty);
     }
@@ -510,7 +476,7 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
     Type *op_type = unary_expr->operand->expr_type;
     if (unary_expr->op == UN_BIT_NOT && type_is_fp(type_rvalue(op_type)))
     {
-        /* §6.5.3.3p4: `~` is integer-only; FP floor is not `~`. */
+        /* §6.5.3.3p4: `~` is integer-only. */
         return sem_error(ctx, unary_expr->base.loc,
                          "invalid operand to '~' (integer type required)");
     }
@@ -529,7 +495,6 @@ static bool check_unary_expr(ASTUnaryExpr *unary_expr, SemanticCtx *ctx)
         {
             return sem_error(ctx, unary_expr->base.loc, "cannot dereference non-pointer type");
         }
-        /* The pointee type carries the const (const int* -> const int). */
         unary_expr->base.expr_type = type_deref(op_type);
         return true;
     }
@@ -574,15 +539,11 @@ static bool check_incdec_expr(ASTIncDecExpr *incdec, SemanticCtx *ctx)
                          "invalid operand to '%s' (arithmetic or pointer type required)",
                          incdec->is_inc ? "++" : "--");
     }
-    /* §6.5.2.4p3/p4: the result is an rvalue of the operand's type (never an
-       lvalue). */
+    /* §6.5.2.4p3/p4: the result is an rvalue of the operand's type. */
     incdec->base.expr_type = type_rvalue(t);
     return true;
 }
 
-/* A va_start/va_end/va_arg argument must be a `va_list` after decay: a pointer
-   to the builtin va_list element type (the array-of-1 decays to the 24-byte
-   struct); pointer-equality on the interned element. */
 static bool builtin_check_va_list_arg(ASTNode *arg, SemanticCtx *ctx)
 {
     if (!check_expr(arg, ctx))
@@ -597,9 +558,6 @@ static bool builtin_check_va_list_arg(ASTNode *arg, SemanticCtx *ctx)
     return true;
 }
 
-/* The va_start/va_end builtins have fixed signatures over the va_list object.
-   `__builtin_va_start(ap, last)` requires `last` to name one of the enclosing
-   function's parameters (its value is unused; offsets are compile-time). */
 static bool check_va_builtin(ASTCallExpr *call_expr, SemanticCtx *ctx)
 {
     size_t got = vec_size(call_expr->args);
@@ -669,8 +627,6 @@ static bool check_va_builtin(ASTCallExpr *call_expr, SemanticCtx *ctx)
     return true;
 }
 
-/* `__builtin_va_arg(ap, type)`: ap must be a va_list (decayed); the type must
-   not be void, a record, or an array. The value is an rvalue of that type. */
 static bool check_va_arg_expr(ASTVaArgExpr *va, SemanticCtx *ctx)
 {
     if (!builtin_check_va_list_arg(va->ap, ctx))
@@ -687,9 +643,7 @@ static bool check_va_arg_expr(ASTVaArgExpr *va, SemanticCtx *ctx)
     return true;
 }
 
-/* The interned function type of a signature: the return and each param type
-   top-level-unqualified (§6.7.6.3p15), plus the variadic bit. type_func interns
-   structurally, so compatible signatures are pointer-equal. */
+/* §6.7.6.3p15: the return and each param type are top-level-unqualified. */
 static Type *build_func_type(FuncSig *sig, SemanticCtx *ctx)
 {
     Vec *param_types = vec_new(ctx->arena);
@@ -702,9 +656,6 @@ static Type *build_func_type(FuncSig *sig, SemanticCtx *ctx)
     return type_func(type_unqual(sig->ret_type), param_types, sig->is_variadic);
 }
 
-/* Validate a call's argument list and result against a parameter-type list.
-   Shared by named calls (params from the AST) and indirect calls (from the
-   pointed-to function type). Sets the call's result type. */
 static bool check_call_args(ASTCallExpr *call_expr, Type *ret_type, Vec *param_types,
                             bool is_variadic, const char *callee_name, SemanticCtx *ctx)
 {
@@ -712,8 +663,7 @@ static bool check_call_args(ASTCallExpr *call_expr, Type *ret_type, Vec *param_t
     size_t got = vec_size(call_expr->args);
     if (is_variadic)
     {
-        /* §6.5.2.2p6: the fixed (named) part is enforced; extra args are
-           legal. */
+        /* §6.5.2.2p6: the fixed (named) part is enforced; extra args are legal. */
         if (got < expected)
         {
             return sem_error(ctx, call_expr->base.loc,
@@ -739,9 +689,6 @@ static bool check_call_args(ASTCallExpr *call_expr, Type *ret_type, Vec *param_t
         {
             return false;
         }
-        /* Only the named parameters have a declared type to check against;
-           the variadic tail is assignability-free here (default promotions
-           land in the IR builder). */
         if (i >= expected)
         {
             continue;
@@ -751,8 +698,6 @@ static bool check_call_args(ASTCallExpr *call_expr, Type *ret_type, Vec *param_t
             return sem_error(ctx, arg->loc, "incompatible argument type for parameter %zu", i + 1);
         }
     }
-    /* The function value is an unqualified rvalue even for a const return
-       type (`const int f()`). */
     call_expr->base.expr_type = type_rvalue(ret_type);
     return true;
 }
@@ -770,8 +715,6 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
     if (callee_node)
     {
         FuncSig *callee = func_sig_of(callee_node);
-        /* Reduce the declared AST params to their types (the interned function
-           type's identity, exactly as build_func_type does). */
         Vec *param_types = vec_new(ctx->arena);
         size_t nparams = vec_size(callee->params);
         for (size_t i = 0; i < nparams; i++)
@@ -783,8 +726,6 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
                                call_expr->callee, ctx);
     }
 
-    /* va_start/va_end builtins are never ASTFuncDefs; a user definition of the
-       same name wins (the globals lookup above). */
     if (strcmp(call_expr->callee, "__builtin_va_start") == 0 ||
         strcmp(call_expr->callee, "__builtin_va_end") == 0 ||
         strcmp(call_expr->callee, "__builtin_va_copy") == 0)
@@ -801,9 +742,6 @@ static bool check_call_expr(ASTCallExpr *call_expr, SemanticCtx *ctx)
     {
         if (type_is_ptr(vdecl->type) && type_deref(vdecl->type)->kind == TYPE_FUNC)
         {
-            /* `fp(x)` where `fp` is a function-pointer variable is an indirect
-               call: redirect to the callee-expression form and validate against
-               the pointed-to function type. */
             ASTNode *ident = ast_ident(call_expr->callee, call_expr->base.loc, ctx->arena);
             ASTIdent *id = ast_as(ASTIdent, ident);
             id->decl = vdecl;
@@ -829,7 +767,7 @@ static bool check_indirect_call(ASTCallExpr *call_expr, SemanticCtx *ctx)
     Type *ct = callee->expr_type;
     if (type_is_function(ct))
     {
-        ct = type_decay(ct); /* a bare function designator in callee position */
+        ct = type_decay(ct);
     }
     if (!type_is_ptr(ct) || type_deref(ct)->kind != TYPE_FUNC)
     {
@@ -854,9 +792,8 @@ static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx)
     Type *op = ce->operand->expr_type;
     if (target->kind == TYPE_VOID)
     {
-        /* `(void) expr` discards the operand's value (C11 §6.5.4p2: the
-           non-scalar-target constraint applies only when the type name is not
-           void), so any operand type is legal. */
+        /* C11 §6.5.4p2: the non-scalar-target constraint applies only when the
+           type name is not void. */
         ce->base.expr_type = target;
         return true;
     }
@@ -868,8 +805,7 @@ static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx)
     {
         return sem_error(ctx, ce->base.loc, "invalid cast of non-scalar type");
     }
-    /* A cast is never an lvalue; a qualified target equals the unqualified one
-       (§6.5.4p4): top-level const drops, pointee qualifiers survive. */
+    /* §6.5.4p4: a cast is never an lvalue. */
     ce->base.expr_type = type_rvalue(target);
     return true;
 }
@@ -913,9 +849,7 @@ static bool check_member_access(ASTMemberAccess *ma, SemanticCtx *ctx)
     ma->is_bitfield = type_record_field_bit(record_type, ma->member, &bit_offset, &bit_width);
     ma->bit_offset = bit_offset;
     ma->bit_width = bit_width;
-    /* §6.5.2.3p4: a const-qualified object (or pointer to one) yields const members;
-       array members take the qualifier on the element, so `s.a[i]` writes and the
-       `const T*` decay work. */
+    /* §6.5.2.3p4: a const-qualified object yields const members. */
     ma->field_offset = type_record_field_offset(record_type, ma->member);
     ma->field_type = field_type;
     if (type_is_const(record_type))
@@ -949,7 +883,7 @@ static bool check_int_literal(ASTIntLiteral *lit, SemanticCtx *ctx)
     return true;
 }
 
-/* A floating constant is typed by its suffix (C11 §6.4.4.2). */
+/* C11 §6.4.4.2: a floating constant is typed by its suffix. */
 static bool check_float_literal(ASTFloatLiteral *fl, SemanticCtx *ctx)
 {
     ASTNode *node = &fl->base;
@@ -969,39 +903,34 @@ static bool check_float_literal(ASTFloatLiteral *fl, SemanticCtx *ctx)
     return true;
 }
 
-/* Element type of a string/char literal by encoding (§6.4.5): char for a plain
-   or u8 literal, wchar_t for L, char16_t for u, char32_t for U. */
+/* §6.4.5: element type of a string/char literal by encoding. */
 static Type *string_literal_elem_type(StrKind kind)
 {
     switch (kind)
     {
         case STRK_WIDE:
-            return type_int(); /* wchar_t */
+            return type_int();
         case STRK_UTF16:
-            return type_ushort(); /* char16_t */
+            return type_ushort();
         case STRK_UTF32:
-            return type_uint(); /* char32_t */
+            return type_uint();
         case STRK_NARROW:
         default:
             return type_char();
     }
 }
 
-/* Element count of a string literal, including the terminating NUL element. */
 static u64 string_literal_elem_count(const ASTStringLiteral *sl)
 {
     return sl->length / str_kind_elem_size(sl->str_kind) + 1;
 }
 
-/* Initialized element count, excluding the terminating NUL element. */
 static u64 string_literal_content_len(const ASTStringLiteral *sl)
 {
     return sl->length / str_kind_elem_size(sl->str_kind);
 }
 
-/* True when `elem` is a character type the given string literal may initialize
-   (C11 §6.7.9p14): the literal's element type, or any char-like type for a
-   plain/u8 literal. */
+/* C11 §6.7.9p14: the char-like element types a string literal may initialize. */
 static bool string_kind_matches_elem(StrKind kind, Type *elem)
 {
     if (kind == STRK_NARROW && is_char_like(elem))
@@ -1041,8 +970,7 @@ static bool check_subscript_expr(ASTSubscriptExpr *se, SemanticCtx *ctx)
     return true;
 }
 
-/* Resolves a parser-deferred array bound as an integer constant expression
-   (§6.6) once expression types are known; VLAs are out of scope. */
+/* §6.6: resolve a parser-deferred array bound as an integer constant expression. */
 static bool sem_resolve_type(Type **slot, SemanticCtx *ctx)
 {
     Type *type = *slot;
@@ -1103,9 +1031,6 @@ static bool sem_resolve_type(Type **slot, SemanticCtx *ctx)
     }
     if (type->kind == TYPE_STRUCT || type->kind == TYPE_UNION)
     {
-        /* A member array bound deferred by the parser (e.g. `int a[sizeof(x)]`)
-           is resolved here, then the record is re-laid-out. Self-referential
-           members are broken by the resolution stack. */
         Vec *fields = type->record.fields;
         if (!type->record.complete || !fields)
         {
@@ -1164,7 +1089,6 @@ static bool check_sizeof_expr(ASTSizeofExpr *se, SemanticCtx *ctx)
         ASTIdent *id = ast_as(ASTIdent, se->operand);
         if (id->is_func)
         {
-            /* No decay: `sizeof(f)` is sizeof(function type), rejected below. */
             ASTNode *fnode = strmap_get(ctx->globals, id->name);
             op_type = func_sig_of(fnode)->func_type;
         }
@@ -1175,14 +1099,13 @@ static bool check_sizeof_expr(ASTSizeofExpr *se, SemanticCtx *ctx)
     }
     else if (se->operand->kind == AST_STRING_LITERAL)
     {
-        /* sizeof a string literal is the array length incl. NUL, not char*. */
         ASTStringLiteral *sl = ast_as(ASTStringLiteral, se->operand);
         op_type = type_array(string_literal_elem_type(sl->str_kind), string_literal_elem_count(sl));
     }
     else if (se->operand->kind == AST_COMPOUND_LITERAL &&
              type_is_array(ast_as(ASTCompoundLiteral, se->operand)->type))
     {
-        /* Compound literals do not decay either (§6.5.2.5p4 note). */
+        /* §6.5.2.5p4: compound literals do not decay. */
         op_type = ast_as(ASTCompoundLiteral, se->operand)->type;
     }
     else if (se->operand->kind == AST_MEMBER_ACCESS)
@@ -1247,8 +1170,7 @@ static bool check_alignof_expr(ASTAlignofExpr *ae, SemanticCtx *ctx)
         return false;
     }
     Type *op_type = ae->operand->expr_type;
-    /* §6.3.2.1p3: decay is suppressed for the direct operand of _Alignof, so an
-       array aligns as its element type. */
+    /* §6.3.2.1p3: decay is suppressed for the direct operand of _Alignof. */
     if (ae->operand->kind == AST_IDENT)
     {
         ASTVarDecl *decl = ast_as(ASTIdent, ae->operand)->decl;
@@ -1463,9 +1385,7 @@ static bool check_return_stmt(ASTReturnStmt *return_stmt, SemanticCtx *ctx, Type
     return true;
 }
 
-/* A block-scope `extern` names an external-linkage entity (§6.2.2p5); it
-   allocates no local storage and resolves through the file-scope namespace,
-   not the block locals. */
+/* §6.2.2p5: a block-scope `extern` names an external-linkage entity. */
 static bool check_block_extern(ASTVarDecl *var_decl, SemanticCtx *ctx)
 {
     if (var_decl->init)
@@ -1491,8 +1411,6 @@ static bool check_block_extern(ASTVarDecl *var_decl, SemanticCtx *ctx)
     return true;
 }
 
-/* Check a block-scope automatic variable's initializer: aggregates are planned,
-   scalar expressions are checked and type-assigned to the variable. */
 static bool check_auto_initializer(ASTVarDecl *var_decl, SemanticCtx *ctx)
 {
     bool handled;
@@ -1539,8 +1457,6 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
     }
     if (var_decl->storage == SC_STATIC)
     {
-        /* Statics are file-backed: the parser folded scalar constants into
-           const_init, routed aggregates/strings/addresses into init. */
         if (var_decl->init && plan_var_initializer(ctx, var_decl) == PLAN_ERROR)
         {
             return false;
@@ -1560,8 +1476,6 @@ static bool check_variable_declaration(ASTVarDecl *var_decl, SemanticCtx *ctx)
     {
         return false;
     }
-    /* A `[]` array with no initializer (or an incomplete record/array element)
-       stays incomplete — rejected after completion would have run. */
     if (!type_is_complete(var_decl->type))
     {
         return sem_error(ctx, var_decl->base.loc, "variable '%s' has incomplete type",
@@ -1575,20 +1489,14 @@ static bool check_expression_statement(ASTExprStmt *expr_stmt, SemanticCtx *ctx)
     return check_expr(expr_stmt->expr, ctx);
 }
 
-/* Initializer-list planner (C11 §6.7.9):
-   Flattens a brace-enclosed initializer tree into offset-targeted writes on
-   the object being initialized. A cursor of aggregate frames walks the
-   subobjects in initialization order; brace elision falls out of the descent:
-   a scalar clause drills to the deepest leaf, a braced clause consumes a
-   whole subtree. Designators rebind the cursor relative to this list's object
-   (§6.7.9p18) so later undesignated clauses continue after the target. */
+/* C11 §6.7.9: initializer-list planner. */
 
 typedef struct
 {
-    Type *agg; /* array / struct / union type this frame iterates */
-    u32 next;  /* next child index to consume within `agg` */
-    u32 base;  /* absolute byte offset of this aggregate in the object */
-    bool grow; /* root `[]` array: unbounded cursor */
+    Type *agg;
+    u32 next;
+    u32 base;
+    bool grow;
 } PlanFrame;
 
 static bool is_aggregate_type(Type *t)
@@ -1604,7 +1512,6 @@ static u32 plan_frame_nchildren(const PlanFrame *fr)
     {
         if (fr->grow)
         {
-            /* Declared-against `[]` array: never pops by exhaustion. */
             return UINT32_MAX;
         }
         return (u32) agg->arr.length;
@@ -1637,7 +1544,7 @@ static bool plan_frame_child(const PlanFrame *fr, Type **cty, u32 *coff, bool *i
     }
     RecordField *f = (RecordField *) vec_get(agg->record.fields, idx);
     *cty = type_unqual(f->type);
-    *coff = base + f->offset; /* unions: every member sits at offset 0 */
+    *coff = base + f->offset;
     *is_bf = f->bit_offset >= 0 && f->bit_width >= 0;
     *bit_off = *is_bf ? (u32) f->bit_offset : 0;
     *bit_w = *is_bf ? (u32) f->bit_width : 0;
@@ -1714,8 +1621,7 @@ static InitPlan *init_plan_new(SemanticCtx *ctx, Type *obj_type)
     return plan;
 }
 
-/* Validate + record a scalar write (initialization bypasses the write gate,
-   so const targets are fine). */
+/* Initialization bypasses the write gate, so const targets are fine. */
 static bool plan_scalar_write(SemanticCtx *ctx, InitPlan *plan, Type *target, u32 offset,
                               ASTNode *value, Loc loc)
 {
@@ -1769,8 +1675,7 @@ static bool resolve_designator_path(SemanticCtx *ctx, InitPlan *plan, Type *t, u
                                  dd->field);
             }
             /* Only the outermost declared-against `[]` array may take an
-               out-of-range designator (it sizes the array). Inner brackets stay
-               bounded. */
+               out-of-range designator. */
             bool grow = plan->grow_array && cur_ty->arr.length == 0;
             if (dd->index < 0 || (!grow && (u64) dd->index >= cur_ty->arr.length))
             {
@@ -1821,9 +1726,6 @@ static bool resolve_designator_path(SemanticCtx *ctx, InitPlan *plan, Type *t, u
 
 static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *list, u32 base_off);
 
-/* Handle a clause whose value is a (non-braced) string literal: it fills a
-   whole `char[N]` subobject when it fits, otherwise it is an ordinary scalar
-   write (a `char *` member, or an error). */
 static bool plan_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *cty, u32 coff,
                                ASTNode *value, Loc loc)
 {
@@ -1845,13 +1747,10 @@ static bool plan_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *cty, u32 
         plan_new_write(ctx, plan, coff, cty, value, true);
         return true;
     }
-    /* `char *` (or another pointer) member/array element: the string decays. */
     return plan_scalar_write(ctx, plan, cty, coff, value, loc);
 }
 
-/* §6.7.9p14: a lone string literal fills `char[N]` (`s[5]="hi"` and `{"hi"}` agree);
-   an unsized target infers strlen+1, the NUL is kept only if it fits, and
-   `strlen > size` is an error (the ir_builder clamps the copy length). */
+/* §6.7.9p14: a lone string literal fills `char[N]`. */
 static PlanResult plan_char_string_clause(SemanticCtx *ctx, InitPlan *plan, Type *t,
                                           ASTInitList *list, InitElem *e, u32 base_off)
 {
@@ -1869,8 +1768,7 @@ static PlanResult plan_char_string_clause(SemanticCtx *ctx, InitPlan *plan, Type
             return PLAN_ERROR;
         }
         plan->inferred_len = need;
-        /* The write's type carries only the copy length (strlen+1); recording it
-           as the yet-to-be-completed type is safe because plan_brace_list
+        /* The write's type carries only the copy length; plan_brace_list
            resizes the object afterwards. */
         plan_new_write(ctx, plan, base_off, t, e->value, true);
         return PLAN_HANDLED;
@@ -1884,9 +1782,6 @@ static PlanResult plan_char_string_clause(SemanticCtx *ctx, InitPlan *plan, Type
     return PLAN_HANDLED;
 }
 
-/* Consume one list element: apply its designator (if any), then plan the clause
-   — a nested brace list, a string fill, or a scalar with brace elision (drilling
-   to the leaf subobject). `stackp` may be replaced by a designator path. */
 static bool plan_elem(SemanticCtx *ctx, InitPlan *plan, Type *t, InitElem *e, u32 base_off,
                       Vec **stackp)
 {
@@ -1936,10 +1831,8 @@ static bool plan_elem(SemanticCtx *ctx, InitPlan *plan, Type *t, InitElem *e, u3
         cursor_advance(stack);
         return true;
     }
-    /* Whole-object copy (§6.7.9p13): a record-typed value initializes the whole
-       subobject it designates, matching the `struct T t = s;` and `(struct T){...}`
-       forms already handled at the declaration level. The clause must not be
-       brace-elided into per-member writes. */
+    /* §6.7.9p13: a record-typed value initializes the whole subobject it
+       designates. */
     if (!check_expr(e->value, ctx) || !check_value_used(e->value, ctx))
     {
         return false;
@@ -1954,7 +1847,6 @@ static bool plan_elem(SemanticCtx *ctx, InitPlan *plan, Type *t, InitElem *e, u3
         cursor_advance(stack);
         return true;
     }
-    /* Scalar clause with brace elision: drill to the leaf subobject. */
     while (is_aggregate_type(cty))
     {
         PlanFrame *fr = arena_alloc(ctx->arena, sizeof(PlanFrame), _Alignof(PlanFrame));
@@ -1991,7 +1883,7 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
     size_t nel = vec_size(list->elems);
     if (nel == 0)
     {
-        return true; /* `{}`: zero-init, nothing to write */
+        return true;
     }
 
     if (type_is_array(t) && nel == 1 &&
@@ -2028,8 +1920,7 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
 
     if (type_is_array(t) && t->arr.length == 0)
     {
-        /* A `[]` rank may only be the outermost, declared-against target:
-           it grows from its initializer. Inner empty brackets error. */
+        /* A `[]` rank may only be the outermost, declared-against target. */
         if (!plan->grow_array)
         {
             return sem_error(ctx, list->base.loc, "array has incomplete type");
@@ -2051,9 +1942,8 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
         {
             return false;
         }
-        /* The growable root's cursor after the clause is the inferred length: a boundary
-           `root.next` counts complete elements; a cursor still inside the current element
-           counts `root.next + 1` (a partially-filled row is one element, §6.7.9p22). */
+        /* §6.7.9p22: the growable root's cursor after the clause is the
+           inferred length. */
         if (plan->grow_array && vec_size(stack) > 0)
         {
             PlanFrame *rf = (PlanFrame *) vec_get(stack, 0);
@@ -2070,9 +1960,7 @@ static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *li
     return true;
 }
 
-/* `char s[N] = "hi"`: the bytes incl. NUL must fit (C11 §6.7.9p14), and the
-   rest of the array is zero-padded. Returns false on error and otherwise fills
-   vd->plan with a single string-fill write. */
+/* C11 §6.7.9p14: the bytes incl. NUL must fit; the rest is zero-padded. */
 static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
 {
     Type *arr = type_unqual(vd->type);
@@ -2096,9 +1984,7 @@ static bool plan_char_array_from_string(SemanticCtx *ctx, ASTVarDecl *vd)
     return true;
 }
 
-/* `int *p = &g;` / `&(type){...}` (block static or file scope): a bare address
-   constant in pointer position; the serializer turns it into one 8-byte
-   relocation write (§6.6p9 — a compound literal is an address constant). */
+/* §6.6p9: a compound literal is an address constant. */
 static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
 {
     if (!type_is_ptr(vd->type) || !is_address_constant(vd->init))
@@ -2114,9 +2000,7 @@ static bool plan_ptr_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
     return true;
 }
 
-/* Run the planner over a brace list, completing a declared-against `[]` array
-   through `type_out` first (the interned 0-length type is never mutated).
-   Shared by var declarations and compound literals. */
+/* The interned 0-length type is never mutated. */
 static bool plan_brace_list(SemanticCtx *ctx, Type **type_out, ASTNode *init, InitPlan **plan_out)
 {
     InitPlan *plan = init_plan_new(ctx, *type_out);
@@ -2136,9 +2020,6 @@ static bool plan_brace_list(SemanticCtx *ctx, Type **type_out, ASTNode *init, In
     return true;
 }
 
-/* Build the initializer plan for a brace list or char-array string, completing
-   a declared-against `[]` array first. `*handled` is set when `vd->init`
-   matched one of these forms. Returns false on error. */
 static bool plan_var_aggregate_init(SemanticCtx *ctx, ASTVarDecl *vd, bool *handled)
 {
     *handled = false;
@@ -2160,8 +2041,7 @@ static bool plan_var_aggregate_init(SemanticCtx *ctx, ASTVarDecl *vd, bool *hand
     return true;
 }
 
-/* A declaration initializer that folded to a scalar constant cannot initialize
-   an aggregate: its init must be a brace list (§6.7.9p2). */
+/* §6.7.9p2: a scalar constant cannot initialize an aggregate. */
 static bool check_aggregate_const_init(ASTVarDecl *vd, SemanticCtx *ctx)
 {
     if (vd->has_const_init && (vd->type->kind == TYPE_ARRAY || type_is_record(vd->type)))
@@ -2211,8 +2091,7 @@ static bool is_address_constant(ASTNode *e)
     }
 }
 
-/* §6.7.9p4: a static pointer initializer may be an integer constant cast to a
-   pointer (e.g. `(const char *)-1`). */
+/* §6.7.9p4: a static pointer initializer may be an integer constant cast to a pointer. */
 static bool fold_pointer_constant(ASTNode *node, i64 *out)
 {
     if (node->kind == AST_CAST_EXPR)
@@ -2226,9 +2105,6 @@ static bool fold_pointer_constant(ASTNode *node, i64 *out)
     return fold_integer_constant(node, out);
 }
 
-/* Plan a declaration's initializer when it is an aggregate, string, or address
-   constant; scalar initializers return PLAN_NONE and are checked as ordinary
-   expressions by the caller. */
 static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
 {
     bool handled;
@@ -2242,7 +2118,6 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
     }
     if (type_is_fp(type_unqual(vd->type)) && vd->init != NULL)
     {
-        /* FP scalars serialize through the shared plan so all FP folds share one path. */
         InitPlan *plan = init_plan_new(ctx, vd->type);
         if (!plan_scalar_write(ctx, plan, type_unqual(vd->type), 0, vd->init, vd->base.loc))
         {
@@ -2253,8 +2128,6 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
     }
     if (!vd->has_const_init && vd->init != NULL && type_is_integer(type_unqual(vd->type)))
     {
-        /* An integer scalar the parser could not fold (needs expression types,
-           e.g. `sizeof(x)`) folds here as an integer constant expression. */
         if (!check_expr(vd->init, ctx))
         {
             return PLAN_ERROR;
@@ -2271,8 +2144,6 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
     }
     if (!vd->has_const_init && vd->init != NULL && type_is_ptr(type_unqual(vd->type)))
     {
-        /* A pointer initialized by an integer constant (typically a cast such
-           as `(const char *)-1`): fold it to the pointer bit pattern. */
         if (!check_expr(vd->init, ctx))
         {
             return PLAN_ERROR;
@@ -2297,8 +2168,7 @@ static PlanResult plan_var_initializer(SemanticCtx *ctx, ASTVarDecl *vd)
     return PLAN_NONE;
 }
 
-/* A compound literal `(type){ ... }` (§6.5.2.5): an lvalue of the declared type,
-   qualifiers intact; initialization itself bypasses the write gate. */
+/* §6.5.2.5: a compound literal is an lvalue of the declared type. */
 static bool check_compound_literal(ASTCompoundLiteral *cl, SemanticCtx *ctx)
 {
     if (!sem_resolve_type(&cl->type, ctx))
@@ -2436,9 +2306,7 @@ static bool fold_unary_constant(UnaryOpKind op, i64 v, i64 *out)
     }
 }
 
-/* Fold a binary integer-constant operation; division by zero and out-of-range
-   shifts are not foldable. `is_unsigned` selects unsigned DIV/REM/SHR and
-   relational semantics (§6.3.1.8). */
+/* §6.3.1.8: `is_unsigned` selects unsigned DIV/REM/SHR and relational semantics. */
 static bool fold_binary_constant(BinOpKind op, i64 l, i64 r, i64 *out, bool is_unsigned)
 {
     switch (op)
@@ -2533,9 +2401,6 @@ static bool fold_binary_constant(BinOpKind op, i64 l, i64 r, i64 *out, bool is_u
     }
 }
 
-/* Whether a folded binary operation follows unsigned arithmetic: DIV/REM and
-   the relational comparisons use the usual-arithmetic-conversions common type
-   of the (promoted) operands; shifts take the promoted left operand. */
 static bool fold_binary_unsigned(ASTBinaryExpr *b)
 {
     Type *lt = b->left->expr_type ? type_promote(type_rvalue(b->left->expr_type)) : type_int();
@@ -2596,8 +2461,7 @@ static bool fold_integer_constant(ASTNode *node, i64 *out)
             return true;
         case AST_CAST_EXPR:
         {
-            /* Casts are allowed in integer constant expressions (§6.6p6), so
-               `case (int)sizeof(x):` folds here; only integer targets fold. */
+            /* §6.6p6: casts are allowed in integer constant expressions. */
             ASTCastExpr *ce = ast_as(ASTCastExpr, node);
             i64 v;
             if (!fold_integer_constant(ce->operand, &v) || !type_is_integer(ce->target_type))
@@ -2645,8 +2509,6 @@ static bool check_case_statement(ASTCaseStmt *cs, SemanticCtx *ctx, Type *ret_ty
     SwitchSem *sem = (SwitchSem *) vec_last(ctx->switch_sem_stack);
     if (!cs->value_known)
     {
-        /* The constant expression couldn't be folded at parse time (e.g.
-           `case sizeof(x):`). Resolve types/sizes, then evaluate now. */
         if (!check_expr(cs->expr, ctx) || !fold_integer_constant(cs->expr, &cs->value))
         {
             return sem_error(ctx, cs->base.loc, "case label is not an integer constant expression");
@@ -2708,8 +2570,7 @@ static bool check_goto_statement(ASTGotoStmt *goto_stmt, SemanticCtx *ctx)
 
 static bool check_label_statement(ASTLabelStmt *label_stmt, SemanticCtx *ctx, Type *ret_type)
 {
-    /* Labels are pre-collected so forward gotos are valid; duplicates were
-       already reported during collection. */
+    /* Labels are pre-collected so forward gotos are valid. */
     (void) ctx;
     return check_stmt(label_stmt->stmt, ctx, ret_type);
 }
@@ -2728,7 +2589,6 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     Type *te = type_decay(type_rvalue(ternary->else_expr->expr_type));
     if (tt->kind == TYPE_VOID && te->kind == TYPE_VOID)
     {
-        /* Both branches void: legal discarded-value conditional, e.g. `cond ? f() : (void)0`. */
         ternary->base.expr_type = tt;
         return true;
     }
@@ -2739,11 +2599,8 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     }
     if (type_is_record(tt) || type_is_record(te))
     {
-        /* §6.5.15p5: a conditional on two operands of the same compatible
-           structure/union type is valid and selects one operand by value.
-           Same-tag records are interned to one Type, so unqualified pointer
-           equality is the compatibility check (anonymous records are distinct
-           types by §6.7.2.1p7). */
+        /* §6.5.15p5: a conditional on two operands of the same compatible record
+           type is valid. */
         if (type_is_record(tt) && type_is_record(te) && type_unqual(tt) == type_unqual(te))
         {
             ternary->base.expr_type = type_rvalue(tt);
@@ -2755,8 +2612,7 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     if (type_is_ptr(tt) || type_is_ptr(te))
     {
         /* §6.5.15p6: both operands are pointers to compatible types (or one is a
-           null pointer constant). The result picks the pointer side — the
-           common case is a function-pointer or data-pointer ternary. */
+           null pointer constant). */
         ternary->base.expr_type = type_rvalue(type_is_ptr(tt) ? tt : te);
         return true;
     }
@@ -2764,9 +2620,7 @@ static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx)
     return true;
 }
 
-/* A typedef names an existing interned type (§6.7.7); the parser registered the
-   name, so semantic has nothing to resolve. Function-type targets are legal
-   (§6.7.7p3); uses of the name decay or declare a function as usual. */
+/* §6.7.7: a typedef names an existing interned type. */
 static bool check_typedef_decl(ASTTypedefDecl *td, SemanticCtx *ctx)
 {
     (void) td;
@@ -2774,9 +2628,7 @@ static bool check_typedef_decl(ASTTypedefDecl *td, SemanticCtx *ctx)
     return true;
 }
 
-/* `_Static_assert(expr, "msg")` (§6.7.4): expr must fold to a constant (after
-   check_expr resolves its type-dependent subexpressions); the message is
-   reported when the value is zero. */
+/* §6.7.4: expr must fold to an integer constant. */
 static bool check_static_assert(ASTStaticAssert *sa, SemanticCtx *ctx)
 {
     if (!check_expr(sa->expr, ctx))
@@ -2807,8 +2659,6 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
             return check_variable_declaration(ast_as(ASTVarDecl, node), ctx);
         case AST_DECL_LIST:
         {
-            /* An init-declarator list: each declarator is an independent
-               declaration sharing the specifier's type. */
             ASTDeclList *dl = ast_as(ASTDeclList, node);
             size_t n = vec_size(dl->decls);
             for (size_t i = 0; i < n; i++)
@@ -2831,8 +2681,6 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
         }
         case AST_STRUCT_DECL:
         case AST_ENUM_DECL:
-            /* A block-scope tag definition: the parser completed the type at
-               parse time; nothing to check or emit. */
             return true;
         case AST_TYPEDEF_DECL:
             return check_typedef_decl(ast_as(ASTTypedefDecl, node), ctx);
@@ -2872,8 +2720,6 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
 
 static bool setup_function_params(ASTFuncDef *func_def, SemanticCtx *ctx)
 {
-    /* Parameters live in the function's outermost scope, which check_func has
-       already pushed. */
     size_t nparams = vec_size(func_def->sig.params);
     for (size_t i = 0; i < nparams; i++)
     {
@@ -2892,9 +2738,8 @@ static bool setup_function_params(ASTFuncDef *func_def, SemanticCtx *ctx)
     return true;
 }
 
-/* Statement walkers: labels may be referenced before they are defined (goto
-   can jump forward), so a function's labels are collected before its body is
-   checked. Duplicate labels are reported here, once. */
+/* Labels may be referenced before they are defined, so they are collected
+   before the body is checked. */
 static void collect_labels(ASTNode *node, SemanticCtx *ctx);
 
 static void collect_labels_statements(Vec *stmts, SemanticCtx *ctx)
@@ -2961,9 +2806,8 @@ static void collect_labels(ASTNode *node, SemanticCtx *ctx)
     }
 }
 
-/* Check one function definition body, with a fresh label table and loop depth.
-   Top-level parameter qualifiers are ignored for function-type compatibility
-   (§6.7.6.3p15). */
+/* §6.7.6.3p15: top-level parameter qualifiers are ignored for function-type
+   compatibility. */
 static bool check_func(ASTNode *node, SemanticCtx *ctx)
 {
     ASSERT(node->kind == AST_FUNC_DEF);
@@ -2986,16 +2830,12 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
     }
     fn->sig.func_type = build_func_type(&fn->sig, ctx);
 
-    /* Labels may be referenced before they are defined (goto can jump forward),
-       so collect them before checking the function body. */
     collect_labels(fn->body, ctx);
 
     bool result =
         check_statement_list(ast_as(ASTCompoundStmt, fn->body)->stmts, ctx, fn->sig.ret_type);
     if (ctx->error)
     {
-        /* An error was reported (e.g. duplicate label during collection);
-           fail so the pipeline aborts instead of continuing to IR. */
         result = false;
     }
 
@@ -3006,12 +2846,7 @@ static bool check_func(ASTNode *node, SemanticCtx *ctx)
     return result;
 }
 
-/* Validate and register one file-scope variable declaration. Repeated
-   tentative/extern declarations merge; the most-defined declaration wins (a
-   definition replaces an extern-only one; an initialized definition replaces a
-   tentative one); two definitions collide. */
-/* Merge a file-scope declaration with a prior one (§6.9.2p2, §6.7.3p8-10):
-   linkage and qualifier mismatches, and two constant definitions, are errors. */
+/* §6.9.2p2, §6.7.3p8-10: merge a file-scope declaration with a prior one. */
 static bool merge_global_var(ASTVarDecl *vd, ASTVarDecl *existing, SemanticCtx *ctx)
 {
     if ((existing->storage == SC_STATIC) != (vd->storage == SC_STATIC))
@@ -3033,8 +2868,7 @@ static bool merge_global_var(ASTVarDecl *vd, ASTVarDecl *existing, SemanticCtx *
     return true;
 }
 
-/* C11 §6.9.2p2: the most-defined declaration wins — a definition replaces an
-   extern-only declaration, an initialized definition replaces a tentative one. */
+/* C11 §6.9.2p2: the most-defined declaration wins. */
 static bool global_replaced(ASTVarDecl *vd, ASTVarDecl *existing)
 {
     if (!existing)
@@ -3048,8 +2882,6 @@ static bool global_replaced(ASTVarDecl *vd, ASTVarDecl *existing)
     return vd->has_const_init && !existing->has_const_init;
 }
 
-/* Validate and register one file-scope variable: tentative/extern declarations
-   merge, two constant definitions collide, and the most-defined one wins. */
 static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
 {
     if (!sem_resolve_type(&vd->type, ctx) || !check_no_fam_array(vd->type, vd->base.loc, ctx))
@@ -3079,9 +2911,7 @@ static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
     }
     if (vd->init)
     {
-        /* Initializer lists are flattened by the planner (completing a `[]`
-           array per §6.7.9); char arrays take a string literal byte-fill;
-           bare `char *` pointers keep the .data string-address relocation. */
+        /* §6.7.9: initializer lists are flattened by the planner. */
         if (plan_var_initializer(ctx, vd) == PLAN_ERROR)
         {
             return false;
@@ -3091,15 +2921,12 @@ static bool collect_one_global_var(ASTVarDecl *vd, SemanticCtx *ctx)
     {
         return false;
     }
-    /* A file-scope `[]` array left without an initializer stays incomplete;
-       `extern int a[];` declares (not defines) it and is legal. */
     if (vd->storage != SC_EXTERN && type_is_array(vd->type) && !type_is_complete(vd->type))
     {
         return sem_error(ctx, vd->base.loc, "variable '%s' has incomplete type", vd->name);
     }
 
-    /* C11 §6.9.2p2: a declaration with an initializer is a definition even
-       with `extern`, so normalize it to a plain external definition. */
+    /* C11 §6.9.2p2: a declaration with an initializer is a definition even with `extern`. */
     if (vd->storage == SC_EXTERN && (vd->has_const_init || vd->init))
     {
         vd->storage = SC_NONE;
@@ -3168,9 +2995,7 @@ static bool check_file_scope_asserts(ASTProgram *prog, SemanticCtx *ctx)
     return true;
 }
 
-/* Merge a function declaration/definition with a prior same-named entry
-   (§6.7.6.3): linkage and double-definition are errors; compatible signatures
-   are pointer-equal interned types; a definition upgrades a prior prototype. */
+/* §6.7.6.3: merge a function declaration/definition with a prior same-named entry. */
 static bool merge_function_decl(ASTNode *decl, ASTNode *prev, SemanticCtx *ctx)
 {
     FuncSig *fn = func_sig_of(decl);
@@ -3198,8 +3023,6 @@ static bool merge_function_decl(ASTNode *decl, ASTNode *prev, SemanticCtx *ctx)
     return true;
 }
 
-/* Register every function definition and prototype: intern its function type,
-   merge/reject against any prior same-named entry. */
 static bool register_functions(ASTProgram *prog, SemanticCtx *ctx)
 {
     size_t ndecls = vec_size(prog->decls);
@@ -3208,7 +3031,6 @@ static bool register_functions(ASTProgram *prog, SemanticCtx *ctx)
         ASTNode *decl = (ASTNode *) vec_get(prog->decls, i);
         if (decl->kind == AST_DECL_LIST)
         {
-            /* A file-scope decl list is all vars or all typedefs; check the latter. */
             ASTDeclList *dl = ast_as(ASTDeclList, decl);
             size_t n = vec_size(dl->decls);
             for (size_t j = 0; j < n; j++)
@@ -3229,8 +3051,6 @@ static bool register_functions(ASTProgram *prog, SemanticCtx *ctx)
         }
         if (decl->kind == AST_TYPEDEF_DECL)
         {
-            /* Validate file-scope typedefs (the block-scope form is checked on
-               the statement path). */
             if (!check_typedef_decl(ast_as(ASTTypedefDecl, decl), ctx))
             {
                 return false;
@@ -3324,8 +3144,7 @@ ASTNode *semantic_check(ASTNode *ast, const SemanticConfig *cfg, Arena *arena)
     }
 
     /* Functions are registered before globals so file-scope initializers may
-       reference function designators; cross-map collisions are caught by each
-       pass's reverse-map check. */
+       reference function designators. */
     if (!register_functions(prog, &ctx))
     {
         return NULL;

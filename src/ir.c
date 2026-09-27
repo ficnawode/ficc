@@ -157,8 +157,6 @@ IrInstr *ir_emit_ret_void(IrBlock *bb)
     return instr_new(bb, OP_RET, NO_VREG, 0);
 }
 
-/* The opcode carries the operation; only binops, icmp predicates, FP arithmetic
-   and fcmp predicates belong. */
 IrInstr *ir_emit_binop(IrBlock *bb, IrOpcode op, u32 dst, IrOperand lhs, IrOperand rhs)
 {
     ASSERT((op >= OP_ADD && op <= OP_ASHR) || (op >= OP_ICMP_EQ && op <= OP_ICMP_SGE) ||
@@ -192,7 +190,6 @@ IrInstr *ir_emit_call(IrBlock *bb, u32 dst, const char *name, u32 nargs, IrOpera
     return ins;
 }
 
-/* One by-value type per argument plus the return type; records stay records. */
 void ir_call_set_types(IrInstr *call, Type **arg_types, Type *ret_type)
 {
     ASSERT(call->opcode == OP_CALL);
@@ -207,10 +204,6 @@ void ir_call_set_variadic(IrInstr *call, bool is_variadic)
     call->extra.call.is_variadic = is_variadic;
 }
 
-/* Mark a call as *indirect*: the target is the runtime value of the
-   `callee` operand (a function pointer), not the named symbol `name` (which is
-   then ignored). Append-only — every existing direct call keeps byte-identical
-   lowering. */
 void ir_call_set_indirect(IrInstr *call, IrOperand callee)
 {
     ASSERT(call->opcode == OP_CALL);
@@ -218,8 +211,6 @@ void ir_call_set_indirect(IrInstr *call, IrOperand callee)
     call->extra.call.callee = callee;
 }
 
-/* va_start(ap, last): write the four va_list fields; ap rides ops[0], the three offsets live in
- * extra.va_start (they overflow the 3-slot ops array). */
 IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offset, i64 fp_offset)
 {
     IrInstr *ins = instr_new(bb, OP_VA_START, NO_VREG, 1);
@@ -230,9 +221,6 @@ IrInstr *ir_emit_va_start(IrBlock *bb, IrOperand ap, i64 stack_skip, i64 gp_offs
     return ins;
 }
 
-/* __builtin_va_arg(ap, type): advance the ap to the next argument and fetch
-   its full 8-byte slot into the width-8 result vreg; the builder converts to
-   the requested type afterwards. */
 IrInstr *ir_emit_va_arg(IrBlock *bb, u32 dst, IrOperand ap)
 {
     IrInstr *ins = instr_new(bb, OP_VA_ARG, dst, 1);
@@ -240,8 +228,6 @@ IrInstr *ir_emit_va_arg(IrBlock *bb, u32 dst, IrOperand ap)
     return ins;
 }
 
-/* __builtin_va_end(ap): a no-op in both backends (kept for source symmetry
-   and the future va_copy). */
 IrInstr *ir_emit_va_end(IrBlock *bb, IrOperand ap)
 {
     IrInstr *ins = instr_new(bb, OP_VA_END, NO_VREG, 1);
@@ -275,8 +261,7 @@ IrInstr *ir_emit_phi(IrBlock *bb, u32 dst, u32 nentries)
     return ins;
 }
 
-/* A PHI must precede every other instruction in its block. instr_new appends,
-   so emit and then move to the front. */
+/* A PHI must precede every other instruction in its block. */
 IrInstr *ir_emit_phi_at_start(IrBlock *bb, u32 dst, u32 nentries)
 {
     IrInstr *phi = ir_emit_phi(bb, dst, nentries);
