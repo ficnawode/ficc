@@ -237,6 +237,16 @@ Pp *pp_new(Arena *arena)
     pp_predefine(pp, "__amd64", "1");
     pp_predefine(pp, "__LP64__", "1");
     pp_predefine(pp, "_LP64", "1");
+    /* Host platform macros, as a hosted Linux/x86-64 compiler predefines them.
+       Feature code (e.g. SQLite's mmap support) branches on these. */
+    pp_predefine(pp, "__linux__", "1");
+    pp_predefine(pp, "__linux", "1");
+    pp_predefine(pp, "linux", "1");
+    pp_predefine(pp, "__gnu_linux__", "1");
+    pp_predefine(pp, "__unix__", "1");
+    pp_predefine(pp, "__unix", "1");
+    pp_predefine(pp, "unix", "1");
+    pp_predefine(pp, "__ELF__", "1");
     /* <sys/cdefs.h> keeps `__attribute__` only for GNU/clang/tinycc identity. */
     pp_predefine(pp, "__TINYC__", "927");
     pp_predefine(pp, "__SIZEOF_POINTER__", "8");
