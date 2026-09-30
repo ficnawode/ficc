@@ -178,3 +178,33 @@ TEST(link_driver, export_dynamic_required)
     }
     EXPECT_EQ(rdyn_build_and_run(false), 1);
 }
+
+TEST(link_driver, dso_without_soname_is_needed)
+{
+    if (!have_gcc())
+    {
+        return;
+    }
+    char lib_c[128], so[128], main_c[128], bin[192];
+    ld_write(lib_c, sizeof(lib_c), "noso", "int noso_val(void) { return 42; }\n");
+    unsigned int id = ld_seq++;
+    snprintf(so, sizeof(so), "/tmp/libficc_24d_%u.so", id);
+    ld_write(main_c, sizeof(main_c), "noso_main",
+             "extern int noso_val(void);\nint main(void) { return noso_val(); }\n");
+    ld_path(bin, sizeof(bin), "noso", "bin");
+
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "gcc -shared -fPIC -o %s %s >/dev/null 2>&1", so, lib_c);
+    if (tc_run_shell(cmd) != 0)
+    {
+        return;
+    }
+    snprintf(cmd, sizeof(cmd), "%s %s -L/tmp -lficc_24d_%u -o %s >/dev/null 2>&1", FICC_BIN, main_c,
+             id, bin);
+    EXPECT_EQ(tc_run_shell(cmd), 0);
+    snprintf(cmd, sizeof(cmd), "LD_LIBRARY_PATH=/tmp %s", bin);
+    EXPECT_EQ(tc_run_shell(cmd), 42);
+
+    char *paths[] = {lib_c, so, main_c, bin};
+    ld_cleanup(paths, 4);
+}

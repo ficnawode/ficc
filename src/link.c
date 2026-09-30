@@ -2707,12 +2707,14 @@ static bool link_add_path(Linker *lk, const char *path)
             }
             vec_push(lk->dsos, d);
             lk->dynamic = true;
-            if (d->soname)
+            /* GNU ld records DT_SONAME when present, else the opened file name. */
+            const char *needed_name = d->soname ? d->soname : base;
+            if (needed_name)
             {
                 bool seen = false;
                 for (size_t k = 0; k < vec_size(lk->needed); k++)
                 {
-                    if (strcmp((const char *) vec_get(lk->needed, k), d->soname) == 0)
+                    if (strcmp((const char *) vec_get(lk->needed, k), needed_name) == 0)
                     {
                         seen = true;
                         break;
@@ -2720,7 +2722,7 @@ static bool link_add_path(Linker *lk, const char *path)
                 }
                 if (!seen)
                 {
-                    vec_push(lk->needed, (void *) d->soname);
+                    vec_push(lk->needed, (void *) needed_name);
                 }
             }
             return true;
