@@ -41,6 +41,7 @@ typedef enum
 static Type *check_expr(ASTNode *node, SemanticCtx *ctx);
 static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type);
 static bool check_func(ASTNode *node, SemanticCtx *ctx);
+static bool merge_function_decl(ASTNode *decl, ASTNode *prev, SemanticCtx *ctx);
 static bool check_ternary_expression(ASTTernaryExpr *ternary, SemanticCtx *ctx);
 static bool check_cast_expr(ASTCastExpr *ce, SemanticCtx *ctx);
 static bool plan_list(SemanticCtx *ctx, InitPlan *plan, Type *t, ASTInitList *list, u32 base_off);
@@ -2684,6 +2685,24 @@ static bool check_stmt(ASTNode *node, SemanticCtx *ctx, Type *ret_type)
             return true;
         case AST_TYPEDEF_DECL:
             return check_typedef_decl(ast_as(ASTTypedefDecl, node), ctx);
+        case AST_FUNC_DECL:
+        {
+            /* §6.2.2p5: a block-scope function declaration has external linkage. */
+            FuncSig *fn = func_sig_of(node);
+            fn->func_type = build_func_type(fn, ctx);
+            ASTNode *prev = strmap_get(ctx->globals, fn->name);
+            if (prev)
+            {
+                return merge_function_decl(node, prev, ctx);
+            }
+            if (strmap_get(ctx->global_vars, fn->name))
+            {
+                return sem_error(ctx, node->loc, "'%s' redeclared as different kind of symbol",
+                                 fn->name);
+            }
+            strmap_set(ctx->globals, fn->name, node);
+            return true;
+        }
         case AST_STATIC_ASSERT:
             return check_static_assert(ast_as(ASTStaticAssert, node), ctx);
         case AST_EXPR_STMT:

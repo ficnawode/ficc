@@ -253,6 +253,8 @@ static bool resolve_constant_init(Parser *p, ASTVarDecl *vd, ASTNode *expr);
 static bool parse_declarator_core(Parser *p, Type *base, Declarator *out, bool name_optional,
                                   bool inner_group);
 static bool parse_declarator(Parser *p, Type *base, Declarator *out);
+static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start, bool allow_def);
+static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start, bool allow_def);
 
 static bool is_attribute_name(Token *t)
 {
@@ -1791,12 +1793,21 @@ static ASTNode *parse_var_decl(Parser *p, Specs s)
 
     Vec *decls = vec_new(p->arena);
     Declarator d;
+    if (!parse_declarator(p, s.type, &d))
+    {
+        return NULL;
+    }
+    /* C11 §6.7.6.3: a block-scope function declarator is a declaration. */
+    if (peek_token(p)->kind == TOK_LPAREN)
+    {
+        return parse_function(p, s, d, start->loc, false);
+    }
+    if (d.type->kind == TYPE_FUNC)
+    {
+        return parse_func_from_type(p, s, d, start->loc, false);
+    }
     while (true)
     {
-        if (!parse_declarator(p, s.type, &d))
-        {
-            return NULL;
-        }
         if (!push_declarator(p, s, d, start->loc, decls, false))
         {
             return NULL;
@@ -1806,6 +1817,10 @@ static ASTNode *parse_var_decl(Parser *p, Specs s)
             break;
         }
         next_token(p);
+        if (!parse_declarator(p, s.type, &d))
+        {
+            return NULL;
+        }
     }
     if (!expect_token(p, TOK_SEMI, "';'"))
     {
@@ -1855,7 +1870,7 @@ static ASTNode *parse_file_vars(Parser *p, Specs s, Declarator d0, Loc start)
     return ast_decl_list(decls, start, p->arena);
 }
 
-static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
+static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start, bool allow_def)
 {
     if (s.alignas)
     {
@@ -1898,6 +1913,11 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
         pop_scope(p);
         return ast_func_decl(d.type, d.name, params, fs, variadic, start, p->arena);
     }
+    if (!allow_def)
+    {
+        parse_error(p, "function definition is not allowed at block scope");
+        return NULL;
+    }
 
     for (size_t i = 0; i < vec_size(params); i++)
     {
@@ -1921,7 +1941,7 @@ static ASTNode *parse_function(Parser *p, Specs s, Declarator d, Loc start)
     return ast_func_def(d.type, d.name, params, body, fs, variadic, start, p->arena);
 }
 
-static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start)
+static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start, bool allow_def)
 {
     if (s.alignas)
     {
@@ -1970,6 +1990,11 @@ static ASTNode *parse_func_from_type(Parser *p, Specs s, Declarator d, Loc start
         }
         return ast_func_decl(d.type->func.ret, d.name, params, fs,
                              d.type->func.is_variadic || d.func_variadic, start, p->arena);
+    }
+    if (!allow_def)
+    {
+        parse_error(p, "function definition is not allowed at block scope");
+        return NULL;
     }
 
     for (size_t i = 0; i < vec_size(params); i++)
@@ -2031,11 +2056,11 @@ static ASTNode *parse_toplevel_decl(Parser *p)
     }
     if (peek_token(p)->kind == TOK_LPAREN)
     {
-        return parse_function(p, s, d, start->loc);
+        return parse_function(p, s, d, start->loc, true);
     }
     if (d.type->kind == TYPE_FUNC)
     {
-        return parse_func_from_type(p, s, d, start->loc);
+        return parse_func_from_type(p, s, d, start->loc, true);
     }
     return parse_file_vars(p, s, d, start->loc);
 }

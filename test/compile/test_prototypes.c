@@ -295,3 +295,64 @@ TEST(prototypes, extern_keyword_prototype)
     EXPECT_EQ(tc_run_interp(src), 42);
     EXPECT_EQ(tc_run_elf(src), 42);
 }
+
+TEST(prototypes, block_scope_function_declaration)
+{
+    const char *src = "int add(int a, int b) {\n"
+                      "    return a + b;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    extern int add(int a, int b);\n"
+                      "    return add(20, 22);\n"
+                      "}\n";
+    EXPECT_EQ(tc_run_interp(src), 42);
+    EXPECT_EQ(tc_run_elf(src), 42);
+}
+
+TEST(prototypes, block_scope_unnamed_pointer_param)
+{
+    const char *src = "int deref(const int *p) {\n"
+                      "    return *p;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    extern int deref(const int*);\n"
+                      "    int v = 42;\n"
+                      "    return deref(&v);\n"
+                      "}\n";
+    EXPECT_EQ(tc_run_interp(src), 42);
+    EXPECT_EQ(tc_run_elf(src), 42);
+}
+
+TEST(prototypes, block_scope_declaration_before_definition)
+{
+    const char *src = "int main(void) {\n"
+                      "    extern int f(void);\n"
+                      "    return f();\n"
+                      "}\n"
+                      "int f(void) {\n"
+                      "    return 42;\n"
+                      "}\n";
+    EXPECT_EQ(tc_run_interp(src), 42);
+    EXPECT_EQ(tc_run_elf(src), 42);
+}
+
+TEST(prototypes, negative_block_scope_function_definition)
+{
+    EXPECT_BUILD_FAIL("int main(void) {\n"
+                      "    int f(void) {\n"
+                      "        return 1;\n"
+                      "    }\n"
+                      "    return 0;\n"
+                      "}\n");
+}
+
+TEST(prototypes, negative_block_scope_conflicting_return)
+{
+    EXPECT_BUILD_FAIL("int f(void) {\n"
+                      "    return 0;\n"
+                      "}\n"
+                      "int main(void) {\n"
+                      "    extern long f(void);\n"
+                      "    return (int) f();\n"
+                      "}\n");
+}

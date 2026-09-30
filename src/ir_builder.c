@@ -3536,6 +3536,16 @@ static IrBlock *build_stmt(FuncBuilder *ctx, ASTNode *node, IrBlock *bb)
         case AST_ENUM_DECL:
         case AST_TYPEDEF_DECL:
             return bb;
+        case AST_FUNC_DECL:
+        {
+            /* A block-scope function declaration introduces its type here and emits no code. */
+            ASTFuncDecl *fd = ast_as(ASTFuncDecl, node);
+            if (!strmap_get(ctx->func_types, fd->sig.name))
+            {
+                strmap_set(ctx->func_types, fd->sig.name, fd->sig.func_type);
+            }
+            return bb;
+        }
         case AST_STATIC_ASSERT:
             /* Checked in the semantic pass; emits nothing. */
             return bb;
