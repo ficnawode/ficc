@@ -2,9 +2,9 @@
 # build-lua.sh — compile the reference Lua interpreter with ficc and run the
 # full test suite (testes/all.lua).
 #
-# Lua is Godmother #1 (Phase 20).  Test mode builds the ltests C library
-# (-DLUA_USER_H='"ltests.h"') and exports the interpreter's symbols (-rdynamic)
-# so the dlopen-based tests resolve the API.
+# Test mode builds the ltests C library (-DLUA_USER_H='"ltests.h"') and exports
+# the interpreter's symbols (-rdynamic) so the dlopen-based tests resolve the
+# API.
 set -euo pipefail
 
 PROJECT=lua

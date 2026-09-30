@@ -2,10 +2,9 @@
 # build-libpng.sh — compile libpng (against a ficc-built zlib) and run the
 # pngtest, pngvalid, and pngstest suites.
 #
-# libpng is Godmother #2.  It has no configure-generated constants that the
-# compiler must know about beyond pnglibconf.h, which upstream ships prebuilt;
-# we compile out-of-tree and run the tests/ driver scripts exactly as
-# `make check` would.
+# libpng has no configure-generated constants that the compiler must know about
+# beyond pnglibconf.h, which upstream ships prebuilt; we compile out-of-tree
+# and run the tests/ driver scripts exactly as `make check` would.
 set -euo pipefail
 
 PROJECT=libpng

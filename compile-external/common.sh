@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for the compile-external godmother harness.
+# Shared helpers for the compile-external harness.
 #
 # Each build-<project>.sh sources this file, then compiles the pinned upstream
 # tree in third_party/<project> with ficc and runs that project's own test

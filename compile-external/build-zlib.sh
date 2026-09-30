@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # build-zlib.sh — compile zlib with ficc and run its test programs.
 #
-# zlib has no tagged godmother plan of its own; the recipe here mirrors
-# `./configure --static && make test` without running configure: the fifteen
-# library translation units plus test/minigzip.c and test/example.c, linked
-# into the standard round-trip tests.
+# The recipe mirrors `./configure --static && make test` without running
+# configure: the fifteen library translation units plus test/minigzip.c and
+# test/example.c, linked into the standard round-trip tests.
 set -euo pipefail
 
 PROJECT=zlib

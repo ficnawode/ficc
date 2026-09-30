@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pinned upstream revisions for the five godmothers.
+# Pinned upstream revisions for the five projects.
 #
 # Every project is pinned to an exact upstream commit or tag so a run is
 # reproducible.  `extern_url <name>` and `extern_rev <name>` are the only

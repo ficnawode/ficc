@@ -69,7 +69,7 @@ golden-static: $(FICC_BIN)
 bench: $(FICC_BIN)
 	./bench/run.sh $(abspath $(FICC_BIN)) $(abspath src)
 
-# --- External godmothers (compile-external/) ---------------------------------------
+# --- External projects (compile-external/) -----------------------------------------
 #
 # Real-world certificates: clone each pinned project, build it with ficc, and
 # run its own test suite.  `make external` does all five; `make external-lua`

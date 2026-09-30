@@ -7,6 +7,6 @@ bench/elfsize
 
 .opencode/
 
-# compile-external/ clones the pinned godmothers and builds them here.
+# compile-external/ clones the pinned projects and builds them here.
 compile-external/third_party/
 compile-external/build/

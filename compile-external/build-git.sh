@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # build-git.sh — compile Git with ficc and run Git's own test suite.
 #
-# Git is Godmother #3 and the first hosted target (Phase 23): glibc supplies
-# POSIX through the compiler wrapper's include model, while ficc links the
-# binary with its in-tree linker.  Both halves of the suite run: the `t/`
-# shell tests and the clar unit tests.
+# Git is a hosted target: glibc supplies POSIX through the compiler wrapper's
+# include model, while ficc links the binary with its in-tree linker.  Both
+# halves of the suite run: the `t/` shell tests and the clar unit tests.
 #
 # The full `t/` suite is long (~1h serial, a few minutes with -j); control the
 # parallelism with JOBS=n.

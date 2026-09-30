@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # build-sqlite.sh — compile SQLite with ficc and run its TCL test suite.
 #
-# SQLite is Godmother #5.  Everything ficc can compile, it does: the generated
-# amalgamation (sqlite3.c) *and* SQLite's TCL test harness (testfixture) are
-# built by ficc, and ficc's own linker produces the executable.  The harness is
+# Everything ficc can compile, it does: the generated amalgamation (sqlite3.c)
+# *and* SQLite's TCL test harness (testfixture) are built by ficc, and ficc's
+# own linker produces the executable.  The harness is
 # compiled by setting CC (not T.cc), because T.cc is a command-line override
 # that would suppress the Makefile's `T.cc += $(OPT_FEATURE_FLAGS)` (math, fts5,
 # ...); CC feeds `T.cc = $(CC)` and the appends still apply.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run.sh [project...] — fetch, build, and test the godmothers.
+# run.sh [project...] — fetch, build, and test the projects.
 #
 # With no arguments it runs all five (lua zlib libpng git sqlite).  A project's
 # build script exits non-zero if its test suite fails; the summary at the end
