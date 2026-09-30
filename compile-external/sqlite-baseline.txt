@@ -1,0 +1,11 @@
+# SQLite tests that fail on this machine regardless of which compiler built
+# the library.  Confirmed by running the same suite with the host-cc baseline
+# binary (compile-external/build/sqlite/testfixture.gcc).
+#
+# build-sqlite.sh requires the ficc-linked build's failures to be a subset of
+# this list, so a failure here is not attributable to ficc.
+#
+# sessionnoact-4.3: expects a specific "cannot open file" message
+# zipfile-25.0:      expects "cannot open file: x", platform reports "error in fread()"
+sessionnoact-4.3
+zipfile-25.0

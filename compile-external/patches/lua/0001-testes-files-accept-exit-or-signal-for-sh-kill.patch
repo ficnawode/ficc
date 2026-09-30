@@ -1,0 +1,24 @@
+diff --git a/testes/files.lua b/testes/files.lua
+index 7146ac7c..28bbddd7 100644
+--- a/testes/files.lua
++++ b/testes/files.lua
+@@ -798,7 +798,7 @@ if not _port then
+     {"exit 129", "exit", 129},
+     {"kill -s HUP $$", "signal", 1},
+     {"kill -s KILL $$", "signal", 9},
+-    {"sh -c 'kill -s HUP $$'", "exit"},
++    {"sh -c 'kill -s HUP $$'", "exit|signal"},  -- depends on shell's fork vs exec
+     {progname .. ' -e " "', "ok"},
+     {progname .. ' -e "os.exit(0, true)"', "ok"},
+     {progname .. ' -e "os.exit(20, true)"', "exit", 20},
+@@ -811,7 +811,9 @@ if not _port then
+     if v[2] == "ok" then
+       assert(x and y == 'exit' and z == 0)
+     else
+-      assert(not x and y == v[2])   -- correct status and 'what'
++      local what = v[2]
++      assert(not x and (y == what or (what == "exit|signal" and
++                                     (y == 'exit' or y == 'signal'))))
+       -- correct code if known (but always different from 0)
+       assert((v[3] == nil and z > 0) or v[3] == z)
+     end

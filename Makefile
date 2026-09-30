@@ -39,7 +39,7 @@ DIRS := $(sort $(dir $(OBJ_SRC) $(OBJ_TEST_SRC) $(OBJ_TEST_TEST) $(FICC_BIN) $(T
 
 FORMAT_FILES := $(shell find src include test \( -name '*.c' -o -name '*.h' \))
 
-.PHONY: all clean test test-gdb selftest golden-static bench dirs compile-commands format format-check
+.PHONY: all clean test test-gdb selftest golden-static bench dirs compile-commands format format-check external fetch-external
 
 all: $(FICC_BIN)
 
@@ -68,6 +68,20 @@ golden-static: $(FICC_BIN)
 # Compares against bench/baseline.txt.
 bench: $(FICC_BIN)
 	./bench/run.sh $(abspath $(FICC_BIN)) $(abspath src)
+
+# --- External godmothers (compile-external/) ---------------------------------------
+#
+# Real-world certificates: clone each pinned project, build it with ficc, and
+# run its own test suite.  `make external` does all five; `make external-lua`
+# (etc.) does one; `make fetch-external` only clones/checks out the sources.
+# Override the list with EXTERNAL="lua git"; pass compiler options through FICC=.
+EXTERNAL ?= lua zlib libpng git sqlite
+external: $(FICC_BIN)
+	compile-external/run.sh $(EXTERNAL)
+external-%: $(FICC_BIN)
+	compile-external/run.sh $*
+fetch-external:
+	compile-external/fetch.sh
 
 $(FICC_BIN): $(OBJ_SRC) | dirs
 	$(CC) $(LDFLAGS) $^ -o $@
