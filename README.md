@@ -270,3 +270,7 @@ Papers:
 Projects:
 
 - chibicc: [github.com/rui314/chibicc](https://github.com/rui314/chibicc)
+
+## License
+
+[MIT](LICENSE)
