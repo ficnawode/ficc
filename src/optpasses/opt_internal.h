@@ -81,7 +81,21 @@ typedef enum
     OPT_PASS_STRENGTH,
     OPT_PASS_DSE,
     OPT_PASS_CANON,
+    OPT_PASS_UNROLL,
+    OPT_PASS_PARTIAL_UNROLL,
 } OptPassId;
+
+/* Inlining thresholds. -O2 uses the baseline; -O3 widens them (bigger binaries). */
+typedef struct
+{
+    u32 t2_max_instrs;
+    u32 t2_loop_factor;
+    u32 t2_max_params;
+    u32 t2_max_locals;
+    u32 max_chain;
+    u32 caller_budget;
+    u32 budget;
+} InlineLimits;
 
 typedef struct
 {
@@ -92,6 +106,7 @@ typedef struct
 typedef struct
 {
     OptPassList passlist;
+    const InlineLimits *inline_limits;
     u32 max_iterations;
 } OptConfig;
 
@@ -112,6 +127,7 @@ struct OptimizerContext
     Arena *scratch;
     bool changed;
     const OptConfig *opts;
+    InlineLimits inline_limits;
     struct IrFunction *cache_f;
     u32 cfg_epoch;
     u32 cache_epoch;
@@ -187,5 +203,7 @@ bool opt_pass_strength(OptimizerContext *ctx);
 bool opt_pass_reassoc(OptimizerContext *ctx);
 bool opt_pass_dse(OptimizerContext *ctx);
 bool opt_pass_canon(OptimizerContext *ctx);
+bool opt_pass_unroll(OptimizerContext *ctx);
+bool opt_pass_partial_unroll(OptimizerContext *ctx);
 
 #endif

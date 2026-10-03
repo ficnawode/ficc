@@ -42,6 +42,65 @@ static void build_def_maps(IrFunction *f, IrBlock **def_block, IrInstr **def_ins
     }
 }
 
+/* A load can only be hoisted from a loop that never writes memory: without
+   alias analysis we cannot prove an invariant address is untouched by a store
+   or an opaque call inside the loop. */
+static bool is_memory_writer(IrInstr *in)
+{
+    if (in->opcode == OP_STORE || in->opcode == OP_CALL || in->opcode == OP_MEMCPY ||
+        in->opcode == OP_VA_START || in->opcode == OP_VA_ARG || in->opcode == OP_VA_END)
+    {
+        return true;
+    }
+    return false;
+}
+
+/* Without alias analysis, a load may be hoisted out of the loop only when the
+   whole loop *region* (every block dominated by the header, including
+   side-exit blocks that the loop-body set does not list) provably never
+   writes memory. */
+static bool loop_region_has_no_writes(IrFunction *f, Dominators *doms, IrBlock *header)
+{
+    u32 hi = opt_block_index(f, header);
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+        if (!opt_doms_dominates(doms, hi, opt_block_index(f, bb)))
+        {
+            continue;
+        }
+        size_t ninstr = vec_size(bb->instrs);
+        for (size_t j = 0; j < ninstr; j++)
+        {
+            if (is_memory_writer((IrInstr *) vec_get(bb->instrs, j)))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/* A hoisted load must not be speculative: its block has to dominate the latch
+   so it executes on every iteration that enters the body. */
+static bool block_dominates_latch(IrFunction *f, Dominators *doms, Loop *loop, IrBlock *bb)
+{
+    u32 bi = opt_block_index(f, bb);
+    size_t nlatches = vec_size(loop->latches);
+    for (size_t l = 0; l < nlatches; l++)
+    {
+        u32 li = opt_block_index(f, (IrBlock *) vec_get(loop->latches, l));
+        if (!opt_doms_dominates(doms, bi, li))
+        {
+            return false;
+        }
+    }
+    return nlatches > 0;
+}
+
+/* is_hoistable covers pure arithmetic; loads are decided by the caller because
+   they also depend on the loop's memory behaviour. */
 static bool is_hoistable(IrInstr *in)
 {
     switch (in->opcode)
@@ -194,6 +253,8 @@ bool opt_pass_licm(OptimizerContext *ctx)
                 continue;
             }
 
+            Dominators *doms = opt_get_doms(ctx, f);
+            bool region_no_writes = loop_region_has_no_writes(f, doms, loop->header);
             HashSet *loop_blocks = hashset_new(ctx->scratch, ptr_hash, ptr_eq);
             size_t nblocks = vec_size(loop->blocks);
             for (size_t bi = 0; bi < nblocks; bi++)
@@ -217,7 +278,11 @@ bool opt_pass_licm(OptimizerContext *ctx)
                     for (size_t j = 0; j < ninstr; j++)
                     {
                         IrInstr *in = (IrInstr *) vec_get(bb->instrs, j);
-                        if (in->result == NO_VREG || !is_hoistable(in) || in_set(hoisted, in))
+                        bool load_ok = in->opcode == OP_LOAD && region_no_writes &&
+                                       !in->extra.mem.is_volatile &&
+                                       block_dominates_latch(f, doms, loop, bb);
+                        if (in->result == NO_VREG || !(is_hoistable(in) || load_ok) ||
+                            in_set(hoisted, in))
                         {
                             continue;
                         }
@@ -242,7 +307,11 @@ bool opt_pass_licm(OptimizerContext *ctx)
                 while (i < vec_size(bb->instrs))
                 {
                     IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
-                    if (in->result != NO_VREG && is_hoistable(in) && in_set(hoisted, in))
+                    bool load_ok = in->opcode == OP_LOAD && region_no_writes &&
+                                   !in->extra.mem.is_volatile &&
+                                   block_dominates_latch(f, doms, loop, bb);
+                    if (in->result != NO_VREG && (is_hoistable(in) || load_ok) &&
+                        in_set(hoisted, in))
                     {
                         opt_erase_instr(bb, in);
                         hoist_into(pre, in);

@@ -56,7 +56,16 @@ bool opt_pass_strength(OptimizerContext *ctx)
                 {
                     continue;
                 }
-                int imm_idx = in->ops[1].is_imm ? 1 : (in->ops[0].is_imm ? 0 : -1);
+                /* Division is not commutative: only a power-of-two divisor may be reduced. */
+                int imm_idx;
+                if (op == OP_MUL)
+                {
+                    imm_idx = in->ops[1].is_imm ? 1 : (in->ops[0].is_imm ? 0 : -1);
+                }
+                else
+                {
+                    imm_idx = in->ops[1].is_imm ? 1 : -1;
+                }
                 if (imm_idx < 0)
                 {
                     continue;

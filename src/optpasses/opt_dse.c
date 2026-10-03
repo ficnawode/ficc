@@ -40,6 +40,103 @@ static bool is_call_barrier(IrOpcode op)
            op == OP_VA_END;
 }
 
+static bool operand_touches_alloca(OptimizerContext *ctx, IrOperand op, u32 alloca_vreg)
+{
+    return ir_operand_is_vreg(op) && op.u.vreg < ctx->mod->width_count &&
+           alloca_base(ctx, op) == alloca_vreg;
+}
+
+/* True when `vreg` is an address derived (possibly transitively, via GEP) from
+   `alloca_vreg`. */
+static bool derives_from_alloca(OptimizerContext *ctx, u32 vreg, u32 alloca_vreg)
+{
+    u32 guard = 0;
+    while (ir_operand_is_vreg(ir_operand_vreg(vreg)) && guard++ < ctx->mod->width_count)
+    {
+        if (vreg == alloca_vreg)
+        {
+            return true;
+        }
+        IrInstr *def = ctx->def_vreg[vreg];
+        if (!def || def->opcode != OP_GEP || !ir_operand_is_vreg(def->ops[0]))
+        {
+            return false;
+        }
+        vreg = def->ops[0].u.vreg;
+    }
+    return false;
+}
+
+/* An alloca whose address is only ever used as a store target, never loaded
+   from and never passed anywhere opaque, has no observable contents: every
+   store into it is dead. */
+static bool alloca_is_store_only(OptimizerContext *ctx, IrFunction *f, u32 alloca_vreg)
+{
+    size_t nblocks = vec_size(f->blocks);
+    for (size_t b = 0; b < nblocks; b++)
+    {
+        IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+        size_t ninstr = vec_size(bb->instrs);
+        for (size_t j = 0; j < ninstr; j++)
+        {
+            IrInstr *in = (IrInstr *) vec_get(bb->instrs, j);
+            if (in->opcode == OP_STORE && !in->extra.mem.is_volatile &&
+                ir_operand_is_vreg(in->ops[1]) &&
+                derives_from_alloca(ctx, in->ops[1].u.vreg, alloca_vreg))
+            {
+                continue; /* a store into the alloca is what we may kill */
+            }
+            for (u8 o = 0; o < in->nops; o++)
+            {
+                if (operand_touches_alloca(ctx, in->ops[o], alloca_vreg))
+                {
+                    return false;
+                }
+            }
+            if (in->opcode == OP_PHI)
+            {
+                for (u32 e = 0; e < in->extra.phi.nentries; e++)
+                {
+                    if (operand_touches_alloca(ctx, in->extra.phi.entries[e].val, alloca_vreg))
+                    {
+                        return false;
+                    }
+                }
+            }
+            else if (in->opcode == OP_CALL)
+            {
+                for (u32 a = 0; a < in->extra.call.nargs; a++)
+                {
+                    if (operand_touches_alloca(ctx, in->extra.call.args[a], alloca_vreg))
+                    {
+                        return false;
+                    }
+                }
+                if (in->extra.call.is_indirect &&
+                    operand_touches_alloca(ctx, in->extra.call.callee, alloca_vreg))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static bool store_target_is_store_only(OptimizerContext *ctx, IrFunction *f, IrOperand ptr)
+{
+    if (!ir_operand_is_vreg(ptr))
+    {
+        return false;
+    }
+    u32 base = alloca_base(ctx, ptr);
+    if (base == NO_VREG)
+    {
+        return false;
+    }
+    return alloca_is_store_only(ctx, f, base);
+}
+
 bool opt_pass_dse(OptimizerContext *ctx)
 {
     bool changed = false;
@@ -59,6 +156,13 @@ bool opt_pass_dse(OptimizerContext *ctx)
                 IrInstr *in = (IrInstr *) vec_get(bb->instrs, i);
                 if (in->opcode != OP_STORE || in->extra.mem.is_volatile)
                 {
+                    continue;
+                }
+                /* A store into a never-read, never-escaping alloca is dead. */
+                if (store_target_is_store_only(ctx, f, in->ops[1]))
+                {
+                    vec_push(dead, in);
+                    changed = true;
                     continue;
                 }
                 u32 width = (u32) in->ops[2].u.imm;

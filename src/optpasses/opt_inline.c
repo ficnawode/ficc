@@ -7,14 +7,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#define INLINE_T2_MAX_INSTRS 2
-#define INLINE_T2_LOOP_FACTOR 4 /* a call in a loop amortizes its own overhead */
-#define INLINE_T2_MAX_PARAMS 4
-#define INLINE_T2_MAX_LOCALS 8
-#define INLINE_MAX_CHAIN 16
-#define INLINE_CALLER_BUDGET 800
-#define INLINE_BUDGET 65536
-
 typedef struct
 {
     OptimizerContext *ctx;
@@ -178,7 +170,8 @@ static bool single_use_static(IrModule *mod, IrFunction *callee)
     return callee->is_static && count_module_calls(mod, callee->name) == 1;
 }
 
-static bool callee_eligible(IrModule *mod, IrFunction *callee, bool in_loop)
+static bool callee_eligible(const InlineLimits *lim, IrModule *mod, IrFunction *callee,
+                            bool in_loop)
 {
     if (callee->is_variadic || callee_uses_va_or_special(callee) || callee_entry_has_phis(callee))
     {
@@ -188,19 +181,19 @@ static bool callee_eligible(IrModule *mod, IrFunction *callee, bool in_loop)
     {
         return true;
     }
-    if (vec_size(callee->params) > INLINE_T2_MAX_PARAMS ||
-        count_allocas(callee) > INLINE_T2_MAX_LOCALS)
+    if (vec_size(callee->params) > lim->t2_max_params || count_allocas(callee) > lim->t2_max_locals)
     {
         return false;
     }
-    u32 limit = INLINE_T2_MAX_INSTRS * (in_loop ? INLINE_T2_LOOP_FACTOR : 1);
+    u32 limit = lim->t2_max_instrs * (in_loop ? lim->t2_loop_factor : 1);
     return count_body_instrs(callee) <= limit;
 }
 
 static bool site_eligible(InlinePass *ip, IrFunction *caller, Vec *lin, IrFunction *callee,
                           bool in_loop)
 {
-    if (ip->budget <= 0 || caller_absorbed(ip, caller) >= INLINE_CALLER_BUDGET || callee == caller)
+    const InlineLimits *lim = &ip->ctx->inline_limits;
+    if (ip->budget <= 0 || caller_absorbed(ip, caller) >= lim->caller_budget || callee == caller)
     {
         return false;
     }
@@ -214,12 +207,12 @@ static bool site_eligible(InlinePass *ip, IrFunction *caller, Vec *lin, IrFuncti
                 return false;
             }
         }
-        if (n >= INLINE_MAX_CHAIN)
+        if (n >= lim->max_chain)
         {
             return false;
         }
     }
-    return callee_eligible(ip->ctx->mod, callee, in_loop);
+    return callee_eligible(lim, ip->ctx->mod, callee, in_loop);
 }
 
 typedef struct
@@ -718,7 +711,7 @@ bool opt_pass_inline(OptimizerContext *ctx)
     {
         ctx->inline_caller_used = hashmap_new(ctx->arena, inline_ptr_hash, inline_ptr_eq);
     }
-    InlinePass ip = {.ctx = ctx, .budget = INLINE_BUDGET};
+    InlinePass ip = {.ctx = ctx, .budget = (int) ctx->inline_limits.budget};
     bool changed = false;
     size_t nfuncs = vec_size(ctx->mod->funcs);
     for (size_t i = 0; i < nfuncs; i++)

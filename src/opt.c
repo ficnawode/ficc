@@ -18,31 +18,64 @@ void opt_error(const char *fmt, ...)
     printf("\n");
 }
 
+/* -O1: cheap, local scalar cleanups only. No global analysis, no code growth. */
 static const OptPassId level1_passes[] = {
-    OPT_PASS_CANON,    OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY,  OPT_PASS_CAST,      OPT_PASS_CPROP,
-    OPT_PASS_PHI_SIMP, OPT_PASS_DCE,        OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER, OPT_PASS_INLINE,
-    OPT_PASS_GVN,      OPT_PASS_LICM,       OPT_PASS_MEM_FWD,
+    OPT_PASS_CANON, OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY, OPT_PASS_CAST,
+    OPT_PASS_CPROP, OPT_PASS_PHI_SIMP,   OPT_PASS_DCE,      OPT_PASS_CFG_CLEAN,
 };
+/* -O2: the standard level. Adds global value numbering, loop opts, inlining and
+   the cheap size reducers on top of -O1. */
 static const OptPassId level2_passes[] = {
     OPT_PASS_CANON,    OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY,  OPT_PASS_CAST,      OPT_PASS_CPROP,
     OPT_PASS_PHI_SIMP, OPT_PASS_DCE,        OPT_PASS_CFG_CLEAN, OPT_PASS_PREHEADER, OPT_PASS_INLINE,
-    OPT_PASS_GVN,      OPT_PASS_LICM,       OPT_PASS_MEM_FWD,
+    OPT_PASS_GVN,      OPT_PASS_LICM,       OPT_PASS_MEM_FWD,   OPT_PASS_STRENGTH,  OPT_PASS_DSE,
 };
+/* -O3: everything in -O2 plus reassociation, loop unrolling and a larger
+   inlining budget. */
 static const OptPassId level3_passes[] = {
-    OPT_PASS_CANON,     OPT_PASS_FOLD_CONST, OPT_PASS_IDENTITY, OPT_PASS_CAST,
-    OPT_PASS_CPROP,     OPT_PASS_PHI_SIMP,   OPT_PASS_DCE,      OPT_PASS_CFG_CLEAN,
-    OPT_PASS_PREHEADER, OPT_PASS_INLINE,     OPT_PASS_GVN,      OPT_PASS_LICM,
-    OPT_PASS_MEM_FWD,   OPT_PASS_REASSOC,    OPT_PASS_STRENGTH, OPT_PASS_DSE,
+    OPT_PASS_CANON,     OPT_PASS_FOLD_CONST,     OPT_PASS_IDENTITY, OPT_PASS_CAST,
+    OPT_PASS_CPROP,     OPT_PASS_PHI_SIMP,       OPT_PASS_DCE,      OPT_PASS_CFG_CLEAN,
+    OPT_PASS_PREHEADER, OPT_PASS_INLINE,         OPT_PASS_GVN,      OPT_PASS_LICM,
+    OPT_PASS_MEM_FWD,   OPT_PASS_REASSOC,        OPT_PASS_STRENGTH, OPT_PASS_DSE,
+    OPT_PASS_UNROLL,    OPT_PASS_PARTIAL_UNROLL,
 };
 
 #define PASS_COUNT(list) (sizeof(list) / sizeof((list)[0]))
 
-static const OptConfig level0_cfg = {.passlist = {NULL, 0}, .max_iterations = 100};
+static const InlineLimits level0_inline = {0, 0, 0, 0, 0, 0, 0};
+/* -O1 never inlines; the limits are inert. */
+static const InlineLimits level1_inline = {0, 0, 0, 0, 0, 0, 0};
+/* Baseline: small callees only. Bigger budgets blow up the object size. */
+static const InlineLimits level2_inline = {
+    .t2_max_instrs = 2,
+    .t2_loop_factor = 4, /* a call in a loop amortizes its own overhead */
+    .t2_max_params = 4,
+    .t2_max_locals = 8,
+    .max_chain = 16,
+    .caller_budget = 800,
+    .budget = 65536,
+};
+/* -O3 trades object size for speed: deeper and wider inlining. */
+static const InlineLimits level3_inline = {
+    .t2_max_instrs = 4,
+    .t2_loop_factor = 4,
+    .t2_max_params = 4,
+    .t2_max_locals = 12,
+    .max_chain = 16,
+    .caller_budget = 1200,
+    .budget = 98304,
+};
+
+static const OptConfig level0_cfg = {
+    .passlist = {NULL, 0}, .inline_limits = &level0_inline, .max_iterations = 100};
 static const OptConfig level1_cfg = {.passlist = {level1_passes, PASS_COUNT(level1_passes)},
+                                     .inline_limits = &level1_inline,
                                      .max_iterations = 100};
 static const OptConfig level2_cfg = {.passlist = {level2_passes, PASS_COUNT(level2_passes)},
+                                     .inline_limits = &level2_inline,
                                      .max_iterations = 100};
 static const OptConfig level3_cfg = {.passlist = {level3_passes, PASS_COUNT(level3_passes)},
+                                     .inline_limits = &level3_inline,
                                      .max_iterations = 100};
 
 const OptConfig *opt_config_for(OptLevel level)
@@ -80,6 +113,8 @@ static const OptPass opt_passes[] = {
     {OPT_PASS_STRENGTH, "strength", opt_pass_strength},
     {OPT_PASS_DSE, "dse", opt_pass_dse},
     {OPT_PASS_CANON, "canon", opt_pass_canon},
+    {OPT_PASS_UNROLL, "unroll", opt_pass_unroll},
+    {OPT_PASS_PARTIAL_UNROLL, "partial_unroll", opt_pass_partial_unroll},
     {0},
 };
 
@@ -770,6 +805,7 @@ void optimize(IrModule *mod, OptLevel level, Arena *arena)
     ctx.arena = arena;
     ctx.scratch = arena_new();
     ctx.opts = opt_config_for(level);
+    ctx.inline_limits = *ctx.opts->inline_limits;
 
     run_pipeline(&ctx);
     arena_free(ctx.scratch);

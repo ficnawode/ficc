@@ -1116,6 +1116,28 @@ static u32 count_opcode(IrModule *m, IrOpcode op)
     return n;
 }
 
+/* Count blocks the partial unroller names; its main headers use a "pun_main_"
+   prefix, so this is zero when the pass did not rewrite a loop. */
+static u32 count_pun_blocks(IrModule *m)
+{
+    u32 n = 0;
+    size_t nfuncs = vec_size(m->funcs);
+    for (size_t fi = 0; fi < nfuncs; fi++)
+    {
+        IrFunction *f = (IrFunction *) vec_get(m->funcs, fi);
+        size_t nblocks = vec_size(f->blocks);
+        for (size_t b = 0; b < nblocks; b++)
+        {
+            IrBlock *bb = (IrBlock *) vec_get(f->blocks, b);
+            if (strncmp(bb->label, "pun_main_", 9) == 0)
+            {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
 static u32 count_all_instrs(IrModule *m)
 {
     u32 n = 0;
@@ -1574,7 +1596,7 @@ TEST(opt, cfg_clean_prunes_dead_blocks)
     arena_free(a);
 }
 
-TEST(opt, preheader_canonical_shape_after_optimize)
+TEST(opt, o2_preheader_canonical_shape_after_optimize)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int main(void) {\n"
@@ -1585,7 +1607,7 @@ TEST(opt, preheader_canonical_shape_after_optimize)
                                   a);
     EXPECT_TRUE(m != NULL);
     EXPECT_EQ(ir_interp_run(m), 15);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_EQ(ir_interp_run(m), 15);
     arena_free(a);
@@ -1618,18 +1640,18 @@ static IrModule *build_add_add(Arena *a)
     return m;
 }
 
-TEST(opt, gvn_merges_equal_defs)
+TEST(opt, o2_gvn_merges_equal_defs)
 {
     Arena *a = arena_new();
     IrModule *m = build_add_add(a);
     EXPECT_EQ(count_opcode(m, OP_ADD), 3);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_EQ(count_opcode(m, OP_ADD), 2);
     arena_free(a);
 }
 
-TEST(opt, gvn_commutative_merge)
+TEST(opt, o2_gvn_commutative_merge)
 {
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
@@ -1652,14 +1674,14 @@ TEST(opt, gvn_commutative_merge)
     ir_emit_binop(entry, OP_ADD, v0, ir_operand_vreg(x), ir_operand_vreg(y));
     ir_emit_binop(entry, OP_ADD, v1, ir_operand_vreg(y), ir_operand_vreg(x));
     ir_emit_ret(entry, ir_operand_vreg(v1));
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_EQ(count_opcode(m, OP_ADD), 1);
     arena_free(a);
 }
 
 /* Equal expressions in non-dominating siblings are never merged. */
-TEST(opt, gvn_skips_sibling_defs)
+TEST(opt, o2_gvn_skips_sibling_defs)
 {
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
@@ -1691,7 +1713,7 @@ TEST(opt, gvn_skips_sibling_defs)
     ir_emit_binop(else_bb, OP_ADD, v1, ir_operand_vreg(x), ir_operand_vreg(y));
     ir_emit_ret(else_bb, ir_operand_vreg(v1));
     EXPECT_EQ(ir_interp_run(m), 0);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     if (count_opcode(m, OP_ADD) != 2)
     {
@@ -1716,7 +1738,7 @@ static IrBlock *block_of_instr(IrFunction *f, IrInstr *in)
     return NULL;
 }
 
-TEST(opt, licm_hoists_invariant_mul)
+TEST(opt, o2_licm_hoists_invariant_mul)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int helper(int k) {\n"
@@ -1728,7 +1750,7 @@ TEST(opt, licm_hoists_invariant_mul)
                                   a);
     EXPECT_TRUE(m != NULL);
     EXPECT_EQ(ir_interp_run(m), 1);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     IrFunction *f = (IrFunction *) vec_get(m->funcs, 0);
     EXPECT_EQ(count_opcode(m, OP_MUL), 1);
@@ -1753,7 +1775,7 @@ TEST(opt, licm_hoists_invariant_mul)
     arena_free(a);
 }
 
-TEST(opt, licm_keeps_loop_carried_defs)
+TEST(opt, o2_licm_keeps_loop_carried_defs)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int helper(int k) {\n"
@@ -1765,7 +1787,7 @@ TEST(opt, licm_keeps_loop_carried_defs)
                                   a);
     EXPECT_TRUE(m != NULL);
     EXPECT_EQ(ir_interp_run(m), 1);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     /* the add uses `s` via a header phi, so it must stay in the loop */
     size_t nadd = 0;
@@ -1793,7 +1815,7 @@ TEST(opt, licm_keeps_loop_carried_defs)
     arena_free(a);
 }
 
-TEST(opt, mem_fwd_runs_at_level_1)
+TEST(opt, o2_mem_fwd_runs_at_level_2)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int g;\n"
@@ -1801,7 +1823,7 @@ TEST(opt, mem_fwd_runs_at_level_1)
                                   a);
     EXPECT_TRUE(m != NULL);
     EXPECT_EQ(ir_interp_run(m), 40);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_EQ(count_opcode(m, OP_LOAD), 0);
     EXPECT_EQ(count_opcode(m, OP_STORE), 1);
@@ -1926,7 +1948,7 @@ TEST(opt, sext_imm_kept_across_optimize)
 }
 
 /* A latch stub feeding a header phi must stay a single-successor block. */
-TEST(opt, cfg_clean_keeps_latch_for_header_phi_copy)
+TEST(opt, o2_cfg_clean_keeps_latch_for_header_phi_copy)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static unsigned char data[8];\n"
@@ -1947,7 +1969,7 @@ TEST(opt, cfg_clean_keeps_latch_for_header_phi_copy)
                                   a);
     EXPECT_TRUE(m != NULL);
     EXPECT_EQ(ir_interp_run(m), 0);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_EQ(ir_interp_run(m), 0);
     arena_free(a);
@@ -2021,7 +2043,7 @@ static IrFunction *fn_by_name(IrModule *m, const char *name)
     return NULL;
 }
 
-TEST(opt, inline_tier1_removes_call)
+TEST(opt, o2_inline_tier1_removes_call)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static inline int sq(int x) { return x * x; }\n"
@@ -2030,7 +2052,7 @@ TEST(opt, inline_tier1_removes_call)
     EXPECT_TRUE(m != NULL);
     EXPECT_TRUE(count_calls_to(m, "sq") >= 1);
     EXPECT_EQ(ir_interp_run(m), 36);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_TRUE(count_calls_to(m, "sq") == 0);
     EXPECT_EQ(ir_interp_run(m), 36);
@@ -2038,14 +2060,14 @@ TEST(opt, inline_tier1_removes_call)
 }
 
 /* A `static inline` keeps its addressable copy (C11 §6.7.4). */
-TEST(opt, inline_static_copy_kept)
+TEST(opt, o2_inline_static_copy_kept)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static inline int add(int x) { return x + 1; }\n"
                                   "int main(void) { return add(41); }\n",
                                   a);
     EXPECT_TRUE(m != NULL);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     IrFunction *add = fn_by_name(m, "add");
     EXPECT_NOTNULL(add);
@@ -2055,7 +2077,7 @@ TEST(opt, inline_static_copy_kept)
 }
 
 /* Direct or transitive recursion is never expanded: a self-call stays a call. */
-TEST(opt, inline_recursion_not_expanded)
+TEST(opt, o1_inline_recursion_not_expanded)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static inline int down(int n)\n"
@@ -2074,7 +2096,7 @@ TEST(opt, inline_recursion_not_expanded)
 }
 
 /* Mutual recursion f <-> g is equally inert under the chain guard. */
-TEST(opt, inline_transitive_recursion_blocked)
+TEST(opt, o1_inline_transitive_recursion_blocked)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static inline int g(int n);\n"
@@ -2097,7 +2119,7 @@ TEST(opt, inline_transitive_recursion_blocked)
     arena_free(a);
 }
 
-TEST(opt, inline_tier2_small_callee)
+TEST(opt, o2_inline_tier2_small_callee)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int twice(int x) { return x + x; }\n"
@@ -2105,7 +2127,7 @@ TEST(opt, inline_tier2_small_callee)
                                   a);
     EXPECT_TRUE(m != NULL);
     EXPECT_TRUE(count_calls_to(m, "twice") >= 1);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_TRUE(count_calls_to(m, "twice") == 0);
     EXPECT_EQ(ir_interp_run(m), 42);
@@ -2113,7 +2135,7 @@ TEST(opt, inline_tier2_small_callee)
 }
 
 /* Tier 2 size filter: a body above the cap stays a call. */
-TEST(opt, inline_tier2_big_callee_kept)
+TEST(opt, o2_inline_tier2_big_callee_kept)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int many(int k)\n"
@@ -2129,7 +2151,7 @@ TEST(opt, inline_tier2_big_callee_kept)
                                   "int main(void) { return many(1) == 22 ? 0 : 1; }\n",
                                   a);
     EXPECT_TRUE(m != NULL);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_TRUE(count_calls_to(m, "many") >= 1);
     EXPECT_EQ(ir_interp_run(m), 0);
@@ -2137,7 +2159,7 @@ TEST(opt, inline_tier2_big_callee_kept)
 }
 
 /* A multi-exit inline body merges its returns into the call result phi. */
-TEST(opt, inline_multi_ret_phi)
+TEST(opt, o2_inline_multi_ret_phi)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static inline int cls(int v)\n"
@@ -2150,14 +2172,14 @@ TEST(opt, inline_multi_ret_phi)
                                   a);
     EXPECT_TRUE(m != NULL);
     EXPECT_EQ(ir_interp_run(m), 2);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_TRUE(count_calls_to(m, "cls") == 0);
     EXPECT_EQ(ir_interp_run(m), 2);
     arena_free(a);
 }
 
-TEST(opt, inline_void_alloca)
+TEST(opt, o2_inline_void_alloca)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static inline void bump(int *p, int n)\n"
@@ -2168,7 +2190,7 @@ TEST(opt, inline_void_alloca)
                                   a);
     EXPECT_TRUE(m != NULL);
     EXPECT_EQ(ir_interp_run(m), 3);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_TRUE(count_calls_to(m, "bump") == 0);
     EXPECT_EQ(ir_interp_run(m), 3);
@@ -2177,7 +2199,7 @@ TEST(opt, inline_void_alloca)
 
 /* A direct call to a non-inline leaf nested inside another inline callee is
    itself inlined (the clone's call sites fall under a fresh chain). */
-TEST(opt, inline_nested_chain)
+TEST(opt, o2_inline_nested_chain)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static inline int seven(void) { return 7; }\n"
@@ -2185,7 +2207,7 @@ TEST(opt, inline_nested_chain)
                                   "int main(void) { return bump7(10); }\n",
                                   a);
     EXPECT_TRUE(m != NULL);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_TRUE(count_calls_to(m, "bump7") == 0);
     EXPECT_TRUE(count_calls_to(m, "seven") == 0);
@@ -2195,7 +2217,7 @@ TEST(opt, inline_nested_chain)
 
 /* Taking a function's address routes the call through an operand: that call
    is indirect and stays, even if the target is `inline`. */
-TEST(opt, inline_indirect_stays)
+TEST(opt, o1_inline_indirect_stays)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static inline int sel(int v) { return v * 2; }\n"
@@ -2215,7 +2237,7 @@ TEST(opt, inline_indirect_stays)
 }
 
 /* An sret (record-return) inline writes through the caller's slot pointer. */
-TEST(opt, inline_sret_record)
+TEST(opt, o2_inline_sret_record)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("typedef struct { int a; int b; } Pair;\n"
@@ -2230,7 +2252,7 @@ TEST(opt, inline_sret_record)
                                   a);
     EXPECT_TRUE(m != NULL);
     EXPECT_EQ(ir_interp_run(m), 42);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_TRUE(count_calls_to(m, "mk") == 0);
     EXPECT_EQ(ir_interp_run(m), 42);
@@ -2272,7 +2294,7 @@ static u32 add_param_vreg(Arena *a, IrModule *m, IrFunction *f, const char *name
     return v;
 }
 
-TEST(opt, strength_rewrites_power_of_two_multiply)
+TEST(opt, o2_strength_rewrites_power_of_two_multiply)
 {
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
@@ -2291,7 +2313,7 @@ TEST(opt, strength_rewrites_power_of_two_multiply)
     arena_free(a);
 }
 
-TEST(opt, strength_rewrites_unsigned_modulo_by_power_of_two)
+TEST(opt, o2_strength_rewrites_unsigned_modulo_by_power_of_two)
 {
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
@@ -2310,7 +2332,7 @@ TEST(opt, strength_rewrites_unsigned_modulo_by_power_of_two)
     arena_free(a);
 }
 
-TEST(opt, strength_rewrites_unsigned_div_by_power_of_two)
+TEST(opt, o2_strength_rewrites_unsigned_div_by_power_of_two)
 {
     Arena *a = arena_new();
     IrModule *m = ir_module_new(a);
@@ -2325,6 +2347,28 @@ TEST(opt, strength_rewrites_unsigned_div_by_power_of_two)
     EXPECT_TRUE(opt_pass_strength(&ctx));
     EXPECT_EQ(def_of(m, r)->opcode, OP_LSHR);
     EXPECT_EQ(def_of(m, r)->ops[1].u.imm, 4);
+    EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+/* Division is not commutative: a power-of-two immediate dividend (`8 / x`)
+   must stay a divide; only a power-of-two divisor may be a shift. */
+TEST(opt, o2_strength_keeps_immediate_dividend)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+    u32 x = ir_alloc_vreg(m, 4, false, false);
+    u32 r = ir_alloc_vreg(m, 4, false, false);
+    ir_emit_binop(bb, OP_UDIV, x, ir_operand_imm(9), ir_operand_imm(1));
+    ir_emit_binop(bb, OP_UDIV, r, ir_operand_imm(8), ir_operand_vreg(x));
+    ir_emit_ret(bb, ir_operand_vreg(r));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_FALSE(opt_pass_strength(&ctx));
+    EXPECT_EQ(def_of(m, r)->opcode, OP_UDIV);
+    EXPECT_TRUE(def_of(m, r)->ops[0].is_imm);
+    EXPECT_EQ(def_of(m, r)->ops[0].u.imm, 8);
     EXPECT_TRUE(opt_verify(m));
     arena_free(a);
 }
@@ -2445,7 +2489,64 @@ TEST(opt, dse_keeps_a_store_a_load_may_read)
     arena_free(a);
 }
 
-TEST(opt, o3_strength_is_distinct_from_o2)
+/* A store into an alloca that is never loaded and never escapes is dead. */
+TEST(opt, dse_drops_store_never_read)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+    u32 slot = ir_alloc_vreg(m, 8, false, false);
+    ir_emit_alloca(bb, slot, 16);
+    ir_emit_store(bb, ir_operand_imm(7), ir_operand_vreg(slot), 4, false);
+    ir_emit_ret(bb, ir_operand_imm(0));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_TRUE(opt_pass_dse(&ctx));
+    EXPECT_EQ(count_opcode(m, OP_STORE), 0u);
+    EXPECT_TRUE(opt_verify(m));
+    arena_free(a);
+}
+
+/* A store into an alloca whose contents are read must stay. */
+TEST(opt, dse_keeps_store_read_back)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+    u32 slot = ir_alloc_vreg(m, 8, false, false);
+    u32 v = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_alloca(bb, slot, 16);
+    ir_emit_store(bb, ir_operand_imm(7), ir_operand_vreg(slot), 4, false);
+    ir_emit_load(bb, v, ir_operand_vreg(slot), false);
+    ir_emit_ret(bb, ir_operand_vreg(v));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_FALSE(opt_pass_dse(&ctx));
+    EXPECT_EQ(count_opcode(m, OP_STORE), 1u);
+    arena_free(a);
+}
+
+/* An alloca whose address escapes (here: passed to a call) is not dead. */
+TEST(opt, dse_keeps_store_escaped_alloca)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *bb = ir_func_add_block(f, "entry");
+    u32 slot = ir_alloc_vreg(m, 8, false, false);
+    ir_emit_alloca(bb, slot, 16);
+    ir_emit_store(bb, ir_operand_imm(7), ir_operand_vreg(slot), 4, false);
+    IrOperand arg = ir_operand_vreg(slot);
+    ir_emit_call(bb, NO_VREG, "sink", 1, &arg);
+    ir_emit_ret(bb, ir_operand_imm(0));
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_FALSE(opt_pass_dse(&ctx));
+    EXPECT_EQ(count_opcode(m, OP_STORE), 1u);
+    arena_free(a);
+}
+
+/* Strength reduction ships at -O2: -O1 keeps the multiply, -O2 rewrites it. */
+TEST(opt, o2_strength_is_distinct_from_o1)
 {
     Arena *a1 = arena_new();
     Arena *a2 = arena_new();
@@ -2455,28 +2556,28 @@ TEST(opt, o3_strength_is_distinct_from_o2)
                       "    for (int i = 0; i < 8; i = i + 1) s = s + i * 8;\n"
                       "    return s;\n"
                       "}\n";
-    IrModule *m2 = tc_build_module(src, a1);
-    IrModule *m3 = tc_build_module(src, a2);
-    optimize(m2, OPT_LEVEL_2, a1);
-    optimize(m3, OPT_LEVEL_3, a2);
-    EXPECT_TRUE(m2 && m3);
-    EXPECT_TRUE(count_opcode(m2, OP_MUL) > 0);
-    EXPECT_EQ(count_opcode(m3, OP_MUL), 0u);
-    EXPECT_EQ(ir_interp_run(m2), ir_interp_run(m3));
+    IrModule *m1 = tc_build_module(src, a1);
+    IrModule *m2 = tc_build_module(src, a2);
+    optimize(m1, OPT_LEVEL_1, a1);
+    optimize(m2, OPT_LEVEL_2, a2);
+    EXPECT_TRUE(m1 && m2);
+    EXPECT_TRUE(count_opcode(m1, OP_MUL) > 0);
+    EXPECT_EQ(count_opcode(m2, OP_MUL), 0u);
+    EXPECT_EQ(ir_interp_run(m1), ir_interp_run(m2));
     arena_free(a1);
     arena_free(a2);
 }
 
 /* DFE: a static helper inlined at its only call site leaves no reference, so
    its definition is dropped (codegen lowers every IrFunction otherwise). */
-TEST(opt, dfe_removes_inlined_static)
+TEST(opt, o2_dfe_removes_inlined_static)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static int twice(int x) { return x + x; }\n"
                                   "int main(void) { return twice(21); }\n",
                                   a);
     EXPECT_TRUE(m != NULL);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_TRUE(count_calls_to(m, "twice") == 0);
     EXPECT_TRUE(fn_by_name(m, "twice") == NULL);
@@ -2485,7 +2586,7 @@ TEST(opt, dfe_removes_inlined_static)
 }
 
 /* DFE keeps an exported function: another translation unit may call it. */
-TEST(opt, dfe_keeps_exported_function)
+TEST(opt, o1_dfe_keeps_exported_function)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("int twice(int x) { return x + x; }\n"
@@ -2501,7 +2602,7 @@ TEST(opt, dfe_keeps_exported_function)
 
 /* DFE keeps a static whose address escapes (is_func operand), even with no
    direct call left: an indirect call may still reach it. */
-TEST(opt, dfe_keeps_address_taken_static)
+TEST(opt, o1_dfe_keeps_address_taken_static)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static int pick(int x) { return x + 1; }\n"
@@ -2519,7 +2620,7 @@ TEST(opt, dfe_keeps_address_taken_static)
 
 /* A static single-use helper larger than the tier-2 cap still inlines: DFE
    removes the definition, so the clone does not reproduce the body. */
-TEST(opt, inline_single_use_static_over_cap)
+TEST(opt, o2_inline_single_use_static_over_cap)
 {
     Arena *a = arena_new();
     IrModule *m = tc_build_module("static int many(int k)\n"
@@ -2532,7 +2633,7 @@ TEST(opt, inline_single_use_static_over_cap)
                                   "int main(void) { return many(1); }\n",
                                   a);
     EXPECT_TRUE(m != NULL);
-    optimize(m, OPT_LEVEL_1, a);
+    optimize(m, OPT_LEVEL_2, a);
     EXPECT_TRUE(opt_verify(m));
     EXPECT_TRUE(count_calls_to(m, "many") == 0);
     EXPECT_TRUE(fn_by_name(m, "many") == NULL);
@@ -2542,7 +2643,7 @@ TEST(opt, inline_single_use_static_over_cap)
 
 /* DFE must see a function operand passed as an argument to a direct call:
    walk(callback) keeps `callback` alive even when no call names it directly. */
-TEST(opt, dfe_keeps_func_passed_as_direct_call_arg)
+TEST(opt, o1_dfe_keeps_func_passed_as_direct_call_arg)
 {
     Arena *a = arena_new();
     IrModule *m =
@@ -2556,5 +2657,323 @@ TEST(opt, dfe_keeps_func_passed_as_direct_call_arg)
     EXPECT_TRUE(opt_verify(m));
     EXPECT_NOTNULL(fn_by_name(m, "callback"));
     EXPECT_EQ(ir_interp_run(m), 7);
+    arena_free(a);
+}
+
+/* -O3 fully unrolls a small counted loop with a constant trip count. */
+TEST(opt, o3_unrolls_counted_loop)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 4; i = i + 1) s = s + i;\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 6);
+    EXPECT_EQ(count_opcode(m, OP_PHI), 0u); /* the loop is gone */
+    arena_free(a);
+}
+
+/* A loop whose trip count is a runtime value is left as a loop. */
+TEST(opt, o3_keeps_variable_trip_count_loop)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int f(int n) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < n; i = i + 1) s = s + i;\n"
+                                  "    return s;\n"
+                                  "}\n"
+                                  "int main(void) { return f(6); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 15);
+    arena_free(a);
+}
+
+/* Unrolling with a step other than 1 must count iterations by the step. */
+TEST(opt, o3_unrolls_stepped_loop)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 8; i = i + 2) s = s + i;\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 12);
+    arena_free(a);
+}
+
+/* Two loop-carried values: the unroller must thread both through every copy. */
+TEST(opt, o3_unrolls_two_carried_values)
+{
+    Arena *a = arena_new();
+    IrModule *m =
+        tc_build_module("int main(void) {\n"
+                        "    int s = 0;\n"
+                        "    int p = 1;\n"
+                        "    for (int i = 0; i < 5; i = i + 1) { s = s + i; p = p * 2; }\n"
+                        "    return s + p;\n"
+                        "}\n",
+                        a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 42);
+    arena_free(a);
+}
+
+/* Count-down loops are not unrolled (the pass only handles `i < bound`). */
+TEST(opt, o3_keeps_countdown_loop)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 5; i > 0; i = i - 1) s = s + i;\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 15);
+    arena_free(a);
+}
+
+/* An early exit is not unrolled: only the header guard may leave the loop. */
+TEST(opt, o3_keeps_loop_with_early_break)
+{
+    Arena *a = arena_new();
+    IrModule *m =
+        tc_build_module("int main(void) {\n"
+                        "    int s = 0;\n"
+                        "    for (int i = 0; i < 6; i = i + 1) { if (i == 3) break; s = s + i; }\n"
+                        "    return s;\n"
+                        "}\n",
+                        a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 3);
+    arena_free(a);
+}
+
+static u32 count_opcode_in_entry(IrModule *m, IrOpcode op)
+{
+    IrFunction *f = opt_main_fn(m);
+    IrBlock *entry = (IrBlock *) vec_get(f->blocks, 0);
+    u32 n = 0;
+    size_t ninstr = vec_size(entry->instrs);
+    for (size_t j = 0; j < ninstr; j++)
+    {
+        if (((IrInstr *) vec_get(entry->instrs, j))->opcode == op)
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* A load from an invariant address in a write-free loop is hoisted to the
+   preheader (the entry block here). */
+TEST(opt, o2_licm_hoists_invariant_load)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int g[4] = {1, 2, 3, 4};\n"
+                                  "int main(void) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < 5; i = i + 1) s = s + g[0];\n"
+                                  "    return s;\n"
+                                  "}\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_2, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 5);
+    EXPECT_EQ(count_opcode_in_entry(m, OP_LOAD), 1u);
+    arena_free(a);
+}
+
+/* A loop that stores may have written the loaded slot, so its load stays put. */
+TEST(opt, o2_licm_keeps_load_when_loop_writes)
+{
+    Arena *a = arena_new();
+    IrModule *m =
+        tc_build_module("int g[4] = {1, 2, 3, 4};\n"
+                        "int main(void) {\n"
+                        "    int s = 0;\n"
+                        "    for (int i = 0; i < 5; i = i + 1) { s = s + g[0]; g[0] = i; }\n"
+                        "    return s;\n"
+                        "}\n",
+                        a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_2, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(count_opcode_in_entry(m, OP_LOAD), 0u);
+    arena_free(a);
+}
+
+/* -O3 partially unrolls a counted loop whose bound is a runtime value: the
+   loop gains a main header (the "pun_" prefix) and still computes the sum. */
+TEST(opt, o3_partial_unrolls_variable_loop)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("int f(int n) {\n"
+                                  "    int s = 0;\n"
+                                  "    for (int i = 0; i < n; i = i + 1) s = s + i;\n"
+                                  "    return s;\n"
+                                  "}\n"
+                                  "int main(void) { return f(10) + f(3) + f(1); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 48);
+    EXPECT_TRUE(count_pun_blocks(m) >= 1);
+    arena_free(a);
+}
+
+/* The partial unroller's guard must not signed-overflow: a bound within a few
+   of INT_MIN makes `bound - (K-1)*step` wrap positive, which (before the
+   unsigned-difference guard) kept the main loop running past the real bound.
+   One iteration remains, so the loop must run exactly once and terminate. */
+TEST(opt, o3_partial_unroll_guard_handles_int_min_bound)
+{
+    Arena *a = arena_new();
+    IrModule *m = tc_build_module("long long g_i = -9223372036854775807LL;\n"
+                                  "long long g_e = -9223372036854775806LL;\n"
+                                  "long long count(void) {\n"
+                                  "    long long s = 0;\n"
+                                  "    for (long long i = g_i; i < g_e; i = i + 1) s = s + 1;\n"
+                                  "    return s;\n"
+                                  "}\n"
+                                  "int main(void) { return (int) count(); }\n",
+                                  a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 1);
+    arena_free(a);
+}
+
+static u32 add_int_param_w(Arena *a, IrModule *m, IrFunction *f, const char *name, u8 w)
+{
+    u32 v = ir_alloc_vreg(m, w, true, false);
+    IrParam *p = arena_alloc(a, sizeof(IrParam), _Alignof(IrParam));
+    p->name = name;
+    p->type = type_int();
+    p->vreg = v;
+    vec_push(f->params, p);
+    return v;
+}
+
+/* A fully unrolled loop body containing a call must remap the call's argument
+   array per iteration; the shallow instruction copy aliases the original's. */
+TEST(opt, o3_unroll_remaps_call_args)
+{
+    Arena *a = arena_new();
+    IrModule *m = ir_module_new(a);
+
+    IrFunction *helper = ir_module_add_func(m, "helper", type_int());
+    u32 hp0 = add_int_param_w(a, m, helper, "p0", 4);
+    u32 hp1 = add_int_param_w(a, m, helper, "p1", 4);
+    IrBlock *hb = ir_func_add_block(helper, "entry");
+    u32 ht = ir_alloc_vreg(m, 4, true, false);
+    u32 hr = ir_alloc_vreg(m, 4, true, false);
+    ir_emit_binop(hb, OP_MUL, ht, ir_operand_vreg(hp0), ir_operand_imm(10));
+    ir_emit_binop(hb, OP_ADD, hr, ir_operand_vreg(ht), ir_operand_vreg(hp1));
+    ir_emit_ret(hb, ir_operand_vreg(hr));
+
+    IrFunction *f = ir_module_add_func(m, "main", type_int());
+    IrBlock *entry = ir_func_add_block(f, "entry");
+    IrBlock *header = ir_func_add_block(f, "header");
+    IrBlock *body = ir_func_add_block(f, "body");
+    IrBlock *latch = ir_func_add_block(f, "latch");
+    IrBlock *exit_bb = ir_func_add_block(f, "exit");
+    u32 i = ir_alloc_vreg(m, 4, true, false);
+    u32 s = ir_alloc_vreg(m, 4, true, false);
+    u32 cmp = ir_alloc_vreg(m, 8, true, false);
+    u32 i_next = ir_alloc_vreg(m, 4, true, false);
+    u32 s_next = ir_alloc_vreg(m, 4, true, false);
+
+    ir_emit_br(entry, header->label);
+    vec_push(header->preds, entry);
+    IrInstr *phi_i = ir_emit_phi_at_start(header, i, 2);
+    ir_phi_add_entry(phi_i, ir_operand_imm(0), entry);
+    ir_phi_add_entry(phi_i, ir_operand_vreg(i_next), latch);
+    IrInstr *phi_s = ir_emit_phi_at_start(header, s, 2);
+    ir_phi_add_entry(phi_s, ir_operand_imm(0), entry);
+    ir_phi_add_entry(phi_s, ir_operand_vreg(s_next), latch);
+    ir_emit_binop(header, OP_ICMP_SLT, cmp, ir_operand_vreg(i), ir_operand_imm(4));
+    ir_emit_brcond(header, ir_operand_vreg(cmp), body->label, exit_bb->label);
+
+    vec_push(body->preds, header);
+    IrOperand args[2] = {ir_operand_vreg(s), ir_operand_vreg(i)};
+    ir_emit_call(body, s_next, "helper", 2, args);
+    ir_emit_br(body, latch->label);
+
+    vec_push(latch->preds, body);
+    ir_emit_binop(latch, OP_ADD, i_next, ir_operand_vreg(i), ir_operand_imm(1));
+    ir_emit_br(latch, header->label);
+    vec_push(header->preds, latch);
+
+    vec_push(exit_bb->preds, header);
+    ir_emit_ret(exit_bb, ir_operand_vreg(s));
+
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 123); /* ((0*10+0)*10+1)*10+2 ... */
+    OptimizerContext ctx = make_ctx(m, a);
+    EXPECT_TRUE(opt_pass_unroll(&ctx));
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 123);
+    arena_free(a);
+}
+
+/* Two carried values whose phis read each other (a swap) must be threaded
+   through the unrolled copies without one update clobbering the other. */
+TEST(opt, o3_unrolls_cross_phi_swap)
+{
+    Arena *a = arena_new();
+    IrModule *m =
+        tc_build_module("int main(void) {\n"
+                        "    int a = 0, b = 1;\n"
+                        "    for (int i = 0; i < 5; i = i + 1) { int t = a; a = b; b = t; }\n"
+                        "    return a * 10 + b;\n"
+                        "}\n",
+                        a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 10); /* 5 swaps leave a=1, b=0 */
+    EXPECT_EQ(count_opcode(m, OP_PHI), 0u);
+    arena_free(a);
+}
+
+/* The partial unroller threads cross-referencing header phis too. */
+TEST(opt, o3_partial_unroll_cross_phi_swap)
+{
+    Arena *a = arena_new();
+    IrModule *m =
+        tc_build_module("int f(int n) {\n"
+                        "    int a = 0, b = 1;\n"
+                        "    for (int i = 0; i < n; i = i + 1) { int t = a; a = b; b = t; }\n"
+                        "    return a * 10 + b;\n"
+                        "}\n"
+                        "int main(void) { return f(5) + f(7) * 100; }\n",
+                        a);
+    EXPECT_TRUE(m != NULL);
+    optimize(m, OPT_LEVEL_3, a);
+    EXPECT_TRUE(opt_verify(m));
+    EXPECT_EQ(ir_interp_run(m), 1010);
+    EXPECT_TRUE(count_pun_blocks(m) >= 1);
     arena_free(a);
 }
