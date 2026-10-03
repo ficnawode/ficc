@@ -31,7 +31,7 @@ ficc vs gcc vs clang on the Lua interpreter and on ficc's own source, across
 peak compile RSS.
 
 ![ficc self-build](docs/images/ficc-self-bench.png)
-<sub>NOTE: the execution-time panel times a freshly built ficc compiler binary, 
+<sub>NOTE: the execution-time panel times a freshly built ficc compiler binary,
 produced by the labeled compiler, running the same command on
 the same input: `ficc -O2 -I src -c src/ir_builder.c`.</sub>
 
@@ -70,8 +70,8 @@ Run `ficc --help` for the full option list.
 ## Dev dependencies
 
 Building ficc needs only `gcc` (stage-0 bootstrap) and `make`; the compiler has
-no runtime dependencies. `bear` is optional and only generates
-`compile_commands.json` (`COMPILE_COMMANDS=0` disables it).
+no third-party build dependencies. `bear` is optional: set
+`COMPILE_COMMANDS=1` to generate `compile_commands.json` (requires `bear`).
 
 The tests and `make external` pull in more:
 
@@ -233,7 +233,7 @@ parameters, and address-not-taken locals (per-segment `.debug_loc`), plus
 - an integrated assembler and a disassembler
 - `-S` output
 - `_Complex`, atomics, and threads
-- try to compile linux? 
+- try to compile linux?
 
 ## AI notice
 

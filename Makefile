@@ -4,11 +4,11 @@ CFLAGS  := -std=c11 -Wall -Wextra -Werror -Isrc -Itest \
 DEPFLAGS := -MMD -MP
 LDFLAGS :=
 
-COMPILE_COMMANDS ?= 1
+COMPILE_COMMANDS ?= 0
 ifeq ($(COMPILE_COMMANDS),1)
   BEAR := $(shell command -v bear)
   ifeq ($(BEAR),)
-    $(error COMPILE_COMMANDS=1 requires 'bear'; install it via your package manager or `pip install bear`)
+    $(error COMPILE_COMMANDS=1 requires 'bear'; install it via your package manager)
   endif
   BEAR_RUN = $(BEAR) --append --output $(BUILD_DIR)/compile_commands.json --
 else
